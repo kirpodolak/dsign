@@ -1,0 +1,140 @@
+/* Унифицированный index.css */
+.info-panel {
+    display: flex;
+    justify-content: space-around;
+    margin-bottom: var(--space-xl);
+    flex-wrap: wrap;
+    gap: var(--space-lg);
+}
+
+.info-card {
+    background: var(--surface-color);
+    padding: var(--space-lg);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+    min-width: 250px;
+    border-left: 4px solid var(--primary-accent);
+}
+
+.logo-preview {
+    background: var(--surface-color);
+    padding: var(--space-lg);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+    border-left: 4px solid var(--danger-accent);
+}
+
+.logo-preview img {
+    max-width: 300px;
+    max-height: 150px;
+    object-fit: contain;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    margin: 0 auto;
+}
+
+.logo-upload {
+    margin-top: var(--space-lg);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.playlist-section {
+    margin: var(--space-xl) 0;
+    background: var(--surface-color);
+    padding: var(--space-lg);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+}
+
+.playlist-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    margin-top: var(--space-lg);
+}
+
+.playlist-table th {
+    background-color: var(--primary-accent);
+    color: white;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: var(--text-sm);
+    letter-spacing: 0.5px;
+}
+
+.playlist-table th, 
+.playlist-table td {
+    padding: var(--space-md);
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.playlist-table tr:nth-child(even) {
+    background-color: var(--zebra-stripe);
+}
+
+.playlist-table tr:hover {
+    background-color: var(--hover-bg);
+}
+
+.playlist-table tr.active_playlist {
+    background-color: var(--active-bg);
+    font-weight: bold;
+    color: var(--active-text);
+}
+
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: var(--space-lg);
+}
+
+.status-badge {
+    padding: var(--space-xs) var(--space-sm);
+    border-radius: 20px;
+    font-size: var(--text-sm);
+    font-weight: 600;
+}
+
+.status-badge.inactive {
+    background-color: var(--danger-accent);
+    color: white;
+}
+
+.status-badge.active {
+    background-color: var(--success-color);
+    color: white;
+}
+
+.status-badge.playing {
+    background-color: var(--success-color);
+    color: white;
+}
+
+/* Стили для кнопок в таблице */
+.playlist-table .btn {
+    padding: var(--space-xs) var(--space-sm);
+    font-size: var(--text-sm);
+    min-width: 80px;
+}
+
+.playlist-table .btn.play {
+    background-color: var(--success-color);
+}
+
+.playlist-table .btn.stop {
+    background-color: var(--danger-accent);
+}
+
+.playlist-table .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.playlist-table .actions-cell {
+    display: flex;
+    gap: var(--space-sm);
+}

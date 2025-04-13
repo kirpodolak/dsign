@@ -1,0 +1,264 @@
+/* Modern Minimalist Base CSS */
+:root {
+  /* Neutral color palette */
+  --bg-color: #f8f9fa;
+  --surface-color: #ffffff;
+  --text-primary: #212529;
+  --text-secondary: #495057;
+  --border-color: #e9ecef;
+  
+  /* Accent colors */
+  --primary-accent: #4a6bff;
+  --secondary-accent: #6c757d;
+  --danger-accent: #dc3545;
+  
+  /* Interactive states */
+  --hover-opacity: 0.85;
+  --active-opacity: 0.75;
+  
+  /* Spacing system */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  
+  /* Typography */
+  --font-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  --font-mono: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --text-base: 1rem;
+  --text-sm: 0.875rem;
+  --text-lg: 1.125rem;
+}
+
+/* Base reset */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-base);
+  font-size: var(--text-base);
+  line-height: 1.5;
+  color: var(--text-primary);
+  background-color: var(--bg-color);
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Navigation - clean and functional */
+nav {
+  background-color: var(--surface-color);
+  padding: var(--space-md) 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  position: relative;
+  z-index: 100;
+}
+
+nav a {
+  color: var(--text-primary);
+  text-decoration: none;
+  padding: var(--space-sm) var(--space-md);
+  margin: 0 var(--space-xs);
+  border-radius: 4px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  transition: all 0.2s ease;
+}
+
+nav a:hover {
+  background-color: rgba(0, 0, 0, 0.03);
+}
+
+nav a.active {
+  color: var(--primary-accent);
+  background-color: rgba(74, 107, 255, 0.1);
+}
+
+nav a i {
+  margin-right: var(--space-xs);
+  font-size: 1.1em;
+}
+
+/* Main content area */
+main {
+  padding: var(--space-xl) var(--space-md);
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+/* Buttons - clean and consistent */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: 4px;
+  border: 1px solid transparent;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background-color: transparent;
+  color: var(--text-primary);
+  margin: var(--space-xs);
+}
+
+.btn:hover {
+  opacity: var(--hover-opacity);
+}
+
+.btn:active {
+  opacity: var(--active-opacity);
+}
+
+.btn i {
+  margin-right: var(--space-xs);
+}
+
+/* Button variants */
+.btn.primary {
+  background-color: var(--primary-accent);
+  color: white;
+}
+
+.btn.secondary {
+  background-color: var(--secondary-accent);
+  color: white;
+}
+
+.btn.danger {
+  background-color: var(--danger-accent);
+  color: white;
+}
+
+.btn.outline {
+  border: 1px solid var(--border-color);
+  background-color: var(--surface-color);
+}
+
+/* Forms - clean and accessible */
+form:not(.settings-form) {
+  background-color: var(--surface-color);
+  border-radius: 8px;
+  padding: var(--space-lg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+  max-width: 600px;
+  margin: var(--space-xl) auto;
+}
+
+label {
+  display: block;
+  margin-bottom: var(--space-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+input,
+select {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-family: var(--font-base);
+  font-size: var(--text-base);
+  transition: border-color 0.2s ease;
+  margin-bottom: var(--space-md);
+}
+
+input:focus,
+select:focus {
+  outline: none;
+  border-color: var(--primary-accent);
+  box-shadow: 0 0 0 2px rgba(74, 107, 255, 0.1);
+}
+
+/* Utility classes */
+.error-message {
+  color: var(--danger-accent);
+  font-size: var(--text-sm);
+  margin-top: var(--space-xs);
+}
+
+.loading-spinner {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  border: 2px solid rgba(0, 0, 0, 0.1);
+  border-radius: 50%;
+  border-top-color: currentColor;
+  animation: spin 1s linear infinite;
+  margin-right: var(--space-xs);
+  vertical-align: middle;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  main {
+    padding: var(--space-lg) var(--space-sm);
+  }
+  
+  nav a {
+    padding: var(--space-sm);
+    font-size: var(--text-sm);
+  }
+  
+  form:not(.settings-form) {
+    padding: var(--space-md);
+    margin: var(--space-lg) auto;
+  }
+}
+
+/* Добавьте в static/css/base.css или другой ваш CSS файл */
+.error-container {
+    max-width: 600px;
+    margin: 2rem auto;
+    padding: 2rem;
+    text-align: center;
+    background: #f8f9fa;
+    border-radius: 8px;
+    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+}
+
+.error-container h1 {
+    color: #dc3545;
+    margin-bottom: 1rem;
+}
+
+.error-container p {
+    font-size: 1.2rem;
+    margin-bottom: 2rem;
+}
+
+.btn-primary {
+    display: inline-block;
+    padding: 0.5rem 1rem;
+    background: #007bff;
+    color: white;
+    text-decoration: none;
+    border-radius: 4px;
+    transition: background 0.3s;
+}
+
+.btn-primary:hover {
+    background: #0056b3;
+}
+
+.error-details {
+    margin-top: 2rem;
+    text-align: left;
+    padding: 1rem;
+    background: #f1f1f1;
+    border-radius: 4px;
+}
+
+.error-details pre {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}

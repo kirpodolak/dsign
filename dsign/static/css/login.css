@@ -1,0 +1,18 @@
+/* Унифицированный login.css */
+#login-form {
+    max-width: 400px;
+    margin: var(--space-xl) auto;
+    padding: var(--space-xl);
+    background: var(--surface-color);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+}
+
+#login-error {
+    margin-top: var(--space-md);
+    padding: var(--space-md);
+    background-color: var(--error-bg);
+    color: var(--error-text);
+    border-radius: var(--radius-sm);
+    border-left: 4px solid var(--danger-accent);
+}
