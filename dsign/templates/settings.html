@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block styles %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="settings-container">
+    <div class="settings-panel">
+        <h2>Playback Settings</h2>
+
+        <!-- Idle Profile -->
+        <div class="form-group">
+            <label for="idle-profile-select">Idle Logo Profile:</label>
+            <select id="idle-profile-select" class="form-control">
+                <option value="">Default</option>
+                {% for profile in profiles if profile.profile_type == 'idle' %}
+                <option value="{{ profile.id }}">{{ profile.name }}</option>
+                {% endfor %}
+            </select>
+            <button id="apply-idle-profile" class="submit-btn secondary">Apply</button>
+        </div>
+
+        <!-- Playlist Profile Assignment -->
+        <div class="form-group">
+            <label for="playlist-select">Playlist:</label>
+            <select id="playlist-select" class="form-control">
+                {% for playlist in playlists.playlists %}
+                <option value="{{ playlist.id }}">{{ playlist.name }}</option>
+                {% endfor %}
+            </select>
+
+            <label for="playlist-profile-select">Assigned Profile:</label>
+            <select id="playlist-profile-select" class="form-control">
+                <option value="">Default</option>
+                {% for profile in profiles if profile.profile_type == 'playlist' %}
+                <option value="{{ profile.id }}">{{ profile.name }}</option>
+                {% endfor %}
+            </select>
+            <button id="assign-profile" class="submit-btn">Assign Profile</button>
+        </div>
+
+        <!-- Profile Creation -->
+        <div class="form-group">
+            <h3>Create Profile</h3>
+            <input type="text" id="profile-name" class="form-control" placeholder="Profile name" required>
+
+            <select id="profile-type" class="form-control">
+                <option value="idle">Idle</option>
+                <option value="playlist">Playlist</option>
+            </select>
+
+            <div id="profile-settings-editor" class="form-group mt-3">
+                <p class="text-muted">Adjust settings below</p>
+            </div>
+
+            <button id="save-profile" class="submit-btn success mt-2">Save Profile</button>
+        </div>
+    </div>
+
+    <div class="settings-panel current-settings-panel">
+        <h3>MPV Player Settings</h3>
+        <div id="current-profile-indicator" class="profile-indicator">
+            {% if current_profile %}
+            <p>Current Profile: <strong>{{ current_profile.name }}</strong></p>
+            {% endif %}
+        </div>
+        
+        <form id="mpv-settings-form">
+            <div class="form-group">
+                <label for="resolution">Resolution:</label>
+                <select id="resolution" name="resolution" class="form-control">
+                    <option value="1920x1080" {% if current_settings.resolution == '1920x1080' %}selected{% endif %}>1920x1080</option>
+                    <option value="1280x720" {% if current_settings.resolution == '1280x720' %}selected{% endif %}>1280x720</option>
+                    <option value="1024x600" {% if current_settings.resolution == '1024x600' %}selected{% endif %}>1024x600</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="aspect-ratio">Aspect Ratio:</label>
+                <select id="aspect-ratio" name="aspect-ratio" class="form-control">
+                    <option value="16:9" {% if current_settings.aspect_ratio == '16:9' %}selected{% endif %}>16:9</option>
+                    <option value="4:3" {% if current_settings.aspect_ratio == '4:3' %}selected{% endif %}>4:3</option>
+                    <option value="1.85:1" {% if current_settings.aspect_ratio == '1.85:1' %}selected{% endif %}>1.85:1</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="rotation">Rotation:</label>
+                <select id="rotation" name="rotation" class="form-control">
+                    <option value="0" {% if current_settings.rotation == 0 %}selected{% endif %}>0°</option>
+                    <option value="90" {% if current_settings.rotation == 90 %}selected{% endif %}>90°</option>
+                    <option value="180" {% if current_settings.rotation == 180 %}selected{% endif %}>180°</option>
+                    <option value="270" {% if current_settings.rotation == 270 %}selected{% endif %}>270°</option>
+                </select>
+            </div>
+            
+            <div class="form-group checkbox-group">
+                <label for="overscan">Overscan:</label>
+                <input type="checkbox" id="overscan" name="overscan" {% if current_settings.overscan %}checked{% endif %}>
+            </div>
+            
+            <div class="form-group">
+                <label for="volume">Volume:</label>
+                <input type="range" id="volume" name="volume" min="0" max="100" step="5" 
+                       class="form-control" value="{{ current_settings.volume|default(80) }}">
+                <span id="volume-value" class="value-display">{{ current_settings.volume|default(80) }}%</span>
+            </div>
+            
+            <div class="form-group checkbox-group">
+                <label for="mute">Mute:</label>
+                <input type="checkbox" id="mute" name="mute" {% if current_settings.mute %}checked{% endif %}>
+            </div>
+            
+            <button type="submit" class="submit-btn">Apply Settings</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/settings.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block styles %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/playlist.css') }}">
+{% endblock %}
+
+{% block content %}
+<h1>Edit Playlist</h1>
+<div class="playlist-container">
+    <table class="media-table">
+        <thead>
+            <tr>
+                <th width="5%">#</th>
+                <th width="10%">Include</th>
+                <th width="20%">Preview</th>
+                <th width="45%">File Name</th>
+                <th width="20%">Duration (seconds)</th>
+            </tr>
+        </thead>
+        <tbody id="file-list">
+            <!-- JS заполняет сюда -->
+        </tbody>
+    </table>
+    <div class="button-group">
+        <button id="save-playlist" class="btn primary">Save Playlist</button>
+        <a href="{{ url_for('main.index') }}" class="btn">Cancel</a>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="{{ url_for('static', filename='js/playlist.js') }}"></script>
+{% endblock %}

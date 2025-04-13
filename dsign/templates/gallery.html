@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block styles %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/gallery.css') }}">
+{% endblock %}
+
+{% block content %}
+<h1>Media Gallery</h1>
+
+<div class="controls">
+  <div class="search-sort">
+    <input type="text" id="search-input" placeholder="Search files...">
+    <select id="sort-select">
+      <option value="name-asc">Name (A-Z)</option>
+      <option value="name-desc">Name (Z-A)</option>
+      <option value="date-newest">Date (Newest)</option>
+      <option value="date-oldest">Date (Oldest)</option>
+      <option value="type">File Type</option>
+    </select>
+    <select id="group-select">
+      <option value="none">No Grouping</option>
+      <option value="type">Group by Type</option>
+      <option value="date">Group by Date</option>
+    </select>
+  </div>
+</div>
+
+<div class="file-grid" id="media-gallery">
+  <!-- Media files will be rendered here -->
+</div>
+
+<div class="actions">
+  <button id="select-all" class="btn secondary">
+    <i class="fas fa-check-square"></i> Select All
+  </button>
+  <button id="delete-selected" class="btn danger">
+    <i class="fas fa-trash"></i> Delete Selected
+  </button>
+</div>
+
+<form id="upload-form" enctype="multipart/form-data">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <div class="upload-container">
+    <input type="file" id="file-upload" multiple accept=".jpg,.jpeg,.png,.mp4,.webm">
+    <button type="button" id="upload-btn" class="btn primary">
+      <i class="fas fa-upload"></i> Upload Files
+    </button>
+  </div>
+</form>
+
+<!-- Preview Modal -->
+<div id="preview-modal" class="modal">
+  <div class="modal-content">
+    <span class="close-modal">&times;</span>
+    <div id="preview-container"></div>
+    <div class="file-info">
+      <h3 id="preview-filename"></h3>
+      <p id="preview-filesize"></p>
+      <p id="preview-date"></p>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/gallery.js') }}"></script>
+{% endblock %}

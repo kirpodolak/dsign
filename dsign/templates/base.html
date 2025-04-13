@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <title>Digital Signage</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
+    {% block styles %}{% endblock %}
+    
+    <!-- External dependencies -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div id="page-loader">
+        <div class="loader-content">
+            <i class="fas fa-spinner fa-spin"></i>
+            <span>Loading...</span>
+        </div>
+    </div>
+
+    <nav>
+        <a href="{{ url_for('main.index') }}" class="{% if request.endpoint == 'main.index' %}active{% endif %}">
+            <i class="fas fa-home"></i> Home
+        </a>
+        <a href="{{ url_for('main.gallery') }}" class="{% if request.endpoint == 'main.gallery' %}active{% endif %}">
+            <i class="fas fa-images"></i> Gallery
+        </a>
+        <a href="{{ url_for('main.settings') }}" class="{% if request.endpoint == 'main.settings' %}active{% endif %}">
+            <i class="fas fa-cog"></i> Settings
+        </a>
+        <a href="{{ url_for('auth.logout') }}">
+            <i class="fas fa-sign-out-alt"></i> Logout
+        </a>
+    </nav>
+
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+
+    <div id="notification-container"></div>
+
+    <!-- Load scripts -->
+    <script src="/static/js/base.js"></script>
+    <script src="/static/js/utils/sockets.js"></script>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            setTimeout(function() {
+                const loader = document.getElementById('page-loader');
+                if (loader) {
+                    loader.style.opacity = '0';
+                    setTimeout(() => loader.style.display = 'none', 300);
+                }
+            }, 500);
+        });
+    </script>
+    
+    {% block scripts %}{% endblock %}
+</body>
+</html>
