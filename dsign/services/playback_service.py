@@ -414,6 +414,47 @@ class PlaybackService:
             self.logger.error(f"Failed to display idle logo: {str(e)}")
             return False
 
+    def restart_idle_logo(self) -> bool:
+        """Restart idle logo display"""
+        try:
+            self.stop_idle_logo()
+            return self.display_idle_logo()
+        except Exception as e:
+            self.logger.error(f"Failed to restart idle logo: {str(e)}")
+            return False
+
+    def get_current_logo_path(self) -> Path:
+        """Безопасное получение текущего пути к логотипу"""
+        try:
+            return self._find_logo_file()
+        except FileNotFoundError:
+            # Возвращаем путь к placeholder, даже если он отсутствует
+            return Path(__file__).parent.parent / "static" / "images" / "placeholder.jpg"
+
+    def _find_logo_file(self) -> Path:
+        """Find current logo file"""
+        logo_path = self.upload_folder / self.DEFAULT_LOGO
+        if logo_path.exists():
+            return logo_path
+        raise FileNotFoundError(f"No logo file found at {logo_path}")
+
+    def get_current_logo_status(self) -> dict:
+        """Получение полного статуса логотипа для API"""
+        try:
+            path = self._find_logo_file()
+            return {
+                "path": str(path),
+                "is_default": "placeholder.jpg" in str(path),
+                "file_size": os.path.getsize(path),
+                "last_modified": os.path.getmtime(path)
+            }
+        except FileNotFoundError:
+            return {
+                "path": "",
+                "is_default": True,
+                "error": "no_logo_found"
+            }
+
     def _create_playlist_file(self, playlist) -> Path:
         """Create temporary playlist file"""
         playlist_file = self.tmp_dir / f'playlist_{playlist.id}.txt'
