@@ -22,6 +22,7 @@
              onerror="this.onerror=null;this.src='{{ url_for('api.serve_media', filename='idle_logo.jpg') }}?t={{ default_logo_cache_buster }}'">
 
         <form id="logo-upload-form" enctype="multipart/form-data">
+		    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="logo-upload">
                 <input type="file" id="logo-upload" name="logo" accept="image/jpeg, image/png" required>
                 <button type="button" id="upload-logo-btn" class="btn small">
