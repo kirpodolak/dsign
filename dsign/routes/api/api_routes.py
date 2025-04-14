@@ -344,25 +344,61 @@ def init_api_routes(api_bp, services):
     def upload_logo():
         try:
             if 'logo' not in request.files:
-                return jsonify({
-                    "success": False,
-                    "error": "No logo file provided"
-                }), 400
+                return jsonify({"success": False, "error": "No file provided"}), 400
 
             file = request.files['logo']
-            filename = secure_filename(UPLOAD_LOGO_NAME)
-            file_path = file_service.save_logo(file, filename)
-            playback_service.restart_idle_logo()
+            if not file.filename:
+                return jsonify({"success": False, "error": "Empty filename"}), 400
+
+            # Сохраняем файл
+            filename = secure_filename("idle_logo.jpg")
+            file_path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
+            file.save(file_path)
+
+            # Проверяем сохранение
+            if not os.path.exists(file_path):
+                return jsonify({"success": False, "error": "Save failed"}), 500
+
+            # Перезапускаем воспроизведение
+            playback_service = current_app.config['services']['playback_service']
+            if not playback_service.restart_idle_logo():
+                return jsonify({
+                    "success": False,
+                    "error": "Logo updated but playback restart failed"
+                }), 500
 
             return jsonify({
                 "success": True,
-                "filename": os.path.basename(file_path)
+                "filename": filename,
+                "logo_status": playback_service.get_current_logo_status()  # Новый метод
             })
+
         except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/media/logo_status', methods=['GET'])
+    @login_required  # Если требуется авторизация
+    def get_logo_status():
+        """Получение статуса текущего логотипа"""
+        try:
+            playback_service = current_app.config['services']['playback_service']
+        
+            # Получаем путь через защищённый метод
+            logo_path = playback_service.get_current_logo_path()
+        
+            return jsonify({
+                "success": True,
+                "path": str(logo_path),
+                "is_default": "placeholder.jpg" in str(logo_path),
+                "exists": True,
+                "filename": os.path.basename(logo_path)
+            })
+        except FileNotFoundError:
             return jsonify({
                 "success": False,
-                "error": str(e)
-            }), 500
+                "error": "No logo files available",
+                "exists": False
+            }), 404
 
     @api_bp.route('/media/<path:filename>', methods=['GET'])
     def serve_media(filename):
