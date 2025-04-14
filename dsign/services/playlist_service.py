@@ -225,3 +225,32 @@ class PlaylistService:
             self.db.session.rollback()
             self.logger.error(f"Failed to update files in playlist {playlist_id}: {str(e)}", exc_info=True)
             raise RuntimeError(f"Failed to update files in playlist {playlist_id}") from e
+    
+    def reorder_single_item(self, playlist_id: int, item_id: int, new_position: int) -> bool:
+        """Изменение позиции одного элемента"""
+        try:
+            items = self.db.session.query(PlaylistFiles).filter_by(
+                playlist_id=playlist_id
+            ).order_by(PlaylistFiles.order).all()
+
+            # Находим перемещаемый элемент
+            item = next((x for x in items if x.id == item_id), None)
+            if not item:
+                raise ValueError("Item not found")
+
+            # Обновляем позиции
+            items.remove(item)
+            items.insert(new_position - 1, item)
+
+            with self.db.session.begin_nested():
+                for idx, item in enumerate(items, start=1):
+                    item.order = idx
+                    self.db.session.add(item)
+
+            self.db.session.commit()
+            return True
+
+        except Exception as e:
+            self.db.session.rollback()
+            self.logger.error(f"Reorder failed: {str(e)}")
+            return False
