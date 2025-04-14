@@ -56,26 +56,76 @@ class User(db.Model, UserMixin):
 class PlaylistFiles(db.Model):
     """Модель файлов в плейлисте"""
     __tablename__ = 'playlist_files'
+    __table_args__ = (
+        # Уникальный индекс для предотвращения дубликатов позиций
+        db.UniqueConstraint('playlist_id', 'order', name='uq_playlist_file_order'),
+        # Индекс для ускорения сортировки
+        db.Index('ix_playlist_file_order', 'playlist_id', 'order'),
+    )
     
     id = db.Column(db.Integer, primary_key=True)
-    playlist_id = db.Column(db.Integer, db.ForeignKey('playlists.id'), nullable=False)
+    playlist_id = db.Column(db.Integer, db.ForeignKey('playlists.id', ondelete='CASCADE'), nullable=False)
     file_name = db.Column(db.String(255), nullable=False)
     duration = db.Column(db.Integer)
-    order = db.Column(db.Integer, nullable=True)  # Разрешено NULL для обратной совместимости
+    order = db.Column(db.Integer, nullable=False)  # Теперь обязательное поле
     created_at = db.Column(db.Integer, default=lambda: int(time.time()))
     
     @property
     def order_or_id(self):
-        """Возвращает порядок или ID, если порядок не задан"""
+        """Возвращает порядок или ID (fallback)"""
         return self.order if self.order is not None else self.id
     
     @property
     def created_dt(self):
         """Возвращает дату создания как datetime"""
         return datetime.fromtimestamp(self.created_at) if self.created_at else None
+
+    @classmethod
+    def get_max_order(cls, playlist_id: int) -> int:
+        """Получить максимальный порядковый номер в плейлисте"""
+        from sqlalchemy import func
+        max_order = db.session.query(func.max(cls.order)).filter(
+            cls.playlist_id == playlist_id
+        ).scalar()
+        return max_order if max_order else 0
+        
+    def validate_order(self):
+        """Проверка корректности порядка"""
+        if self.order is None:
+            raise ValueError("Order cannot be null")
+        if self.order < 1:
+            raise ValueError("Order must be positive")
+
+    @staticmethod
+    def reorder_items(playlist_id: int, new_order: list[int]):
+        """
+        Массовое обновление позиций элементов
+        Args:
+            playlist_id: ID плейлиста
+            new_order: Список ID элементов в новом порядке
+        """
+        from sqlalchemy import case
+        try:
+            # Создаем CASE выражение для массового обновления
+            order_case = case(
+                {id: index for index, id in enumerate(new_order, 1)},
+                value=PlaylistFiles.id
+            )
+            
+            db.session.query(PlaylistFiles).filter(
+                PlaylistFiles.playlist_id == playlist_id,
+                PlaylistFiles.id.in_(new_order)
+            ).update({
+                'order': order_case
+            }, synchronize_session=False)
+            
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            raise RuntimeError(f"Reorder failed: {str(e)}") from e
         
     def __repr__(self) -> str:
-        return f'<PlaylistFile {self.file_name}>'
+        return f'<PlaylistFile {self.id} [{self.order}]: {self.file_name}>'
 
 class Playlist(db.Model):
     """Модель плейлиста"""
