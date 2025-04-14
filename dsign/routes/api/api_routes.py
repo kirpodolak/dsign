@@ -252,6 +252,23 @@ def init_api_routes(api_bp, services):
                 "error": str(e)
             }), 500
 
+    @api_bp.route('/playlists/<int:playlist_id>/reorder', methods=['POST'])
+    @login_required
+    def reorder_playlist_items(playlist_id):
+        data = request.get_json()
+        if not data or 'item_id' not in data or 'position' not in data:
+            return jsonify({"success": False, "error": "Invalid data"}), 400
+
+        try:
+            success = playlist_service.reorder_single_item(
+                playlist_id,
+                data['item_id'],
+                data['position']
+            )
+            return jsonify({"success": success})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
     # ======================
     # Media File Handling (/api/media)
     # ======================
