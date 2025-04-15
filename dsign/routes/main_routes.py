@@ -5,7 +5,7 @@ from dsign.forms import SettingsForm, UploadLogoForm, PlaylistProfileForm
 from dsign.services.settings_service import SettingsService
 import requests
 from dsign.extensions import db
-from dsign.models import PlaybackProfile, PlaylistProfileAssignment
+from dsign.models import Playlist, PlaybackProfile, PlaylistProfileAssignment
 
 def init_main_routes(main_bp: Blueprint, settings_service: SettingsService):
     
