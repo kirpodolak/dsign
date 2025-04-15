@@ -270,19 +270,16 @@ def init_api_routes(api_bp, services):
     @login_required
     def get_profile_assignments():
         try:
-            assignments = {}
-            results = db.session.query(PlaylistProfileAssignment).all()
-            for assignment in results:
-                assignments[assignment.playlist_id] = assignment.profile_id
+            assignments = db.session.query(PlaylistProfileAssignment).all()
             return jsonify({
-                'success': True,
-                'assignments': assignments
+                "success": True,
+                "assignments": {a.playlist_id: a.profile_id for a in assignments}
             })
         except Exception as e:
             current_app.logger.error(f"Error getting assignments: {str(e)}")
             return jsonify({
-                'success': False,
-                'error': str(e)
+                "success": False,
+                "error": "Failed to load assignments"
             }), 500
 
     # ======================
@@ -372,30 +369,22 @@ def init_api_routes(api_bp, services):
     def get_playlists():
         try:
             playlists = db.session.query(Playlist).all()
-            
-            # Get assignments for all playlists
-            assignments = {}
-            results = db.session.query(PlaylistProfileAssignment).all()
-            for assignment in results:
-                assignments[assignment.playlist_id] = assignment.profile_id
-            
-            playlist_data = []
-            for playlist in playlists:
-                playlist_data.append({
-                    'id': playlist.id,
-                    'name': playlist.name,
-                    'profile_id': assignments.get(playlist.id)
-                })
-            
+            assignments = {a.playlist_id: a.profile_id 
+                          for a in db.session.query(PlaylistProfileAssignment).all()}
+        
             return jsonify({
                 "success": True,
-                "playlists": playlist_data
+                "playlists": [{
+                    "id": p.id,
+                    "name": p.name,
+                    "profile_id": assignments.get(p.id)
+                } for p in playlists]
             })
         except Exception as e:
             current_app.logger.error(f"Error getting playlists: {str(e)}")
             return jsonify({
                 "success": False,
-                "error": str(e)
+                 "error": "Failed to load playlists"
             }), 500
 
     @api_bp.route('/playlists', methods=['POST'])
@@ -709,13 +698,29 @@ def init_api_routes(api_bp, services):
     @api_bp.route('/media/<path:filename>', methods=['GET'])
     def serve_media(filename):
         try:
+            # Validate filename
+            if not filename or not secure_filename(filename) == filename:
+                abort(400, description="Invalid filename")
+            
             upload_folder = current_app.config.get('UPLOAD_FOLDER', '/var/lib/dsign/media')
             file_path = os.path.join(upload_folder, filename)
-            
-            if not os.path.exists(file_path):
+        
+            # Check if file exists and is within the upload folder
+            if not os.path.exists(file_path) or not os.path.isfile(file_path):
                 current_app.logger.warning(f"File not found: {file_path}")
-                abort(404, description="Media file not found")
             
+                # Try static folder as fallback
+                static_path = os.path.join(current_app.config['STATIC_FOLDER'], 'images', filename)
+                if os.path.exists(static_path):
+                    return send_from_directory(
+                        os.path.dirname(static_path),
+                        os.path.basename(static_path),
+                        mimetype=None,
+                        as_attachment=False
+                    )
+            
+                abort(404, description="Media file not found")
+        
             return send_from_directory(
                 upload_folder,
                 filename,
@@ -723,9 +728,6 @@ def init_api_routes(api_bp, services):
                 as_attachment=False,
                 conditional=True
             )
-        except KeyError:
-            current_app.logger.error("UPLOAD_FOLDER not configured in app config")
-            abort(500, description="Server configuration error")
         except Exception as e:
             current_app.logger.error(f"Error serving media file: {str(e)}")
-            abort(500, description="Internal server error")
+            abort(404, description="Media file not available")
