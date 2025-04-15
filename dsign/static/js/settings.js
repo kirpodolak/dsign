@@ -1,4 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // DOM Elements
     const elements = {
         idleProfileSelect: document.getElementById('idle-profile-select'),
         applyIdleBtn: document.getElementById('apply-idle-profile'),
@@ -10,89 +11,240 @@ document.addEventListener('DOMContentLoaded', () => {
         saveProfileBtn: document.getElementById('save-profile'),
         settingsEditor: document.getElementById('profile-settings-editor'),
         currentSettingsPanel: document.getElementById('current-settings-panel'),
-        mpvSettingsForm: document.getElementById('mpv-settings-form')
+        mpvSettingsForm: document.getElementById('mpv-settings-form'),
+        profilesGrid: document.getElementById('profiles-grid'),
+        playlistAssignments: document.getElementById('playlist-assignments'),
+        currentSettingsDisplay: document.getElementById('current-settings-display'),
+        currentProfileIndicator: document.getElementById('current-profile-indicator')
     };
 
+    // Application State
     const state = {
         currentProfile: null,
         currentSettings: {},
         profiles: [],
         playlists: [],
+        assignments: {},
         settingsSchema: {}
     };
 
+    // Main Initialization
     async function init() {
         try {
-            await loadData();
-            setupEventListeners();
-            startAutoRefresh();
-        } catch (error) {
-            console.error('Initialization error:', error);
-            showAlert('Failed to initialize application', 'error');
-        }
-    }
-
-    async function loadData() {
-        try {
-            const [profilesRes, playlistsRes, schemaRes, settingsRes] = await Promise.all([
-                fetch('/api/profiles'),
-                fetch('/api/playlists'),
-                fetch('/api/settings/schema'),
-                fetch('/api/settings/current')
+            // Load all required data
+            await Promise.all([
+                loadProfiles(),
+                loadPlaylists(),
+                loadAssignments(),
+                loadCurrentSettings(),
+                loadSettingsSchema()
             ]);
 
-            if (!profilesRes.ok) throw new Error('Failed to load profiles');
-            if (!playlistsRes.ok) throw new Error('Failed to load playlists');
-            if (!schemaRes.ok) throw new Error('Failed to load settings schema');
-            if (!settingsRes.ok) throw new Error('Failed to load current settings');
+            // Render UI
+            renderProfileSelects();
+            renderProfileGrid();
+            renderPlaylistAssignments();
+            renderCurrentSettings();
+            renderSettingsForm();
 
-            const profilesData = await profilesRes.json();
-            const playlistsData = await playlistsRes.json();
-            const schemaData = await schemaRes.json();
-            const settingsData = await settingsRes.json();
+            // Setup event listeners
+            setupEventListeners();
 
-            state.profiles = profilesData.success ? profilesData.profiles : [];
-            state.playlists = playlistsData.success ? playlistsData.playlists : [];
-            state.settingsSchema = schemaData.success ? schemaData.schema : {};
-            state.currentSettings = settingsData.success ? settingsData.settings : {};
+            // Start auto-refresh
+            startAutoRefresh();
 
-            updateUI();
         } catch (error) {
-            console.error('Error loading data:', error);
-            showAlert(error.message, 'error');
-            throw error;
+            console.error('Initialization error:', error);
+            showAlert('Failed to initialize application. Please try again.', 'error');
         }
     }
 
-    function updateUI() {
-        populateSelects();
-        renderSettingsForm();
-        updateCurrentSettingsDisplay();
+    // Data Loading Functions
+    async function loadProfiles() {
+        try {
+            const response = await fetch('/api/profiles');
+            if (!response.ok) throw new Error('Failed to load profiles');
+            
+            const data = await response.json();
+            if (data.success) {
+                state.profiles = Array.isArray(data.profiles) ? data.profiles : [];
+            } else {
+                throw new Error(data.error || 'Invalid profiles data');
+            }
+        } catch (error) {
+            console.error('Error loading profiles:', error);
+            showAlert('Failed to load profiles. ' + error.message, 'error');
+            state.profiles = [];
+        }
     }
 
-    function populateSelects() {
+    async function loadPlaylists() {
+        try {
+            const response = await fetch('/api/playlists');
+            if (!response.ok) throw new Error('Failed to load playlists');
+            
+            const data = await response.json();
+            if (data.success) {
+                state.playlists = Array.isArray(data.playlists) ? data.playlists : [];
+            } else {
+                throw new Error(data.error || 'Invalid playlists data');
+            }
+        } catch (error) {
+            console.error('Error loading playlists:', error);
+            showAlert('Failed to load playlists. ' + error.message, 'error');
+            state.playlists = [];
+        }
+    }
+
+    async function loadAssignments() {
+        try {
+            const response = await fetch('/api/profiles/assignments');
+            if (!response.ok) throw new Error('Failed to load assignments');
+            
+            const data = await response.json();
+            if (data.success) {
+                state.assignments = data.assignments || {};
+            } else {
+                throw new Error(data.error || 'Invalid assignments data');
+            }
+        } catch (error) {
+            console.error('Error loading assignments:', error);
+            showAlert('Failed to load profile assignments', 'error');
+            state.assignments = {};
+        }
+    }
+
+    async function loadCurrentSettings() {
+        try {
+            const response = await fetch('/api/settings/current');
+            if (!response.ok) throw new Error('Failed to load current settings');
+            
+            const data = await response.json();
+            if (data.success) {
+                state.currentSettings = data.settings || {};
+                state.currentProfile = data.profile || null;
+            } else {
+                throw new Error(data.error || 'Invalid settings data');
+            }
+        } catch (error) {
+            console.error('Error loading current settings:', error);
+            showAlert('Failed to load current settings', 'error');
+            state.currentSettings = {};
+            state.currentProfile = null;
+        }
+    }
+
+    async function loadSettingsSchema() {
+        try {
+            const response = await fetch('/api/settings/schema');
+            if (!response.ok) throw new Error('Failed to load settings schema');
+            
+            const data = await response.json();
+            if (data.success) {
+                state.settingsSchema = data.schema || {};
+            } else {
+                throw new Error(data.error || 'Invalid schema data');
+            }
+        } catch (error) {
+            console.error('Error loading settings schema:', error);
+            showAlert('Failed to load settings schema', 'error');
+            state.settingsSchema = {};
+        }
+    }
+
+    // UI Rendering Functions
+    function renderProfileSelects() {
+        // Clear existing options
         elements.idleProfileSelect.innerHTML = '<option value="">Default</option>';
         elements.profileSelect.innerHTML = '<option value="">Default</option>';
-        elements.playlistSelect.innerHTML = '';
 
+        // Add idle profiles
+        state.profiles
+            .filter(profile => profile.profile_type === 'idle')
+            .forEach(profile => {
+                const option = document.createElement('option');
+                option.value = profile.id;
+                option.textContent = profile.name;
+                elements.idleProfileSelect.appendChild(option);
+            });
+
+        // Add playlist profiles
+        state.profiles
+            .filter(profile => profile.profile_type === 'playlist')
+            .forEach(profile => {
+                const option = document.createElement('option');
+                option.value = profile.id;
+                option.textContent = profile.name;
+                elements.profileSelect.appendChild(option);
+            });
+    }
+
+    function renderProfileGrid() {
+        elements.profilesGrid.innerHTML = '';
+        
         state.profiles.forEach(profile => {
-            const option = document.createElement('option');
-            option.value = profile.id;
-            option.textContent = profile.name;
-
-            if (profile.profile_type === 'idle') {
-                elements.idleProfileSelect.appendChild(option.cloneNode(true));
-            } else if (profile.profile_type === 'playlist') {
-                elements.profileSelect.appendChild(option.cloneNode(true));
-            }
+            const card = document.createElement('div');
+            card.className = 'profile-card';
+            card.innerHTML = `
+                <div class="profile-header">
+                    <span class="profile-name">${profile.name}</span>
+                    <span class="profile-type">${profile.profile_type}</span>
+                </div>
+                <div class="profile-actions">
+                    <button class="btn-edit" data-id="${profile.id}">✏️</button>
+                    <button class="btn-delete" data-id="${profile.id}">🗑️</button>
+                </div>
+            `;
+            elements.profilesGrid.appendChild(card);
         });
+    }
 
+    function renderPlaylistAssignments() {
+        elements.playlistAssignments.innerHTML = '';
+        
         state.playlists.forEach(playlist => {
-            const option = document.createElement('option');
-            option.value = playlist.id;
-            option.textContent = playlist.name;
-            elements.playlistSelect.appendChild(option);
+            const row = document.createElement('div');
+            row.className = 'assignment-row';
+            row.innerHTML = `
+                <span class="playlist-name">${playlist.name}</span>
+                <select class="profile-select" data-playlist-id="${playlist.id}">
+                    <option value="">Default</option>
+                    ${state.profiles
+                        .filter(p => p.profile_type === 'playlist')
+                        .map(p => `<option value="${p.id}" 
+                            ${state.assignments[playlist.id] === p.id ? 'selected' : ''}>
+                            ${p.name}
+                        </option>`)
+                        .join('')}
+                </select>
+                <button class="btn-save" data-playlist-id="${playlist.id}">Save</button>
+            `;
+            elements.playlistAssignments.appendChild(row);
         });
+    }
+
+    function renderCurrentSettings() {
+        if (!elements.currentSettingsDisplay || !elements.currentProfileIndicator) return;
+
+        // Render current profile info
+        if (state.currentProfile) {
+            elements.currentProfileIndicator.innerHTML = `
+                <p>Current Profile: <strong>${state.currentProfile.name}</strong></p>
+                <p>Type: <strong>${state.currentProfile.profile_type}</strong></p>
+            `;
+        } else {
+            elements.currentProfileIndicator.innerHTML = '<p>Using default settings</p>';
+        }
+
+        // Render current settings
+        elements.currentSettingsDisplay.innerHTML = `
+            <div><strong>Resolution:</strong> ${state.currentSettings.resolution || 'N/A'}</div>
+            <div><strong>Aspect Ratio:</strong> ${state.currentSettings.aspect_ratio || 'N/A'}</div>
+            <div><strong>Rotation:</strong> ${state.currentSettings.rotation || '0'}°</div>
+            <div><strong>Overscan:</strong> ${state.currentSettings.overscan ? 'On' : 'Off'}</div>
+            <div><strong>Volume:</strong> ${state.currentSettings.volume || '100'}%</div>
+            <div><strong>Mute:</strong> ${state.currentSettings.mute ? 'On' : 'Off'}</div>
+        `;
     }
 
     function renderSettingsForm() {
@@ -163,25 +315,229 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function updateCurrentSettingsDisplay() {
-        if (!elements.currentSettingsPanel) return;
+    // Event Handlers
+    function setupEventListeners() {
+        // Apply idle profile
+        elements.applyIdleBtn?.addEventListener('click', handleApplyIdleProfile);
 
-        const settings = state.currentSettings || {};
-        const isIdle = state.currentProfile?.profile_type === 'idle';
+        // Assign profile to playlist
+        elements.assignBtn?.addEventListener('click', handleAssignProfile);
 
-        elements.currentSettingsPanel.innerHTML = `
-            <h3>Current ${isIdle ? 'Idle' : 'Playlist'} Settings</h3>
-            <div class="settings-grid">
-                <div><strong>Resolution:</strong> ${settings.resolution || 'N/A'}</div>
-                <div><strong>Aspect Ratio:</strong> ${settings.aspect_ratio || 'N/A'}</div>
-                <div><strong>Rotation:</strong> ${settings.rotation || '0'}°</div>
-                <div><strong>Overscan:</strong> ${settings.overscan ? 'On' : 'Off'}</div>
-                <div><strong>Volume:</strong> ${settings.volume || '100'}%</div>
-                <div><strong>Mute:</strong> ${settings.mute ? 'On' : 'Off'}</div>
-            </div>
-        `;
+        // Save new profile
+        elements.saveProfileBtn?.addEventListener('click', handleSaveProfile);
+
+        // MPV settings form submission
+        elements.mpvSettingsForm?.addEventListener('submit', handleMpvSettingsSubmit);
+
+        // Delegated event listeners for dynamic content
+        document.addEventListener('click', (e) => {
+            // Save playlist assignment
+            if (e.target.classList.contains('btn-save')) {
+                handleSaveAssignment(e);
+            }
+            
+            // Edit profile
+            if (e.target.classList.contains('btn-edit')) {
+                handleEditProfile(e);
+            }
+            
+            // Delete profile
+            if (e.target.classList.contains('btn-delete')) {
+                handleDeleteProfile(e);
+            }
+        });
     }
 
+    async function handleApplyIdleProfile() {
+        const profileId = elements.idleProfileSelect.value;
+        if (!profileId) return;
+
+        try {
+            const response = await fetch(`/api/profiles/apply/${profileId}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCSRFToken()
+                }
+            });
+            
+            const result = await response.json();
+            if (result.success) {
+                showAlert('Idle profile applied successfully', 'success');
+                await loadCurrentSettings();
+                renderCurrentSettings();
+            } else {
+                throw new Error(result.error || 'Failed to apply profile');
+            }
+        } catch (error) {
+            console.error('Error applying profile:', error);
+            showAlert(error.message, 'error');
+        }
+    }
+
+    async function handleAssignProfile() {
+        const playlistId = elements.playlistSelect.value;
+        const profileId = elements.profileSelect.value || null;
+
+        if (!playlistId) {
+            return showAlert('Please select a playlist', 'warning');
+        }
+
+        try {
+            const response = await fetch('/api/profiles/assign', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCSRFToken()
+                },
+                body: JSON.stringify({ playlist_id: playlistId, profile_id: profileId })
+            });
+            
+            const result = await response.json();
+            if (result.success) {
+                showAlert('Profile assigned successfully', 'success');
+                await loadAssignments();
+                renderPlaylistAssignments();
+            } else {
+                throw new Error(result.error || 'Failed to assign profile');
+            }
+        } catch (error) {
+            console.error('Error assigning profile:', error);
+            showAlert(error.message, 'error');
+        }
+    }
+
+    async function handleSaveAssignment(e) {
+        const playlistId = e.target.dataset.playlistId;
+        const select = document.querySelector(`.profile-select[data-playlist-id="${playlistId}"]`);
+        const profileId = select.value;
+
+        try {
+            const response = await fetch('/api/profiles/assign', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCSRFToken()
+                },
+                body: JSON.stringify({ playlist_id: playlistId, profile_id: profileId })
+            });
+            
+            const result = await response.json();
+            if (result.success) {
+                showAlert('Assignment saved successfully', 'success');
+                await loadAssignments();
+            } else {
+                throw new Error(result.error || 'Failed to save assignment');
+            }
+        } catch (error) {
+            console.error('Error saving assignment:', error);
+            showAlert(error.message, 'error');
+        }
+    }
+
+    async function handleSaveProfile() {
+        const name = elements.profileNameInput.value.trim();
+        const type = elements.profileTypeSelect.value;
+
+        if (!name) {
+            return showAlert('Please enter profile name', 'warning');
+        }
+
+        try {
+            const settings = collectSettingsFromForm();
+            const response = await fetch('/api/profiles', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCSRFToken()
+                },
+                body: JSON.stringify({ name, type, settings })
+            });
+            
+            const result = await response.json();
+            if (result.success) {
+                showAlert('Profile saved successfully', 'success');
+                elements.profileNameInput.value = '';
+                await loadProfiles();
+                renderProfileSelects();
+                renderProfileGrid();
+            } else {
+                throw new Error(result.error || 'Failed to save profile');
+            }
+        } catch (error) {
+            console.error('Error saving profile:', error);
+            showAlert(error.message, 'error');
+        }
+    }
+
+    async function handleEditProfile(e) {
+        const profileId = e.target.dataset.id;
+        const profile = state.profiles.find(p => p.id == profileId);
+        
+        if (profile) {
+            elements.profileNameInput.value = profile.name;
+            elements.profileTypeSelect.value = profile.profile_type;
+            showAlert(`Editing profile: ${profile.name}`, 'info');
+        }
+    }
+
+    async function handleDeleteProfile(e) {
+        const profileId = e.target.dataset.id;
+        if (!confirm('Are you sure you want to delete this profile?')) return;
+
+        try {
+            const response = await fetch(`/api/profiles/${profileId}`, {
+                method: 'DELETE',
+                headers: {
+                    'X-CSRFToken': getCSRFToken()
+                }
+            });
+            
+            const result = await response.json();
+            if (result.success) {
+                showAlert('Profile deleted successfully', 'success');
+                await loadProfiles();
+                renderProfileSelects();
+                renderProfileGrid();
+            } else {
+                throw new Error(result.error || 'Failed to delete profile');
+            }
+        } catch (error) {
+            console.error('Error deleting profile:', error);
+            showAlert(error.message, 'error');
+        }
+    }
+
+    async function handleMpvSettingsSubmit(e) {
+        e.preventDefault();
+        try {
+            const formData = new FormData(elements.mpvSettingsForm);
+            const settings = Object.fromEntries(formData.entries());
+            
+            const response = await fetch('/api/settings/update', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCSRFToken()
+                },
+                body: JSON.stringify(settings)
+            });
+            
+            const result = await response.json();
+            if (result.success) {
+                showAlert('Settings updated successfully', 'success');
+                await loadCurrentSettings();
+                renderCurrentSettings();
+            } else {
+                throw new Error(result.error || 'Failed to update settings');
+            }
+        } catch (error) {
+            console.error('Error updating settings:', error);
+            showAlert(error.message, 'error');
+        }
+    }
+
+    // Utility Functions
     function collectSettingsFromForm() {
         const settings = {};
         const inputs = elements.settingsEditor.querySelectorAll('[data-setting-key]');
@@ -194,136 +550,11 @@ document.addEventListener('DOMContentLoaded', () => {
         return settings;
     }
 
-    function setupEventListeners() {
-        elements.applyIdleBtn?.addEventListener('click', async () => {
-            const profileId = elements.idleProfileSelect.value;
-            if (!profileId) return;
-
-            try {
-                const response = await fetch(`/api/profiles/apply/${profileId}`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRFToken': getCSRFToken()
-                    }
-                });
-                const result = await response.json();
-
-                if (result.success) {
-                    showAlert('Idle profile applied', 'success');
-                    await loadData();
-                } else {
-                    showAlert(result.error || 'Failed to apply profile', 'error');
-                }
-            } catch (error) {
-                console.error('Error applying profile:', error);
-                showAlert('Error applying profile', 'error');
-            }
-        });
-
-        elements.assignBtn?.addEventListener('click', async () => {
-            const playlistId = elements.playlistSelect.value;
-            const profileId = elements.profileSelect.value || null;
-
-            if (!playlistId) {
-                return showAlert('Please select a playlist', 'warning');
-            }
-
-            try {
-                const response = await fetch('/api/profiles/assign', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRFToken': getCSRFToken()
-                    },
-                    body: JSON.stringify({ playlist_id: playlistId, profile_id: profileId })
-                });
-                const result = await response.json();
-
-                if (result.success) {
-                    showAlert('Profile assigned successfully', 'success');
-                } else {
-                    showAlert(result.error || 'Failed to assign profile', 'error');
-                }
-            } catch (error) {
-                console.error('Error assigning profile:', error);
-                showAlert('Error assigning profile', 'error');
-            }
-        });
-
-        elements.saveProfileBtn?.addEventListener('click', async () => {
-            const name = elements.profileNameInput.value.trim();
-            const type = elements.profileTypeSelect.value;
-
-            if (!name) {
-                return showAlert('Please enter profile name', 'warning');
-            }
-
-            try {
-                const settings = collectSettingsFromForm();
-                const response = await fetch('/api/profiles', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRFToken': getCSRFToken()
-                    },
-                    body: JSON.stringify({ name, type, settings })
-                });
-                const result = await response.json();
-
-                if (result.success) {
-                    showAlert('Profile saved successfully', 'success');
-                    elements.profileNameInput.value = '';
-                    await loadData();
-                } else {
-                    showAlert(result.error || 'Failed to save profile', 'error');
-                }
-            } catch (error) {
-                console.error('Error saving profile:', error);
-                showAlert('Error saving profile', 'error');
-            }
-        });
-
-        elements.mpvSettingsForm?.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            try {
-                const formData = new FormData(elements.mpvSettingsForm);
-                const settings = Object.fromEntries(formData.entries());
-                
-                const response = await fetch('/api/settings/update', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRFToken': getCSRFToken()
-                    },
-                    body: JSON.stringify(settings)
-                });
-                
-                const result = await response.json();
-                if (result.success) {
-                    showAlert('Settings updated successfully', 'success');
-                    await loadData();
-                } else {
-                    showAlert(result.error || 'Failed to update settings', 'error');
-                }
-            } catch (error) {
-                console.error('Error updating settings:', error);
-                showAlert('Error updating settings', 'error');
-            }
-        });
-    }
-
     function startAutoRefresh() {
         setInterval(async () => {
             try {
-                const response = await fetch('/api/settings/current');
-                if (response.ok) {
-                    const newSettings = await response.json();
-                    if (JSON.stringify(state.currentSettings) !== JSON.stringify(newSettings.settings)) {
-                        state.currentSettings = newSettings.settings;
-                        updateCurrentSettingsDisplay();
-                    }
-                }
+                await loadCurrentSettings();
+                renderCurrentSettings();
             } catch (error) {
                 console.error('Auto-refresh error:', error);
             }
@@ -368,5 +599,6 @@ document.addEventListener('DOMContentLoaded', () => {
         return document.querySelector('meta[name="csrf-token"]')?.content || '';
     }
 
+    // Initialize the application
     init();
 });
