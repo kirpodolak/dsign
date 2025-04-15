@@ -7,9 +7,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 settings: '/api/settings/current',
                 playlists: '/api/playlists',
                 playback: '/api/playback',
-                uploadLogo: '/api/media/upload_logo', // Updated endpoint
+                uploadLogo: '/api/media/upload_logo',
                 media: '/api/media/files',
-                mediaUpload: '/api/media/upload' // Added media upload endpoint
+                mediaUpload: '/api/media/upload',
+                serveMedia: '/api/serve_media',
+                previewImage: '/api/media/preview' // Добавлен endpoint для превью
             },
             headers: {
                 'Content-Type': 'application/json',
@@ -27,18 +29,22 @@ document.addEventListener('DOMContentLoaded', () => {
             logoForm: '#logo-upload-form',
             settingsPanel: '.info-panel .info-card',
             logoImage: '#idle-logo',
+            previewImage: '#mpv-preview-image', // Добавлен селектор для превью
             currentSettings: '#current-settings',
-            loadingIndicator: '#loading-indicator' // Added loading indicator
+            loadingIndicator: '#loading-indicator',
+            logoFileInput: '#logo-upload-form input[type="file"]',
+            refreshPreviewBtn: '#refresh-mpv-preview' // Добавлен селектор для кнопки обновления превью
         },
         defaultLogo: '/static/default-logo.jpg',
-        refreshInterval: 5000 // Auto-refresh interval in ms
+        defaultPreview: '/static/default-preview.jpg', // Добавлен дефолтный превью
+        refreshInterval: 5000,
+        previewRefreshInterval: 10000 // Интервал обновления превью
     };
 
     // Initialize DOM elements
     const elements = Object.fromEntries(
         Object.entries(CONFIG.selectors).map(([key, selector]) => 
             [key, document.querySelector(selector)]
-        )
     );
 
     // Application state
@@ -46,14 +52,14 @@ document.addEventListener('DOMContentLoaded', () => {
         playlists: [],
         currentSettings: {},
         playbackStatus: null,
-        refreshIntervalId: null
+        refreshIntervalId: null,
+        previewRefreshId: null // ID интервала обновления превью
     };
 
     // API functions
     const api = {
         async request(url, options = {}) {
             try {
-                // Show loading indicator
                 if (elements.loadingIndicator) {
                     elements.loadingIndicator.style.display = 'block';
                 }
@@ -78,7 +84,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 ui.showAlert(`Error: ${error.message}`, 'error');
                 throw error;
             } finally {
-                // Hide loading indicator
                 if (elements.loadingIndicator) {
                     elements.loadingIndicator.style.display = 'none';
                 }
@@ -155,13 +160,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 console.error('Media upload error:', error);
                 throw error;
             }
+        },
+
+        async refreshPreview() {
+            try {
+                // Сначала запрашиваем создание нового превью
+                await this.request(`${CONFIG.api.endpoints.previewImage}/capture`, {
+                    method: 'POST'
+                });
+                
+                // Затем получаем обновленное изображение
+                return `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
+            } catch (error) {
+                console.error('Preview refresh error:', error);
+                return CONFIG.defaultPreview;
+            }
         }
     };
 
     // UI functions
     const ui = {
         showAlert(message, type = 'info', duration = 3000) {
-            // Remove existing alerts of the same type
             document.querySelectorAll(`.alert-${type}`).forEach(alert => alert.remove());
 
             const alert = document.createElement('div');
@@ -283,9 +302,51 @@ document.addEventListener('DOMContentLoaded', () => {
 
         updateLogo(logoPath) {
             if (elements.logoImage) {
-                elements.logoImage.src = logoPath ? 
-                    `${CONFIG.api.baseUrl}/media/${logoPath}?t=${Date.now()}` : 
+                const newSrc = logoPath ? 
+                    `${CONFIG.api.baseUrl}${CONFIG.api.endpoints.serveMedia}/${logoPath}?t=${Date.now()}` : 
                     CONFIG.defaultLogo;
+                
+                // Улучшенная обработка загрузки изображения
+                elements.logoImage.onload = function() {
+                    this.style.display = 'block';
+                    // Удаляем обработчик ошибок после успешной загрузки
+                    this.onerror = null;
+                };
+                
+                elements.logoImage.onerror = function() {
+                    console.error('Failed to load logo image:', this.src);
+                    this.src = CONFIG.defaultLogo;
+                    this.onerror = null; // Предотвращаем бесконечный цикл
+                };
+                
+                elements.logoImage.src = newSrc;
+                
+                // Принудительно скрываем изображение перед загрузкой
+                elements.logoImage.style.display = 'none';
+            }
+        },
+
+        updatePreviewImage() {
+            if (elements.previewImage) {
+                const newSrc = `${CONFIG.api.baseUrl}${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
+                
+                elements.previewImage.onload = function() {
+                    this.style.display = 'block';
+                    // Обновляем время последнего обновления
+                    const updateElement = document.getElementById('mpv-last-update');
+                    if (updateElement) {
+                        updateElement.textContent = new Date().toLocaleTimeString();
+                    }
+                };
+                
+                elements.previewImage.onerror = function() {
+                    console.error('Failed to load preview image:', this.src);
+                    this.src = CONFIG.defaultPreview;
+                    this.onerror = null;
+                };
+                
+                elements.previewImage.src = newSrc;
+                elements.previewImage.style.display = 'none';
             }
         },
 
@@ -293,6 +354,21 @@ document.addEventListener('DOMContentLoaded', () => {
             if (elements.modal) {
                 elements.modal.style.display = show ? 'block' : 'none';
             }
+        },
+
+        previewLogo(file) {
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                elements.logoImage.src = e.target.result;
+                elements.logoImage.style.display = 'block';
+            };
+            reader.onerror = (e) => {
+                console.error('FileReader error:', e);
+                ui.showAlert('Failed to preview logo file', 'error');
+            };
+            reader.readAsDataURL(file);
         }
     };
 
@@ -300,7 +376,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const handlers = {
         async init() {
             try {
-                // Load initial data
                 const [settings, playlists] = await Promise.all([
                     api.getSettings(),
                     api.getPlaylists()
@@ -309,14 +384,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 state.currentSettings = settings;
                 state.playlists = playlists;
 
-                // Render UI
                 ui.renderSettings(settings);
                 ui.renderPlaylists(playlists);
                 ui.updateLogo(settings.display?.logo);
+                ui.updatePreviewImage(); // Инициализация превью
 
-                // Setup event listeners
                 this.setupEventListeners();
                 this.startAutoRefresh();
+                this.startPreviewRefresh();
 
             } catch (error) {
                 console.error('Initialization failed:', error);
@@ -363,19 +438,89 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Logo upload
             elements.uploadLogoBtn?.addEventListener('click', async () => {
-                const formData = new FormData(elements.logoForm);
-                
+                const fileInput = elements.logoFileInput;
+                if (!fileInput.files || fileInput.files.length === 0) {
+                    ui.showAlert('Please select a logo file first', 'error');
+                    return;
+                }
+
+                const file = fileInput.files[0];
+                // Проверка типа файла
+                if (!file.type.match('image.*')) {
+                    ui.showAlert('Only image files are allowed', 'error');
+                    return;
+                }
+
+                // Проверка размера файла (максимум 5MB)
+                if (file.size > 5 * 1024 * 1024) {
+                    ui.showAlert('File size should be less than 5MB', 'error');
+                    return;
+                }
+
+                // Показываем спиннер
+                const btnText = elements.uploadLogoBtn.querySelector('.btn-text');
+                const spinner = elements.uploadLogoBtn.querySelector('.loading-spinner');
+                btnText.style.display = 'none';
+                spinner.style.display = 'inline-block';
+                elements.uploadLogoBtn.disabled = true;
+
                 try {
+                    const formData = new FormData(elements.logoForm);
                     const result = await api.uploadLogo(formData);
+                    
+                    // Обновляем логотип
                     ui.updateLogo(result.filename);
                     ui.showAlert('Logo updated successfully', 'success');
                     
-                    // Refresh settings to get updated logo info
+                    // Очищаем input файла
+                    fileInput.value = '';
+                    
+                    // Обновляем настройки
                     const settings = await api.getSettings();
                     state.currentSettings = settings;
                     ui.renderSettings(settings);
                 } catch (error) {
+                    console.error('Logo upload failed:', error);
                     ui.showAlert('Failed to upload logo: ' + error.message, 'error');
+                    
+                    // Восстанавливаем предыдущий логотип
+                    ui.updateLogo(state.currentSettings.display?.logo);
+                } finally {
+                    // Восстанавливаем кнопку
+                    btnText.style.display = 'inline-block';
+                    spinner.style.display = 'none';
+                    elements.uploadLogoBtn.disabled = false;
+                }
+            });
+
+            // Предпросмотр логотипа при выборе файла
+            elements.logoFileInput?.addEventListener('change', (e) => {
+                if (e.target.files && e.target.files[0]) {
+                    ui.previewLogo(e.target.files[0]);
+                }
+            });
+
+            // Обновление превью по кнопке
+            elements.refreshPreviewBtn?.addEventListener('click', async () => {
+                try {
+                    elements.refreshPreviewBtn.disabled = true;
+                    const spinner = elements.refreshPreviewBtn.querySelector('i');
+                    if (spinner) {
+                        spinner.className = 'fas fa-spinner fa-spin';
+                    }
+                    
+                    await api.refreshPreview();
+                    ui.updatePreviewImage();
+                    ui.showAlert('Preview refreshed', 'success');
+                } catch (error) {
+                    console.error('Failed to refresh preview:', error);
+                    ui.showAlert('Failed to refresh preview', 'error');
+                } finally {
+                    elements.refreshPreviewBtn.disabled = false;
+                    const spinner = elements.refreshPreviewBtn.querySelector('i');
+                    if (spinner) {
+                        spinner.className = 'fas fa-sync-alt';
+                    }
                 }
             });
 
@@ -417,12 +562,10 @@ document.addEventListener('DOMContentLoaded', () => {
         },
 
         startAutoRefresh() {
-            // Clear existing interval if any
             if (state.refreshIntervalId) {
                 clearInterval(state.refreshIntervalId);
             }
 
-            // Update settings periodically
             state.refreshIntervalId = setInterval(async () => {
                 try {
                     const settings = await api.getSettings();
@@ -437,9 +580,22 @@ document.addEventListener('DOMContentLoaded', () => {
             }, CONFIG.refreshInterval);
         },
 
+        startPreviewRefresh() {
+            if (state.previewRefreshId) {
+                clearInterval(state.previewRefreshId);
+            }
+
+            state.previewRefreshId = setInterval(() => {
+                ui.updatePreviewImage();
+            }, CONFIG.previewRefreshInterval);
+        },
+
         cleanup() {
             if (state.refreshIntervalId) {
                 clearInterval(state.refreshIntervalId);
+            }
+            if (state.previewRefreshId) {
+                clearInterval(state.previewRefreshId);
             }
         }
     };
