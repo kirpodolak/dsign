@@ -697,19 +697,30 @@ class PlaybackService:
 
     def capture_preview(self) -> bool:
         """Capture current playback preview"""
-        preview_path = Path(__file__).parent.parent / 'static' / self.PREVIEW_FILE
-        
+        preview_path = self.upload_folder / self.PREVIEW_FILE
+    
         try:
+            # Ensure directory exists
+            self.upload_folder.mkdir(exist_ok=True, parents=True)
+        
+            # Remove old file if exists
             if preview_path.exists():
                 preview_path.unlink()
-                
+            
+            # Send screenshot command
             res = self._send_command({
                 "command": ["screenshot-to-file", str(preview_path), "video"]
             })
+        
+            # Wait for file to be created
+            max_attempts = 5
+            for _ in range(max_attempts):
+                if preview_path.exists():
+                    return True
+                time.sleep(0.5)
             
-            time.sleep(0.5)
-            return preview_path.exists() and res is not None
-            
+            return False
+        
         except Exception as e:
             self.logger.error(f"Preview capture failed: {str(e)}")
             return False
