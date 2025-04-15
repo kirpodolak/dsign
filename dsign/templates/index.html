@@ -13,16 +13,35 @@
         <!-- Данные настроек будут загружены через JS -->
     </div>
 
+    <div class="mpv-preview">
+        <h3>MPV Player Preview</h3>
+        <div class="mpv-preview-container">
+            <img id="mpv-preview-image" 
+                 src="{{ url_for('api.serve_media', filename='mpv_screenshot.jpg') }}" 
+                 class="mpv-preview-image"
+                 style="display: none;"
+                 onload="this.style.display='block'"
+                 onerror="this.onerror=null;this.src='{{ url_for('api.serve_media', filename='mpv_screenshot.jpg') }}?t='+Date.now()">
+            <button id="refresh-mpv-preview" class="mpv-refresh-btn" title="Refresh Preview">
+                <i class="fas fa-sync-alt"></i>
+            </button>
+        </div>
+        <div class="mpv-status">
+            Last updated: <span id="mpv-last-update">Never</span>
+            <span id="mpv-auto-refresh-status"></span>
+        </div>
+    </div>
+
     <div class="logo-preview">
         <h3>Current Logo</h3>
         <img id="idle-logo"
              src="{{ url_for('api.serve_media', filename='idle_logo.jpg') }}"
              style="display: none;"
              onload="this.style.display='block'"
-             onerror="this.onerror=null;this.src='{{ url_for('api.serve_media', filename='idle_logo.jpg') }}?t={{ default_logo_cache_buster }}'">
+             onerror="this.onerror=null;this.src='{{ url_for('static', filename='default-logo.jpg') }}?t={{ default_logo_cache_buster }}'">
 
         <form id="logo-upload-form" enctype="multipart/form-data">
-		    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="logo-upload">
                 <input type="file" id="logo-upload" name="logo" accept="image/jpeg, image/png" required>
                 <button type="button" id="upload-logo-btn" class="btn small">
@@ -84,4 +103,3 @@
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/index.js') }}"></script>
 {% endblock %}
-
