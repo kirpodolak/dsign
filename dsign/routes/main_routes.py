@@ -5,7 +5,7 @@ from dsign.forms import SettingsForm, UploadLogoForm, PlaylistProfileForm
 from dsign.services.settings_service import SettingsService
 import requests
 from dsign.extensions import db
-from dsign.models import PlaybackProfile
+from dsign.models import PlaybackProfile, PlaylistProfileAssignment
 
 def init_main_routes(main_bp: Blueprint, settings_service: SettingsService):
     
@@ -24,31 +24,41 @@ def init_main_routes(main_bp: Blueprint, settings_service: SettingsService):
     @login_required
     def settings():
         try:
-            # Ensure we're working with the initialized services
-            if not hasattr(current_app, 'settings_service') or not hasattr(current_app, 'playlist_service'):
-                current_app.logger.error("Required services not initialized")
-                raise RuntimeError("Application services not available")
-
-            with current_app.app_context():
-                # Get profiles
-                profiles = db.session.query(PlaybackProfile).all()
+            # Get profiles with their assignments
+            profiles = db.session.query(PlaybackProfile).all()
+            
+            # Get current settings
+            current_settings = settings_service.get_current_settings()
+            
+            # Get playlists with their assigned profiles
+            playlists = db.session.query(Playlist).all()
+            playlist_data = []
+            
+            for playlist in playlists:
+                assignment = db.session.query(PlaylistProfileAssignment).filter_by(
+                    playlist_id=playlist.id
+                ).first()
                 
-                # Get current settings
-                current_settings = current_app.settings_service.get_current_settings()
-                
-                # Get playlists in the correct format
-                playlists_data = current_app.playlist_service.get_all_playlists()
-                playlists = {
-                    'playlists': playlists_data if isinstance(playlists_data, list) else []
-                }
-                
-                return render_template(
-                    'settings.html',
-                    profiles=profiles,
-                    current_settings=current_settings,
-                    playlists=playlists,
-                    current_profile=None  # Add this if template expects it
+                playlist_data.append({
+                    'id': playlist.id,
+                    'name': playlist.name,
+                    'profile_id': assignment.profile_id if assignment else None
+                })
+            
+            # Get current profile
+            current_profile = None
+            if current_settings.get('profile_id'):
+                current_profile = db.session.query(PlaybackProfile).get(
+                    current_settings['profile_id']
                 )
+            
+            return render_template(
+                'settings.html',
+                profiles=profiles,
+                current_settings=current_settings,
+                playlists={'playlists': playlist_data},
+                current_profile=current_profile
+            )
                 
         except Exception as e:
             current_app.logger.error(f"Settings route error: {str(e)}", exc_info=True)
