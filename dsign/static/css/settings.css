@@ -12,35 +12,44 @@
     padding: 30px;
     border-radius: 12px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    display: flex;
+    flex-direction: column;
+    gap: 25px;
 }
 
 .current-settings-panel {
     background: #f8f9fa;
+    grid-column: span 2;
 }
 
-.settings-panel h2,
+.settings-panel h2 {
+    color: #2c3e50;
+    margin-bottom: 15px;
+    font-weight: 600;
+    font-size: 1.5rem;
+    border-bottom: 2px solid #e9ecef;
+    padding-bottom: 10px;
+}
+
 .settings-panel h3 {
     color: #2c3e50;
-    margin-bottom: 25px;
+    margin-bottom: 15px;
     font-weight: 600;
+    font-size: 1.2rem;
 }
 
-.profile-indicator {
-    background: #e9ecef;
-    padding: 15px;
-    border-radius: 8px;
-    margin-bottom: 20px;
-}
-
+/* Формы и элементы управления */
 .form-group {
     margin-bottom: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
 }
 
-.form-group label {
-    display: block;
-    margin-bottom: 8px;
-    font-weight: 500;
-    color: #495057;
+.form-group-row {
+    display: flex;
+    gap: 15px;
+    align-items: center;
 }
 
 .form-control {
@@ -50,6 +59,7 @@
     border-radius: 6px;
     font-size: 15px;
     transition: all 0.2s ease;
+    background-color: #fff;
 }
 
 .form-control:focus {
@@ -58,17 +68,7 @@
     outline: none;
 }
 
-.checkbox-group {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
-.checkbox-group input[type="checkbox"] {
-    width: 18px;
-    height: 18px;
-}
-
+/* Кнопки */
 .submit-btn {
     padding: 12px 24px;
     background-color: #4a6bff;
@@ -79,19 +79,12 @@
     font-weight: 500;
     cursor: pointer;
     transition: all 0.2s ease;
+    align-self: flex-start;
 }
 
 .submit-btn:hover {
     background-color: #3a5bef;
     transform: translateY(-1px);
-}
-
-.submit-btn.secondary {
-    background-color: #6c757d;
-}
-
-.submit-btn.secondary:hover {
-    background-color: #5a6268;
 }
 
 .submit-btn.success {
@@ -102,57 +95,213 @@
     background-color: #218838;
 }
 
-.value-display {
-    display: inline-block;
-    margin-left: 10px;
-    min-width: 40px;
-    text-align: right;
-}
-
-.settings-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
+/* Секции */
+.assignment-section {
+    background: #f8f9fa;
+    padding: 20px;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
     gap: 15px;
 }
 
-.settings-grid div {
-    padding: 8px 0;
-    border-bottom: 1px solid #eee;
+.profile-indicator {
+    background: #e9ecef;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 20px;
 }
 
-.text-muted {
+/* Карточки профилей */
+.profile-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 20px;
+    margin-top: 15px;
+}
+
+.profile-card {
+    background: white;
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    transition: transform 0.2s;
+}
+
+.profile-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.profile-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.profile-name {
+    font-weight: 600;
+    font-size: 1.1rem;
+    color: #212529;
+}
+
+.profile-type {
+    font-size: 0.85rem;
     color: #6c757d;
-    font-style: italic;
+    background: #e9ecef;
+    padding: 3px 8px;
+    border-radius: 12px;
 }
 
-.alert {
+.profile-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.profile-actions button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 1.2rem;
+    padding: 5px;
+    color: #6c757d;
+    transition: color 0.2s;
+}
+
+.profile-actions button:hover {
+    color: #4a6bff;
+}
+
+/* Назначения плейлистов */
+.assignment-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 15px;
+    align-items: center;
+    margin-top: 15px;
+}
+
+.assignment-row {
+    display: contents;
+}
+
+.playlist-name {
+    font-weight: 500;
+    color: #495057;
+}
+
+/* Редактор настроек */
+.settings-editor {
+    background: #f8f9fa;
+    padding: 20px;
+    border-radius: 8px;
+    margin: 15px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.settings-editor .form-group {
+    margin-bottom: 0;
+}
+
+/* Текущие настройки */
+.settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 20px;
+}
+
+.settings-grid div {
+    padding: 10px;
+    background: white;
+    border-radius: 6px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.settings-grid strong {
+    color: #495057;
+    display: block;
+    margin-bottom: 5px;
+}
+
+/* Форма MPV */
+#mpv-settings-form {
+    margin-top: 30px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 20px;
+}
+
+/* Модальное окно */
+.modal {
+    display: none;
     position: fixed;
-    top: 20px;
-    right: 20px;
-    padding: 12px 20px;
-    border-radius: 4px;
-    color: white;
-    z-index: 1000;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-    animation: fadeIn 0.3s ease-out;
+    z-index: 1001;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0,0,0,0.5);
 }
 
+.modal-content {
+    background-color: #fff;
+    margin: 10% auto;
+    padding: 25px;
+    border-radius: 8px;
+    max-width: 500px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+    position: relative;
+}
+
+.close {
+    position: absolute;
+    right: 20px;
+    top: 15px;
+    font-size: 1.5rem;
+    font-weight: bold;
+    cursor: pointer;
+    color: #6c757d;
+}
+
+/* Анимации */
 @keyframes fadeIn {
     from { opacity: 0; transform: translateY(10px); }
     to { opacity: 1; transform: translateY(0); }
 }
 
+/* Адаптивность */
 @media (max-width: 768px) {
     .settings-container {
         grid-template-columns: 1fr;
+        gap: 20px;
         padding: 15px;
     }
     
-    .settings-panel {
-        padding: 20px;
+    .current-settings-panel {
+        grid-column: auto;
     }
     
-    .settings-grid {
+    .assignment-grid {
         grid-template-columns: 1fr;
+        gap: 10px;
+    }
+    
+    .profile-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    .form-group-row {
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .submit-btn {
+        width: 100%;
     }
 }
