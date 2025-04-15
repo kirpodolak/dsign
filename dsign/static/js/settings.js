@@ -31,31 +31,44 @@ document.addEventListener('DOMContentLoaded', () => {
     // Main Initialization
     async function init() {
         try {
-            // Load all required data
-            await Promise.all([
-                loadProfiles(),
-                loadPlaylists(),
-                loadAssignments(),
-                loadCurrentSettings(),
-                loadSettingsSchema()
+            // Проверка существования элементов перед работой с ними
+            if (!elements.idleProfileSelect || !elements.profileSelect) {
+                throw new Error('Required DOM elements not found');
+            }
+
+            // Загрузка данных с обработкой ошибок
+            const [profiles, playlists, assignments] = await Promise.all([
+                loadProfiles().catch(e => {
+                    console.error('Profile load error:', e);
+                    return [];
+                }),
+                loadPlaylists().catch(e => {
+                    console.error('Playlist load error:', e);
+                    return [];
+                }),
+                loadAssignments().catch(e => {
+                    console.error('Assignment load error:', e);
+                    return {};
+                })
             ]);
 
-            // Render UI
-            renderProfileSelects();
-            renderProfileGrid();
-            renderPlaylistAssignments();
-            renderCurrentSettings();
-            renderSettingsForm();
+            // Обновление состояния
+            state.profiles = profiles;
+            state.playlists = playlists;
+            state.assignments = assignments;
 
-            // Setup event listeners
-            setupEventListeners();
-
-            // Start auto-refresh
-            startAutoRefresh();
+            // Рендеринг только если есть данные
+            if (profiles.length > 0) {
+                renderProfileSelects();
+            }
+        
+            if (playlists.length > 0) {
+                renderPlaylistAssignments();
+            }
 
         } catch (error) {
             console.error('Initialization error:', error);
-            showAlert('Failed to initialize application. Please try again.', 'error');
+            showAlert('Failed to initialize settings. Please try again.', 'error');
         }
     }
 
