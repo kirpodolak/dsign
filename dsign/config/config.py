@@ -22,6 +22,10 @@ class Config:
     BASE_DIR = Path(__file__).parent.parent
     STATIC_FOLDER = str(BASE_DIR / 'static')
     IDLE_LOGO = "idle_logo.jpg"
+    DEFAULT_LOGO = 'idle_logo.jpg'
+    SCREENSHOT_DIR = '/var/lib/dsign/media'
+    SCREENSHOT_FILE = '/var/lib/dsign/media/mpv_screenshot.jpg'
+    DEFAULT_LOGO_PATH = '/var/lib/dsign/media/idle_logo.jpg'
     
     # Создаем директории, если они не существуют
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
