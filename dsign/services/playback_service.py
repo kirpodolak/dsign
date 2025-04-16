@@ -13,7 +13,7 @@ from datetime import datetime
 
 class PlaybackService:
     DEFAULT_LOGO = 'idle_logo.jpg'
-    PREVIEW_FILE = 'On_Air_Preview.jpg'
+    PREVIEW_FILE = 'mpv_screenshot.jpg'
     SOCKET_PATH = '/tmp/mpv-socket'
     DEFAULT_RESOLUTION = '1920x1080'
     DEFAULT_ASPECT_RATIO = '16:9'
@@ -37,7 +37,13 @@ class PlaybackService:
         
         # Initialize MPV properties and settings
         self._initialize_mpv()
-
+        self.screenshot_supported = False
+        self._check_mpv_screenshot_support()
+        if self.screenshot_supported:
+            self.start_periodic_screenshots(interval=30)
+        else:
+            self.logger.info("MPV screenshot functionality not available - previews disabled")
+                        
     def _initialize_mpv(self):
         """Initialize MPV properties and settings with enhanced reliability"""
         try:
@@ -83,7 +89,8 @@ class PlaybackService:
             self._filter_supported_settings()
             self._ensure_mpv_service()
             self._wait_for_mpv_ready()
-            
+            self._initialize_default_logo()
+                        
         except Exception as e:
             self.logger.error(f"MPV initialization failed: {str(e)}", exc_info=True)
             raise RuntimeError(f"MPV initialization failed: {str(e)}")
@@ -488,6 +495,18 @@ class PlaybackService:
             return self.update_settings(profile['settings'])
         return False
 
+    def _initialize_default_logo(self):
+        logo_path = Path(self.upload_folder) / self.DEFAULT_LOGO
+        if not logo_path.exists():
+            try:
+                default_logo = Path(__file__).parent.parent / "static" / "images" / "placeholder.jpg"
+                if default_logo.exists():
+                    import shutil
+                    shutil.copy(default_logo, logo_path)
+                    self.logger.info(f"Initialized default logo at {logo_path}")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize default logo: {str(e)}")
+
     def display_idle_logo(self, profile_id: int = None) -> bool:
         """Display idle logo with multiple fallback strategies"""
         try:
@@ -503,9 +522,33 @@ class PlaybackService:
             logo_path = self.upload_folder / self.DEFAULT_LOGO
             self.logger.info(f"Displaying logo from: {logo_path}")
 
+            # Добавленная проверка и копирование логотипа по умолчанию
             if not logo_path.exists():
-                self.logger.error(f"Logo file not found at {logo_path}")
-                return False
+                self.logger.warning(f"Logo file not found at {logo_path}, trying default...")
+                default_logo = Path(__file__).parent.parent / "static" / "images" / "placeholder.jpg"
+                if default_logo.exists():
+                    import shutil
+                    try:
+                        shutil.copy(default_logo, logo_path)
+                        self.logger.info(f"Copied default logo to {logo_path}")
+                        # Устанавливаем правильные права
+                        logo_path.chmod(0o664)
+                        os.chown(logo_path, os.getuid(), os.getgid())
+                    except Exception as copy_error:
+                        self.logger.error(f"Failed to copy default logo: {str(copy_error)}")
+                        return False
+                else:
+                    self.logger.error("Default logo file not found in static/images")
+                    return False
+
+            # Проверка прав доступа
+            if not os.access(logo_path, os.R_OK):
+                self.logger.error(f"Insufficient permissions to read logo file: {logo_path}")
+                try:
+                    logo_path.chmod(0o664)
+                except Exception as perm_error:
+                    self.logger.error(f"Failed to fix permissions: {str(perm_error)}")
+                    return False
 
             # Try primary method
             load_res = self._send_command({
@@ -691,33 +734,91 @@ class PlaybackService:
 
     def capture_preview(self) -> bool:
         """Capture current playback preview"""
-        preview_path = self.upload_folder / self.PREVIEW_FILE
-    
-        try:
-            # Ensure directory exists
-            self.upload_folder.mkdir(exist_ok=True, parents=True)
+        if not self.screenshot_supported:
+            return False
+            
+        preview_path = self.upload_folder / 'mpv_screenshot.jpg'
         
-            # Remove old file if exists
+        try:
+            # Удаляем старый файл если существует
             if preview_path.exists():
                 preview_path.unlink()
+                
+            # Пробуем разные методы создания скриншота
+            methods = [
+                {"command": ["screenshot-to-file", str(preview_path), "video"]},
+                {"command": ["screenshot", str(preview_path), "video"]},
+                {"command": ["async", "screenshot-to-file", str(preview_path), "video"]}
+            ]
             
-            # Send screenshot command
-            res = self._send_command({
-                "command": ["screenshot-to-file", str(preview_path), "video"]
-            })
-        
-            # Wait for file to be created
-            max_attempts = 5
-            for _ in range(max_attempts):
-                if preview_path.exists():
-                    return True
-                time.sleep(0.5)
-            
+            for method in methods:
+                res = self._send_command(method)
+                if res and 'error' not in res:
+                    break
+                    
+            # Проверяем результат
+            if preview_path.exists() and preview_path.stat().st_size > 0:
+                return True
+                
+            self.logger.warning("Preview file was not created")
             return False
-        
+            
         except Exception as e:
             self.logger.error(f"Preview capture failed: {str(e)}")
             return False
+
+    # Метод проверки поддержки скриншотов
+    def _check_mpv_screenshot_support(self):
+        """Check if MPV supports screenshot command"""
+        self.screenshot_supported = False
+        
+        # Проверяем доступность команды screenshot-to-file
+        res = self._send_command({"command": ["get_property", "screenshot-to-file"]})
+        if res and 'error' not in res:
+            self.screenshot_supported = True
+            return
+            
+        # Если первая проверка не прошла, пробуем альтернативный метод
+        try:
+            test_path = self.upload_folder / 'test_screenshot.jpg'
+            if test_path.exists():
+                test_path.unlink()
+                
+            res = self._send_command({
+                "command": ["screenshot-to-file", str(test_path), "video"],
+                "async": False
+            })
+            
+            if res and 'error' not in res and test_path.exists():
+                self.screenshot_supported = True
+                test_path.unlink()
+            else:
+                self.logger.warning("Screenshot functionality not available")
+                
+        except Exception as e:
+            self.logger.error(f"Error checking screenshot support: {str(e)}")
+
+    # Обновленный метод периодических скриншотов
+    def start_periodic_screenshots(self, interval: int = 30):
+        """Start periodic screenshot capture"""
+        if not self.screenshot_supported:
+            self.logger.info("Skipping periodic screenshots - not supported")
+            return
+
+        def capture_loop():
+            while getattr(self, 'screenshot_supported', False):
+                try:
+                    if not self.capture_preview():
+                        self.logger.debug("Screenshot attempt failed")
+                except Exception as e:
+                    self.logger.error(f"Screenshot error: {str(e)}")
+                time.sleep(interval)
+        
+        threading.Thread(
+            target=capture_loop,
+            daemon=True,
+            name="ScreenshotThread"
+        ).start()
 
     def restart_mpv(self) -> bool:
         """Restart MPV process with enhanced reliability"""
