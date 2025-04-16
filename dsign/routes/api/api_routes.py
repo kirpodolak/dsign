@@ -731,3 +731,60 @@ def init_api_routes(api_bp, services):
         except Exception as e:
             current_app.logger.error(f"Error serving media file: {str(e)}")
             abort(404, description="Media file not available")
+            
+    @api_bp.route('/media/mpv_screenshot', methods=['GET'])
+    def get_mpv_screenshot():
+        """Get current MPV screenshot"""
+        try:
+            screenshot_path = Path(current_app.config['UPLOAD_FOLDER']) / 'mpv_screenshot.jpg'
+        
+            if not screenshot_path.exists():
+                # Если скриншот не существует, попробуем создать его
+                if not playback_service.capture_preview():
+                    return send_from_directory(
+                        current_app.static_folder,
+                        'images/default-preview.jpg',
+                        as_attachment=False
+                    )
+        
+            return send_file(
+                screenshot_path,
+                mimetype='image/jpeg',
+                as_attachment=False,
+                conditional=True
+            )
+        except Exception as e:
+            current_app.logger.error(f"Error serving MPV screenshot: {str(e)}")
+            return send_from_directory(
+                current_app.static_folder,
+                'images/default-preview.jpg',
+                as_attachment=False
+            )
+
+    @api_bp.route('/media/mpv_screenshot/capture', methods=['POST'])
+    @login_required
+    def capture_mpv_screenshot():
+        """Force capture new MPV screenshot"""
+        if not playback_service.screenshot_supported:
+            return jsonify({
+                "success": False,
+                "error": "Screenshot functionality not supported by MPV"
+            }), 501
+            
+        try:
+            if playback_service.capture_preview():
+                return jsonify({
+                    "success": True,
+                    "message": "Screenshot captured successfully"
+                })
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": "Failed to capture screenshot"
+                }), 500
+        except Exception as e:
+            current_app.logger.error(f"Error capturing MPV screenshot: {str(e)}")
+            return jsonify({
+                "success": False,
+                "error": str(e)
+            }), 500
