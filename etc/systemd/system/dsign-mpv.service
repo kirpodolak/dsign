@@ -1,0 +1,19 @@
+[Unit]
+Description=Digital Signage MPV Player
+After=digital-signage.service
+Requires=digital-signage.service
+
+[Service]
+User=dsign
+Group=www-data
+Type=simple
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/dsign/.Xauthority
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
+UMask=0002
+ExecStart=/usr/bin/mpv --player-operation-mode=pseudo-gui --input-ipc-server=/tmp/mpv-socket --idle=yes --loop-playlist=inf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
