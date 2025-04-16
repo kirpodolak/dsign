@@ -20,7 +20,7 @@ class PlaybackService:
     MAX_RETRIES = 3
     RETRY_DELAY = 0.5
     SOCKET_TIMEOUT = 2.0
-    MPV_START_TIMEOUT = 15
+    MPV_START_TIMEOUT = 30  # Увеличенный таймаут
 
     def __init__(self, upload_folder: str, db_session, socketio, logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
@@ -125,6 +125,11 @@ class PlaybackService:
                     os.unlink(self.SOCKET_PATH)
                 except Exception as e:
                     self.logger.warning(f"Could not remove old socket: {str(e)}")
+                    try:
+                        os.chmod(self.SOCKET_PATH, 0o777)
+                        os.unlink(self.SOCKET_PATH)
+                    except Exception as e:
+                        self.logger.error(f"Failed to remove socket even after chmod: {str(e)}")
 
             # Start MPV process directly with proper environment
             env = {
@@ -145,7 +150,9 @@ class PlaybackService:
                     "--no-terminal",
                     "--vo=gpu",
                     "--hwdec=auto",
-                    "--quiet"
+                    "--quiet",
+                    "--log-file=/var/log/mpv.log",  # Добавлено логирование
+                    "--msg-level=all=info"         # Уровень детализации логов
                 ],
                 env=env,
                 stdout=subprocess.PIPE,
@@ -186,17 +193,11 @@ class PlaybackService:
         """Wait for MPV IPC socket to be ready with enhanced checks"""
         timeout = timeout or self.MPV_START_TIMEOUT
         start_time = time.time()
-        last_log_time = 0
-        log_interval = 2  # seconds between logs
         
         while time.time() - start_time < timeout:
             try:
                 if not os.path.exists(self.SOCKET_PATH):
-                    current_time = time.time()
-                    if current_time - last_log_time > log_interval:
-                        self.logger.info(f"Waiting for MPV socket at {self.SOCKET_PATH}...")
-                        last_log_time = current_time
-                    time.sleep(0.5)
+                    time.sleep(1)
                     continue
 
                 # Ensure socket has correct permissions
@@ -205,47 +206,43 @@ class PlaybackService:
                         os.chmod(self.SOCKET_PATH, 0o666)
                     except Exception as e:
                         self.logger.warning(f"Could not set socket permissions: {str(e)}")
+                        time.sleep(1)
+                        continue
 
                 # Test connection
                 with self._ipc_lock:
                     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                        s.settimeout(1.0)
-                        s.connect(self.SOCKET_PATH)
-                        s.sendall(b'{"command": ["get_property", "idle-active"]}\n')
-                        response = self._read_socket_response(s)
-                        
-                        if response:
-                            try:
-                                # Handle multiple JSON responses
-                                responses = [json.loads(r) for r in response.strip().split('\n') if r.strip()]
-                                for data in responses:
-                                    if isinstance(data, dict):
-                                        if data.get('error') == 'success':
-                                            self.logger.debug("MPV connection test succeeded")
-                                            self._mpv_ready = True
-                                            self._socket_ready_event.set()
-                                            self.logger.info("MPV connection established successfully")
-                                            return True
-                                        elif 'data' in data:
-                                            self._mpv_ready = True
-                                            self._socket_ready_event.set()
-                                            self.logger.info("MPV connection established successfully")
-                                            return True
-                            except json.JSONDecodeError as e:
-                                self.logger.debug(f"JSON decode error: {str(e)}")
-                                continue
+                        s.settimeout(2.0)
+                        try:
+                            s.connect(self.SOCKET_PATH)
+                            s.sendall(b'{"command": ["get_property", "idle-active"]}\n')
+                            response = self._read_socket_response(s)
                             
-            except ConnectionRefusedError:
-                time.sleep(0.5)
-                continue
+                            if response and '"error":"success"' in response:
+                                self._mpv_ready = True
+                                self._socket_ready_event.set()
+                                self.logger.info("MPV connection established successfully")
+                                return True
+                        except ConnectionRefusedError:
+                            time.sleep(1)
+                            continue
+                        except Exception as e:
+                            self.logger.debug(f"Connection test failed: {str(e)}")
+                            time.sleep(1)
+                            continue
+                        
             except Exception as e:
-                current_time = time.time()
-                if current_time - last_log_time > log_interval:
-                    self.logger.warning(f"MPV connection attempt failed: {str(e)}")
-                    last_log_time = current_time
-                time.sleep(0.5)
+                self.logger.debug(f"MPV ready check failed: {str(e)}")
+                time.sleep(1)
                 
         self.logger.error("Timeout waiting for MPV to become ready")
+        # Try to kill the process if it's stuck
+        if self._mpv_process and self._mpv_process.poll() is None:
+            try:
+                self._mpv_process.terminate()
+                self._mpv_process.wait(timeout=5)
+            except:
+                pass
         raise RuntimeError("Timeout waiting for MPV IPC socket to become ready")
 
     def _read_socket_response(self, sock: socket.socket, timeout: float = 1.0) -> Optional[str]:
@@ -264,11 +261,9 @@ class PlaybackService:
                 # Try to parse as complete JSON or multiple JSONs
                 decoded = response.decode()
                 try:
-                    # Try single JSON first
                     json.loads(decoded)
                     return decoded
                 except json.JSONDecodeError:
-                    # Try splitting by newlines if there are multiple JSONs
                     if '\n' in decoded:
                         parts = [p.strip() for p in decoded.split('\n') if p.strip()]
                         if all(self._is_valid_json(p) for p in parts):
@@ -318,7 +313,6 @@ class PlaybackService:
                         response = self._read_socket_response(s)
                         if response:
                             try:
-                                # Handle multiple JSON responses
                                 responses = [json.loads(r) for r in response.strip().split('\n') if r.strip()]
                                 for data in responses:
                                     if isinstance(data, dict):
@@ -726,13 +720,17 @@ class PlaybackService:
             return False
 
     def restart_mpv(self) -> bool:
-        """Restart MPV process"""
+        """Restart MPV process with enhanced reliability"""
         try:
             # Clean up existing process
             if self._mpv_process:
                 try:
                     self._mpv_process.terminate()
-                    self._mpv_process.wait(timeout=5)
+                    self._mpv_process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self.logger.warning("MPV process did not terminate gracefully, killing...")
+                    self._mpv_process.kill()
+                    self._mpv_process.wait()
                 except Exception as e:
                     self.logger.warning(f"Error terminating MPV process: {str(e)}")
             
@@ -742,15 +740,27 @@ class PlaybackService:
                     os.unlink(self.SOCKET_PATH)
                 except Exception as e:
                     self.logger.warning(f"Error removing socket: {str(e)}")
+                    try:
+                        os.chmod(self.SOCKET_PATH, 0o777)
+                        os.unlink(self.SOCKET_PATH)
+                    except:
+                        pass
             
             # Start fresh
             self._mpv_ready = False
+            self._socket_ready_event.clear()
             self._ensure_mpv_service()
-            self._wait_for_mpv_ready()
-            return True
             
+            # Give more time for initialization
+            try:
+                self._wait_for_mpv_ready(timeout=30)
+                return True
+            except Exception as e:
+                self.logger.error(f"Failed to verify MPV restart: {str(e)}")
+                return False
+                
         except Exception as e:
-            self.logger.error(f"Failed to restart MPV: {str(e)}", exc_info=True)
+            self.logger.error(f"MPV restart failed: {str(e)}", exc_info=True)
             return False
 
     def get_playback_info(self) -> Dict:
