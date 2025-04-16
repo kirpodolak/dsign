@@ -25,6 +25,12 @@ class ServiceFactory:
             socketio=socketio,
             logger=logger or logging.getLogger(__name__)
         )
+        
+        # Отложенный запуск периодических скриншотов
+        if hasattr(service, 'screenshot_supported') and service.screenshot_supported:
+            service.start_periodic_screenshots(interval=30)
+    
+        return service
 
     @staticmethod
     def create_playlist_service(db, logger: logging.Logger = None) -> 'PlaylistService':
