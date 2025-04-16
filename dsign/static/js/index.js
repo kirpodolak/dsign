@@ -45,7 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const elements = Object.fromEntries(
         Object.entries(CONFIG.selectors).map(([key, selector]) => 
             [key, document.querySelector(selector)]
-    );
+    };
 
     // Application state
     const state = {
