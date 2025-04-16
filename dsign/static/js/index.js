@@ -11,7 +11,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 media: '/api/media/files',
                 mediaUpload: '/api/media/upload',
                 serveMedia: '/api/serve_media',
-                previewImage: '/api/media/preview' // Добавлен endpoint для превью
+                previewImage: '/api/media/mpv_screenshot' // Добавлен endpoint для превью
             },
             headers: {
                 'Content-Type': 'application/json',
@@ -44,7 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Initialize DOM elements
     const elements = Object.fromEntries(
         Object.entries(CONFIG.selectors).map(([key, selector]) => 
-            [key, document.querySelector(selector)]
+            [key, document.querySelector(selector))]
     };
 
     // Application state
