@@ -9,65 +9,60 @@ fi
 # Конфигурация
 DSIGN_USER="dsign"
 WWW_USER="www-data"
-DSIGN_DIR="/opt/dsign"
-VENV_DIR="$DSIGN_DIR/venv"
-CONFIG_DIR="/etc/dsign"
+PROJECT_DIR="/home/dsign/dsign"  # Оригинальный путь проекта
+VENV_DIR="/home/dsign/venv"
+CONFIG_DIR="/home/dsign/config"
 LOG_DIR="/var/log/dsign"
-UPLOAD_DIR="/var/www/dsign/uploads"
-DB_NAME="dsign"
-DB_USER="dsign"
-DB_PASS=$(openssl rand -hex 12)
+UPLOAD_DIR="/var/lib/dsign/media"
+DB_DIR="/var/lib/dsign"
+SETTINGS_FILE="/var/lib/dsign/settings.json"
 
-# Установка зависимостей системы
-echo "Установка системных зависимостей..."
+# Создание пользователя и групп
+if ! id "$DSIGN_USER" &>/dev/null; then
+    useradd -m -s /bin/bash "$DSIGN_USER"
+fi
+usermod -a -G "$DSIGN_USER" "$WWW_USER"
+usermod -a -G "$WWW_USER" "$DSIGN_USER"
+
+# Установка зависимостей
 apt-get update
 apt-get install -y \
     python3-pip python3-venv python3-dev \
     libpq-dev postgresql postgresql-contrib \
     mpv ffmpeg \
-    nginx git
+    nginx git \
+    acl  # Для расширенного управления правами
 
-# Создание пользователей и групп
-if ! id "$DSIGN_USER" &>/dev/null; then
-    useradd -r -s /bin/false "$DSIGN_USER"
-fi
-usermod -a -G "$DSIGN_USER" "$WWW_USER"
-usermod -a -G "$WWW_USER" "$DSIGN_USER"
-
-# Создание директорий
-echo "Создание структуры директорий..."
-mkdir -p "$DSIGN_DIR" "$CONFIG_DIR" "$LOG_DIR" "$UPLOAD_DIR"
-chown -R "$DSIGN_USER:$DSIGN_USER" "$DSIGN_DIR" "$LOG_DIR"
-chown -R "$WWW_USER:$WWW_USER" "$UPLOAD_DIR"
+# Создание структуры директорий
+mkdir -p "$PROJECT_DIR" "$VENV_DIR" "$CONFIG_DIR" "$LOG_DIR" "$UPLOAD_DIR" "$DB_DIR"
+chown -R "$DSIGN_USER:$DSIGN_USER" "/home/dsign" "$DB_DIR" "$LOG_DIR"
 chmod -R 775 "$UPLOAD_DIR"
 
+# Настройка ACL для совместного доступа
+setfacl -R -m u:"$WWW_USER":rwX "$PROJECT_DIR" "$UPLOAD_DIR" "$DB_DIR"
+setfacl -Rd -m u:"$WWW_USER":rwX "$PROJECT_DIR" "$UPLOAD_DIR" "$DB_DIR"
+
 # Клонирование репозитория
-echo "Клонирование репозитория..."
-git clone https://github.com/kirpodolak/dsign.git "$DSIGN_DIR"
-chown -R "$DSIGN_USER:$DSIGN_USER" "$DSIGN_DIR"
+sudo -u "$DSIGN_USER" git clone https://github.com/kirpodolak/dsign.git "$PROJECT_DIR"
+
+# Создание необходимых файлов
+touch "$SETTINGS_FILE" "$LOG_DIR/dsign.log" "$LOG_DIR/app.log"
+chown "$DSIGN_USER:$DSIGN_USER" "$SETTINGS_FILE" "$LOG_DIR/dsign.log" "$LOG_DIR/app.log"
 
 # Настройка виртуального окружения
-echo "Создание виртуального окружения..."
 sudo -u "$DSIGN_USER" python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip wheel
-pip install -r "$DSIGN_DIR/requirements.txt"
+pip install -r "$PROJECT_DIR/requirements.txt"
 deactivate
 
-# Настройка базы данных
-echo "Настройка PostgreSQL..."
-sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';"
-sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
-sudo -u postgres psql -d "$DB_NAME" -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;"
-
-# Создание конфигурационного файла
-echo "Создание конфигурации..."
+# Конфигурационные файлы
 cat > "$CONFIG_DIR/config.py" <<EOL
 import os
 
 class Config:
-    SECRET_KEY = '$(openssl rand -hex 16)'
-    SQLALCHEMY_DATABASE_URI = 'postgresql://$DB_USER:$DB_PASS@localhost/$DB_NAME'
+    SECRET_KEY = '$(openssl rand -hex 32)'
+    SQLALCHEMY_DATABASE_URI = 'sqlite:///$DB_DIR/database.db'
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     UPLOAD_FOLDER = '$UPLOAD_DIR'
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
@@ -75,27 +70,36 @@ class Config:
     MPV_SOCKET = '/tmp/mpv-socket'
 EOL
 
-chown "$DSIGN_USER:$DSIGN_USER" "$CONFIG_DIR/config.py"
-chmod 640 "$CONFIG_DIR/config.py"
-
-# Инициализация базы данных
-echo "Инициализация базы данных..."
-export DSIGN_CONFIG="$CONFIG_DIR/config.py"
-sudo -u "$DSIGN_USER" -E "$VENV_DIR/bin/python" "$DSIGN_DIR/manage.py db upgrade"
-
-# Настройка systemd службы
-echo "Настройка службы systemd..."
-cat > /etc/systemd/system/dsign.service <<EOL
+# Systemd сервисы
+cat > /etc/systemd/system/digital-signage.service <<EOL
 [Unit]
-Description=DSign Digital Signage Service
-After=network.target postgresql.service
+Description=Digital Signage Web Service
+After=network.target
 
 [Service]
 User=$DSIGN_USER
 Group=$DSIGN_USER
-WorkingDirectory=$DSIGN_DIR
-Environment="DSIGN_CONFIG=$CONFIG_DIR/config.py"
-ExecStart=$VENV_DIR/bin/gunicorn -w 4 -b 127.0.0.1:8000 "app:create_app()"
+WorkingDirectory=$PROJECT_DIR
+Environment="FLASK_APP=$PROJECT_DIR/server.py"
+Environment="FLASK_ENV=production"
+ExecStart=$VENV_DIR/bin/gunicorn -w 4 -b 127.0.0.1:8000 "server:app"
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+cat > /etc/systemd/system/dsign-mpv.service <<EOL
+[Unit]
+Description=Digital Signage MPV Service
+After=network.target
+
+[Service]
+User=$DSIGN_USER
+Group=$DSIGN_USER
+WorkingDirectory=$PROJECT_DIR
+Environment="PYTHONPATH=$PROJECT_DIR"
+ExecStart=$VENV_DIR/bin/python $PROJECT_DIR/services/playback_service.py
 Restart=always
 
 [Install]
@@ -103,11 +107,10 @@ WantedBy=multi-user.target
 EOL
 
 systemctl daemon-reload
-systemctl enable dsign.service
-systemctl start dsign.service
+systemctl enable digital-signage.service dsign-mpv.service
+systemctl start digital-signage.service dsign-mpv.service
 
 # Настройка Nginx
-echo "Настройка Nginx..."
 cat > /etc/nginx/sites-available/dsign <<EOL
 server {
     listen 80;
@@ -117,7 +120,11 @@ server {
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+
+    location /static/ {
+        alias $PROJECT_DIR/static/;
+        expires 30d;
     }
 
     location /uploads/ {
@@ -128,18 +135,13 @@ server {
 EOL
 
 ln -s /etc/nginx/sites-available/dsign /etc/nginx/sites-enabled/
-rm /etc/nginx/sites-enabled/default
 systemctl restart nginx
 
-# Настройка cron для очистки
-echo "Настройка регулярных задач..."
-cat > /etc/cron.d/dsign <<EOL
-0 3 * * * $DSIGN_USER $VENV_DIR/bin/python $DSIGN_DIR/manage.py cleanup
-EOL
+# Инициализация базы данных
+sudo -u "$DSIGN_USER" "$VENV_DIR/bin/python" "$PROJECT_DIR/manage.py db upgrade"
 
 echo "Установка завершена!"
-echo "Данные для доступа к БД:"
-echo "База данных: $DB_NAME"
-echo "Пользователь: $DB_USER"
-echo "Пароль: $DB_PASS"
-echo "Приложение доступно по адресу: http://сервер"
+echo "Проект развернут в: $PROJECT_DIR"
+echo "Сервисы:"
+echo "  Веб-интерфейс: systemctl status digital-signage.service"
+echo "  MPV сервис:    systemctl status dsign-mpv.service"
