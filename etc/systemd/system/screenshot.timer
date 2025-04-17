@@ -1,0 +1,12 @@
+[Unit]
+Description=DSign Screenshot Timer
+Requires=screenshot.service
+
+[Timer]
+OnUnitActiveSec=60s
+AccuracySec=1s
+Persistent=true
+Unit=screenshot.service
+
+[Install]
+WantedBy=timers.target
