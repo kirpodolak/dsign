@@ -1,0 +1,27 @@
+[Unit]
+Description=DSign Screenshot Service
+After=multi-user.target
+Requires=dev-dri-card0.device
+
+[Service]
+Type=simple
+User=dsign
+Group=video
+WorkingDirectory=/home/dsign/dsign/static/images
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=/home/dsign/.Xauthority"
+ExecStart=/usr/local/bin/dsign-capture
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=5
+SuccessExitStatus=0 1
+
+# Security sandboxing
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/dsign/dsign/static/images/
+
+[Install]
+WantedBy=multi-user.target
