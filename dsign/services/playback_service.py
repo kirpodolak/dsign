@@ -13,7 +13,6 @@ from datetime import datetime
 
 class PlaybackService:
     DEFAULT_LOGO = 'idle_logo.jpg'
-    PREVIEW_FILE = 'mpv_screenshot.jpg'
     SOCKET_PATH = '/tmp/mpv-socket'
     DEFAULT_RESOLUTION = '1920x1080'
     DEFAULT_ASPECT_RATIO = '16:9'
@@ -37,13 +36,7 @@ class PlaybackService:
         
         # Initialize MPV properties and settings
         self._initialize_mpv()
-        self.screenshot_supported = False
-        self._check_mpv_screenshot_support()
-        if self.screenshot_supported:
-            self.start_periodic_screenshots(interval=30)
-        else:
-            self.logger.info("MPV screenshot functionality not available - previews disabled")
-                        
+                               
     def _initialize_mpv(self):
         """Initialize MPV properties and settings with enhanced reliability"""
         try:
@@ -731,94 +724,6 @@ class PlaybackService:
             'playlist_id': status.playlist_id if status else None,
             'settings': self._current_settings
         }
-
-    def capture_preview(self) -> bool:
-        """Capture current playback preview"""
-        if not self.screenshot_supported:
-            return False
-            
-        preview_path = self.upload_folder / 'mpv_screenshot.jpg'
-        
-        try:
-            # Удаляем старый файл если существует
-            if preview_path.exists():
-                preview_path.unlink()
-                
-            # Пробуем разные методы создания скриншота
-            methods = [
-                {"command": ["screenshot-to-file", str(preview_path), "video"]},
-                {"command": ["screenshot", str(preview_path), "video"]},
-                {"command": ["async", "screenshot-to-file", str(preview_path), "video"]}
-            ]
-            
-            for method in methods:
-                res = self._send_command(method)
-                if res and 'error' not in res:
-                    break
-                    
-            # Проверяем результат
-            if preview_path.exists() and preview_path.stat().st_size > 0:
-                return True
-                
-            self.logger.warning("Preview file was not created")
-            return False
-            
-        except Exception as e:
-            self.logger.error(f"Preview capture failed: {str(e)}")
-            return False
-
-    # Метод проверки поддержки скриншотов
-    def _check_mpv_screenshot_support(self):
-        """Check if MPV supports screenshot command"""
-        self.screenshot_supported = False
-        
-        # Проверяем доступность команды screenshot-to-file
-        res = self._send_command({"command": ["get_property", "screenshot-to-file"]})
-        if res and 'error' not in res:
-            self.screenshot_supported = True
-            return
-            
-        # Если первая проверка не прошла, пробуем альтернативный метод
-        try:
-            test_path = self.upload_folder / 'test_screenshot.jpg'
-            if test_path.exists():
-                test_path.unlink()
-                
-            res = self._send_command({
-                "command": ["screenshot-to-file", str(test_path), "video"],
-                "async": False
-            })
-            
-            if res and 'error' not in res and test_path.exists():
-                self.screenshot_supported = True
-                test_path.unlink()
-            else:
-                self.logger.warning("Screenshot functionality not available")
-                
-        except Exception as e:
-            self.logger.error(f"Error checking screenshot support: {str(e)}")
-
-    # Обновленный метод периодических скриншотов
-    def start_periodic_screenshots(self, interval: int = 30):
-        """Start periodic screenshot capture"""
-        if not self.screenshot_supported:
-            self.logger.info("Skipping periodic screenshots - not supported")
-            return
-
-        def capture_loop():
-            while getattr(self, 'screenshot_supported', False):
-                try:
-                    if not self.capture_preview():
-                        self.logger.debug("Screenshot attempt failed")
-                except Exception as e:
-                    self.logger.error(f"Screenshot error: {str(e)}")
-                time.sleep(interval)
-        
-        threading.Thread(
-            target=capture_loop,
-            daemon=True,
-            name="ScreenshotThread"
-        ).start()
 
     def restart_mpv(self) -> bool:
         """Restart MPV process with enhanced reliability"""
