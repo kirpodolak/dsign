@@ -1,19 +1,35 @@
 [Unit]
 Description=Digital Signage MPV Player
-After=digital-signage.service
-Requires=digital-signage.service
+After=network.target
+Wants=network-online.target
 
 [Service]
 User=dsign
 Group=www-data
 Type=simple
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/dsign/.Xauthority
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=/home/dsign/.Xauthority"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
 UMask=0002
-ExecStart=/usr/bin/mpv --player-operation-mode=pseudo-gui --input-ipc-server=/tmp/mpv-socket --idle=yes --loop-playlist=inf
+
+# Критически важные параметры для корректного захвата
+ExecStart=/usr/bin/mpv \
+    --player-operation-mode=pseudo-gui \
+    --input-ipc-server=/tmp/mpv-socket \
+    --idle=yes \
+    --loop-playlist=inf \
+    --no-osc \
+    --no-border \
+    --hwdec=auto-safe \
+    --vo=gpu \
+    --gpu-context=drm \
+    --drm-mode=preferred \
+    --drm-connector=0 \
+    --drm-plane=0
+
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
