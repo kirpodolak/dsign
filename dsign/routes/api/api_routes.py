@@ -1,5 +1,5 @@
 import os
-from flask import jsonify, request, send_from_directory, abort, current_app
+from flask import jsonify, request, send_from_directory, abort, current_app, send_file
 from flask_login import login_required
 from werkzeug.utils import secure_filename
 from dsign.models import PlaybackProfile, PlaylistProfileAssignment, Playlist, db
@@ -730,4 +730,64 @@ def init_api_routes(api_bp, services):
             )
         except Exception as e:
             current_app.logger.error(f"Error serving media file: {str(e)}")
-            abort(404, description="Media file not available")
+                abort(404, description="Media file not available")
+                
+    @api_bp.route('/media/mpv_screenshot', methods=['GET'])
+    def get_mpv_screenshot():
+        try:
+            screenshot_path = '/home/dsign/dsign/static/images/on_air_screen.jpg'
+            default_path = '/home/dsign/dsign/static/images/default-preview.jpg'
+        
+            # Check if screenshot exists and is a valid image
+            if os.path.exists(screenshot_path) and os.path.getsize(screenshot_path) > 1024:
+                try:
+                    with Image.open(screenshot_path) as img:
+                        img.verify()
+                    return send_file(screenshot_path, mimetype='image/jpeg')
+                except:
+                    current_app.logger.warning("Invalid screenshot image, using default")
+        
+            return send_file(default_path, mimetype='image/jpeg')
+        
+        except Exception as e:
+            current_app.logger.error(f"Screenshot error: {str(e)}")
+            abort(500)
+            
+    @api_bp.route('/media/mpv_screenshot/capture', methods=['POST'])
+    @login_required
+    def capture_mpv_screenshot():
+        try:
+            # Запускаем скрипт создания скриншота
+            result = subprocess.run(
+                ['/usr/local/bin/dsign-capture'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode != 0:
+                current_app.logger.error(f"Screenshot capture failed: {result.stderr}")
+                return jsonify({
+                    "success": False,
+                    "error": "Failed to capture screenshot",
+                    "details": result.stderr
+                }), 500
+                
+            return jsonify({
+                "success": True,
+                "message": "Screenshot captured successfully"
+            })
+            
+        except subprocess.TimeoutExpired:
+            current_app.logger.error("Screenshot capture timed out")
+            return jsonify({
+                "success": False,
+                "error": "Capture process timed out"
+            }), 500
+            
+        except Exception as e:
+            current_app.logger.error(f"Screenshot capture error: {str(e)}", exc_info=True)
+            return jsonify({
+                "success": False,
+                "error": "Internal server error"
+            }), 500
