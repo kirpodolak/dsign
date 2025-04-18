@@ -1,4 +1,4 @@
-document.addEventListener('DOMContentLoaded', () => {
+ document.addEventListener('DOMContentLoaded', () => {
     // Application configuration
     const CONFIG = {
         api: {
@@ -10,8 +10,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 uploadLogo: '/api/media/upload_logo',
                 media: '/api/media/files',
                 mediaUpload: '/api/media/upload',
-                serveMedia: '/api/serve_media',
-                previewImage: '/api/media/mpv_screenshot' // Добавлен endpoint для превью
+                serveMedia: '/api/media',
+                previewImage: '/api/media/mpv_screenshot'
             },
             headers: {
                 'Content-Type': 'application/json',
@@ -29,23 +29,24 @@ document.addEventListener('DOMContentLoaded', () => {
             logoForm: '#logo-upload-form',
             settingsPanel: '.info-panel .info-card',
             logoImage: '#idle-logo',
-            previewImage: '#mpv-preview-image', // Добавлен селектор для превью
+            previewImage: '#mpv-preview-image',
             currentSettings: '#current-settings',
             loadingIndicator: '#loading-indicator',
             logoFileInput: '#logo-upload-form input[type="file"]',
-            refreshPreviewBtn: '#refresh-mpv-preview' // Добавлен селектор для кнопки обновления превью
+            refreshPreviewBtn: '#refresh-mpv-preview'
         },
-        defaultLogo: '/static/default-logo.jpg',
-        defaultPreview: '/static/default-preview.jpg', // Добавлен дефолтный превью
-        refreshInterval: 5000,
-        previewRefreshInterval: 10000 // Интервал обновления превью
+        defaultLogo: '/static/images/default-logo.jpg',
+        defaultPreview: '/static/images/default-preview.jpg',
+        refreshInterval: 10000,
+        previewRefreshInterval: 15000,
+        maxImageLoadAttempts: 3
     };
 
     // Initialize DOM elements
     const elements = Object.fromEntries(
-        Object.entries(CONFIG.selectors).map(([key, selector]) => 
-            [key, document.querySelector(selector))]
-    };
+        Object.entries(CONFIG.selectors)
+            .map(([key, selector]) => [key, document.querySelector(selector)])
+    );
 
     // Application state
     const state = {
@@ -53,7 +54,11 @@ document.addEventListener('DOMContentLoaded', () => {
         currentSettings: {},
         playbackStatus: null,
         refreshIntervalId: null,
-        previewRefreshId: null // ID интервала обновления превью
+        previewRefreshId: null,
+        logoLoadAttempts: 0,
+        previewLoadAttempts: 0,
+        fallbackLogoUsed: false,
+        fallbackPreviewUsed: false
     };
 
     // API functions
@@ -112,8 +117,9 @@ document.addEventListener('DOMContentLoaded', () => {
         },
 
         async startPlayback(playlistId) {
-            return this.request(`${CONFIG.api.endpoints.playback}/start/${playlistId}`, {
-                method: 'POST'
+            return this.request(`${CONFIG.api.endpoints.playback}/play`, {
+                method: 'POST',
+                body: JSON.stringify({ playlist_id: playlistId })
             });
         },
 
@@ -164,12 +170,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
         async refreshPreview() {
             try {
-                // Сначала запрашиваем создание нового превью
+                // First request to capture new preview
                 await this.request(`${CONFIG.api.endpoints.previewImage}/capture`, {
                     method: 'POST'
                 });
                 
-                // Затем получаем обновленное изображение
+                // Reset attempts counter on manual refresh
+                state.previewLoadAttempts = 0;
+                state.fallbackPreviewUsed = false;
+                
+                // Then get the updated image
                 return `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
             } catch (error) {
                 console.error('Preview refresh error:', error);
@@ -301,53 +311,75 @@ document.addEventListener('DOMContentLoaded', () => {
         },
 
         updateLogo(logoPath) {
-            if (elements.logoImage) {
-                const newSrc = logoPath ? 
-                    `${CONFIG.api.baseUrl}${CONFIG.api.endpoints.serveMedia}/${logoPath}?t=${Date.now()}` : 
-                    CONFIG.defaultLogo;
-                
-                // Улучшенная обработка загрузки изображения
-                elements.logoImage.onload = function() {
-                    this.style.display = 'block';
-                    // Удаляем обработчик ошибок после успешной загрузки
-                    this.onerror = null;
-                };
-                
-                elements.logoImage.onerror = function() {
-                    console.error('Failed to load logo image:', this.src);
-                    this.src = CONFIG.defaultLogo;
-                    this.onerror = null; // Предотвращаем бесконечный цикл
-                };
-                
-                elements.logoImage.src = newSrc;
-                
-                // Принудительно скрываем изображение перед загрузкой
-                elements.logoImage.style.display = 'none';
+            if (!elements.logoImage) return;
+
+            // Reset fallback flag when trying to load a new logo
+            if (logoPath) {
+                state.fallbackLogoUsed = false;
+                state.logoLoadAttempts = 0;
             }
+
+            const basePath = state.fallbackLogoUsed ? 
+                CONFIG.defaultLogo : 
+                `${CONFIG.api.endpoints.serveMedia}/${logoPath || 'idle_logo.jpg'}`;
+
+            const newSrc = `${basePath}?t=${Date.now()}`;
+
+            elements.logoImage.onload = function() {
+                this.style.display = 'block';
+                state.logoLoadAttempts = 0;
+            };
+
+            elements.logoImage.onerror = function() {
+                state.logoLoadAttempts++;
+                
+                if (state.logoLoadAttempts >= CONFIG.maxImageLoadAttempts && !state.fallbackLogoUsed) {
+                    console.warn('Max logo load attempts reached, using fallback');
+                    state.fallbackLogoUsed = true;
+                    this.src = `${CONFIG.defaultLogo}?t=${Date.now()}`;
+                } else if (!state.fallbackLogoUsed) {
+                    // Retry with fresh timestamp
+                    setTimeout(() => {
+                        this.src = `${CONFIG.api.endpoints.serveMedia}/${logoPath || 'idle_logo.jpg'}?t=${Date.now()}`;
+                    }, 2000);
+                }
+            };
+            
+            elements.logoImage.src = newSrc;
+            elements.logoImage.style.display = 'none';
         },
 
         updatePreviewImage() {
-            if (elements.previewImage) {
-                const newSrc = `${CONFIG.api.baseUrl}${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
+            if (!elements.previewImage) return;
+
+            const newSrc = `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
+
+            elements.previewImage.onload = function() {
+                this.style.display = 'block';
+                state.previewLoadAttempts = 0;
+                const updateElement = document.getElementById('mpv-last-update');
+                if (updateElement) {
+                    updateElement.textContent = new Date().toLocaleTimeString();
+                }
+            };
+
+            elements.previewImage.onerror = function() {
+                state.previewLoadAttempts++;
                 
-                elements.previewImage.onload = function() {
-                    this.style.display = 'block';
-                    // Обновляем время последнего обновления
-                    const updateElement = document.getElementById('mpv-last-update');
-                    if (updateElement) {
-                        updateElement.textContent = new Date().toLocaleTimeString();
-                    }
-                };
-                
-                elements.previewImage.onerror = function() {
-                    console.error('Failed to load preview image:', this.src);
-                    this.src = CONFIG.defaultPreview;
-                    this.onerror = null;
-                };
-                
-                elements.previewImage.src = newSrc;
-                elements.previewImage.style.display = 'none';
-            }
+                if (state.previewLoadAttempts >= CONFIG.maxImageLoadAttempts && !state.fallbackPreviewUsed) {
+                    console.warn('Max preview load attempts reached, using fallback');
+                    state.fallbackPreviewUsed = true;
+                    this.src = `${CONFIG.defaultPreview}?t=${Date.now()}`;
+                } else if (!state.fallbackPreviewUsed) {
+                    // Retry with fresh timestamp
+                    setTimeout(() => {
+                        this.src = `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
+                    }, 3000);
+                }
+            };
+        
+            elements.previewImage.style.display = 'none';
+            elements.previewImage.src = newSrc;
         },
 
         toggleModal(show = true) {
@@ -387,7 +419,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 ui.renderSettings(settings);
                 ui.renderPlaylists(playlists);
                 ui.updateLogo(settings.display?.logo);
-                ui.updatePreviewImage(); // Инициализация превью
+                ui.updatePreviewImage();
 
                 this.setupEventListeners();
                 this.startAutoRefresh();
@@ -445,19 +477,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 const file = fileInput.files[0];
-                // Проверка типа файла
                 if (!file.type.match('image.*')) {
                     ui.showAlert('Only image files are allowed', 'error');
                     return;
                 }
 
-                // Проверка размера файла (максимум 5MB)
                 if (file.size > 5 * 1024 * 1024) {
                     ui.showAlert('File size should be less than 5MB', 'error');
                     return;
                 }
 
-                // Показываем спиннер
                 const btnText = elements.uploadLogoBtn.querySelector('.btn-text');
                 const spinner = elements.uploadLogoBtn.querySelector('.loading-spinner');
                 btnText.style.display = 'none';
@@ -468,39 +497,37 @@ document.addEventListener('DOMContentLoaded', () => {
                     const formData = new FormData(elements.logoForm);
                     const result = await api.uploadLogo(formData);
                     
-                    // Обновляем логотип
+                    // Reset fallback flags on successful upload
+                    state.fallbackLogoUsed = false;
+                    state.logoLoadAttempts = 0;
+                    
                     ui.updateLogo(result.filename);
                     ui.showAlert('Logo updated successfully', 'success');
                     
-                    // Очищаем input файла
                     fileInput.value = '';
                     
-                    // Обновляем настройки
                     const settings = await api.getSettings();
                     state.currentSettings = settings;
                     ui.renderSettings(settings);
                 } catch (error) {
                     console.error('Logo upload failed:', error);
                     ui.showAlert('Failed to upload logo: ' + error.message, 'error');
-                    
-                    // Восстанавливаем предыдущий логотип
                     ui.updateLogo(state.currentSettings.display?.logo);
                 } finally {
-                    // Восстанавливаем кнопку
                     btnText.style.display = 'inline-block';
                     spinner.style.display = 'none';
                     elements.uploadLogoBtn.disabled = false;
                 }
             });
 
-            // Предпросмотр логотипа при выборе файла
+            // Logo file preview
             elements.logoFileInput?.addEventListener('change', (e) => {
                 if (e.target.files && e.target.files[0]) {
                     ui.previewLogo(e.target.files[0]);
                 }
             });
 
-            // Обновление превью по кнопке
+            // Refresh preview button
             elements.refreshPreviewBtn?.addEventListener('click', async () => {
                 try {
                     elements.refreshPreviewBtn.disabled = true;
