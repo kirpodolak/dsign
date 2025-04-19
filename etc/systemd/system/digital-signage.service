@@ -1,37 +1,26 @@
 [Unit]
-Description=Digital Signage Service (DRM)
-After=graphical.target
-Wants=dsign-mpv.service
-Requires=dev-dri-card0.device
-ConditionPathExists=/dev/dri/card0
+Description=Digital Signage Controller
+After=network.target dsign-mpv.service
+Requires=dsign-mpv.service
 
 [Service]
 User=dsign
 Group=dsign
 WorkingDirectory=/home/dsign
-Environment="FLASK_APP=dsign.server:create_app()"
-Environment="FLASK_ENV=production"
-Environment=PYTHONPATH=/home/dsign
 ExecStart=/usr/bin/python3 /home/dsign/run.py
 Restart=on-failure
 RestartSec=30s
-StandardOutput=journal
-StandardError=journal
+KillMode=mixed
+TimeoutStopSec=30
+
+# Общие переменные среды
+Environment=MPV_IPC_SOCKET=/tmp/mpv-socket
+Environment=DISPLAY=:0
+Environment=PYTHONPATH=/home/dsign
+
+# Ограничения ресурсов
 MemoryLimit=500M
 CPUQuota=50%
-
-# Особенно важные настройки:
-KillMode=process
-KillSignal=SIGTERM
-TimeoutStopSec=5
-SendSIGKILL=no
-
-# Права доступа
-DeviceAllow=/dev/dri rw
-DeviceAllow=/dev/vchiq rw
-
-# Директории для записи
-ReadWritePaths=/var/log/dsign /var/lib/dsign
 
 [Install]
 WantedBy=multi-user.target
