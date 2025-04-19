@@ -69,10 +69,16 @@
                     elements.loadingIndicator.style.display = 'block';
                 }
 
+                // Get CSRF token from meta tag or cookies
+                const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || 
+                                document.cookie.match(/csrf_token=([^;]+)/)?.[1] || 
+                                '';
+
                 const response = await fetch(`${CONFIG.api.baseUrl}${url}`, {
                     ...options,
                     headers: {
                         ...CONFIG.api.headers,
+                        'X-CSRFToken': csrfToken, // Add CSRF token to all requests
                         ...options.headers
                     }
                 });
@@ -131,10 +137,14 @@
 
         async uploadLogo(formData) {
             try {
+                const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || 
+                                document.cookie.match(/csrf_token=([^;]+)/)?.[1] || 
+                                '';
+                
                 const response = await fetch(`${CONFIG.api.baseUrl}${CONFIG.api.endpoints.uploadLogo}`, {
                     method: 'POST',
                     headers: {
-                        'X-CSRFToken': CONFIG.api.headers['X-CSRFToken']
+                        'X-CSRFToken': csrfToken
                     },
                     body: formData
                 });
@@ -152,8 +162,15 @@
 
         async uploadMediaFiles(formData) {
             try {
+                const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || 
+                                document.cookie.match(/csrf_token=([^;]+)/)?.[1] || 
+                                '';
+                
                 const response = await fetch(`${CONFIG.api.baseUrl}${CONFIG.api.endpoints.mediaUpload}`, {
                     method: 'POST',
+                    headers: {
+                        'X-CSRFToken': csrfToken
+                    },
                     body: formData
                 });
 
@@ -187,7 +204,7 @@
             }
         }
     };
-
+	
     // UI functions
     const ui = {
         showAlert(message, type = 'info', duration = 3000) {
