@@ -1,4 +1,5 @@
 import os
+import subprocess
 from flask import jsonify, request, send_from_directory, abort, current_app, send_file
 from flask_login import login_required
 from werkzeug.utils import secure_filename
@@ -730,13 +731,13 @@ def init_api_routes(api_bp, services):
             )
         except Exception as e:
             current_app.logger.error(f"Error serving media file: {str(e)}")
-                abort(404, description="Media file not available")
+            abort(404, description="Media file not available")
                 
     @api_bp.route('/media/mpv_screenshot', methods=['GET'])
     def get_mpv_screenshot():
         try:
-            screenshot_path = '/home/dsign/dsign/static/images/on_air_screen.jpg'
-            default_path = '/home/dsign/dsign/static/images/default-preview.jpg'
+            screenshot_path = os.path.join(current_app.config['STATIC_FOLDER'], 'images', 'on_air_screen.jpg')
+            default_path = os.path.join(current_app.config['STATIC_FOLDER'], 'images', 'default-preview.jpg')
         
             # Check if screenshot exists and is a valid image
             if os.path.exists(screenshot_path) and os.path.getsize(screenshot_path) > 1024:
