@@ -12,17 +12,11 @@ WorkingDirectory=/var/lib/dsign/media
 # Оптимальные параметры для RPi 3B
 ExecStart=/usr/bin/mpv \
     --idle \
+    --input-ipc-server=/tmp/mpv-socket \
+    --no-config \
     --hwdec=mmal \
     --vo=drm \
-    --drm-connector=HDMI-A-1 \
-    --drm-mode=preferred \
-    --profile=low-latency \
-    --no-config \
-    --no-osc \
-    --no-border \
-    --input-ipc-server=/tmp/mpv-socket \
-    --loop-file=inf \
-    --fs \
+    --drm-connector=HDMI-A-1
 
 Restart=on-failure
 RestartSec=5
