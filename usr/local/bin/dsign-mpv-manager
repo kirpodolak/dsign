@@ -1,0 +1,19 @@
+#!/bin/bash
+case $1 in
+  start)
+    # Очистка старых процессов перед запуском
+    pkill -f "mpv .*idle_logo" || true
+    ;;
+  stop)
+    # Корректное завершение MPV процессов
+    pkill -TERM -f "mpv .*idle_logo" || true
+    sleep 1
+    # Принудительное завершение, если остались
+    pkill -KILL -f "mpv .*idle_logo" || true
+    ;;
+  *)
+    echo "Usage: $0 {start|stop}"
+    exit 1
+    ;;
+esac
+exit 0
