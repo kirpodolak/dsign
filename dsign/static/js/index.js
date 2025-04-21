@@ -1,4 +1,4 @@
- document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', () => {
     // Application configuration
     const CONFIG = {
         api: {
@@ -33,7 +33,8 @@
             currentSettings: '#current-settings',
             loadingIndicator: '#loading-indicator',
             logoFileInput: '#logo-upload-form input[type="file"]',
-            refreshPreviewBtn: '#refresh-mpv-preview'
+            refreshPreviewBtn: '#refresh-mpv-preview',
+            mpvLastUpdate: '#mpv-last-update'
         },
         defaultLogo: '/static/images/default-logo.jpg',
         defaultPreview: '/static/images/default-preview.jpg',
@@ -58,7 +59,8 @@
         logoLoadAttempts: 0,
         previewLoadAttempts: 0,
         fallbackLogoUsed: false,
-        fallbackPreviewUsed: false
+        fallbackPreviewUsed: false,
+        isPreviewRefreshing: false
     };
 
     // API functions
@@ -69,7 +71,6 @@
                     elements.loadingIndicator.style.display = 'block';
                 }
 
-                // Get CSRF token from meta tag or cookies
                 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || 
                                 document.cookie.match(/csrf_token=([^;]+)/)?.[1] || 
                                 '';
@@ -78,7 +79,7 @@
                     ...options,
                     headers: {
                         ...CONFIG.api.headers,
-                        'X-CSRFToken': csrfToken, // Add CSRF token to all requests
+                        'X-CSRFToken': csrfToken,
                         ...options.headers
                     }
                 });
@@ -92,7 +93,6 @@
                 return await response.json();
             } catch (error) {
                 console.error(`API request failed: ${url}`, error);
-                ui.showAlert(`Error: ${error.message}`, 'error');
                 throw error;
             } finally {
                 if (elements.loadingIndicator) {
@@ -187,28 +187,22 @@
 
         async refreshPreview() {
             try {
-                // First request to capture new preview
                 await this.request(`${CONFIG.api.endpoints.previewImage}/capture`, {
                     method: 'POST'
                 });
-                
-                // Reset attempts counter on manual refresh
-                state.previewLoadAttempts = 0;
-                state.fallbackPreviewUsed = false;
-                
-                // Then get the updated image
-                return `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
+                return true;
             } catch (error) {
-                console.error('Preview refresh error:', error);
-                return CONFIG.defaultPreview;
+                console.warn('Preview refresh failed:', error);
+                return false;
             }
         }
     };
-	
+    
     // UI functions
     const ui = {
         showAlert(message, type = 'info', duration = 3000) {
-            document.querySelectorAll(`.alert-${type}`).forEach(alert => alert.remove());
+            const existingAlerts = document.querySelectorAll(`.alert-${type}`);
+            existingAlerts.forEach(alert => alert.remove());
 
             const alert = document.createElement('div');
             alert.className = `alert alert-${type}`;
@@ -355,7 +349,6 @@
                     state.fallbackLogoUsed = true;
                     this.src = `${CONFIG.defaultLogo}?t=${Date.now()}`;
                 } else if (!state.fallbackLogoUsed) {
-                    // Retry with fresh timestamp
                     setTimeout(() => {
                         this.src = `${CONFIG.api.endpoints.serveMedia}/${logoPath || 'idle_logo.jpg'}?t=${Date.now()}`;
                     }, 2000);
@@ -374,9 +367,8 @@
             elements.previewImage.onload = function() {
                 this.style.display = 'block';
                 state.previewLoadAttempts = 0;
-                const updateElement = document.getElementById('mpv-last-update');
-                if (updateElement) {
-                    updateElement.textContent = new Date().toLocaleTimeString();
+                if (elements.mpvLastUpdate) {
+                    elements.mpvLastUpdate.textContent = new Date().toLocaleTimeString();
                 }
             };
 
@@ -388,7 +380,6 @@
                     state.fallbackPreviewUsed = true;
                     this.src = `${CONFIG.defaultPreview}?t=${Date.now()}`;
                 } else if (!state.fallbackPreviewUsed) {
-                    // Retry with fresh timestamp
                     setTimeout(() => {
                         this.src = `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
                     }, 3000);
@@ -514,7 +505,6 @@
                     const formData = new FormData(elements.logoForm);
                     const result = await api.uploadLogo(formData);
                     
-                    // Reset fallback flags on successful upload
                     state.fallbackLogoUsed = false;
                     state.logoLoadAttempts = 0;
                     
@@ -546,24 +536,26 @@
 
             // Refresh preview button
             elements.refreshPreviewBtn?.addEventListener('click', async () => {
+                if (state.isPreviewRefreshing) return;
+                
                 try {
                     elements.refreshPreviewBtn.disabled = true;
-                    const spinner = elements.refreshPreviewBtn.querySelector('i');
-                    if (spinner) {
-                        spinner.className = 'fas fa-spinner fa-spin';
+                    const icon = elements.refreshPreviewBtn.querySelector('i');
+                    if (icon) {
+                        icon.className = 'fas fa-spinner fa-spin';
                     }
                     
                     await api.refreshPreview();
                     ui.updatePreviewImage();
                     ui.showAlert('Preview refreshed', 'success');
                 } catch (error) {
-                    console.error('Failed to refresh preview:', error);
+                    console.warn('Failed to refresh preview:', error);
                     ui.showAlert('Failed to refresh preview', 'error');
                 } finally {
                     elements.refreshPreviewBtn.disabled = false;
-                    const spinner = elements.refreshPreviewBtn.querySelector('i');
-                    if (spinner) {
-                        spinner.className = 'fas fa-sync-alt';
+                    const icon = elements.refreshPreviewBtn.querySelector('i');
+                    if (icon) {
+                        icon.className = 'fas fa-sync-alt';
                     }
                 }
             });
