@@ -1,35 +1,40 @@
 [Unit]
-Description=Digital Signage MPV Player
+Description=Digital Signage MPV Player (DRM)
 After=network.target
-Wants=network-online.target
+BindsTo=digital-signage.service
 
 [Service]
 User=dsign
-Group=www-data
+Group=video
 Type=simple
-Environment="DISPLAY=:0"
-Environment="XAUTHORITY=/home/dsign/.Xauthority"
-Environment="XDG_RUNTIME_DIR=/run/user/1000"
-UMask=0002
+WorkingDirectory=/var/lib/dsign/media
 
-# Критически важные параметры для корректного захвата
+# Оптимальные параметры для RPi 3B
 ExecStart=/usr/bin/mpv \
-    --player-operation-mode=pseudo-gui \
-    --input-ipc-server=/tmp/mpv-socket \
-    --idle=yes \
-    --loop-playlist=inf \
+    --idle \
+    --hwdec=mmal \
+    --vo=drm \
+    --drm-connector=HDMI-A-1 \
+    --drm-mode=preferred \
+    --profile=low-latency \
+    --no-config \
     --no-osc \
     --no-border \
-    --hwdec=auto-safe \
-    --vo=gpu \
-    --gpu-context=drm \
-    --drm-mode=preferred \
-    --drm-connector=0 \
-    --drm-plane=0
+    --input-ipc-server=/tmp/mpv-socket \
+    --loop-file=inf \
+    --fs \
 
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=10
+TimeoutStopSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Ограничения ресурсов
+MemoryLimit=512M
+CPUQuota=80%
+DeviceAllow=/dev/dri rw
+DeviceAllow=/dev/fb0 rw
 
 [Install]
 WantedBy=multi-user.target
