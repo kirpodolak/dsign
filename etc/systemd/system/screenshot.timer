@@ -3,6 +3,7 @@ Description=DSign Screenshot Timer
 Requires=screenshot.service
 
 [Timer]
+OnBootSec=1min
 OnUnitActiveSec=60s
 AccuracySec=1s
 Persistent=true
