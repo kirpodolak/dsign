@@ -1,7 +1,8 @@
 import os
-import subprocess
+import shutil
 from flask import jsonify, request, send_from_directory, abort, current_app, send_file
 from flask_login import login_required
+from flask_wtf.csrf import validate_csrf
 from werkzeug.utils import secure_filename
 from dsign.models import PlaybackProfile, PlaylistProfileAssignment, Playlist, db
 from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
@@ -756,39 +757,45 @@ def init_api_routes(api_bp, services):
             
     @api_bp.route('/media/mpv_screenshot/capture', methods=['POST'])
     @login_required
-    def capture_mpv_screenshot():
+    def force_screenshot_update():
+        """Запуск systemd-сервиса для обновления скриншота"""
         try:
-            # Запускаем скрипт создания скриншота
+            # Check if CSRF token is present in form data or headers
+            csrf_token = request.form.get('csrf_token') or request.headers.get('X-CSRFToken')
+            if not csrf_token:
+                current_app.logger.error("CSRF token missing")
+                abort(403, description="CSRF token missing")
+        
+            try:
+                validate_csrf(csrf_token)
+            except Exception as e:
+                current_app.logger.error(f"CSRF validation failed: {str(e)}")
+                abort(403, description="Invalid CSRF token")
+
+            # Import subprocess here to avoid UnboundLocalError
+            import subprocess
+        
+            # Start service
             result = subprocess.run(
-                ['/usr/local/bin/dsign-capture'],
-                capture_output=True,
-                text=True,
-                timeout=10
+                ['sudo', '/bin/systemctl', 'start', 'screenshot.service'],
+                check=True,
+                timeout=10,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True
             )
-            
-            if result.returncode != 0:
-                current_app.logger.error(f"Screenshot capture failed: {result.stderr}")
-                return jsonify({
-                    "success": False,
-                    "error": "Failed to capture screenshot",
-                    "details": result.stderr
-                }), 500
-                
-            return jsonify({
-                "success": True,
-                "message": "Screenshot captured successfully"
-            })
-            
-        except subprocess.TimeoutExpired:
-            current_app.logger.error("Screenshot capture timed out")
-            return jsonify({
-                "success": False,
-                "error": "Capture process timed out"
-            }), 500
-            
+    
+            current_app.logger.info(f"Screenshot service started: {result.stdout}")
+            return jsonify({"success": True})
+
+        except subprocess.TimeoutExpired as e:
+            current_app.logger.error(f"Service timeout: {e.stderr}")
+            return jsonify({"success": False, "error": "Service timeout"}), 500
+    
+        except subprocess.CalledProcessError as e:
+            current_app.logger.error(f"Service failed: {e.stderr}")
+            return jsonify({"success": False, "error": "Service failed"}), 500
+    
         except Exception as e:
-            current_app.logger.error(f"Screenshot capture error: {str(e)}", exc_info=True)
-            return jsonify({
-                "success": False,
-                "error": "Internal server error"
-            }), 500
+            current_app.logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": "Internal error"}), 500
