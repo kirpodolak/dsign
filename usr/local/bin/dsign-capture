@@ -1,0 +1,54 @@
+#!/bin/bash
+
+OUTPUT_DIR="/home/dsign/dsign/static/images"
+OUTPUT_FILE="on_air_screen.jpg"
+FB_DEV="/dev/fb0"
+
+# Автоопределение разрешения
+get_resolution() {
+    # Способ 1: Через /sys (работает на большинстве Linux)
+    if [ -f /sys/class/graphics/fb0/virtual_size ]; then
+        FB_WIDTH=$(cat /sys/class/graphics/fb0/virtual_size | cut -d, -f1)
+        FB_HEIGHT=$(cat /sys/class/graphics/fb0/virtual_size | cut -d, -f2)
+        echo "${FB_WIDTH}x${FB_HEIGHT}"
+        return
+    fi
+
+    # Способ 2: Через fbset (если установлен)
+    if command -v fbset &> /dev/null; then
+        fbset | grep -oP "'\K\d+x\d+"
+        return
+    fi
+
+    # Способ 3: Через xrandr (для X11)
+    if [ -n "$DISPLAY" ] && command -v xrandr &> /dev/null; then
+        xrandr | grep -oP 'current \K\d+ x \d+' | tr -d ' '
+        return
+    fi
+
+    # Fallback: стандартное разрешение
+    echo "1024x600"
+}
+
+RESOLUTION=$(get_resolution)
+
+# Проверка зависимостей
+if ! command -v ffmpeg &> /dev/null; then
+    echo "Error: ffmpeg is not installed!" >&2
+    exit 1
+fi
+
+# Основная логика (как в предыдущей версии)
+mkdir -p "$OUTPUT_DIR"
+sudo cat "$FB_DEV" > "$OUTPUT_DIR/screen.raw"
+
+ffmpeg \
+    -f rawvideo \
+    -pixel_format rgb565le \
+    -video_size "$RESOLUTION" \
+    -i "$OUTPUT_DIR/screen.raw" \
+    -frames:v 1 \
+    "$OUTPUT_DIR/$OUTPUT_FILE" \
+    -y
+
+rm "$OUTPUT_DIR/screen.raw"
