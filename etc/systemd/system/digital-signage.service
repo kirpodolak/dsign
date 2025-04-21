@@ -1,7 +1,7 @@
 [Unit]
 Description=Digital Signage Controller
 After=network.target dsign-mpv.service
-Requires=dsign-mpv.service
+Wants=dsign-mpv.service
 
 [Service]
 User=dsign
