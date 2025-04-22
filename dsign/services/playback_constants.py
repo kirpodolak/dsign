@@ -13,3 +13,13 @@ class PlaybackConstants:
         "HOME": "/var/www",
         "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"
     }
+    # Добавляем DRM-специфичные параметры
+    MPV_DRM_PARAMS = [
+        "--vo=drm",               # Используем DRM вывод
+        "--drm-connector=HDMI-A-1", # Укажите ваш коннектор (можно узнать через modetest)
+        "--drm-mode=preferred",    # Используем предпочтительный режим
+        "--drm-draw-plane=primary",
+        "--drm-drmprime-video-plane=overlay",
+        "--hwdec=drm",             # Аппаратное декодирование через DRM
+        "--profile=sw-fast",       # Оптимизированный профиль
+    ]
