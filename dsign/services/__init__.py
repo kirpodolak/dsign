@@ -57,23 +57,42 @@ class ServiceFactory:
 
 def init_services(config: Dict[str, Any], db, socketio=None, logger: logging.Logger = None) -> Dict[str, Any]:
     """Инициализация всех сервисов"""
+    upload_folder = config.get('UPLOAD_FOLDER', str(Path.cwd() / 'media'))
+    settings_file = config.get('SETTINGS_FILE', 'settings.json')
+    secret_key = config['SECRET_KEY']
+
     services = {
         'file_service': ServiceFactory.create_file_service(
-            config.get('UPLOAD_FOLDER', str(Path.cwd() / 'media')),
+            upload_folder=upload_folder,
+            logger=logger
+        ),
         'playback_service': ServiceFactory.create_playback_service(
-            config.get('UPLOAD_FOLDER', str(Path.cwd() / 'media')),
-        'playlist_service': ServiceFactory.create_playlist_service(db),
+            upload_folder=upload_folder,
+            db=db,
+            socketio=socketio,
+            logger=logger
+        ),
+        'playlist_service': ServiceFactory.create_playlist_service(
+            db=db,
+            logger=logger
+        ),
         'settings_service': ServiceFactory.create_settings_service(
-            config.get('SETTINGS_FILE', 'settings.json'),
-            config.get('UPLOAD_FOLDER', str(Path.cwd() / 'media')),
+            settings_file=settings_file,
+            upload_folder=upload_folder,
+            logger=logger
+        ),
         'auth_service': ServiceFactory.create_auth_service(
-            config['SECRET_KEY']),
+            secret_key=secret_key,
+            logger=logger
+        ),
         'db': db
     }
     
     if socketio:
         services['socket_service'] = ServiceFactory.create_socket_service(
-            socketio, db, logger
+            socketio=socketio,
+            db=db,
+            logger=logger
         )
     
     return services
