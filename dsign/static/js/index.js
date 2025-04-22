@@ -15,7 +15,8 @@ document.addEventListener('DOMContentLoaded', () => {
             },
             headers: {
                 'Content-Type': 'application/json',
-                'X-CSRFToken': document.cookie.match(/csrf_token=([^;]+)/)?.[1] || ''
+                'X-CSRFToken': document.querySelector('meta[name="csrf-token"]')?.content || 
+                              document.cookie.match(/csrf_token=([^;]+)/)?.[1] || ''				
             }
         },
         selectors: {
