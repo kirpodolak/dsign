@@ -27,69 +27,35 @@ class LogoManager:
                 self.logger.error(f"Failed to initialize default logo: {str(e)}")
 
     def display_idle_logo(self, profile_id: int = None) -> bool:
-        """Display idle logo with enhanced error handling"""
+        """Display idle logo with DRM-specific handling"""
         try:
-            if not self._mpv_manager._mpv_ready:
-                self.logger.warning("MPV not ready in display_idle_logo")
-                return False
+            logo_path = self._validate_logo_file()
+            self.logger.info(f"Using DRM to display logo at: {logo_path}")
 
-            if profile_id:
-                self.logger.info(f"Applying profile {profile_id} for idle logo")
-                if not self._mpv_manager.apply_profile(profile_id):
-                    self.logger.error(f"Failed to apply profile {profile_id}")
-                    return False
+            # DRM-specific commands
+            commands = [
+                {"command": ["stop"]},
+                {"command": ["loadfile", str(logo_path), "replace"]},
+                {"command": ["set_property", "loop-file", "inf"]},
+                {"command": ["set_property", "pause", "no"]},
+                {"command": ["set_property", "mute", "yes"]},
+                # DRM-specific properties
+                {"command": ["set_property", "video-aspect", "0"]},  # Сохранить пропорции
+                {"command": ["set_property", "video-zoom", "0"]},    # Без масштабирования
+                {"command": ["set_property", "video-pan-x", "0"]},
+                {"command": ["set_property", "video-pan-y", "0"]}
+            ]
 
-            try:
-                logo_path = self._validate_logo_file()
-                self.logger.info(f"Using logo at: {logo_path}")
-            except Exception as e:
-                self.logger.error(f"Logo validation failed: {str(e)}")
-                return False
+            for cmd in commands:
+                res = self._mpv_manager._send_command(cmd)
+                if not res or 'error' in res:
+                    self.logger.warning(f"DRM command failed: {cmd} - {res.get('error', '')}")
 
-            stop_res = self._mpv_manager._send_command({"command": ["stop"]})
-            if not stop_res or 'error' in stop_res:
-                self.logger.warning("Failed to stop current playback")
+            self._update_playback_state('idle')
+            return True
 
-            load_success = False
-            for attempt in range(2):
-                load_res = self._mpv_manager._send_command({
-                    "command": ["loadfile", str(logo_path), "replace"]
-                })
-                
-                if load_res and 'error' not in load_res:
-                    load_success = True
-                    break
-                self.logger.warning(f"Logo load failed (attempt {attempt + 1})")
-
-            if not load_success:
-                self.logger.error("Failed to load logo file after retries")
-                return False
-
-            props_set = True
-            if not self._mpv_manager._send_command({"command": ["set_property", "loop", "inf"]}):
-                self.logger.warning("Failed to set loop property")
-                props_set = False
-            
-            if not self._mpv_manager._send_command({"command": ["set_property", "mute", "yes"]}):
-                self.logger.warning("Failed to set mute property")
-                props_set = False
-
-            self._last_playback_state.update({
-                'status': 'idle',
-                'playlist_id': None,
-                'timestamp': time.time()
-            })
-            self._update_playback_status(None, 'idle')
-            
-            self.socketio.emit('playback_state', {
-                'status': 'idle',
-                'settings': self._mpv_manager._current_settings
-            })
-            
-            return props_set
-            
         except Exception as e:
-            self.logger.error(f"Logo display failed: {str(e)}", exc_info=True)
+            self.logger.error(f"DRM logo display failed: {str(e)}")
             return False
 
     def _validate_logo_file(self) -> Path:
