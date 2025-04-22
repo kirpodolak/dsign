@@ -81,6 +81,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await response.json();
             if (data.success) {
                 state.profiles = Array.isArray(data.profiles) ? data.profiles : [];
+				return state.profiles;
             } else {
                 throw new Error(data.error || 'Invalid profiles data');
             }
@@ -88,6 +89,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Error loading profiles:', error);
             showAlert('Failed to load profiles. ' + error.message, 'error');
             state.profiles = [];
+			return [];
         }
     }
 
