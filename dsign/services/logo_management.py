@@ -32,27 +32,31 @@ class LogoManager:
             logo_path = self._validate_logo_file()
             self.logger.info(f"Using DRM to display logo at: {logo_path}")
 
-            # DRM-specific commands
             commands = [
                 {"command": ["stop"]},
                 {"command": ["loadfile", str(logo_path), "replace"]},
                 {"command": ["set_property", "loop-file", "inf"]},
                 {"command": ["set_property", "pause", "no"]},
                 {"command": ["set_property", "mute", "yes"]},
-                # DRM-specific properties
-                {"command": ["set_property", "video-aspect", "0"]},  # Сохранить пропорции
-                {"command": ["set_property", "video-zoom", "0"]},    # Без масштабирования
+                {"command": ["set_property", "video-aspect", "0"]},
+                {"command": ["set_property", "video-zoom", "0"]},
                 {"command": ["set_property", "video-pan-x", "0"]},
                 {"command": ["set_property", "video-pan-y", "0"]}
             ]
 
+            success = True
             for cmd in commands:
                 res = self._mpv_manager._send_command(cmd)
-                if not res or 'error' in res:
+                if not res or res.get('error') != 'success':
+                    success = False
                     self.logger.warning(f"DRM command failed: {cmd} - {res.get('error', '')}")
+                    continue
+                self.logger.debug(f"DRM command succeeded: {cmd}")
 
-            self._update_playback_state('idle')
-            return True
+            if success:
+                self._update_playback_state('idle')
+                return True
+            return False
 
         except Exception as e:
             self.logger.error(f"DRM logo display failed: {str(e)}")
@@ -88,6 +92,20 @@ class LogoManager:
 
         return logo_path
 
+    def _update_playback_state(self, status: str):
+        """Update playback state"""
+        self._update_playback_status(None, status)
+
+    def _update_playback_status(self, playlist_id: Optional[int], status: str):
+        """Update playback status in database"""
+        from ..models import PlaybackStatus
+        
+        playback = self.db_session.query(PlaybackStatus).first() or PlaybackStatus()
+        playback.playlist_id = playlist_id
+        playback.status = status
+        self.db_session.add(playback)
+        self.db_session.commit()
+
     def get_current_logo_path(self) -> Path:
         """Safely get current logo path"""
         try:
@@ -111,13 +129,3 @@ class LogoManager:
                 "is_default": True,
                 "error": "no_logo_found"
             }
-
-    def _update_playback_status(self, playlist_id: Optional[int], status: str):
-        """Update playback status in database"""
-        from ..models import PlaybackStatus
-        
-        playback = self.db_session.query(PlaybackStatus).first() or PlaybackStatus()
-        playback.playlist_id = playlist_id
-        playback.status = status
-        self.db_session.add(playback)
-        self.db_session.commit()
