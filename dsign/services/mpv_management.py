@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import socket
 import subprocess
 import threading
@@ -209,8 +210,8 @@ class MPVManager:
                 
         return response.decode() if response else None
 
-    def _send_command(self, command: Dict) -> Optional[Dict]:
-        """Send command to MPV via IPC socket with robust error handling"""
+    def _send_command(self, command: Dict, timeout: float = None) -> Optional[Dict]:
+        """Send command to MPV via IPC socket with configurable timeout"""
         if not isinstance(command, dict) or 'command' not in command:
             self.logger.error(f"Invalid command structure: {command}")
             return None
@@ -222,18 +223,20 @@ class MPVManager:
             except Exception as e:
                 self.logger.error(f"Failed to reconnect to MPV: {str(e)}")
                 return None
+
+        actual_timeout = timeout or PlaybackConstants.SOCKET_TIMEOUT
     
         for attempt in range(PlaybackConstants.MAX_RETRIES):
             with self._ipc_lock:
                 try:
                     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                        s.settimeout(PlaybackConstants.SOCKET_TIMEOUT)
+                        s.settimeout(actual_timeout)
                         s.connect(PlaybackConstants.SOCKET_PATH)
-                        
+                    
                         cmd_str = json.dumps(command) + '\n'
                         s.sendall(cmd_str.encode())
-                        
-                        response = self._read_socket_response(s)
+                    
+                        response = self._read_socket_response(s, timeout=actual_timeout)
                         if response:
                             try:
                                 responses = [json.loads(r) for r in response.strip().split('\n') if r.strip()]
@@ -249,14 +252,18 @@ class MPVManager:
                             except json.JSONDecodeError as e:
                                 self.logger.error(f"Failed to decode MPV response: {str(e)}")
                                 continue
-                                
+                            
                 except ConnectionError as e:
                     if attempt == PlaybackConstants.MAX_RETRIES - 1:
                         self.logger.error(f"IPC command failed after {PlaybackConstants.MAX_RETRIES} attempts: {str(e)}")
                         self._mpv_ready = False
                     time.sleep(PlaybackConstants.RETRY_DELAY)
+                except socket.timeout:
+                    self.logger.warning(f"MPV command timed out after {actual_timeout} seconds (attempt {attempt + 1})")
+                    if attempt == PlaybackConstants.MAX_RETRIES - 1:
+                        return None
                 except Exception as e:
                     self.logger.error(f"IPC command failed: {str(e)}")
                     break
-                    
+                
         return None
