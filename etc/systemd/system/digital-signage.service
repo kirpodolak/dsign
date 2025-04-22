@@ -4,14 +4,30 @@ After=network.target dsign-mpv.service
 Wants=dsign-mpv.service
 
 [Service]
+Type=simple
 User=dsign
 Group=dsign
 WorkingDirectory=/home/dsign
+
+# Очистка перед запуском (без выхода при ошибке)
+ExecStartPre=/bin/sh -c "/usr/local/bin/dsign-mpv-manager start || true"
+ExecStartPre=/bin/sleep 1
+
+# Основной процесс
 ExecStart=/usr/bin/python3 /home/dsign/run.py
+
+# Очистка после остановки
+ExecStopPost=/bin/sh -c "/usr/local/bin/dsign-mpv-manager stop || true"
+
+# Настройки перезапуска
 Restart=on-failure
 RestartSec=30s
-KillMode=mixed
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Настройки завершения
 TimeoutStopSec=30
+KillMode=mixed
 
 # Общие переменные среды
 Environment=MPV_IPC_SOCKET=/tmp/mpv-socket
