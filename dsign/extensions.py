@@ -12,6 +12,73 @@ bcrypt = Bcrypt()
 login_manager = LoginManager()
 socketio = SocketIO()
 
+class LogoManager:
+    def __init__(self, mpv_client, logger):
+        self._mpv = mpv_client
+        self.logger = logger
+        self._current_state = 'stopped'
+        
+    def _update_playback_state(self):
+        """Обновление внутреннего состояния воспроизведения"""
+        try:
+            pause_state = self._mpv.get_property('pause')
+            self._current_state = 'paused' if pause_state else 'playing'
+            return True
+        except Exception as e:
+            self.logger.warning(f"Could not update playback state: {str(e)}")
+            return False
+
+    def _execute_drm_command(self, command):
+        """Выполнение DRM команды"""
+        try:
+            result = self._mpv.command(command)
+            
+            if result is None or result.get('error') == 'success':
+                self._update_playback_state()
+                self.logger.debug(f"DRM command succeeded: {command}")
+                return True
+            
+            self.logger.warning(f"DRM command failed: {command} - {result.get('error', '')}")
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"DRM command error: {command} - {str(e)}")
+            return False
+
+    def display_idle_logo(self, logo_path):
+        """Отображение логотипа в режиме ожидания"""
+        try:
+            if not os.path.exists(logo_path):
+                raise FileNotFoundError(f"Logo file not found: {logo_path}")
+
+            commands = [
+                ['stop'],
+                ['loadfile', logo_path, 'replace'],
+                ['set_property', 'loop-file', 'inf'],
+                ['set_property', 'pause', 'no'],
+                ['set_property', 'mute', 'yes'],
+                ['set_property', 'video-aspect', '0'],
+                ['set_property', 'video-zoom', '0'],
+                ['set_property', 'video-pan-x', '0'],
+                ['set_property', 'video-pan-y', '0']
+            ]
+            
+            success = True
+            for cmd in commands:
+                if not self._execute_drm_command(cmd):
+                    success = False
+            
+            if success:
+                self.logger.info(f"Successfully displayed idle logo: {logo_path}")
+            else:
+                self.logger.warning("Some DRM commands failed during idle logo display")
+            
+            return success
+            
+        except Exception as e:
+            self.logger.error(f"Failed to display idle logo: {str(e)}")
+            return False
+
 def init_extensions(app) -> Dict[str, Any]:
     """
     Полная инициализация всех компонентов
@@ -98,4 +165,4 @@ def _shutdown_session(exception=None) -> None:
     except Exception as e:
         logging.getLogger(__name__).error(f"Error during session shutdown: {str(e)}")
 
-__all__ = ['db', 'bcrypt', 'login_manager', 'socketio', 'init_extensions']
+__all__ = ['db', 'bcrypt', 'login_manager', 'socketio', 'init_extensions', 'LogoManager']
