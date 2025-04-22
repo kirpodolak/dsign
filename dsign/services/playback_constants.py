@@ -4,22 +4,39 @@ class PlaybackConstants:
     DEFAULT_RESOLUTION = '1920x1080'
     DEFAULT_ASPECT_RATIO = '16:9'
     MAX_RETRIES = 3
-    RETRY_DELAY = 0.5
-    SOCKET_TIMEOUT = 2.0
-    MPV_START_TIMEOUT = 30
+    RETRY_DELAY = 1.0  # Увеличили задержку
+    SOCKET_TIMEOUT = 5.0  # Увеличили таймаут
+    MPV_START_TIMEOUT = 60  # Увеличили таймаут запуска
     MPV_ENV = {
         "DISPLAY": ":0",
         "XDG_RUNTIME_DIR": "/run/user/1000",
-        "HOME": "/var/www",
+        "HOME": "/home/dsign",
         "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"
     }
-    # Добавляем DRM-специфичные параметры
+    
+    # Базовые параметры MPV
+    MPV_BASE_PARAMS = [
+        "--idle",
+        f"--input-ipc-server={SOCKET_PATH}",
+        "--no-config",
+        "--no-osc",
+        "--no-terminal",
+        "--quiet",
+        "--log-file=/var/log/mpv.log",
+        "--msg-level=all=info"
+    ]
+    
+    # Параметры для DRM режима
     MPV_DRM_PARAMS = [
-        "--vo=drm",               # Используем DRM вывод
-        "--drm-connector=HDMI-A-1", # Укажите ваш коннектор (можно узнать через modetest)
-        "--drm-mode=preferred",    # Используем предпочтительный режим
-        "--drm-draw-plane=primary",
-        "--drm-drmprime-video-plane=overlay",
-        "--hwdec=drm",             # Аппаратное декодирование через DRM
-        "--profile=sw-fast",       # Оптимизированный профиль
+        "--vo=drm",
+        "--hwdec=drm",
+        "--gpu-context=drm",
+        "--drm-atomic=yes",
+        "--drm-mode=preferred"
+    ]
+    
+    # Параметры для fallback режима
+    MPV_FALLBACK_PARAMS = [
+        "--vo=gpu",
+        "--hwdec=auto-safe"
     ]
