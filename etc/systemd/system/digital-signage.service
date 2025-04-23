@@ -1,38 +1,27 @@
 [Unit]
-Description=MPV Player for Digital Signage
-After=graphical.target
-Requires=graphical.target
+Description=Digital Signage Controller
+After=network.target dsign-mpv.service
+Requires=dsign-mpv.service
 
 [Service]
+Type=simple
 User=dsign
-Group=video
-Environment="DISPLAY=:0"
-Environment="XDG_RUNTIME_DIR=/run/user/1000"
-Environment="PULSE_RUNTIME_PATH=/run/user/1000/pulse"
+Group=dsign
 WorkingDirectory=/home/dsign
-
-# Подготовка директории и прав
-ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv
-ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv
-ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
-ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
-
-# Основная команда запуска
-ExecStart=/usr/local/bin/mpv \
-    --idle \
-    --no-terminal \
-    --no-config \
-    --no-osc \
-    --no-input-default-bindings \
-    --input-ipc-server=/var/lib/dsign/mpv/socket \
-    --hwdec=auto \
-    --log-file=/var/log/dsign/mpv.log
-
+ExecStart=/usr/bin/python3 /home/dsign/run.py
 # Настройки перезапуска
-Restart=always
-RestartSec=5s
-StartLimitInterval=60s
+Restart=on-failure
+RestartSec=30s
+StartLimitIntervalSec=60
 StartLimitBurst=3
+
+# Настройки завершения
+TimeoutStopSec=30
+KillMode=mixed
+
+# Ограничения ресурсов
+MemoryLimit=500M
+CPUQuota=50%
 
 [Install]
 WantedBy=multi-user.target
