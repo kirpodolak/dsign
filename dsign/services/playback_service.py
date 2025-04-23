@@ -5,6 +5,8 @@ import socket
 import subprocess
 from pathlib import Path
 from typing import Dict, Optional, List
+from concurrent.futures import ThreadPoolExecutor
+from threading import Thread
 
 from .mpv_management import MPVManager
 from .logo_management import LogoManager
@@ -109,52 +111,52 @@ class PlaybackService:
             self.logger.error(f"IPC connection check failed: {str(e)}")
             return False
 
-    def _init_with_retry(self, max_attempts: int = 3, delay: float = 5.0):
-        """Initialize with retry logic"""
+    def _init_with_retry(self, max_attempts: int = 3, initial_delay: float = 2.0):
+        """Optimized initialization with parallel checks and backoff"""
         last_exception = None
-        
-        # Даем MPV время на запуск
-        time.sleep(3)
         
         for attempt in range(max_attempts):
             try:
-                self.logger.info(f"Initializing playback service (attempt {attempt + 1}/{max_attempts})")
+                delay = min(initial_delay * (2 ** attempt), 30)  # Exponential backoff
                 
-                # 1. Check if MPV service is running
-                if not self._check_mpv_service_active():
-                    raise RuntimeError("dsign-mpv.service is not active. Start it with: systemctl start dsign-mpv.service")
-                
-                # 2. Verify IPC connection with actual command
-                if not self._check_ipc_connection():
-                    raise RuntimeError(f"Failed to connect to MPV IPC socket at {self.mpv_socket}")
-                
-                # 3. Initialize MPV manager with IPC
-                if not self._mpv_manager.initialize():
-                    raise RuntimeError("MPV manager failed to initialize IPC connection")
-                
-                # Initialize logo
-                self._logo_manager._initialize_default_logo()
-                
-                # Verify logo file exists
-                logo_path = self._logo_manager.get_current_logo_path()
-                if not logo_path.exists():
-                    raise FileNotFoundError(f"Logo file not found: {logo_path}")
-                
-                # Transition to idle
-                self._transition_to_idle()
-                
-                self.logger.info("Playback service initialized successfully")
-                return
-                
+                with ThreadPoolExecutor(max_workers=3) as executor:
+                    # Parallel checks
+                    checks = {
+                        'mpv': executor.submit(self._check_mpv_service_active),
+                        'ipc': executor.submit(self._check_ipc_connection),
+                        'init': executor.submit(self._mpv_manager.initialize)
+                    }
+                    
+                    # Verify results with timeout
+                    for name, future in checks.items():
+                        if not future.result(timeout=10):
+                            raise RuntimeError(f"{name} check failed")
+                    
+                    # Background resource loading
+                    Thread(target=self._preload_resources).start()
+                    
+                    return  # Success
+                    
             except Exception as e:
                 last_exception = e
-                self.logger.error(f"Initialization attempt {attempt + 1} failed: {str(e)}", exc_info=True)
-                
+                self.logger.error(f"Attempt {attempt+1} failed: {str(e)}")
                 if attempt < max_attempts - 1:
                     time.sleep(delay)
         
-        self.logger.critical("Playback service initialization failed after all attempts")
-        raise RuntimeError(f"Failed to initialize after {max_attempts} attempts: {str(last_exception)}")
+        self.logger.critical("Initialization failed after all attempts")
+        raise RuntimeError(f"Initialization failed: {str(last_exception)}")
+
+    def _preload_resources(self):
+        """Non-critical resource loading in background"""
+        try:
+            self._logo_manager._initialize_default_logo()
+            logo_path = self._logo_manager.get_current_logo_path()
+            if not logo_path.exists():
+                self.logger.warning(f"Logo file missing: {logo_path}")
+            
+            self._transition_to_idle()  # Non-blocking transition
+        except Exception as e:
+            self.logger.error(f"Background init error: {str(e)}")
 
     def _transition_to_idle(self):
         """Transition to idle state with logo"""
