@@ -8,24 +8,28 @@ User=dsign
 Group=video
 Environment="DISPLAY=:0"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
+Environment="PULSE_RUNTIME_PATH=/run/user/1000/pulse"
 WorkingDirectory=/home/dsign
 
-# Подготовка директории
+# Подготовка директории и прав
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv
 ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 
-# Основная команда с ожиданием создания сокета
-ExecStart=/bin/bash -c '/usr/bin/mpv \
+# Основная команда запуска
+ExecStart=/usr/local/bin/mpv \
     --idle \
+    --no-terminal \
+    --no-config \
+    --no-osc \
+    --no-input-default-bindings \
     --input-ipc-server=/var/lib/dsign/mpv/socket \
-    --log-file=/var/log/dsign/mpv.log & \
-    while [ ! -S /var/lib/dsign/mpv/socket ]; do sleep 0.1; done; \
-    /bin/chmod 660 /var/lib/dsign/mpv/socket; \
-    wait'
+    --hwdec=auto \
+    --log-file=/var/log/dsign/mpv.log
 
-Restart=on-failure
+# Настройки перезапуска
+Restart=always
 RestartSec=5s
 StartLimitInterval=60s
 StartLimitBurst=3
