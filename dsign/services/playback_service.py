@@ -2,7 +2,6 @@ import logging
 import os
 import time
 from pathlib import Path
-from threading import Lock
 from typing import Dict, Optional, List
 
 from .mpv_management import MPVManager
@@ -39,12 +38,9 @@ class PlaybackService:
             try:
                 self.logger.info(f"Initializing playback service (attempt {attempt + 1}/{max_attempts})")
                 
-                # Cleanup any previous failed attempts
-                self._cleanup_resources()
-                
-                # Initialize MPV
+                # Check MPV service connection
                 if not self._mpv_manager.initialize():
-                    raise RuntimeError("MPV initialization failed")
+                    raise RuntimeError("Failed to connect to MPV service")
                 
                 # Initialize logo
                 self._logo_manager._initialize_default_logo()
@@ -64,31 +60,11 @@ class PlaybackService:
                 last_exception = e
                 self.logger.error(f"Initialization attempt {attempt + 1} failed: {str(e)}", exc_info=True)
                 
-                # Cleanup
-                self._cleanup_resources()
-                
                 if attempt < max_attempts - 1:
                     time.sleep(delay)
         
         self.logger.critical("Playback service initialization failed after all attempts")
         raise RuntimeError(f"Failed to initialize after {max_attempts} attempts: {str(last_exception)}")
-
-    def _cleanup_resources(self):
-        """Cleanup resources on failed initialization"""
-        try:
-            if hasattr(self._mpv_manager, 'shutdown'):
-                self._mpv_manager.shutdown()
-            elif hasattr(self._mpv_manager, '_mpv_process'):
-                if self._mpv_manager._mpv_process and self._mpv_manager._mpv_process.poll() is None:
-                    self._mpv_manager._mpv_process.terminate()
-        except Exception as e:
-            self.logger.warning(f"Error during MPV cleanup: {str(e)}")
-        
-        try:
-            if os.path.exists(PlaybackConstants.SOCKET_PATH):
-                os.unlink(PlaybackConstants.SOCKET_PATH)
-        except Exception as e:
-            self.logger.warning(f"Error removing socket: {str(e)}")
 
     def _transition_to_idle(self):
         """Transition to idle state with logo"""
@@ -102,11 +78,6 @@ class PlaybackService:
                     self.logger.error(f"Idle transition attempt {attempt + 1} failed: {str(e)}")
                 
                 time.sleep(1)
-            
-            self.logger.warning("All idle attempts failed, trying to restart MPV...")
-            if self._playlist_manager.restart_mpv():
-                if self._logo_manager.display_idle_logo():
-                    return
             
             raise RuntimeError("Could not establish idle state")
         
