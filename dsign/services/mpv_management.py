@@ -8,32 +8,42 @@ from typing import Dict, Optional
 from .playback_constants import PlaybackConstants
 
 class MPVManager:
-    def __init__(self, logger, socketio, upload_folder):
+    def __init__(self, logger, socketio, upload_folder, mpv_socket=None):
         self.logger = logger
         self.socketio = socketio
+        self.mpv_socket = mpv_socket if mpv_socket is not None else PlaybackConstants.SOCKET_PATH
         self.upload_folder = upload_folder
         self._ipc_lock = Lock()
         self._current_settings = {}
         self._mpv_ready = False
 
+        # Создаем директорию для сокета, если не существует
+        os.makedirs(os.path.dirname(self.mpv_socket), exist_ok=True)
+        
+        self.logger.info(f"MPVManager initialized with socket: {self.mpv_socket}")
+        
     def _wait_for_socket(self, timeout=10.0):
         """Ожидаем появления сокета с таймаутом"""
+        self.logger.info(f"Waiting for MPV socket at {PlaybackConstants.SOCKET_PATH}")
         start_time = time.time()
         while time.time() - start_time < timeout:
             if os.path.exists(PlaybackConstants.SOCKET_PATH):
+                self.logger.info("Socket found, testing connection...")
                 try:
-                    # Проверяем доступность сокета
                     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as test_socket:
                         test_socket.settimeout(1.0)
                         test_socket.connect(PlaybackConstants.SOCKET_PATH)
+                        self.logger.info("Socket connection successful")
                         return True
-                except (ConnectionRefusedError, socket.timeout):
+                except (ConnectionRefusedError, socket.timeout) as e:
+                    self.logger.warning(f"Socket test failed: {str(e)}")
                     time.sleep(0.1)
                     continue
                 except Exception as e:
-                    self.logger.warning(f"Socket test failed: {str(e)}")
+                    self.logger.error(f"Socket test error: {str(e)}")
                     return False
             time.sleep(0.1)
+        self.logger.error("Socket wait timeout expired")
         return False
 
     def _send_command(self, command: Dict, timeout: float = 5.0) -> Optional[Dict]:
@@ -42,9 +52,7 @@ class MPVManager:
             self.logger.error(f"Invalid command: {command}")
             return None
 
-        if not self._wait_for_socket():
-            self.logger.error("MPV socket not available")
-            return None
+        self.logger.debug(f"Sending command: {command}")
 
         for attempt in range(PlaybackConstants.MAX_RETRIES):
             try:
@@ -67,6 +75,7 @@ class MPVManager:
                             try:
                                 data = json.loads(response.decode())
                                 if isinstance(data, dict):
+                                    self.logger.debug(f"Received response: {data}")
                                     return data
                             except json.JSONDecodeError:
                                 continue
@@ -89,7 +98,7 @@ class MPVManager:
                 self.logger.error("MPV socket not found or not responsive")
                 return False
                 
-            response = self._send_command({"command": ["get_property", "version"]})
+            response = self._send_command({"command": ["get_property", "mpv-version"]})
             if response and response.get("error") == "success":
                 self._mpv_ready = True
                 self.logger.info("Successfully connected to MPV service")
@@ -113,11 +122,11 @@ class MPVManager:
         return success
 
     def verify_settings_support(self) -> Dict:
-        """Проверяем поддерживаемые настройки"""
+        """Проверяем поддерживаемые настройки через set_property"""
         test_settings = {
             "volume": 50,
             "speed": 1.0,
-            "loop": "inf"
+            "loop-playlist": "inf"
         }
         results = {}
         for key, value in test_settings.items():
