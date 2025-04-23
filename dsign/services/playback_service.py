@@ -1,6 +1,8 @@
 import logging
 import os
 import time
+import socket
+import subprocess
 from pathlib import Path
 from typing import Dict, Optional, List
 
@@ -16,31 +18,119 @@ class PlaybackService:
         self.upload_folder = Path(upload_folder)
         self.db_session = db_session
         self.socketio = socketio
+        self.mpv_socket = PlaybackConstants.SOCKET_PATH
         
         # Initialize components
-        self._mpv_manager = MPVManager(self.logger, self.socketio, self.upload_folder)
-        self._logo_manager = LogoManager(self.logger, self.socketio, self.upload_folder, 
-                                       self.db_session, self._mpv_manager)
-        self._profile_manager = ProfileManager(self.logger, self.db_session, self._mpv_manager)
+        self._mpv_manager = MPVManager(
+            logger=self.logger,
+            socketio=self.socketio,
+            mpv_socket=PlaybackConstants.SOCKET_PATH,
+            upload_folder=str(self.upload_folder))
+            
+        self._logo_manager = LogoManager(
+            logger=self.logger,
+            socketio=self.socketio,
+            upload_folder=str(self.upload_folder),
+            db_session=self.db_session,
+            mpv_manager=self._mpv_manager
+        )
+            
+        self._profile_manager = ProfileManager(
+            self.logger, 
+            self.db_session, 
+            self._mpv_manager
+        )
         self._playlist_manager = PlaylistManager(
-            self.logger, self.socketio, self.upload_folder,
-            self.db_session, self._mpv_manager, self._logo_manager
+            self.logger, 
+            self.socketio, 
+            self.upload_folder,
+            self.db_session, 
+            self._mpv_manager, 
+            self._logo_manager
         )
         
         # Initialize with retry
         self._init_with_retry()
 
+    def _check_mpv_service_active(self) -> bool:
+        """Check if dsign-mpv.service is active using systemctl"""
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", "dsign-mpv.service"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode != 0:
+                self.logger.warning(f"MPV service not active: {result.stderr.strip()}")
+                return False
+            return result.stdout.strip() == "active"
+        except subprocess.TimeoutExpired:
+            self.logger.error("Timeout while checking MPV service status")
+            return False
+        except Exception as e:
+            self.logger.error(f"Failed to check MPV service status: {str(e)}")
+            return False
+
+    def _check_ipc_connection(self) -> bool:
+        """Check if we can connect to MPV IPC socket"""
+        try:
+            # 1. Проверяем, что сервис MPV активен
+            result = subprocess.run(
+                ["systemctl", "is-active", "dsign-mpv.service"],
+                capture_output=True,
+                text=True
+            )
+            if result.stdout.strip() != "active":
+                self.logger.error("MPV service is not active")
+                return False
+
+            # 2. Проверяем существование сокета
+            if not os.path.exists(self.mpv_socket):
+                self.logger.error(f"MPV socket not found at {self.mpv_socket}")
+                return False
+
+            # 3. Проверяем соединение через простую команду
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    s.settimeout(5)  # Увеличиваем таймаут
+                    s.connect(self.mpv_socket)
+                    s.sendall(b'{ "command": ["get_property", "version"] }\n')
+                    response = s.recv(1024)
+                    if response:  # Любой ответ означает успешное соединение
+                        return True
+            except Exception as e:
+                self.logger.error(f"Socket communication error: {str(e)}")
+                return False
+
+            return False
+        
+        except Exception as e:
+            self.logger.error(f"IPC connection check failed: {str(e)}")
+            return False
+
     def _init_with_retry(self, max_attempts: int = 3, delay: float = 5.0):
         """Initialize with retry logic"""
         last_exception = None
+        
+        # Даем MPV время на запуск
+        time.sleep(3)
         
         for attempt in range(max_attempts):
             try:
                 self.logger.info(f"Initializing playback service (attempt {attempt + 1}/{max_attempts})")
                 
-                # Check MPV service connection
+                # 1. Check if MPV service is running
+                if not self._check_mpv_service_active():
+                    raise RuntimeError("dsign-mpv.service is not active. Start it with: systemctl start dsign-mpv.service")
+                
+                # 2. Verify IPC connection with actual command
+                if not self._check_ipc_connection():
+                    raise RuntimeError(f"Failed to connect to MPV IPC socket at {self.mpv_socket}")
+                
+                # 3. Initialize MPV manager with IPC
                 if not self._mpv_manager.initialize():
-                    raise RuntimeError("Failed to connect to MPV service")
+                    raise RuntimeError("MPV manager failed to initialize IPC connection")
                 
                 # Initialize logo
                 self._logo_manager._initialize_default_logo()
@@ -68,22 +158,22 @@ class PlaybackService:
 
     def _transition_to_idle(self):
         """Transition to idle state with logo"""
-        try:
-            for attempt in range(3):
-                try:
-                    if self._logo_manager.display_idle_logo():
-                        return
-                    self.logger.warning(f"Failed to display idle logo (attempt {attempt + 1})")
-                except Exception as e:
-                    self.logger.error(f"Idle transition attempt {attempt + 1} failed: {str(e)}")
-                
-                time.sleep(1)
-            
-            raise RuntimeError("Could not establish idle state")
+        max_attempts = 5
+        delay = 2
+    
+        for attempt in range(max_attempts):
+            try:
+                if self._logo_manager.display_idle_logo():
+                    self.logger.info("Successfully transitioned to idle state")
+                    return
+                self.logger.warning(f"Idle logo attempt {attempt+1}/{max_attempts} failed")
+            except Exception as e:
+                self.logger.error(f"Idle transition error: {str(e)}")
         
-        except Exception as e:
-            self.logger.critical(f"Fatal error in idle transition: {str(e)}", exc_info=True)
-            raise
+            time.sleep(delay)
+    
+        self.logger.critical("Could not establish idle state")
+        raise RuntimeError("Could not establish idle state")
 
     # Delegate methods to appropriate managers
     def play(self, playlist_id: int) -> bool:
