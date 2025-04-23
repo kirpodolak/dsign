@@ -1,10 +1,14 @@
+import os
+from pathlib import Path
+
 class PlaybackConstants:
     DEFAULT_LOGO = 'idle_logo.jpg'
     SOCKET_PATH = '/var/lib/dsign/mpv/socket'
+    SOCKET_DIR = os.path.dirname(SOCKET_PATH)
     DEFAULT_RESOLUTION = '1920x1080'
     DEFAULT_ASPECT_RATIO = '16:9'
-    MAX_RETRIES = 5  # Увеличено с 3
-    RETRY_DELAY = 2.0  # Увеличено с 1.0
+    MAX_RETRIES = 3  # Увеличено с 3
+    RETRY_DELAY = 5.0  # Увеличено с 1.0
     SOCKET_TIMEOUT = 10.0  # Увеличено с 5.0
     
     MPV_ENV = {
