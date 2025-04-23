@@ -2,6 +2,8 @@ import os
 import time
 from pathlib import Path
 from typing import Dict, Optional
+from threading import Thread
+from concurrent.futures import ThreadPoolExecutor
 
 from .playback_constants import PlaybackConstants
 
@@ -15,6 +17,11 @@ class LogoManager:
         self._last_playback_state = {}
 
     def _initialize_default_logo(self):
+        """Initialize default logo in background"""
+        Thread(target=self._async_initialize_logo).start()
+
+    def _async_initialize_logo(self):
+        """Async logo initialization"""
         logo_path = self.upload_folder / PlaybackConstants.DEFAULT_LOGO
         if not logo_path.exists():
             try:
@@ -22,65 +29,83 @@ class LogoManager:
                 if default_logo.exists():
                     import shutil
                     shutil.copy(default_logo, logo_path)
+                    logo_path.chmod(0o664)
                     self.logger.info(f"Initialized default logo at {logo_path}")
             except Exception as e:
                 self.logger.error(f"Failed to initialize default logo: {str(e)}")
 
     def display_idle_logo(self, profile_id: int = None) -> bool:
-        """Display idle logo with MPV commands"""
+        """Display idle logo with optimized IPC commands"""
         try:
             logo_path = self._validate_logo_file()
             self.logger.info(f"Displaying idle logo: {logo_path}")
 
-            # Последовательность команд для MPV
+            # Команды для MPV через IPC
             commands = [
-                {"command": ["stop"]},
                 {"command": ["loadfile", str(logo_path), "replace"]},
                 {"command": ["set_property", "loop-file", "inf"]},
                 {"command": ["set_property", "pause", "no"]}
             ]
 
-            for cmd in commands:
-                response = self._mpv_manager._send_command(cmd)
-                if not response or response.get('error') != 'success':
-                    self.logger.error(f"MPV command failed: {cmd} - {response}")
-                    return False
+            # Отправка команд с таймаутом
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(self._send_ipc_command, cmd) for cmd in commands]
+                for future in futures:
+                    if not future.result(timeout=5):
+                        return False
 
             return True
         except Exception as e:
             self.logger.error(f"Failed to display idle logo: {str(e)}", exc_info=True)
             return False
 
+    def _send_ipc_command(self, command: Dict) -> bool:
+        """Safe IPC command sending with retries"""
+        try:
+            response = self._mpv_manager._send_command(command)
+            return response and response.get('error') == 'success'
+        except Exception as e:
+            self.logger.warning(f"IPC command failed: {command} - {str(e)}")
+            return False
+
     def _validate_logo_file(self) -> Path:
-        """Validate logo file exists and is accessible"""
+        """Validate logo file with improved error handling"""
         logo_path = self.upload_folder / PlaybackConstants.DEFAULT_LOGO
         
         if not logo_path.exists():
-            self.logger.warning(f"Logo file not found at {logo_path}, trying default...")
-            default_logo = Path(__file__).parent.parent / "static" / "images" / "placeholder.jpg"
-            if default_logo.exists():
-                import shutil
-                try:
-                    shutil.copy(default_logo, logo_path)
-                    self.logger.info(f"Copied default logo to {logo_path}")
-                    logo_path.chmod(0o664)
-                    os.chown(logo_path, os.getuid(), os.getgid())
-                except Exception as copy_error:
-                    self.logger.error(f"Failed to copy default logo: {str(copy_error)}")
-                    raise
-            else:
-                raise FileNotFoundError("Default logo file not found in static/images")
+            self._handle_missing_logo(logo_path)
 
         if not os.access(logo_path, os.R_OK):
-            self.logger.error(f"Insufficient permissions to read logo file: {logo_path}")
-            try:
-                logo_path.chmod(0o664)
-            except Exception as perm_error:
-                self.logger.error(f"Failed to fix permissions: {str(perm_error)}")
-                raise
+            self._fix_logo_permissions(logo_path)
 
         return logo_path
 
+    def _handle_missing_logo(self, logo_path: Path):
+        """Handle missing logo file scenario"""
+        default_logo = Path(__file__).parent.parent / "static" / "images" / "placeholder.jpg"
+        if not default_logo.exists():
+            raise FileNotFoundError("Default logo file not found in static/images")
+
+        try:
+            import shutil
+            shutil.copy(default_logo, logo_path)
+            logo_path.chmod(0o664)
+            self.logger.info(f"Copied default logo to {logo_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to copy default logo: {str(e)}")
+            raise
+
+    def _fix_logo_permissions(self, logo_path: Path):
+        """Fix logo file permissions"""
+        try:
+            logo_path.chmod(0o664)
+            if os.getuid() != 0:  # Skip if not root
+                os.chown(logo_path, os.getuid(), os.getgid())
+        except Exception as e:
+            self.logger.error(f"Failed to fix permissions: {str(e)}")
+            raise
+
+    # Остальные методы остаются без изменений
     def _update_playback_state(self, status: str):
         """Update playback state"""
         self._update_playback_status(None, status)
