@@ -1,13 +1,9 @@
 import os
 import json
-import re
 import socket
-import subprocess
-import threading
 import time
-from pathlib import Path
-from threading import Lock, Event
-from typing import Dict, Optional, List
+from threading import Lock
+from typing import Dict, Optional
 
 from .playback_constants import PlaybackConstants
 
@@ -15,132 +11,41 @@ class MPVManager:
     def __init__(self, logger, socketio, upload_folder):
         self.logger = logger
         self.socketio = socketio
-        self.upload_folder = Path(upload_folder)
+        self.upload_folder = upload_folder
         self._ipc_lock = Lock()
-        self._mpv_ready = Event()
-        self._mpv_process = None
-        self._monitor_thread = None
-        self._stop_monitor = Event()
         self._current_settings = {}
-        self._using_drm = False
+        self._mpv_ready = False
 
-    def _check_drm_support(self) -> bool:
-        """Проверяем поддержку DRM"""
-        try:
-            result = subprocess.run(
-                ['mpv', '--vo=help'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            return 'drm' in result.stdout
-        except Exception as e:
-            self.logger.warning(f"DRM check failed: {str(e)}")
-            return False
-
-    def _start_mpv_process(self, use_drm: bool) -> bool:
-        """Запускаем процесс MPV"""
-        try:
-            params = PlaybackConstants.MPV_BASE_PARAMS.copy()
-            
-            if use_drm:
-                params.extend(PlaybackConstants.MPV_DRM_PARAMS)
-                self._using_drm = True
-                self.logger.info("Starting MPV with DRM output")
-            else:
-                params.extend(PlaybackConstants.MPV_FALLBACK_PARAMS)
-                self._using_drm = False
-                self.logger.info("Starting MPV with fallback GPU output")
-
-            # Очищаем старый сокет
-            if os.path.exists(PlaybackConstants.SOCKET_PATH):
-                try:
-                    os.unlink(PlaybackConstants.SOCKET_PATH)
-                except Exception as e:
-                    self.logger.warning(f"Could not remove old socket: {str(e)}")
-
-            self._mpv_process = subprocess.Popen(
-                ["mpv"] + params,
-                env={**os.environ, **PlaybackConstants.MPV_ENV},
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True
-            )
-
-            # Запускаем мониторинг процесса
-            self._stop_monitor.clear()
-            if self._monitor_thread is None or not self._monitor_thread.is_alive():
-                self._monitor_thread = threading.Thread(
-                    target=self._monitor_mpv_process,
-                    daemon=True
-                )
-                self._monitor_thread.start()
-
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to start MPV: {str(e)}")
-            return False
-
-    def _monitor_mpv_process(self):
-        """Мониторинг процесса MPV"""
-        while not self._stop_monitor.is_set():
-            if self._mpv_process.poll() is not None:
-                self._mpv_ready.clear()
-                self.logger.error("MPV process terminated unexpectedly")
-                
-                # Пробуем перезапустить
-                for attempt in range(3):
-                    try:
-                        if self._start_mpv_process(self._using_drm):
-                            time.sleep(2)  # Даем время на запуск
-                            if self._mpv_process.poll() is None:
-                                break
-                    except Exception as e:
-                        self.logger.error(f"Restart attempt {attempt+1} failed: {str(e)}")
-                
-                if self._mpv_process.poll() is not None:
-                    self.logger.error("Failed to restart MPV after 3 attempts")
-            
-            time.sleep(2)
-
-    def _wait_for_mpv_ready(self, timeout: float = None) -> bool:
-        """Ожидаем готовности MPV"""
-        timeout = timeout or PlaybackConstants.MPV_START_TIMEOUT
+    def _wait_for_socket(self, timeout=10.0):
+        """Ожидаем появления сокета с таймаутом"""
         start_time = time.time()
-        
         while time.time() - start_time < timeout:
-            if self._mpv_process.poll() is not None:
-                self.logger.error("MPV process terminated while waiting")
-                return False
-                
             if os.path.exists(PlaybackConstants.SOCKET_PATH):
                 try:
-                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                        s.settimeout(2)
-                        s.connect(PlaybackConstants.SOCKET_PATH)
-                        s.sendall(b'{"command": ["get_property", "idle-active"]}\n')
-                        response = s.recv(1024)
-                        
-                        if response and b'"error":"success"' in response:
-                            self._mpv_ready.set()
-                            self.logger.info("MPV connection established")
-                            return True
+                    # Проверяем доступность сокета
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as test_socket:
+                        test_socket.settimeout(1.0)
+                        test_socket.connect(PlaybackConstants.SOCKET_PATH)
+                        return True
+                except (ConnectionRefusedError, socket.timeout):
+                    time.sleep(0.1)
+                    continue
                 except Exception as e:
-                    self.logger.debug(f"Socket test failed: {str(e)}")
-            
-            time.sleep(1)
-        
-        self.logger.error("Timeout waiting for MPV to become ready")
+                    self.logger.warning(f"Socket test failed: {str(e)}")
+                    return False
+            time.sleep(0.1)
         return False
 
-    def _send_command(self, command: Dict, timeout: float = None) -> Optional[Dict]:
-        """Отправляем команду в MPV"""
+    def _send_command(self, command: Dict, timeout: float = 5.0) -> Optional[Dict]:
+        """Улучшенная отправка команд с обработкой ошибок"""
         if not isinstance(command, dict) or 'command' not in command:
             self.logger.error(f"Invalid command: {command}")
             return None
 
-        timeout = timeout or PlaybackConstants.SOCKET_TIMEOUT
-        
+        if not self._wait_for_socket():
+            self.logger.error("MPV socket not available")
+            return None
+
         for attempt in range(PlaybackConstants.MAX_RETRIES):
             try:
                 with self._ipc_lock, \
@@ -154,16 +59,20 @@ class MPVManager:
                     
                     response = b''
                     while True:
-                        chunk = s.recv(4096)
-                        if not chunk:
-                            break
-                        response += chunk
                         try:
-                            data = json.loads(response.decode())
-                            if isinstance(data, dict):
-                                return data
-                        except json.JSONDecodeError:
-                            continue
+                            chunk = s.recv(4096)
+                            if not chunk:
+                                break
+                            response += chunk
+                            try:
+                                data = json.loads(response.decode())
+                                if isinstance(data, dict):
+                                    return data
+                            except json.JSONDecodeError:
+                                continue
+                        except socket.timeout:
+                            self.logger.warning("Socket timeout while receiving response")
+                            break
                             
             except Exception as e:
                 self.logger.warning(f"Command failed (attempt {attempt+1}): {str(e)}")
@@ -174,38 +83,46 @@ class MPVManager:
         return None
 
     def initialize(self) -> bool:
-        """Инициализация MPV"""
-        # Сначала пробуем с DRM
-        if self._check_drm_support():
-            if not self._start_mpv_process(use_drm=True):
-                self.logger.warning("Failed to start with DRM, trying fallback")
-                if not self._start_mpv_process(use_drm=False):
-                    return False
-        else:
-            self.logger.warning("DRM not supported, using fallback mode")
-            if not self._start_mpv_process(use_drm=False):
+        """Инициализация с улучшенной проверкой состояния"""
+        try:
+            if not self._wait_for_socket():
+                self.logger.error("MPV socket not found or not responsive")
                 return False
-        
-        return self._wait_for_mpv_ready()
+                
+            response = self._send_command({"command": ["get_property", "version"]})
+            if response and response.get("error") == "success":
+                self._mpv_ready = True
+                self.logger.info("Successfully connected to MPV service")
+                return True
+            return False
+        except Exception as e:
+            self.logger.error(f"MPV initialization failed: {str(e)}")
+            return False
 
-    def shutdown(self):
-        """Корректное завершение работы"""
-        self._stop_monitor.set()
-        
-        if self._mpv_process and self._mpv_process.poll() is None:
-            try:
-                self._send_command({"command": ["quit"]})
-                self._mpv_process.wait(timeout=5)
-            except Exception as e:
-                self.logger.warning(f"Error during shutdown: {str(e)}")
-                try:
-                    self._mpv_process.terminate()
-                    self._mpv_process.wait(timeout=2)
-                except:
-                    pass
-        
-        if os.path.exists(PlaybackConstants.SOCKET_PATH):
-            try:
-                os.unlink(PlaybackConstants.SOCKET_PATH)
-            except:
-                pass
+    # Остальные методы остаются без изменений
+    def update_settings(self, settings: Dict) -> bool:
+        """Обновляем настройки MPV"""
+        success = True
+        for key, value in settings.items():
+            response = self._send_command({
+                "command": ["set_property", key, value]
+            })
+            if not response or response.get("error") != "success":
+                success = False
+                self.logger.warning(f"Failed to set property {key} to {value}")
+        return success
+
+    def verify_settings_support(self) -> Dict:
+        """Проверяем поддерживаемые настройки"""
+        test_settings = {
+            "volume": 50,
+            "speed": 1.0,
+            "loop": "inf"
+        }
+        results = {}
+        for key, value in test_settings.items():
+            response = self._send_command({
+                "command": ["set_property", key, value]
+            })
+            results[key] = response.get("error") == "success" if response else False
+        return results
