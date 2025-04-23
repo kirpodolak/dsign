@@ -31,16 +31,16 @@ class LogoManager:
     def _execute_drm_command(self, command):
         """Выполнение DRM команды"""
         try:
-            result = self._mpv.command(command)
-            
+            result = self._mpv.send_command(command)
+
             if result is None or result.get('error') == 'success':
                 self._update_playback_state()
                 self.logger.debug(f"DRM command succeeded: {command}")
                 return True
-            
+
             self.logger.warning(f"DRM command failed: {command} - {result.get('error', '')}")
             return False
-            
+
         except Exception as e:
             self.logger.error(f"DRM command error: {command} - {str(e)}")
             return False
