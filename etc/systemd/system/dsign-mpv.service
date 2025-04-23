@@ -1,34 +1,34 @@
 [Unit]
-Description=Digital Signage MPV Player (DRM)
-After=network.target
-BindsTo=digital-signage.service
+Description=MPV Player for Digital Signage
+After=graphical.target
+Requires=graphical.target
 
 [Service]
 User=dsign
 Group=video
-Type=simple
-WorkingDirectory=/var/lib/dsign/media
+Environment="DISPLAY=:0"
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
+WorkingDirectory=/home/dsign
 
-# Оптимальные параметры для RPi 3B
-ExecStart=/usr/bin/mpv \
+# Подготовка директории
+ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv
+ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv
+ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
+ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
+
+# Основная команда с ожиданием создания сокета
+ExecStart=/bin/bash -c '/usr/bin/mpv \
     --idle \
-    --input-ipc-server=/tmp/mpv-socket \
-    --no-config \
-    --hwdec=mmal \
-    --vo=drm \
-    --drm-connector=HDMI-A-1
+    --input-ipc-server=/var/lib/dsign/mpv/socket \
+    --log-file=/var/log/dsign/mpv.log & \
+    while [ ! -S /var/lib/dsign/mpv/socket ]; do sleep 0.1; done; \
+    /bin/chmod 660 /var/lib/dsign/mpv/socket; \
+    wait'
 
 Restart=on-failure
-RestartSec=5
-TimeoutStopSec=5
-StandardOutput=journal
-StandardError=journal
-
-# Ограничения ресурсов
-MemoryLimit=512M
-CPUQuota=80%
-DeviceAllow=/dev/dri rw
-DeviceAllow=/dev/fb0 rw
+RestartSec=5s
+StartLimitInterval=60s
+StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target
