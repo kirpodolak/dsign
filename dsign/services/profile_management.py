@@ -111,3 +111,67 @@ class ProfileManager:
         if profile and self._mpv_manager._validate_settings(profile['settings']):
             return self._mpv_manager.update_settings(profile['settings'])
         return False
+        
+    def apply_profile(self, profile_id: int) -> bool:
+        """Enhanced profile application with validation"""
+        profile = self.get_profile(profile_id)
+        if not profile:
+            return False
+    
+        try:
+            # Validate settings against schema
+            if not self._validate_settings(profile['settings']):
+                self.logger.error(f"Invalid settings in profile {profile_id}")
+                return False
+            
+            # Apply settings in batches with error handling
+            success = True
+            applied_settings = {}
+        
+            for category, settings in profile['settings'].items():
+                category_success = self._mpv_manager.update_settings({category: settings})
+                if not category_success:
+                    self.logger.warning(f"Failed to apply {category} settings")
+                    success = False
+                else:
+                    applied_settings[category] = settings
+                
+            # Log applied settings
+            if applied_settings:
+                self.logger.info(f"Applied settings from profile {profile_id}: {applied_settings}")
+            
+            return success
+        
+        except Exception as e:
+            self.logger.error(f"Error applying profile {profile_id}: {str(e)}")
+            return False
+            
+    def _validate_settings(self, settings: Dict) -> bool:
+        """Validate settings against schema and MPV capabilities"""
+        if not isinstance(settings, dict):
+            return False
+        
+        try:
+            # Get supported properties from MPV
+            supported = self._mpv_manager.get_supported_properties()
+        
+            # Check each setting
+            for prop, value in settings.items():
+                if prop not in supported:
+                    self.logger.warning(f"Unsupported property: {prop}")
+                    return False
+                
+                # Basic type checking
+                prop_type = supported[prop]
+                if prop_type == 'bool' and not isinstance(value, bool):
+                    return False
+                elif prop_type == 'int' and not isinstance(value, int):
+                    return False
+                elif prop_type == 'string' and not isinstance(value, str):
+                    return False
+                
+            return True
+        
+        except Exception as e:
+            self.logger.error(f"Settings validation failed: {str(e)}")
+            return False
