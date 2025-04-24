@@ -35,27 +35,29 @@ class LogoManager:
                 self.logger.error(f"Failed to initialize default logo: {str(e)}")
 
     def display_idle_logo(self) -> bool:
-        """Display idle logo without profile_id parameter"""
         logo_path = self._validate_logo_file()
-        playlist_content = f"""#EXTM3U
-    #EXTINF:-1,Idle Logo
-    {logo_path}
-    """
-    
-        # Create temporary playlist in memory
-        cmd = {
-            "command": ["loadlist", "memory://idle_logo.m3u", "replace"],
-            "input": playlist_content
+        if not logo_path:
+            return False
+
+        settings = {
+            "vo": "drm",
+            "hwdec": "no",
+            "loop-file": "inf",
+            "pause": "no"
         }
-    
-        response = self._mpv_manager._send_command(cmd)
-        if response and response.get("error") == "success":
-            self._mpv_manager.update_settings({
-                "loop-file": "inf",
-                "pause": "no"
-            })
-            return True
-        return False
+
+        # Преобразуем путь в строку
+        commands = [
+            ["loadfile", str(logo_path), "replace"]
+        ] + [["set", key, value] for key, value in settings.items()]
+
+        for cmd in commands:
+            response = self._mpv_manager._send_command({"command": cmd})
+            if not response or response.get("error") != "success":
+                self.logger.warning(f"Failed command: {' '.join(map(str, cmd))}")
+                return False
+
+        return True
 
     def _validate_logo_file(self) -> Path:
         """Проверка доступности файла логотипа"""
