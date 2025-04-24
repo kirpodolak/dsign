@@ -234,10 +234,10 @@ class PlaybackService:
             self.logger.error(f"Error restarting idle logo: {str(e)}")
             return False
 
-    def display_idle_logo(self, profile_id: int = None) -> bool:
-        """Display idle logo"""
+    def display_idle_logo(self) -> bool:
+        """Display idle logo without profile_id parameter"""
         try:
-            return self._logo_manager.display_idle_logo(profile_id)
+            return self._logo_manager.display_idle_logo()
         except Exception as e:
             self.logger.error(f"Error displaying idle logo: {str(e)}")
             return False
@@ -337,3 +337,23 @@ class PlaybackService:
         except Exception as e:
             self.logger.error(f"Error updating settings: {str(e)}")
             return False
+            
+    def _verify_mpv_state(self) -> bool:
+        """Проверяем, что MPV действительно воспроизводит контент"""
+        try:
+            status = self._mpv_manager._send_command({
+                "command": ["get_property", "idle-active"]
+            })
+            return status and not status.get("data", True)
+        except Exception as e:
+            self.logger.error(f"MPV state verification failed: {str(e)}")
+            return False
+            
+    def wait_for_mpv_ready(self, timeout=30, check_interval=1):
+        """Явное ожидание готовности MPV"""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self._check_mpv_service_active() and self._check_ipc_connection():
+                return True
+            time.sleep(check_interval)
+        return False
