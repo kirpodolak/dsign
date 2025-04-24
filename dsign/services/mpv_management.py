@@ -46,27 +46,27 @@ class MPVManager:
         self.logger.error("Socket wait timeout expired")
         return False
 
-    def _send_command(self, command: Dict, timeout: float = 5.0) -> Optional[Dict]:
-        """Улучшенная отправка команд с обработкой ошибок"""
-        if not isinstance(command, dict) or 'command' not in command:
-            self.logger.error(f"Invalid command: {command}")
-            return None
-
-        self.logger.debug(f"Sending command: {command}")
-
-        for attempt in range(PlaybackConstants.MAX_RETRIES):
+    def _send_command(self, command: Dict, timeout: float = 10.0) -> Optional[Dict]:
+        """Отправка команд в MPV с увеличенным таймаутом"""
+        for attempt in range(3):
             try:
                 with self._ipc_lock, \
                      socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
                     
                     s.settimeout(timeout)
-                    s.connect(PlaybackConstants.SOCKET_PATH)
+                    try:
+                        s.connect(self.mpv_socket)
+                    except ConnectionRefusedError:
+                        self.logger.warning("MPV socket connection refused")
+                        time.sleep(1)
+                        continue
                     
                     cmd_str = json.dumps(command) + '\n'
                     s.sendall(cmd_str.encode())
                     
                     response = b''
-                    while True:
+                    start_time = time.time()
+                    while time.time() - start_time < timeout:
                         try:
                             chunk = s.recv(4096)
                             if not chunk:
@@ -75,20 +75,22 @@ class MPVManager:
                             try:
                                 data = json.loads(response.decode())
                                 if isinstance(data, dict):
-                                    self.logger.debug(f"Received response: {data}")
                                     return data
                             except json.JSONDecodeError:
                                 continue
                         except socket.timeout:
-                            self.logger.warning("Socket timeout while receiving response")
                             break
-                            
+                    
+                    if not response:
+                        raise TimeoutError("No response from MPV")
+                    
             except Exception as e:
-                self.logger.warning(f"Command failed (attempt {attempt+1}): {str(e)}")
-                if attempt < PlaybackConstants.MAX_RETRIES - 1:
-                    time.sleep(PlaybackConstants.RETRY_DELAY)
+                self.logger.warning(f"Attempt {attempt+1} failed: {str(e)}")
+                if attempt < 2:
+                    time.sleep(1)
+                continue
         
-        self.logger.error(f"Command failed after {PlaybackConstants.MAX_RETRIES} attempts")
+        self.logger.error(f"Command failed after 3 attempts: {command}")
         return None
 
     def initialize(self) -> bool:
@@ -135,3 +137,13 @@ class MPVManager:
             })
             results[key] = response.get("error") == "success" if response else False
         return results
+        
+    def wait_for_mpv_ready(self, timeout=30, check_interval=1):
+        """Явное ожидание готовности MPV"""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self._send_command({"command": ["get_property", "idle-active"]}):
+                self._mpv_ready = True
+                return True
+            time.sleep(check_interval)
+        return False
