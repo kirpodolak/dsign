@@ -34,30 +34,41 @@ class LogoManager:
             except Exception as e:
                 self.logger.error(f"Failed to initialize default logo: {str(e)}")
 
-    def display_idle_logo(self, profile_id: int = None) -> bool:
-        """Display idle logo with optimized IPC commands"""
-        try:
-            logo_path = self._validate_logo_file()
-            self.logger.info(f"Displaying idle logo: {logo_path}")
-
-            # Команды для MPV через IPC
-            commands = [
-                {"command": ["loadfile", str(logo_path), "replace"]},
-                {"command": ["set_property", "loop-file", "inf"]},
-                {"command": ["set_property", "pause", "no"]}
-            ]
-
-            # Отправка команд с таймаутом
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = [executor.submit(self._send_ipc_command, cmd) for cmd in commands]
-                for future in futures:
-                    if not future.result(timeout=5):
-                        return False
-
+    def display_idle_logo(self) -> bool:
+        """Display idle logo without profile_id parameter"""
+        logo_path = self._validate_logo_file()
+        playlist_content = f"""#EXTM3U
+    #EXTINF:-1,Idle Logo
+    {logo_path}
+    """
+    
+        # Create temporary playlist in memory
+        cmd = {
+            "command": ["loadlist", "memory://idle_logo.m3u", "replace"],
+            "input": playlist_content
+        }
+    
+        response = self._mpv_manager._send_command(cmd)
+        if response and response.get("error") == "success":
+            self._mpv_manager.update_settings({
+                "loop-file": "inf",
+                "pause": "no"
+            })
             return True
-        except Exception as e:
-            self.logger.error(f"Failed to display idle logo: {str(e)}", exc_info=True)
-            return False
+        return False
+
+    def _validate_logo_file(self) -> Path:
+        """Проверка доступности файла логотипа"""
+        logo_path = self.upload_folder / PlaybackConstants.DEFAULT_LOGO
+        
+        if not logo_path.exists():
+            self._handle_missing_logo(logo_path)
+
+        if not os.access(logo_path, os.R_OK):
+            self._fix_logo_permissions(logo_path)
+
+        return logo_path
+
 
     def _send_ipc_command(self, command: Dict) -> bool:
         """Safe IPC command sending with retries"""
@@ -105,7 +116,6 @@ class LogoManager:
             self.logger.error(f"Failed to fix permissions: {str(e)}")
             raise
 
-    # Остальные методы остаются без изменений
     def _update_playback_state(self, status: str):
         """Update playback state"""
         self._update_playback_status(None, status)
@@ -143,3 +153,27 @@ class LogoManager:
                 "is_default": True,
                 "error": "no_logo_found"
             }
+            
+    def _get_playback_status(self) -> Dict:
+        """Get current playback status from MPV"""
+        try:
+            response = self._mpv_manager._send_command({
+                "command": ["get_property", "filename"]
+            })
+            return {
+                "filename": response.get("data", ""),
+                "status": "playing" if not response.get("error") else "error"
+            }
+        except Exception as e:
+            self.logger.error(f"Failed to get playback status: {str(e)}")
+            return {"filename": "", "status": "error"}
+            
+    def _verify_logo_displayed(self):
+        """Проверка что логотип действительно отображается"""
+        try:
+            response = self._mpv_manager._send_command({
+                "command": ["get_property", "filename"]
+            })
+            return response and "idle_logo" in response.get("data", "")
+        except Exception:
+            return False
