@@ -1,12 +1,18 @@
 from flask import Flask
 from flask_wtf import CSRFProtect
-from typing import Dict, Any
 import logging
 import time
 import subprocess
 from pathlib import Path
+from threading import Thread
 
 from dsign.config.config import Config, config
+
+def should_display_logo(db_session) -> bool:
+    """Проверяет, нужно ли отображать логотип (нет активных плейлистов)"""
+    from .models import PlaybackStatus
+    status = db_session.query(PlaybackStatus).first()
+    return not (status and status.playlist_id)
 
 def create_app(config_class=config) -> Flask:
     # Настройка логирования
@@ -22,38 +28,54 @@ def create_app(config_class=config) -> Flask:
 
         app.static_folder = config_class.STATIC_FOLDER
         app.static_url_path = '/static'
-
-        # Настройка уровня логирования
         app.logger.setLevel(logging.INFO if not app.debug else logging.DEBUG)
         logger.info("Application instance created")
 
-        # Инициализация расширений
+        # 1. Запуск MPV сервиса
+        logger.info("Starting MPV service...")
+        try:
+            subprocess.run(
+                ["sudo", "systemctl", "enable", "--now", "dsign-mpv.service"],
+                check=True,
+                timeout=30
+            )
+            logger.info("MPV service enabled and started")
+            time.sleep(3)  # Даем время для инициализации
+        except Exception as e:
+            logger.error(f"MPV service error: {str(e)}")
+            raise RuntimeError("MPV service initialization failed") from e
+
+        # 2. Инициализация расширений
         logger.info("Initializing extensions...")
-        from .extensions import init_extensions, db
+        from .extensions import init_extensions, db, socketio
         services = init_extensions(app)
         csrf = CSRFProtect(app)
         logger.info("Extensions initialized successfully")
 
-        # Инициализация сервисов
+        # 3. Инициализация сервисов
         logger.info("Initializing services...")
         from dsign.services.settings_service import SettingsService
         from dsign.services.playlist_service import PlaylistService
         from dsign.services.file_service import FileService
         from dsign.services.playback_service import PlaybackService
         
-        # Создаем сессию БД для сервисов
         with app.app_context():
-            db_session = db.session
-            
+            # Инициализация сервисов
             app.settings_service = SettingsService(
                 settings_file=config_class.SETTINGS_FILE,
-                upload_folder=config_class.UPLOAD_FOLDER,
-                db_session=db_session
+                upload_folder=config_class.UPLOAD_FOLDER
             )
             
-            app.playlist_service = PlaylistService(db_session=db_session)
             app.file_service = FileService(upload_folder=config_class.UPLOAD_FOLDER)
-            app.playback_service = PlaybackService(db_session=db.session)
+            app.playlist_service = PlaylistService(db.session)
+            
+            # Инициализация PlaybackService
+            app.playback_service = PlaybackService(
+                upload_folder=config_class.UPLOAD_FOLDER,
+                db_session=db.session,
+                socketio=socketio,
+                logger=logger
+            )
             
         logger.info("Services initialized successfully")
 
@@ -72,75 +94,59 @@ def create_app(config_class=config) -> Flask:
         logger.info("All required services verified")
 
         # Настройка сервиса воспроизведения
-        try:
-            logger.info("Configuring playback service...")
-            from .models import PlaybackStatus
-            
-            with app.app_context():
-                # Проверка подключения к БД
-                try:
-                    db.session.query(PlaybackStatus).first()
-                    logger.info("Database connection verified")
-                except Exception as db_error:
-                    logger.error(f"Database connection failed: {str(db_error)}")
-                    raise RuntimeError("Database connection failed") from db_error
-
-                playback_status = db.session.query(PlaybackStatus).first()
-                if not playback_status or not playback_status.playlist_id:
-                    logger.info("Starting idle logo...")
-                    if services['playback_service'].display_idle_logo():
-                        logger.info("Idle logo started successfully")
-                    else:
-                        logger.warning("Failed to start idle logo")
-
-            # Запуск сервиса MPV
+        logger.info("Configuring playback service...")
+        from .models import PlaybackStatus
+        
+        with app.app_context():
             try:
-                subprocess.run(
-                    ["sudo", "systemctl", "enable", "--now", "dsign-mpv.service"],
-                    check=True
-                )
-                logger.info("MPV service enabled and started")
-            except subprocess.CalledProcessError as e:
-                logger.error(f"MPV service error: {str(e)}")
-                raise RuntimeError("MPV service initialization failed") from e
-
-        except Exception as e:
-            logger.error(f"Playback configuration error: {str(e)}", exc_info=True)
-            raise
+                # Проверка подключения к БД и получение статуса воспроизведения
+                playback_status = db.session.query(PlaybackStatus).first()
+                logger.info("Database connection verified")
+        
+                # Определение состояния воспроизведения
+                if not playback_status or not playback_status.playlist_id:
+                    logger.info("No active playlist found, starting idle logo...")
+            
+                    def start_idle_logo():
+                        try:
+                            if not app.playback_service.display_idle_logo():
+                                logger.warning("Initial idle logo display failed, retrying...")
+                                time.sleep(2)  # Задержка перед повторной попыткой
+                                app.playback_service.display_idle_logo()
+                        except Exception as e:
+                            logger.error(f"Failed to display idle logo: {str(e)}")
+            
+                    # Запуск в фоновом потоке
+                    Thread(target=start_idle_logo, daemon=True).start()
+                else:
+                    logger.info(f"Active playlist found (ID: {playback_status.playlist_id}), resuming playback...")
+                    try:
+                        if not app.playlist_service.play(playback_status.playlist_id):
+                            logger.error("Failed to resume playlist playback, falling back to idle logo")
+                            app.playback_service.display_idle_logo()
+                    except Exception as e:
+                        logger.error(f"Error resuming playback: {str(e)}")
+                        logger.info("Falling back to idle logo due to playback error")
+                        app.playback_service.display_idle_logo()
+                
+            except Exception as db_error:
+                logger.error(f"Database/playback initialization failed: {str(db_error)}")
+                logger.info("Attempting to start idle logo as fallback")
+                try:
+                    app.playback_service.display_idle_logo()
+                except Exception as logo_error:
+                    logger.critical(f"Complete initialization failure: {str(logo_error)}")
+                raise RuntimeError("Initialization failed") from db_error
 
         # Инициализация маршрутов
-        try:
-            logger.info("Initializing routes...")
-            from .routes import init_routes
-            init_routes(app, services)
-            logger.info("Routes initialized successfully")
-        except Exception as e:
-            logger.error(f"Route initialization failed: {str(e)}", exc_info=True)
-            raise RuntimeError(f"Route initialization error: {str(e)}") from e
+        logger.info("Initializing routes...")
+        from .routes import init_routes
+        init_routes(app, services)
+        logger.info("Routes initialized successfully")
 
         # Регистрация обработчиков ошибок
         register_error_handlers(app)
         logger.info("Error handlers registered")
-
-        # Добавляем проверку маршрута /settings
-        @app.route('/test-settings')
-        def test_settings():
-            try:
-                with app.app_context():
-                    from dsign.models import PlaybackProfile
-                    profiles = db.session.query(PlaybackProfile).all()
-                    return {
-                        'status': 'success',
-                        'profiles_count': len(profiles),
-                        'services_initialized': all(
-                            hasattr(app, service) for service in required_services
-                        )
-                    }
-            except Exception as e:
-                return {
-                    'status': 'error',
-                    'error': str(e)
-                }, 500
 
         logger.info("Application initialization completed successfully")
         return app
