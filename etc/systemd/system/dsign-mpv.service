@@ -18,15 +18,7 @@ ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 
 # Основная команда запуска
-ExecStart=/usr/local/bin/mpv \
-    --idle \
-    --no-terminal \
-    --no-config \
-    --no-osc \
-    --no-input-default-bindings \
-    --input-ipc-server=/var/lib/dsign/mpv/socket \
-    --hwdec=auto \
-    --log-file=/var/log/dsign/mpv.log
+ExecStart=/usr/local/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --hwdec=auto --vo=drm --log-file=/var/log/dsign/mpv.log
 
 # Настройки перезапуска
 Restart=always
