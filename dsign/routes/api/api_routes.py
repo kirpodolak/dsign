@@ -298,26 +298,15 @@ def init_api_routes(api_bp, services):
                     "error": "Missing playlist_id"
                 }), 400
 
-            # Get assigned profile settings if available
-            settings = {}
-            assignment = db.session.query(PlaylistProfileAssignment).filter_by(
-                playlist_id=data['playlist_id']
-            ).first()
-            
-            if assignment and assignment.profile_id:
-                profile = db.session.query(PlaybackProfile).get(assignment.profile_id)
-                if profile:
-                    settings = profile.settings
-
-            # Override with any specific settings from request
-            if 'settings' in data:
-                settings.update(data['settings'])
-
+            # Get additional settings from request if provided
+            additional_settings = data.get('settings', {})
+        
+            # Start playback through service
             result = playback_service.play(
                 playlist_id=data['playlist_id'],
-                settings=settings
+                settings=additional_settings
             )
-            
+        
             return jsonify({
                 "success": True,
                 "playlist_id": data['playlist_id'],
