@@ -18,49 +18,76 @@ class PlaylistManager:
         self.tmp_dir.mkdir(exist_ok=True)
 
     def play(self, playlist_id: int) -> bool:
-        """Play playlist with optional profile"""
-        from ..models import Playlist
-        
+        """Play playlist with profile support"""
+        from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment
+    
         try:
-            self._last_playback_state = {'status': 'playing', 'playlist_id': playlist_id}
-            
-            if not os.path.exists(PlaybackConstants.SOCKET_PATH):
-                raise RuntimeError(f"MPV socket not found at {PlaybackConstants.SOCKET_PATH}")
-            
-            if not os.access(PlaybackConstants.SOCKET_PATH, os.R_OK | os.W_OK):
-                raise PermissionError(f"No access to MPV socket at {PlaybackConstants.SOCKET_PATH}")
-                
+            # Get playlist and validate
             playlist = self.db_session.query(Playlist).get(playlist_id)
             if not playlist:
                 raise ValueError(f"Playlist {playlist_id} not found")
 
-            assigned_profile = self._mpv_manager.get_assigned_profile(playlist_id)
-            if assigned_profile:
-                self._mpv_manager.apply_profile(assigned_profile['id'])
+            # Get assigned profile if exists
+            profile_settings = {}
+            assignment = self.db_session.query(PlaylistProfileAssignment).filter_by(
+                playlist_id=playlist_id
+            ).first()
+        
+            if assignment and assignment.profile_id:
+                profile = self.db_session.query(PlaybackProfile).get(assignment.profile_id)
+                if profile:
+                    profile_settings = json.loads(profile.settings)
 
-            playlist_file = PlaybackUtils.create_playlist_file(self.upload_folder, self.tmp_dir, playlist)
-            
-            load_res = self._mpv_manager._send_command({
+            # Update playback status in DB
+            playback = self.db_session.query(PlaybackStatus).first() or PlaybackStatus()
+            playback.playlist_id = playlist_id
+            playback.status = 'playing'
+            self.db_session.add(playback)
+            self.db_session.commit()
+
+            # Apply profile settings first
+            if profile_settings:
+                if not self._mpv_manager.update_settings(profile_settings):
+                    self.logger.warning("Failed to apply some profile settings")
+
+            # Create playlist file and load it
+            playlist_file = PlaybackUtils.create_playlist_file(
+                self.upload_folder, 
+                self.tmp_dir, 
+                playlist
+            )
+        
+            # Load playlist with retry logic
+            result = self._mpv_manager._send_command({
                 "command": ["loadlist", str(playlist_file), "replace"]
-            })
-            
-            loop_res = self._mpv_manager._send_command({
+            }, timeout=10.0)
+        
+            if not result or result.get("error") != "success":
+                raise RuntimeError("Failed to load playlist")
+
+            # Ensure looping is enabled
+            self._mpv_manager._send_command({
                 "command": ["set_property", "loop-playlist", "inf"]
             })
-            
-            if not load_res or not loop_res:
-                raise RuntimeError("Failed to set playlist properties")
-            
-            self._logo_manager._update_playback_status(playlist_id, 'playing')
+
+            # Start playback
+            self._mpv_manager._send_command({
+                "command": ["set_property", "pause", "no"]
+            })
+
+            # Notify clients
             self.socketio.emit('playback_state', {
                 'status': 'playing',
                 'playlist': {'id': playlist.id, 'name': playlist.name},
-                'settings': self._mpv_manager._current_settings
+                'settings': profile_settings
             })
+        
             return True
-            
+
         except Exception as e:
             self.logger.error(f"Playback error: {str(e)}", exc_info=True)
+            self.db_session.rollback()
+            # Fall back to idle logo
             self._logo_manager.display_idle_logo()
             raise RuntimeError(f"Failed to start playback: {str(e)}")
 
