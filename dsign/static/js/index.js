@@ -20,7 +20,8 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         },
         selectors: {
-            playlistTable: '#playlist-table tbody',
+            playlistTable: '#playlist-table',
+            playlistTableBody: '#playlist-table-body',
             createPlaylistBtn: '#create-playlist-btn',
             modal: '#create-playlist-modal',
             modalClose: '.modal .close',
@@ -107,14 +108,16 @@ document.addEventListener('DOMContentLoaded', () => {
         },
 
         async getPlaylists() {
-            return this.request(CONFIG.api.endpoints.playlists);
+            const response = await this.request(CONFIG.api.endpoints.playlists);
+            return Array.isArray(response) ? response : (response.playlists || []);
         },
 
         async createPlaylist(data) {
-            return this.request(CONFIG.api.endpoints.playlists, {
+            const response = await this.request(CONFIG.api.endpoints.playlists, {
                 method: 'POST',
                 body: JSON.stringify(data)
             });
+            return response;
         },
 
         async deletePlaylist(id) {
@@ -264,12 +267,31 @@ document.addEventListener('DOMContentLoaded', () => {
         },
 
         renderPlaylists(playlists) {
-            if (!elements.playlistTable) return;
+            let tableBody = document.querySelector('#playlist-table-body');
+            if (!tableBody) {
+                // Create tbody if it doesn't exist
+                const table = document.querySelector('#playlist-table');
+                if (table) {
+                    tableBody = document.createElement('tbody');
+                    tableBody.id = 'playlist-table-body';
+                    table.appendChild(tableBody);
+                } else {
+                    console.error('Playlist table not found');
+                    return;
+                }
+            }
 
-            elements.playlistTable.innerHTML = playlists.map(playlist => `
+            const playlistsArray = Array.isArray(playlists) ? playlists : [];
+    
+            console.log('Rendering playlists to:', tableBody);
+            console.log('Playlist data:', playlistsArray);
+
+            tableBody.innerHTML = playlistsArray.map(playlist => `
                 <tr data-id="${playlist.id}">
                     <td>${this.escapeHtml(playlist.name || 'Unnamed')}</td>
                     <td>${this.escapeHtml(playlist.customer || 'No customer')}</td>
+                    <td>${playlist.files_count || 0}</td>
+                    <td class="status-badge"></td>
                     <td class="actions">
                         <button class="btn play" data-id="${playlist.id}" title="Play">
                             <i class="fas fa-play"></i>
@@ -283,7 +305,6 @@ document.addEventListener('DOMContentLoaded', () => {
                         <button class="btn delete" data-id="${playlist.id}" title="Delete">
                             <i class="fas fa-trash"></i>
                         </button>
-                        <span class="status-badge"></span>
                     </td>
                 </tr>
             `).join('');
@@ -417,10 +438,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const handlers = {
         async init() {
             try {
+                console.log('Initializing application...');
+                
+                // Ensure table body exists before proceeding
+                await this.ensureTableBodyExists();
+                console.log('Playlist table element found:', elements.playlistTableBody);
+
                 const [settings, playlists] = await Promise.all([
                     api.getSettings(),
                     api.getPlaylists()
                 ]);
+
+                console.log('Received playlists:', playlists);
 
                 state.currentSettings = settings;
                 state.playlists = playlists;
@@ -438,6 +467,29 @@ document.addEventListener('DOMContentLoaded', () => {
                 console.error('Initialization failed:', error);
                 ui.showAlert('Failed to initialize application', 'error');
             }
+        },
+
+        async ensureTableBodyExists() {
+            return new Promise((resolve) => {
+                const checkTableBody = () => {
+                    if (elements.playlistTableBody) {
+                        resolve();
+                    } else {
+                        // Try to create the table body if it doesn't exist
+                        const table = document.querySelector('#playlist-table');
+                        if (table) {
+                            const tableBody = document.createElement('tbody');
+                            tableBody.id = 'playlist-table-body';
+                            table.appendChild(tableBody);
+                            elements.playlistTableBody = tableBody;
+                            resolve();
+                        } else {
+                            setTimeout(checkTableBody, 100);
+                        }
+                    }
+                };
+                checkTableBody();
+            });
         },
 
         setupEventListeners() {
@@ -462,12 +514,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 const formData = new FormData(elements.playlistForm);
                 
                 try {
-                    const playlist = await api.createPlaylist({
+                    const response = await api.createPlaylist({
                         name: formData.get('name'),
                         customer: formData.get('customer')
                     });
 
-                    state.playlists.push(playlist);
+                    // Add new playlist to state
+                    state.playlists = [...state.playlists, {
+                        id: response.playlist_id,
+                        name: formData.get('name'),
+                        customer: formData.get('customer'),
+                        files_count: 0
+                    }];
+                    
                     ui.renderPlaylists(state.playlists);
                     ui.toggleModal(false);
                     elements.playlistForm.reset();
