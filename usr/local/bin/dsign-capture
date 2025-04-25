@@ -3,42 +3,54 @@
 OUTPUT_DIR="/home/dsign/dsign/static/images"
 OUTPUT_FILE="on_air_screen.jpg"
 FB_DEV="/dev/fb0"
+MPV_SOCKET="/var/lib/dsign/mpv/socket"
 
-# Автоопределение разрешения
+# Функция: определение разрешения
 get_resolution() {
-    # Способ 1: Через /sys (работает на большинстве Linux)
     if [ -f /sys/class/graphics/fb0/virtual_size ]; then
-        FB_WIDTH=$(cat /sys/class/graphics/fb0/virtual_size | cut -d, -f1)
-        FB_HEIGHT=$(cat /sys/class/graphics/fb0/virtual_size | cut -d, -f2)
+        FB_WIDTH=$(cut -d, -f1 /sys/class/graphics/fb0/virtual_size)
+        FB_HEIGHT=$(cut -d, -f2 /sys/class/graphics/fb0/virtual_size)
         echo "${FB_WIDTH}x${FB_HEIGHT}"
         return
     fi
-
-    # Способ 2: Через fbset (если установлен)
     if command -v fbset &> /dev/null; then
         fbset | grep -oP "'\K\d+x\d+"
         return
     fi
-
-    # Способ 3: Через xrandr (для X11)
     if [ -n "$DISPLAY" ] && command -v xrandr &> /dev/null; then
         xrandr | grep -oP 'current \K\d+ x \d+' | tr -d ' '
         return
     fi
-
-    # Fallback: стандартное разрешение
     echo "1024x600"
 }
 
 RESOLUTION=$(get_resolution)
 
-# Проверка зависимостей
+# Проверка ffmpeg
 if ! command -v ffmpeg &> /dev/null; then
     echo "Error: ffmpeg is not installed!" >&2
     exit 1
 fi
 
-# Основная логика (как в предыдущей версии)
+# Функция: скриншот через MPV (если доступен)
+screenshot_with_mpv() {
+    echo '{"command": ["screenshot-to-file", "'"$OUTPUT_DIR/$OUTPUT_FILE"'", "video"]}' | socat - "$MPV_SOCKET"
+    return $?
+}
+
+# Проверка наличия сокета и активности MPV
+if [ -S "$MPV_SOCKET" ]; then
+    STATUS=$(echo '{"command": ["get_property", "playback-time"]}' | socat - "$MPV_SOCKET")
+    if echo "$STATUS" | grep -q '"error":"success"'; then
+        mkdir -p "$OUTPUT_DIR"
+        if screenshot_with_mpv; then
+            echo "Screenshot taken from MPV."
+            exit 0
+        fi
+    fi
+fi
+
+# Fallback: скриншот через framebuffer
 mkdir -p "$OUTPUT_DIR"
 sudo cat "$FB_DEV" > "$OUTPUT_DIR/screen.raw"
 
@@ -52,3 +64,4 @@ ffmpeg \
     -y
 
 rm "$OUTPUT_DIR/screen.raw"
+echo "Screenshot taken from framebuffer."
