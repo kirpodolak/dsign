@@ -292,19 +292,21 @@ document.addEventListener('DOMContentLoaded', () => {
                     <td>${this.escapeHtml(playlist.customer || 'No customer')}</td>
                     <td>${playlist.files_count || 0}</td>
                     <td class="status-badge"></td>
-                    <td class="actions">
-                        <button class="btn play" data-id="${playlist.id}" title="Play">
-                            <i class="fas fa-play"></i>
-                        </button>
-                        <button class="btn stop" data-id="${playlist.id}" title="Stop" disabled>
-                            <i class="fas fa-stop"></i>
-                        </button>
-                        <button class="btn edit" data-id="${playlist.id}" title="Edit">
-                            <i class="fas fa-edit"></i>
-                        </button>
-                        <button class="btn delete" data-id="${playlist.id}" title="Delete">
-                            <i class="fas fa-trash"></i>
-                        </button>
+                    <td>
+                        <div class="actions">
+                            <button class="btn play" data-id="${playlist.id}" title="Play">
+                                <i class="fas fa-play"></i>
+                            </button>
+                            <button class="btn stop" data-id="${playlist.id}" title="Stop" disabled>
+                                <i class="fas fa-stop"></i>
+                            </button>
+                            <button class="btn edit" data-id="${playlist.id}" title="Edit">
+                                <i class="fas fa-edit"></i>
+                            </button>
+                            <button class="btn delete" data-id="${playlist.id}" title="Delete">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
                     </td>
                 </tr>
             `).join('');
@@ -639,11 +641,13 @@ document.addEventListener('DOMContentLoaded', () => {
                         ui.showAlert('Playback stopped', 'info');
                         
                     } else if (btn.classList.contains('edit')) {
-                        window.location.href = `/playlists/${playlistId}`;
+                        // Fix for edit button - use correct URL format
+                        window.location.href = `/playlist/${playlistId}`;
                         
                     } else if (btn.classList.contains('delete')) {
                         if (confirm('Are you sure you want to delete this playlist?')) {
                             await api.deletePlaylist(playlistId);
+                            // Update UI immediately after successful deletion
                             state.playlists = state.playlists.filter(p => p.id !== playlistId);
                             ui.renderPlaylists(state.playlists);
                             ui.showAlert('Playlist deleted', 'info');
