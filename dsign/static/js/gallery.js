@@ -89,7 +89,7 @@
           type: getFileExtension(file.filename),
           date: file.uploadDate || file.modified || Date.now(),
           size: file.size || 0,
-          path: file.path || `/api/media/${file.filename}`,
+          path: `/api/media/${file.filename}`, // Fixed path
           mimetype: file.mimetype || null,
           dimensions: file.dimensions || null
         }));
@@ -231,6 +231,9 @@
         img.onerror = () => {
           img.src = PLACEHOLDER_IMAGE;
           img.style.opacity = '0.7';
+          if (window.App?.Alerts?.show) {
+            window.App.Alerts.show('Could not load preview image', 'warning');
+          }
         };
         previewContainer.appendChild(img);
       } else {
@@ -243,7 +246,10 @@
       // Click handler for preview
       previewContainer.addEventListener('click', (e) => {
         if (e.target?.tagName !== 'INPUT' && e.target?.tagName !== 'LABEL') {
-          showPreview(file);
+          showPreview({
+            ...file,
+            path: `/api/media/${file.name}`
+          });
         }
       });
 
@@ -296,10 +302,17 @@
     
     if (ALLOWED_IMAGE_TYPES.includes(file.type)) {
       const img = document.createElement('img');
-      img.src = file.path;
+      img.src = `/api/media/${file.name}`;
       img.alt = file.name;
       img.style.maxWidth = '100%';
       img.style.maxHeight = '70vh';
+      img.onerror = () => {
+        img.src = PLACEHOLDER_IMAGE;
+        img.style.opacity = '0.7';
+        if (window.App?.Alerts?.show) {
+          window.App.Alerts.show('Could not load preview image', 'warning');
+        }
+      };
       previewContainer.appendChild(img);
     } else if (ALLOWED_VIDEO_TYPES.includes(file.type)) {
       const video = document.createElement('video');
@@ -308,7 +321,7 @@
       video.style.maxWidth = '100%';
       video.style.maxHeight = '70vh';
       const source = document.createElement('source');
-      source.src = file.path;
+      source.src = `/api/media/${file.name}`;
       source.type = file.mimetype || `video/${file.type}`;
       video.appendChild(source);
       previewContainer.appendChild(video);
@@ -364,13 +377,13 @@
 
     const formData = new FormData();
     const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
-	
-	// Добавляем CSRF-токен
+    
+    // Add CSRF token
     if (csrfToken) {
         formData.append('csrf_token', csrfToken);
     }
-	
-	let validFilesCount = 0;
+    
+    let validFilesCount = 0;
     // Filter and validate files
     Array.from(fileInput.files).forEach(file => {
       if (isValidFile(file)) {
@@ -395,7 +408,7 @@
         method: 'POST',
         body: formData,
         headers: {
-            'X-CSRFToken': csrfToken // Добавляем токен в заголовки
+            'X-CSRFToken': csrfToken
         }
       });
 
@@ -438,13 +451,13 @@
       
       const response = await fetch('/api/media/files', {
         method: 'POST',
-		headers: { 
+        headers: { 
             'Content-Type': 'application/json',
             'X-CSRFToken': document.querySelector('input[name="csrf_token"]')?.value
         },
         body: JSON.stringify({
-			files: Array.from(selectedFiles),
-			csrf_token: document.querySelector('input[name="csrf_token"]')?.value
+            files: Array.from(selectedFiles),
+            csrf_token: document.querySelector('input[name="csrf_token"]')?.value
         })
       });
 
@@ -534,7 +547,7 @@
     });
 
     // Initial load
-    document.addEventListener('DOMContentLoaded', loadMediaFiles);
+    loadMediaFiles();
   }
 
   // Initialize the gallery
