@@ -52,19 +52,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 })
             ]);
 
-            // Обновление состояния
-            state.profiles = profiles;
-            state.playlists = playlists;
-            state.assignments = assignments;
+            // Обновление состояния с проверкой на null/undefined
+            state.profiles = Array.isArray(profiles) ? profiles : [];
+            state.playlists = Array.isArray(playlists) ? playlists : [];
+            state.assignments = assignments && typeof assignments === 'object' ? assignments : {};
 
-            // Рендеринг только если есть данные
-            if (profiles.length > 0) {
-                renderProfileSelects();
-            }
-        
-            if (playlists.length > 0) {
-                renderPlaylistAssignments();
-            }
+            // Рендеринг только если есть данные (теперь гарантировано есть массивы)
+            renderProfileSelects();
+            renderPlaylistAssignments();
+
+            // Load additional data
+            await Promise.all([
+                loadCurrentSettings(),
+                loadSettingsSchema()
+            ]);
+
+            renderCurrentSettings();
+            renderSettingsForm();
+            renderProfileGrid();
+
+            // Setup event listeners after initial render
+            setupEventListeners();
 
         } catch (error) {
             console.error('Initialization error:', error);
@@ -81,7 +89,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await response.json();
             if (data.success) {
                 state.profiles = Array.isArray(data.profiles) ? data.profiles : [];
-				return state.profiles;
+                return state.profiles;
             } else {
                 throw new Error(data.error || 'Invalid profiles data');
             }
@@ -89,7 +97,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Error loading profiles:', error);
             showAlert('Failed to load profiles. ' + error.message, 'error');
             state.profiles = [];
-			return [];
+            return [];
         }
     }
 
@@ -101,6 +109,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await response.json();
             if (data.success) {
                 state.playlists = Array.isArray(data.playlists) ? data.playlists : [];
+                return state.playlists;
             } else {
                 throw new Error(data.error || 'Invalid playlists data');
             }
@@ -108,6 +117,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Error loading playlists:', error);
             showAlert('Failed to load playlists. ' + error.message, 'error');
             state.playlists = [];
+            return [];
         }
     }
 
@@ -118,7 +128,10 @@ document.addEventListener('DOMContentLoaded', () => {
             
             const data = await response.json();
             if (data.success) {
-                state.assignments = data.assignments || {};
+                state.assignments = data.assignments && typeof data.assignments === 'object' 
+                    ? data.assignments 
+                    : {};
+                return state.assignments;
             } else {
                 throw new Error(data.error || 'Invalid assignments data');
             }
@@ -126,6 +139,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Error loading assignments:', error);
             showAlert('Failed to load profile assignments', 'error');
             state.assignments = {};
+            return {};
         }
     }
 
@@ -136,8 +150,11 @@ document.addEventListener('DOMContentLoaded', () => {
             
             const data = await response.json();
             if (data.success) {
-                state.currentSettings = data.settings || {};
+                state.currentSettings = data.settings && typeof data.settings === 'object' 
+                    ? data.settings 
+                    : {};
                 state.currentProfile = data.profile || null;
+                return { settings: state.currentSettings, profile: state.currentProfile };
             } else {
                 throw new Error(data.error || 'Invalid settings data');
             }
@@ -146,6 +163,7 @@ document.addEventListener('DOMContentLoaded', () => {
             showAlert('Failed to load current settings', 'error');
             state.currentSettings = {};
             state.currentProfile = null;
+            return { settings: {}, profile: null };
         }
     }
 
@@ -156,7 +174,10 @@ document.addEventListener('DOMContentLoaded', () => {
             
             const data = await response.json();
             if (data.success) {
-                state.settingsSchema = data.schema || {};
+                state.settingsSchema = data.schema && typeof data.schema === 'object' 
+                    ? data.schema 
+                    : {};
+                return state.settingsSchema;
             } else {
                 throw new Error(data.error || 'Invalid schema data');
             }
@@ -164,18 +185,21 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Error loading settings schema:', error);
             showAlert('Failed to load settings schema', 'error');
             state.settingsSchema = {};
+            return {};
         }
     }
 
     // UI Rendering Functions
     function renderProfileSelects() {
+        if (!elements.idleProfileSelect || !elements.profileSelect) return;
+
         // Clear existing options
         elements.idleProfileSelect.innerHTML = '<option value="">Default</option>';
         elements.profileSelect.innerHTML = '<option value="">Default</option>';
 
         // Add idle profiles
         state.profiles
-            .filter(profile => profile.profile_type === 'idle')
+            .filter(profile => profile && profile.profile_type === 'idle')
             .forEach(profile => {
                 const option = document.createElement('option');
                 option.value = profile.id;
@@ -185,7 +209,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Add playlist profiles
         state.profiles
-            .filter(profile => profile.profile_type === 'playlist')
+            .filter(profile => profile && profile.profile_type === 'playlist')
             .forEach(profile => {
                 const option = document.createElement('option');
                 option.value = profile.id;
@@ -195,9 +219,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderProfileGrid() {
+        if (!elements.profilesGrid) return;
+        
         elements.profilesGrid.innerHTML = '';
         
         state.profiles.forEach(profile => {
+            if (!profile) return;
+            
             const card = document.createElement('div');
             card.className = 'profile-card';
             card.innerHTML = `
@@ -215,9 +243,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderPlaylistAssignments() {
+        if (!elements.playlistAssignments) return;
+        
         elements.playlistAssignments.innerHTML = '';
         
         state.playlists.forEach(playlist => {
+            if (!playlist) return;
+            
             const row = document.createElement('div');
             row.className = 'assignment-row';
             row.innerHTML = `
@@ -225,7 +257,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <select class="profile-select" data-playlist-id="${playlist.id}">
                     <option value="">Default</option>
                     ${state.profiles
-                        .filter(p => p.profile_type === 'playlist')
+                        .filter(p => p && p.profile_type === 'playlist')
                         .map(p => `<option value="${p.id}" 
                             ${state.assignments[playlist.id] === p.id ? 'selected' : ''}>
                             ${p.name}
@@ -263,6 +295,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderSettingsForm() {
+        if (!elements.settingsEditor) return;
+
         elements.settingsEditor.innerHTML = '';
 
         if (!state.settingsSchema || Object.keys(state.settingsSchema).length === 0) {
@@ -271,11 +305,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         for (const [key, setting] of Object.entries(state.settingsSchema)) {
+            if (!setting || typeof setting !== 'object') continue;
+
             const wrapper = document.createElement('div');
             wrapper.className = 'form-group';
 
             const label = document.createElement('label');
-            label.textContent = setting.label;
+            label.textContent = setting.label || key;
             label.htmlFor = `setting-${key}`;
             wrapper.appendChild(label);
 
@@ -285,26 +321,28 @@ document.addEventListener('DOMContentLoaded', () => {
             switch (setting.type) {
                 case 'select':
                     input = document.createElement('select');
-                    setting.options.forEach(opt => {
-                        const option = document.createElement('option');
-                        option.value = opt;
-                        option.textContent = opt;
-                        option.selected = opt === currentValue;
-                        input.appendChild(option);
-                    });
+                    if (Array.isArray(setting.options)) {
+                        setting.options.forEach(opt => {
+                            const option = document.createElement('option');
+                            option.value = opt;
+                            option.textContent = opt;
+                            option.selected = opt === currentValue;
+                            input.appendChild(option);
+                        });
+                    }
                     break;
 
                 case 'boolean':
                     input = document.createElement('input');
                     input.type = 'checkbox';
-                    input.checked = currentValue;
+                    input.checked = Boolean(currentValue);
                     break;
 
                 case 'range':
                     input = document.createElement('input');
                     input.type = 'range';
-                    input.min = setting.min;
-                    input.max = setting.max;
+                    input.min = setting.min || 0;
+                    input.max = setting.max || 100;
                     input.step = setting.step || 1;
                     input.value = currentValue;
 
@@ -320,7 +358,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 default:
                     input = document.createElement('input');
                     input.type = 'text';
-                    input.value = currentValue;
+                    input.value = currentValue || '';
             }
 
             input.id = `setting-${key}`;
@@ -364,7 +402,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function handleApplyIdleProfile() {
-        const profileId = elements.idleProfileSelect.value;
+        const profileId = elements.idleProfileSelect?.value;
         if (!profileId) return;
 
         try {
@@ -391,8 +429,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function handleAssignProfile() {
-        const playlistId = elements.playlistSelect.value;
-        const profileId = elements.profileSelect.value || null;
+        const playlistId = elements.playlistSelect?.value;
+        const profileId = elements.profileSelect?.value || null;
 
         if (!playlistId) {
             return showAlert('Please select a playlist', 'warning');
@@ -425,7 +463,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function handleSaveAssignment(e) {
         const playlistId = e.target.dataset.playlistId;
         const select = document.querySelector(`.profile-select[data-playlist-id="${playlistId}"]`);
-        const profileId = select.value;
+        const profileId = select?.value;
 
         try {
             const response = await fetch('/api/profiles/assign', {
@@ -451,8 +489,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function handleSaveProfile() {
-        const name = elements.profileNameInput.value.trim();
-        const type = elements.profileTypeSelect.value;
+        const name = elements.profileNameInput?.value.trim();
+        const type = elements.profileTypeSelect?.value;
 
         if (!name) {
             return showAlert('Please enter profile name', 'warning');
@@ -487,7 +525,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function handleEditProfile(e) {
         const profileId = e.target.dataset.id;
-        const profile = state.profiles.find(p => p.id == profileId);
+        const profile = state.profiles.find(p => p && p.id == profileId);
         
         if (profile) {
             elements.profileNameInput.value = profile.name;
@@ -555,11 +593,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // Utility Functions
     function collectSettingsFromForm() {
         const settings = {};
-        const inputs = elements.settingsEditor.querySelectorAll('[data-setting-key]');
+        const inputs = elements.settingsEditor?.querySelectorAll('[data-setting-key]') || [];
 
         inputs.forEach(input => {
             const key = input.dataset.settingKey;
-            settings[key] = input.type === 'checkbox' ? input.checked : input.value;
+            if (key) {
+                settings[key] = input.type === 'checkbox' ? input.checked : input.value;
+            }
         });
 
         return settings;
