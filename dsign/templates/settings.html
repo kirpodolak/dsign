@@ -6,6 +6,27 @@
 
 {% block content %}
 <div class="settings-container">
+    <!-- Current Settings Section -->
+    <div class="settings-panel current-settings-panel">
+        <h2>Current Settings</h2>
+        <div id="current-profile-indicator" class="profile-indicator">
+            {% if current_profile %}
+            <p>Current Profile: <strong>{{ current_profile.name }}</strong></p>
+            <p>Type: <strong>{{ current_profile.profile_type }}</strong></p>
+            {% else %}
+            <p>Using default settings</p>
+            {% endif %}
+        </div>
+        <div id="current-settings-display" class="settings-grid">
+            <!-- Current settings will be inserted here -->
+        </div>
+        
+        <!-- MPV Settings Form -->
+        <form id="mpv-settings-form">
+            <!-- Will be populated dynamically -->
+        </form>
+    </div>
+
     <!-- Profile Management Section -->
     <div class="settings-panel">
         <h2>Profile Management</h2>
@@ -82,27 +103,6 @@
             </select>
             <button id="apply-idle-profile" class="submit-btn">Apply</button>
         </div>
-    </div>
-    
-    <!-- Current Settings Section -->
-    <div class="settings-panel current-settings-panel">
-        <h2>Current Settings</h2>
-        <div id="current-profile-indicator" class="profile-indicator">
-            {% if current_profile %}
-            <p>Current Profile: <strong>{{ current_profile.name }}</strong></p>
-            <p>Type: <strong>{{ current_profile.profile_type }}</strong></p>
-            {% else %}
-            <p>Using default settings</p>
-            {% endif %}
-        </div>
-        <div id="current-settings-display" class="settings-grid">
-            <!-- Current settings will be inserted here -->
-        </div>
-        
-        <!-- MPV Settings Form -->
-        <form id="mpv-settings-form">
-            <!-- Will be populated dynamically -->
-        </form>
     </div>
 </div>
 
