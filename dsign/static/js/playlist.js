@@ -8,10 +8,13 @@ const saveBtn = document.getElementById('save-playlist');
 
 async function loadMediaFiles() {
   try {
-    const files = await fetchAPI(`/api/media/files?playlist_id=${playlistId}`);
+    if (!playlistId) {
+      throw new Error('Playlist ID is missing in URL');
+    }
+    const files = await fetchAPI(`media/files?playlist_id=${playlistId}`);
     renderFileTable(files);
   } catch (error) {
-    showAlert('Failed to load media files', 'error');
+    showAlert('error', 'Ошибка', 'Не удалось загрузить медиафайлы: ' + error.message);
   }
 }
 
