@@ -1,4 +1,4 @@
-import { fetchAPI } from './utils/api.js';
+import fetchAPI from './utils/api.js';
 import { showAlert } from './utils/alerts.js';
 import { toggleButtonState } from './utils/helpers.js';
 
@@ -22,10 +22,16 @@ function renderFileTable(files) {
     row.innerHTML = `
       <td>${index + 1}</td>
       <td><input type="checkbox" class="include-checkbox" data-id="${file.id}" ${file.included ? 'checked' : ''}></td>
-      <td><img src="/media/${file.filename}" alt="Preview" style="height: 40px"></td>
+      <td>
+        ${file.is_video ? 
+          `<img src="/media/${file.filename}" alt="Preview" class="file-preview" onerror="this.src='/static/images/default-preview.jpg'">` :
+          `<div class="file-icon">📄</div>`
+        }
+      </td>
       <td>${file.filename}</td>
       <td>
-        <input type="number" class="duration-input" data-id="${file.id}" value="${file.duration}" min="1" ${file.is_video ? 'readonly' : ''}>
+        <input type="number" class="duration-input" data-id="${file.id}" 
+               value="${file.duration || 10}" min="1" ${file.is_video ? 'readonly' : ''}>
       </td>
     `;
     fileListEl.appendChild(row);
