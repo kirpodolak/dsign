@@ -74,35 +74,44 @@
 
   // Load media files from server
   async function loadMediaFiles() {
-    try {
-      const response = await fetch('/api/media/files');
-      
-      if (!response.ok) {
-        throw new Error(`Server returned ${response.status} status`);
+      try {
+          // Используем стандартный fetch с явным указанием параметров
+          const url = '/api/media/files?playlist_id=all';
+        
+          const response = await fetch(url, {
+              headers: {
+                  'Content-Type': 'application/json',
+                  'Accept': 'application/json'
+              },
+              credentials: 'include'
+          });
+        
+          if (!response.ok) {
+              throw new Error(`Server returned ${response.status} status`);
+          }
+        
+          const data = await response.json();
+        
+          if (data?.success && Array.isArray(data.files)) {
+              currentFiles = data.files.map(file => ({
+                  name: file.filename || 'unnamed',
+                  type: getFileExtension(file.filename),
+                  date: file.uploadDate || file.modified || Date.now(),
+                  size: file.size || 0,
+                  path: `/api/media/${file.filename}`,
+                  mimetype: file.mimetype || null,
+                  dimensions: file.dimensions || null
+              }));
+              renderGallery(currentFiles);
+          } else {
+              throw new Error(data?.error || 'Invalid response format');
+          }
+      } catch (error) {
+          console.error('Failed to load media files:', error);
+          if (window.App?.Alerts?.show) {
+              window.App.Alerts.show(`Error loading files: ${error.message}`, 'error');
+          }
       }
-      
-      const data = await response.json();
-      
-      if (data?.success && Array.isArray(data.files)) {
-        currentFiles = data.files.map(file => ({
-          name: file.filename || 'unnamed',
-          type: getFileExtension(file.filename),
-          date: file.uploadDate || file.modified || Date.now(),
-          size: file.size || 0,
-          path: `/api/media/${file.filename}`, // Fixed path
-          mimetype: file.mimetype || null,
-          dimensions: file.dimensions || null
-        }));
-        renderGallery(currentFiles);
-      } else {
-        throw new Error(data?.error || 'Invalid response format');
-      }
-    } catch (error) {
-      console.error('Failed to load media files:', error);
-      if (window.App?.Alerts?.show) {
-        window.App.Alerts.show(`Error loading files: ${error.message}`, 'error');
-      }
-    }
   }
 
   // Filter and sort files
