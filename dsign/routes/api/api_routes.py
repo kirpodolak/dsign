@@ -508,7 +508,7 @@ def init_api_routes(api_bp, services):
                 "success": False,
                 "error": str(e)
             }), 500
-
+            
     # ======================
     # Media File Handling (/api/media)
     # ======================
@@ -516,6 +516,7 @@ def init_api_routes(api_bp, services):
     @login_required
     def get_media_files():
         try:
+            playlist_id = request.args.get('playlist_id')
             files = file_service.get_media_files()
             return jsonify({
                 "success": True,
