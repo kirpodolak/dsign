@@ -517,7 +517,14 @@ def init_api_routes(api_bp, services):
     def get_media_files():
         try:
             playlist_id = request.args.get('playlist_id')
-            files = file_service.get_media_files()
+        
+            # Если playlist_id='all' или не указан - возвращаем все файлы
+            if playlist_id == 'all' or not playlist_id:
+                files = file_service.get_media_files()
+            else:
+                # Иначе только файлы для конкретного плейлиста
+                files = file_service.get_media_files(playlist_id=playlist_id)
+            
             return jsonify({
                 "success": True,
                 "files": files,
