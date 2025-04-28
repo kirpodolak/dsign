@@ -85,3 +85,19 @@ def init_main_routes(main_bp: Blueprint, settings_service: SettingsService):
     def playlist():
         """Рендеринг страницы плейлистов"""
         return render_template('playlist.html')
+        
+    @main_bp.route('/playlist/<int:playlist_id>')
+    @login_required
+    def edit_playlist(playlist_id):
+        """Render playlist editing page"""
+        try:
+            playlist = db.session.query(Playlist).get(playlist_id)
+            if not playlist:
+                flash('Playlist not found', 'error')
+                return redirect(url_for('main.index'))
+
+            return render_template('playlist.html', playlist_id=playlist_id)
+        except Exception as e:
+            current_app.logger.error(f"Error loading playlist {playlist_id}: {str(e)}")
+            flash('Error loading playlist', 'error')
+            return redirect(url_for('main.index'))
