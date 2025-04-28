@@ -4,8 +4,20 @@ let authToken = null;
 
 async function fetchAPI(endpoint, options = {}) {
     try {
-        const url = endpoint.startsWith('http') ? endpoint : `${API_BASE_URL}/${endpoint.replace(/^\//, '')}`;
+        // Build base URL
+        let url = endpoint.startsWith('http') ? endpoint : `${API_BASE_URL}/${endpoint.replace(/^\//, '')}`;
         
+        // Handle query parameters
+        if (options.query) {
+            const queryParams = new URLSearchParams();
+            for (const [key, value] of Object.entries(options.query)) {
+                if (value !== undefined && value !== null) {
+                    queryParams.append(key, value);
+                }
+            }
+            url += (url.includes('?') ? '&' : '?') + queryParams.toString();
+        }
+
         const headers = {
             'Content-Type': 'application/json',
             'Accept': 'application/json',
