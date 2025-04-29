@@ -17,11 +17,11 @@
         <h3>MPV Player Preview</h3>
         <div class="mpv-preview-container">
             <img id="mpv-preview-image" 
-                 src="{{ url_for('api.serve_media', filename='on_air_screen.jpg') }}" 
+                 src="{{ url_for('api.get_mpv_screenshot') }}" 
                  class="mpv-preview-image"
                  style="display: none;"
                  onload="this.style.display='block'"
-                 onerror="this.onerror=null;this.src='{{ url_for('api.serve_media', filename='on_air_screen.jpg') }}?t='+Date.now()">
+                 onerror="this.onerror=null;this.src='{{ url_for('static', filename='images/default-preview.jpg') }}?t='+Date.now()">
             <button id="refresh-mpv-preview" class="mpv-refresh-btn" title="Refresh Preview">
                 <i class="fas fa-sync-alt"></i>
             </button>
