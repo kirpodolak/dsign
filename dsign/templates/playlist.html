@@ -7,6 +7,12 @@
 {% block content %}
 <h1>Edit Playlist</h1>
 <div class="playlist-container">
+    <!-- Сообщение для пустого плейлиста -->
+    <div id="empty-playlist-message" class="empty-message" style="display: none;">
+        <p>This playlist is currently empty.</p>
+        <p>Select files from the gallery below and click "Save Playlist".</p>
+    </div>
+
     <table class="media-table">
         <thead>
             <tr>
