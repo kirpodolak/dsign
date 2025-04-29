@@ -1,7 +1,18 @@
 (function() {
     // Кэш для превью медиафайлов
     const previewCache = new Map();
-    
+    const imageCache = new Map();
+	
+	function getCachedImage(url) {
+        if (imageCache.has(url)) {
+            return imageCache.get(url);
+        }
+        const img = new Image();
+        img.src = url;
+        imageCache.set(url, img);
+        return img;
+    }
+	
     // Получаем ID плейлиста из URL
     function getPlaylistId() {
         const params = new URLSearchParams(window.location.search);
@@ -142,51 +153,49 @@
     // Оптимизированный рендеринг таблицы файлов
     async function renderFileTable(files) {
         if (!fileListEl) return;
-        
-        const emptyMessage = document.getElementById('empty-playlist-message');
     
+        const emptyMessage = document.getElementById('empty-playlist-message');
+
         if (!files || files.length === 0) {
             fileListEl.innerHTML = '';
             emptyMessage.style.display = 'block';
             return;
         }
-    
+
         emptyMessage.style.display = 'none';
+
+        // Создаем временный элемент для вставки HTML
+        const fragment = document.createDocumentFragment();
     
-        // Сначала рендерим скелетон для лучшего UX
-        fileListEl.innerHTML = files.map((_, index) => `
-            <tr>
-                <td>${index + 1}</td>
-                <td><input type="checkbox" class="include-checkbox" disabled></td>
-                <td><div class="skeleton-preview"></div></td>
-                <td><div class="skeleton-text"></div></td>
-                <td><input type="number" class="duration-input" disabled></td>
-            </tr>
-        `).join('');
-    
-        // Затем асинхронно заполняем данные
         for (const [index, file] of files.entries()) {
-            const row = fileListEl.children[index];
-            if (!row) continue;
-            
-            const previewUrl = await loadPreview(file);
-            
+            const row = document.createElement('tr');
+        
+            // Для видео используем эндпоинт API для превью
+            const previewUrl = file.is_video ? 
+                `/api/media/thumbnail/${encodeURIComponent(file.filename)}` : 
+                '/static/images/default-file-icon.png';
+
             row.innerHTML = `
                 <td>${index + 1}</td>
                 <td><input type="checkbox" class="include-checkbox" data-id="${file.id}" ${file.included ? 'checked' : ''}></td>
                 <td>
-                    ${file.is_video ? 
-                        `<img src="${previewUrl}" alt="Preview" class="file-preview img-thumbnail">` :
-                        `<div class="file-icon">📄</div>`
-                    }
+                    <img src="${previewUrl}" 
+                         alt="Preview" 
+                         class="file-preview ${file.is_video ? 'video-thumbnail' : 'file-icon'}"
+                         onerror="this.onerror=null;this.src='/static/images/default-preview.jpg?v='+Date.now();this.style.display='block'"
                 </td>
                 <td>${file.filename}</td>
                 <td>
-                    <input type="number" class="duration-input" data-id="${file.id}" 
+                     <input type="number" class="duration-input" data-id="${file.id}" 
                            value="${file.duration || 10}" min="1" ${file.is_video ? 'readonly' : ''}>
                 </td>
             `;
+        
+            fragment.appendChild(row);
         }
+
+        fileListEl.innerHTML = '';
+        fileListEl.appendChild(fragment);
     }
 
     // Оптимизированное сохранение плейлиста
@@ -253,8 +262,8 @@
                 loadMediaFiles();
                 
                 // Добавляем обработчик для инвалидации кэша при изменении файлов
-                if (window.App?.Sockets) {
-                    window.App.Sockets.on('playlist_updated', (data) => {
+                if (window.App?.Sockets?.socket) {
+                    window.App.Sockets.socket.on('playlist_updated', (data) => {
                         if (data.playlist_id == playlistId) {
                             sessionStorage.removeItem(`media-files-${playlistId}`);
                             loadMediaFiles();
