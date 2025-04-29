@@ -90,9 +90,12 @@
         handleError(error) {
             console.error('WebSocket connection error:', error);
             this.reconnectAttempts++;
-            
-            if (this.reconnectAttempts >= CONFIG.MAX_RETRIES && window.App.Alerts?.showError) {
-                window.App.Alerts.showError('Connection Error', 'Failed to establish real-time connection');
+    
+            if (this.reconnectAttempts >= CONFIG.MAX_RETRIES) {
+                if (window.App.Alerts?.showError) {
+                    window.App.Alerts.showError('Connection Error', 'Real-time updates disabled. Page will refresh.');
+                }
+                setTimeout(() => location.reload(), 5000);
             }
         }
 
