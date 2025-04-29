@@ -546,13 +546,34 @@ def init_api_routes(api_bp, services):
         try:
             playlist_id = request.args.get('playlist_id')
         
-            # Если playlist_id='all' или не указан - возвращаем все файлы
-            if playlist_id == 'all' or not playlist_id:
+            # Если playlist_id не указан - возвращаем все файлы
+            if not playlist_id:
                 files = file_service.get_media_files()
             else:
-                # Иначе только файлы для конкретного плейлиста
-                files = file_service.get_media_files(playlist_id=playlist_id)
+                # Получаем файлы для конкретного плейлиста
+                playlist = db.session.query(Playlist).get(playlist_id)
+                if not playlist:
+                    return jsonify({
+                        "success": False,
+                        "error": "Playlist not found"
+                    }), 404
             
+                # Получаем все файлы из галереи
+                all_files = file_service.get_media_files()
+            
+                # Получаем файлы, привязанные к плейлисту
+                playlist_files = {f.file_name for f in playlist.files}
+            
+                # Добавляем флаг, принадлежит ли файл плейлисту
+                files = []
+                for file in all_files:
+                    file_data = {
+                        **file,
+                        'included': file['filename'] in playlist_files,
+                         'is_video': file['type'] in {'mp4', 'avi'}
+                    }
+                    files.append(file_data)
+        
             return jsonify({
                 "success": True,
                 "files": files,
