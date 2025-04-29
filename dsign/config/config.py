@@ -23,6 +23,7 @@ class Config:
     STATIC_FOLDER = str(BASE_DIR / 'static')
     IDLE_LOGO = "idle_logo.jpg"
     DEFAULT_LOGO = 'idle_logo.jpg'
+    DEFAULT_LOGO = IDLE_LOGO
     SCREENSHOT_DIR = '/var/lib/dsign/media'
     DEFAULT_LOGO_PATH = '/var/lib/dsign/media/idle_logo.jpg'
     THUMBNAIL_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbnails')
