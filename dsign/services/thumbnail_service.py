@@ -1,13 +1,17 @@
-import os
-import logging
-import subprocess
-import time
+from typing import Optional
 from pathlib import Path
-from typing import Optional, Tuple
+import logging
 from threading import Lock
+import subprocess
 from PIL import Image, UnidentifiedImageError
 from flask import current_app
-from dsign.config import UPLOAD_FOLDER, THUMBNAIL_FOLDER, THUMBNAIL_URL, DEFAULT_LOGO  # Измененный импорт
+import time
+from dsign.config.config import (
+    UPLOAD_FOLDER,
+    THUMBNAIL_FOLDER,
+    THUMBNAIL_URL,
+    IDLE_LOGO as DEFAULT_LOGO
+)
 
 class ThumbnailService:
     def __init__(
@@ -16,30 +20,19 @@ class ThumbnailService:
         thumbnail_folder: str = THUMBNAIL_FOLDER,
         thumbnail_url: str = THUMBNAIL_URL,
         default_thumbnail: str = DEFAULT_LOGO,
-        thumbnail_size: Tuple[int, int] = (300, 300),
-        ffmpeg_timeout: int = 15
+        thumbnail_size: tuple = (300, 300),
+        ffmpeg_timeout: int = 15,
+        logger=None  # Добавляем параметр logger
     ):
-        """
-        Инициализация сервиса миниатюр с интеграцией конфигурации.
-
-        Args:
-            upload_folder: Папка с оригинальными файлами (из конфига)
-            thumbnail_folder: Папка для хранения миниатюр (из конфига)
-            thumbnail_url: Базовый URL для доступа к миниатюрам (из конфига)
-            default_thumbnail: Имя файла с дефолтной миниатюрой (из конфига)
-            thumbnail_size: Размер генерируемых миниатюр (ширина, высота)
-            ffmpeg_timeout: Таймаут генерации видео-превью в секундах
-        """
         self.upload_folder = Path(upload_folder)
         self.thumbnail_folder = Path(thumbnail_folder)
         self.thumbnail_url = thumbnail_url
         self.thumbnail_size = thumbnail_size
         self.default_thumbnail = default_thumbnail
         self.ffmpeg_timeout = ffmpeg_timeout
+        self.logger = logger or logging.getLogger(__name__)  # Инициализируем логгер
         self.lock = Lock()
         self.ffmpeg_available = self._check_ffmpeg()
-        
-        # Создание необходимых директорий
         self._ensure_dirs()
         
         current_app.logger.info(
