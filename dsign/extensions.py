@@ -2,6 +2,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from flask_login import LoginManager
 from flask_socketio import SocketIO
+from flask import request
 import os
 import logging
 from typing import Dict, Any
@@ -65,6 +66,9 @@ def init_extensions(app) -> Dict[str, Any]:
                     raise RuntimeError("MPV failed to initialize")
                 
                 logger.info("MPV initialized and ready")
+                
+        # 6. Настройка кэширования статических файлов
+        configure_static_cache(app)
         
         logger.info("All extensions initialized successfully")
         return services
@@ -109,5 +113,14 @@ def _shutdown_session(exception=None) -> None:
             db.session.remove()
     except Exception as e:
         logging.getLogger(__name__).error(f"Error during session shutdown: {str(e)}")
+        
+def configure_static_cache(app):
+    """Настройка кэширования статических файлов"""
+    @app.after_request
+    def add_cache_headers(response):
+        if request.path.startswith('/static/'):
+            response.cache_control.max_age = 86400  # 1 день
+            response.cache_control.public = True
+        return response
 
-__all__ = ['db', 'bcrypt', 'login_manager', 'socketio', 'init_extensions']
+__all__ = ['db', 'bcrypt', 'login_manager', 'socketio', 'init_extensions', 'configure_static_cache']
