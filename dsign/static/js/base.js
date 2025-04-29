@@ -20,7 +20,7 @@
 
     // Конфигурация приложения
     const CONFIG = {
-        AUTH_CHECK_INTERVAL: 30000,
+        AUTH_CHECK_INTERVAL: 60000,
         MAX_API_RETRIES: 3,
         INIT_RETRY_DELAY: 100
     };
@@ -71,13 +71,20 @@
                 const response = await window.App.API.fetch('/auth/api/check-auth', {
                     headers: { 'Accept': 'application/json' }
                 });
+        
+                if (!response.ok) {
+                    this.clearAuthCache();
+                    return false;
+                }
+        
                 const data = await response.json();
                 const isAuthenticated = data?.authenticated === true;
-                
+        
                 this.setCachedAuth(isAuthenticated);
                 return isAuthenticated;
             } catch (error) {
                 console.debug('Auth check failed:', error);
+                this.clearAuthCache();
                 return false;
             }
         },
@@ -107,16 +114,20 @@
 
     // Обработка аутентификации
     const handleAuthFlow = async () => {
+        if (window.App.isNavigationInProgress) return true;
+    
         const isLoginPage = window.location.pathname.includes('/auth/login');
         const isAuthenticated = await authService.checkAuth();
 
         if (!isAuthenticated && !isLoginPage) {
+            window.App.isNavigationInProgress = true;
             const redirect = encodeURIComponent(window.location.pathname + window.location.search);
             window.location.href = `/auth/login?redirect=${redirect}`;
             return false;
         }
 
         if (isAuthenticated && isLoginPage) {
+            window.App.isNavigationInProgress = true;
             const redirectTo = new URLSearchParams(window.location.search).get('redirect') || '/';
             window.location.href = redirectTo;
             return false;
