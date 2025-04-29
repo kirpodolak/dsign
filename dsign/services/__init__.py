@@ -35,7 +35,7 @@ class ServiceFactory:
             thumbnail_folder=thumbnail_folder,
             thumbnail_url=thumbnail_url,
             default_thumbnail=default_thumbnail,
-            logger=logger or logging.getLogger(__name__)
+            logger=logger
         )
 
     @staticmethod
@@ -86,7 +86,7 @@ def init_services(config: Dict[str, Any], db, socketio=None, logger: logging.Log
         ),
         'thumbnail_service': ServiceFactory.create_thumbnail_service(
             upload_folder=upload_folder,
-            thumbnail_folder=config.get('THUMBNAIL_FOLDER', str(Path(upload_folder) / 'thumbnails'),
+            thumbnail_folder=config.get('THUMBNAIL_FOLDER', str(Path(upload_folder) / 'thumbnails')),
             thumbnail_url=config.get('THUMBNAIL_URL', '/media/thumbnails'),
             default_thumbnail=config.get('DEFAULT_LOGO', 'default-preview.jpg'),
             logger=logger
@@ -131,5 +131,5 @@ __all__ = [
     'SettingsService',
     'AuthService',
     'SocketService',
-    'ThumbnailService'  # Добавляем в экспортируемые классы
+    'ThumbnailService'
 ]
