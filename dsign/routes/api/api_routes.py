@@ -508,7 +508,35 @@ def init_api_routes(api_bp, services):
                 "success": False,
                 "error": str(e)
             }), 500
-            
+    
+    @api_bp.route('/playlists/<int:playlist_id>/files', methods=['POST'])
+    @login_required
+    def update_playlist_files(playlist_id):
+        try:
+            data = request.get_json()
+            if not data or 'files' not in data:
+                return jsonify({"success": False, "error": "Missing files data"}), 400
+
+            # Проверяем существование плейлиста
+            playlist = db.session.query(Playlist).get(playlist_id)
+            if not playlist:
+                return jsonify({"success": False, "error": "Playlist not found"}), 404
+
+            # Обновляем файлы плейлиста
+            result = playlist_service.update_playlist_files(
+                playlist_id,
+                data.get('files', [])
+            )
+
+            if socketio:
+                socketio.emit('playlist_updated', {'playlist_id': playlist_id})
+
+            return jsonify({"success": True, "updated": result})
+        
+        except Exception as e:
+            current_app.logger.error(f"Error updating playlist files: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
+    
     # ======================
     # Media File Handling (/api/media)
     # ======================
