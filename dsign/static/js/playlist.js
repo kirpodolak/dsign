@@ -1,4 +1,7 @@
 (function() {
+    // Кэш для превью медиафайлов
+    const previewCache = new Map();
+    
     // Получаем ID плейлиста из URL
     function getPlaylistId() {
         const params = new URLSearchParams(window.location.search);
@@ -21,11 +24,14 @@
     const fileListEl = document.getElementById('file-list');
     const saveBtn = document.getElementById('save-playlist');
 
-    // Простая реализация showAlert если глобальная не доступна
+    // Улучшенная реализация showAlert
     const showAlert = window.App?.Alerts?.show || function(type, title, message) {
         const alertDiv = document.createElement('div');
-        alertDiv.className = `alert alert-${type}`;
-        alertDiv.innerHTML = `<strong>${title}</strong> ${message}`;
+        alertDiv.className = `alert alert-${type} fade show`;
+        alertDiv.innerHTML = `
+            <strong>${title}</strong> ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+        `;
         document.body.prepend(alertDiv);
         setTimeout(() => alertDiv.remove(), 5000);
     };
@@ -38,6 +44,12 @@
             '<i class="fas fa-save"></i> Сохранить плейлист';
     }
 
+    // Функция для получения CSRF токена
+    function getCSRFToken() {
+        return document.querySelector('meta[name="csrf-token"]')?.content || '';
+    }
+
+    // Оптимизированная загрузка медиафайлов с кэшированием
     async function loadMediaFiles() {
         if (!playlistId) {
             showAlert('error', 'Ошибка', 'Неверный ID плейлиста');
@@ -45,31 +57,40 @@
         }
 
         try {
+            const cacheKey = `media-files-${playlistId}`;
+            const cachedData = sessionStorage.getItem(cacheKey);
+            
+            // Если есть кэшированные данные и они не старше 1 минуты
+            if (cachedData) {
+                const { timestamp, data } = JSON.parse(cachedData);
+                if (Date.now() - timestamp < 60000) {
+                    renderFileTable(data.files);
+                    return;
+                }
+            }
+
             const response = await fetch(`/api/media/files?playlist_id=${playlistId}`, {
                 headers: {
                     'Content-Type': 'application/json',
-                    'Accept': 'application/json'
+                    'Accept': 'application/json',
+                    'Cache-Control': 'no-cache'
                 },
                 credentials: 'include'
             });
         
             if (!response.ok) {
-                // Try to get error details from response
-                let errorMsg = `Ошибка сервера: ${response.status}`;
-                try {
-                    const errorData = await response.json();
-                    if (errorData.error) {
-                        errorMsg = errorData.error;
-                    }
-                } catch (e) {
-                    console.warn('Could not parse error response', e);
-                }
-                throw new Error(errorMsg);
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.error || `Ошибка сервера: ${response.status}`);
             }
         
             const data = await response.json();
         
             if (data?.success) {
+                // Кэшируем полученные данные
+                sessionStorage.setItem(cacheKey, JSON.stringify({
+                    timestamp: Date.now(),
+                    data
+                }));
                 renderFileTable(data.files);
             } else {
                 throw new Error(data?.error || 'Неверный формат ответа');
@@ -80,8 +101,48 @@
         }
     }
 
-    function renderFileTable(files) {
-        const fileListEl = document.getElementById('file-list');
+    // Функция для загрузки превью с кэшированием
+    async function loadPreview(file) {
+        const cacheKey = `preview-${file.id}`;
+        
+        if (previewCache.has(cacheKey)) {
+            return previewCache.get(cacheKey);
+        }
+
+        try {
+            const previewUrl = file.is_video ? 
+                `/media/${file.filename}?thumb=1` : 
+                '/static/images/default-preview.jpg';
+            
+            // Для изображений сразу возвращаем URL, для видео создаем объект Image
+            if (!file.is_video) {
+                previewCache.set(cacheKey, previewUrl);
+                return previewUrl;
+            }
+
+            return new Promise((resolve) => {
+                const img = new Image();
+                img.src = previewUrl;
+                img.onload = () => {
+                    previewCache.set(cacheKey, previewUrl);
+                    resolve(previewUrl);
+                };
+                img.onerror = () => {
+                    const fallback = '/static/images/default-preview.jpg';
+                    previewCache.set(cacheKey, fallback);
+                    resolve(fallback);
+                };
+            });
+        } catch (error) {
+            console.error('Ошибка загрузки превью:', error);
+            return '/static/images/default-preview.jpg';
+        }
+    }
+
+    // Оптимизированный рендеринг таблицы файлов
+    async function renderFileTable(files) {
+        if (!fileListEl) return;
+        
         const emptyMessage = document.getElementById('empty-playlist-message');
     
         if (!files || files.length === 0) {
@@ -92,14 +153,30 @@
     
         emptyMessage.style.display = 'none';
     
-        fileListEl.innerHTML = files.map((file, index) => `
+        // Сначала рендерим скелетон для лучшего UX
+        fileListEl.innerHTML = files.map((_, index) => `
             <tr>
+                <td>${index + 1}</td>
+                <td><input type="checkbox" class="include-checkbox" disabled></td>
+                <td><div class="skeleton-preview"></div></td>
+                <td><div class="skeleton-text"></div></td>
+                <td><input type="number" class="duration-input" disabled></td>
+            </tr>
+        `).join('');
+    
+        // Затем асинхронно заполняем данные
+        for (const [index, file] of files.entries()) {
+            const row = fileListEl.children[index];
+            if (!row) continue;
+            
+            const previewUrl = await loadPreview(file);
+            
+            row.innerHTML = `
                 <td>${index + 1}</td>
                 <td><input type="checkbox" class="include-checkbox" data-id="${file.id}" ${file.included ? 'checked' : ''}></td>
                 <td>
                     ${file.is_video ? 
-                        `<img src="/media/${file.filename}?thumb=1" alt="Preview" class="file-preview" 
-                              onerror="this.src='/static/images/default-preview.jpg'">` :
+                        `<img src="${previewUrl}" alt="Preview" class="file-preview img-thumbnail">` :
                         `<div class="file-icon">📄</div>`
                     }
                 </td>
@@ -108,10 +185,11 @@
                     <input type="number" class="duration-input" data-id="${file.id}" 
                            value="${file.duration || 10}" min="1" ${file.is_video ? 'readonly' : ''}>
                 </td>
-            </tr>
-        `).join('');
+            `;
+        }
     }
 
+    // Оптимизированное сохранение плейлиста
     async function savePlaylist() {
         if (!playlistId) {
             showAlert('error', 'Ошибка', 'Неверный ID плейлиста');
@@ -121,41 +199,42 @@
         toggleButtonState(saveBtn, true);
     
         try {
-            // Собираем выбранные файлы
-            const selectedFiles = [];
-            document.querySelectorAll('.file-item').forEach(item => {
-                const checkbox = item.querySelector('.file-checkbox');
-                if (checkbox?.checked) {
-                    const durationInput = item.querySelector('.duration-input');
-                    selectedFiles.push({
-                        id: item.dataset.fileId,
+            // Собираем данные более эффективно
+            const selectedFiles = Array.from(document.querySelectorAll('.include-checkbox:checked'))
+                .map(checkbox => {
+                    const fileId = checkbox.dataset.id;
+                    const durationInput = document.querySelector(`.duration-input[data-id="${fileId}"]`);
+                    return {
+                        id: fileId,
                         duration: durationInput ? parseInt(durationInput.value) || 10 : 10
-                    });
-                }
-            });
+                    };
+                });
 
             const response = await fetch(`/api/playlists/${playlistId}/files`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-CSRFToken': getCSRFToken()
+                    'X-CSRFToken': getCSRFToken(),
+                    'X-Requested-With': 'XMLHttpRequest'
                 },
-                body: JSON.stringify({
-                    files: selectedFiles
-                })
+                body: JSON.stringify({ files: selectedFiles })
             });
 
+            const result = await response.json();
+            
             if (!response.ok) {
-                const error = await response.json().catch(() => ({}));
-                throw new Error(error.message || 'Ошибка сервера');
+                throw new Error(result.error || 'Ошибка сервера');
             }
 
-            const result = await response.json();
             showAlert('success', 'Успех', 'Плейлист сохранен');
-        
-            // Обновляем состояние (если нужно)
-            if (window.App.Sockets) {
-                window.App.Sockets.emit('playlist_updated', {playlist_id: playlistId});
+            
+            // Очищаем кэш и обновляем данные
+            sessionStorage.removeItem(`media-files-${playlistId}`);
+            await loadMediaFiles();
+            
+            // Отправляем событие обновления через сокеты, если доступно
+            if (window.App?.Sockets) {
+                window.App.Sockets.emit('playlist_updated', { playlist_id: playlistId });
             }
         
         } catch (error) {
@@ -166,11 +245,28 @@
         }
     }
 
-    // Инициализация
-    if (fileListEl && saveBtn) {
-        saveBtn.addEventListener('click', savePlaylist);
-        document.addEventListener('DOMContentLoaded', loadMediaFiles);
-    } else {
-        console.error('Не найдены необходимые элементы DOM');
-    }
+    // Инициализация с обработкой ошибок
+    document.addEventListener('DOMContentLoaded', () => {
+        try {
+            if (fileListEl && saveBtn) {
+                saveBtn.addEventListener('click', savePlaylist);
+                loadMediaFiles();
+                
+                // Добавляем обработчик для инвалидации кэша при изменении файлов
+                if (window.App?.Sockets) {
+                    window.App.Sockets.on('playlist_updated', (data) => {
+                        if (data.playlist_id == playlistId) {
+                            sessionStorage.removeItem(`media-files-${playlistId}`);
+                            loadMediaFiles();
+                        }
+                    });
+                }
+            } else {
+                console.error('Не найдены необходимые элементы DOM');
+            }
+        } catch (error) {
+            console.error('Ошибка инициализации:', error);
+            showAlert('error', 'Ошибка', 'Не удалось загрузить плейлист');
+        }
+    });
 })();
