@@ -746,29 +746,33 @@ def init_api_routes(api_bp, services):
     @api_bp.route('/media/<path:filename>', methods=['GET'])
     def serve_media(filename):
         try:
-            # Validate filename
-            if not filename or not secure_filename(filename) == filename:
-                abort(400, description="Invalid filename")
+            # Проверяем запрос на миниатюру
+            is_thumb = 'thumb=1' in request.query_string.decode()
+        
+            if is_thumb:
+                # Получаем путь к миниатюре
+                thumb_path = file_service.get_media_thumbnail(filename)
+                if thumb_path:
+                    return send_from_directory(
+                        file_service.upload_folder,
+                        thumb_path,
+                        mimetype='image/jpeg',
+                        as_attachment=False
+                    )
+                # Если миниатюры нет - возвращаем дефолтное изображение
+                return send_from_directory(
+                    current_app.static_folder,
+                    'images/default-preview.jpg',
+                    mimetype='image/jpeg'
+                )
             
+            # Обычная обработка файла
             upload_folder = current_app.config.get('UPLOAD_FOLDER', '/var/lib/dsign/media')
             file_path = os.path.join(upload_folder, filename)
         
-            # Check if file exists and is within the upload folder
             if not os.path.exists(file_path) or not os.path.isfile(file_path):
-                current_app.logger.warning(f"File not found: {file_path}")
+                abort(404)
             
-                # Try static folder as fallback
-                static_path = os.path.join(current_app.config['STATIC_FOLDER'], 'images', filename)
-                if os.path.exists(static_path):
-                    return send_from_directory(
-                        os.path.dirname(static_path),
-                        os.path.basename(static_path),
-                        mimetype=None,
-                        as_attachment=False
-                    )
-            
-                abort(404, description="Media file not found")
-        
             return send_from_directory(
                 upload_folder,
                 filename,
@@ -778,7 +782,7 @@ def init_api_routes(api_bp, services):
             )
         except Exception as e:
             current_app.logger.error(f"Error serving media file: {str(e)}")
-            abort(404, description="Media file not available")
+            abort(404)
                 
     @api_bp.route('/media/mpv_screenshot', methods=['GET'])
     def get_mpv_screenshot():
