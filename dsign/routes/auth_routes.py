@@ -111,3 +111,11 @@ def init_auth_routes(auth_bp):
             'username': user.username,
             'is_admin': user.is_admin
         })
+        
+    @auth_bp.route('/api/socket-token')
+    @login_required
+    def get_socket_token():
+        return jsonify({
+            'token': generate_socket_token(current_user.id),
+            'expires': datetime.utcnow() + timedelta(minutes=5)
+        })
