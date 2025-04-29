@@ -24,14 +24,16 @@ class Config:
     IDLE_LOGO = "idle_logo.jpg"
     DEFAULT_LOGO = 'idle_logo.jpg'
     SCREENSHOT_DIR = '/var/lib/dsign/media'
-    SCREENSHOT_FILE = '/var/lib/dsign/media/mpv_screenshot.jpg'
     DEFAULT_LOGO_PATH = '/var/lib/dsign/media/idle_logo.jpg'
+    THUMBNAIL_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbnails')
+    THUMBNAIL_URL = '/media/thumbnails'  # URL-префикс для доступа к миниатюрам
     
     # Создаем директории, если они не существуют
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
     os.makedirs(STATIC_FOLDER, exist_ok=True)
+    os.makedirs(THUMBNAIL_FOLDER, exist_ok=True)
 
     # Настройки приложения
     SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey123")
@@ -88,6 +90,8 @@ ALLOWED_EXTENSIONS = config.ALLOWED_EXTENSIONS
 ALLOWED_LOGO_EXTENSIONS = config.ALLOWED_LOGO_EXTENSIONS
 MAX_CONTENT_LENGTH = config.MAX_CONTENT_LENGTH
 CORS_SUPPORTS_CREDENTIALS = config.CORS_SUPPORTS_CREDENTIALS
+THUMBNAIL_FOLDER = config.THUMBNAIL_FOLDER
+THUMBNAIL_URL = config.THUMBNAIL_URL
 
 __all__ = [
     'config',
@@ -103,4 +107,6 @@ __all__ = [
     'MAX_CONTENT_LENGTH',
     'CORS_SUPPORTS_CREDENTIALS',
     'BASE_DIR',
+    'THUMBNAIL_FOLDER',
+    'THUMBNAIL_URL',
 ]
