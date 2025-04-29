@@ -60,7 +60,7 @@ class FileService:
         has_valid_size = file_size <= self.MAX_LOGO_SIZE if file_size > 0 else True
         return has_valid_extension and has_valid_size
 
-    def get_media_files(self) -> List[dict]:
+    def get_media_files(self, playlist_id: Optional[int] = None) -> List[dict]:
         """Получение списка медиафайлов с метаданными"""
         try:
             files = []
