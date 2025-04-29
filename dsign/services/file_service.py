@@ -4,6 +4,8 @@ from werkzeug.utils import secure_filename
 from flask import send_from_directory
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from PIL import Image
+import io
 
 class FileService:
     ALLOWED_MEDIA_EXTENSIONS = {'jpg', 'jpeg', 'png', 'mp4', 'avi'}
@@ -11,6 +13,8 @@ class FileService:
     DEFAULT_LOGO = 'idle_logo.jpg'
     MAX_LOGO_SIZE = 2 * 1024 * 1024  # 2MB
     MAX_MEDIA_SIZE = 50 * 1024 * 1024  # 50MB
+    THUMBNAIL_CACHE = {}  # Классовый кэш для миниатюр
+    THUMBNAIL_SIZE = (200, 200)  # Размер миниатюры
 
     def __init__(self, upload_folder: str, logger: Optional[logging.Logger] = None):
         """
@@ -80,19 +84,33 @@ class FileService:
             self.logger.error(f"Failed to get media files: {str(e)}", exc_info=True)
             return []
 
-    def serve_media_file(self, filename: str):
-        """Отдача медиафайла с дополнительными заголовками"""
+    def serve_media_file(self, filename: str, thumb: bool = False):
+        """
+        Отдача медиафайла или его миниатюры
+        
+        Args:
+            filename: Имя файла
+            thumb: Если True - возвращает миниатюру
+        """
         try:
-            file_path = self.upload_folder / filename
-            if not file_path.exists():
+            if thumb:
+                thumb_path = self.get_media_thumbnail(filename)
+                if not thumb_path:
+                    raise FileNotFoundError(f"Thumbnail for {filename} not found")
+                return send_from_directory(
+                    os.path.dirname(thumb_path),
+                    os.path.basename(thumb_path))
+            
+            file_path = os.path.join(self.upload_folder, filename)
+            if not os.path.exists(file_path):
                 raise FileNotFoundError(f"File {filename} not found")
         
             # Добавляем заголовки с метаданными
-            stat = file_path.stat()
+            stat = os.stat(file_path)
             headers = {
                 'X-File-Size': str(stat.st_size),
                 'X-File-Modified': str(stat.st_mtime),
-                'X-File-Type': file_path.suffix.lower()[1:]
+                'X-File-Type': os.path.splitext(filename)[1][1:].lower()
             }
             return send_from_directory(
                 self.upload_folder,
@@ -204,3 +222,53 @@ class FileService:
         if logo_path.exists():
             return logo_path.stat().st_size
         return 0
+        
+    def get_media_thumbnail(self, filename: str) -> Optional[str]:
+        """
+        Получение пути к миниатюре медиафайла с кэшированием
+        
+        Args:
+            filename: Имя исходного файла
+            
+        Returns:
+            str: Путь к миниатюре или None если не удалось создать
+        """
+        # Проверка кэша
+        if filename in self.THUMBNAIL_CACHE:
+            cached_path = self.THUMBNAIL_CACHE[filename]
+            if Path(cached_path).exists():
+                return cached_path
+            del self.THUMBNAIL_CACHE[filename]  # Удаляем из кэша если файл пропал
+
+        try:
+            file_path = os.path.join(self.upload_folder, filename)
+            if not os.path.exists(file_path):
+                return None
+
+            # Для видео возвращаем оригинальный путь (превью будет генерироваться на клиенте)
+            if filename.lower().endswith(('.mp4', '.avi')):
+                return file_path
+
+            # Создаем папку для миниатюр если ее нет
+            thumb_dir = os.path.join(self.upload_folder, 'thumbnails')
+            os.makedirs(thumb_dir, exist_ok=True)
+
+            thumb_path = os.path.join(thumb_dir, f"thumb_{filename}")
+            
+            # Если миниатюра уже существует - возвращаем ее
+            if os.path.exists(thumb_path):
+                self.THUMBNAIL_CACHE[filename] = thumb_path
+                return thumb_path
+
+            # Создаем миниатюру
+            with Image.open(file_path) as img:
+                img.thumbnail(self.THUMBNAIL_SIZE)
+                img.save(thumb_path, quality=85)
+
+            # Сохраняем в кэш
+            self.THUMBNAIL_CACHE[filename] = thumb_path
+            return thumb_path
+
+        except Exception as e:
+            self.logger.error(f"Failed to create thumbnail for {filename}: {str(e)}", exc_info=True)
+            return None
