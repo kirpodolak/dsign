@@ -182,7 +182,7 @@
                     <img src="${previewUrl}" 
                          alt="Preview" 
                          class="file-preview ${file.is_video ? 'video-thumbnail' : 'file-icon'}"
-                         onerror="this.onerror=null;this.src='/static/images/default-preview.jpg?v='+Date.now();this.style.display='block'"
+                         onerror="this.onerror=null;this.src='/static/images/default-preview.jpg?v='+Date.now();this.style.display='block'">
                 </td>
                 <td>${file.filename}</td>
                 <td>
