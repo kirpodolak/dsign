@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from PIL import Image
 import io
+from dsign.models import Playlist
 
 class FileService:
     ALLOWED_MEDIA_EXTENSIONS = {'jpg', 'jpeg', 'png', 'mp4', 'avi'}
@@ -272,3 +273,31 @@ class FileService:
         except Exception as e:
             self.logger.error(f"Failed to create thumbnail for {filename}: {str(e)}", exc_info=True)
             return None
+            
+    def get_media_files_with_playlist_info(self, playlist_id=None, db_session=None):
+        """Получает файлы с информацией о принадлежности к плейлисту"""
+        try:
+            all_files = self.get_media_files()
+    
+            if not playlist_id or playlist_id == 'all':
+                return all_files
+                
+            if not db_session:
+                raise RuntimeError("Database session not provided")
+            
+            # Получаем файлы плейлиста из БД
+            playlist_files = set()
+            playlist = db_session.query(Playlist).get(playlist_id)
+            if playlist:
+                playlist_files = {f.file_name for f in playlist.files}
+            
+            # Добавляем флаг принадлежности
+            return [{
+                **file,
+                'included': file['filename'] in playlist_files,
+                'is_video': file['type'].lower() in {'mp4', 'avi', 'webm', 'mov'}
+            } for file in all_files]
+            
+        except Exception as e:
+            self.logger.error(f"Error in get_media_files_with_playlist_info: {str(e)}")
+            raise
