@@ -10,26 +10,32 @@
     <!-- Сообщение для пустого плейлиста -->
     <div id="empty-playlist-message" class="empty-message" style="display: none;">
         <p>This playlist is currently empty.</p>
-        <p>Select files from the gallery below and click "Save Playlist".</p>
+        <p>Select files from the list below and click "Save Playlist".</p>
     </div>
 
-    <table class="media-table">
-        <thead>
-            <tr>
-                <th width="5%">#</th>
-                <th width="10%">Include</th>
-                <th width="20%">Preview</th>
-                <th width="45%">File Name</th>
-                <th width="20%">Duration (seconds)</th>
-            </tr>
-        </thead>
-        <tbody id="file-list">
-            <!-- JS заполняет сюда -->
-        </tbody>
-    </table>
+    <div class="table-responsive">
+        <table class="media-table">
+            <thead>
+                <tr>
+                    <th width="5%">#</th>
+                    <th width="10%">Include</th>
+                    <th width="20%">Preview</th>
+                    <th width="45%">File Name</th>
+                    <th width="20%">Duration (seconds)</th>
+                </tr>
+            </thead>
+            <tbody id="file-list">
+                <!-- JS заполняет сюда -->
+            </tbody>
+        </table>
+    </div>
     <div class="button-group">
-        <button id="save-playlist" class="btn primary">Save Playlist</button>
-        <a href="{{ url_for('main.index') }}" class="btn">Cancel</a>
+        <button id="save-playlist" class="btn primary">
+            <i class="fas fa-save"></i> Save Playlist
+        </button>
+        <a href="{{ url_for('main.index') }}" class="btn">
+            <i class="fas fa-times"></i> Cancel
+        </a>
     </div>
 </div>
 {% endblock %}
