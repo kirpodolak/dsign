@@ -84,7 +84,7 @@ def init_auth_routes(auth_bp):
     @auth_bp.route('/api/check-auth')
     def check_auth():
         """Endpoint для проверки статуса аутентификации"""
-        logger.debug(f"Check-auth called, auth: {current_user.is_authenticated}")
+        logger.debug(f"Check-auth called, auth: {current_user.is_authenticated}, IP: {request.remote_addr}, User-Agent: {request.user_agent}")
         return jsonify({
             'authenticated': current_user.is_authenticated,
             'username': current_user.username if current_user.is_authenticated else None,
