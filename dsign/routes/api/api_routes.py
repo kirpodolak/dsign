@@ -1,5 +1,7 @@
+from threading import Lock
 import os
 import shutil
+import subprocess
 from flask import jsonify, request, send_from_directory, abort, current_app, send_file
 from flask_login import login_required
 from flask_wtf.csrf import validate_csrf
@@ -7,6 +9,9 @@ from werkzeug.utils import secure_filename
 from dsign.models import PlaybackProfile, PlaylistProfileAssignment, Playlist, db
 from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
 from PIL import Image
+from dsign.config.config import THUMBNAIL_FOLDER, THUMBNAIL_URL
+
+thumbnail_lock = Lock()
 
 def init_api_routes(api_bp, services):
     settings_service = services.get('settings_service')
@@ -849,3 +854,36 @@ def init_api_routes(api_bp, services):
         except Exception as e:
             current_app.logger.error(f"Unexpected error: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": "Internal error"}), 500
+            
+    @api_bp.route('/media/thumbnail/<filename>', methods=['GET'])
+    def get_media_thumbnail(filename):
+        try:
+            if not filename.lower().endswith(('.mp4', '.avi', '.mov')):
+                return send_from_directory(current_app.static_folder, 'images/default-file-icon.png')
+        
+            thumb_path = os.path.join(current_app.config['THUMBNAIL_FOLDER'], f"thumb_{filename}")
+        
+            # Проверка с блокировкой для избежания race condition
+            with thumbnail_lock:
+                if os.path.exists(thumb_path):
+                    return send_from_directory(current_app.config['THUMBNAIL_FOLDER'], f"thumb_{filename}")
+                
+                os.makedirs(current_app.config['THUMBNAIL_FOLDER'], exist_ok=True)
+            
+                # Генерация миниатюры с таймаутом
+                input_path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
+                try:
+                    subprocess.run([
+                        'ffmpeg', '-i', input_path,
+                        '-ss', '00:00:01', '-vframes', '1', '-q:v', '2',
+                        thumb_path
+                    ], check=True, timeout=10)
+                except subprocess.TimeoutExpired:
+                    current_app.logger.warning(f"Thumbnail generation timeout for {filename}")
+                    raise
+                
+            return send_from_directory(current_app.config['THUMBNAIL_FOLDER'], f"thumb_{filename}")
+        
+        except Exception as e:
+            current_app.logger.error(f"Failed to generate thumbnail for {filename}: {str(e)}")
+            return send_from_directory(current_app.static_folder, 'images/default-preview.jpg')
