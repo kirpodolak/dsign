@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 from threading import Lock
 from PIL import Image, UnidentifiedImageError
 from flask import current_app
-from .config import UPLOAD_FOLDER, THUMBNAIL_FOLDER, THUMBNAIL_URL, DEFAULT_LOGO
+from dsign.config import UPLOAD_FOLDER, THUMBNAIL_FOLDER, THUMBNAIL_URL, DEFAULT_LOGO  # Измененный импорт
 
 class ThumbnailService:
     def __init__(
