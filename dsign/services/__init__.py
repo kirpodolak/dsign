@@ -11,6 +11,7 @@ from .playlist_service import PlaylistService
 from .settings_service import SettingsService
 from .auth import AuthService
 from .sockets import SocketService
+from .thumbnail_service import ThumbnailService
 
 class ServiceFactory:
     """Фабрика для инициализации сервисов"""
@@ -19,6 +20,23 @@ class ServiceFactory:
     def create_file_service(upload_folder: str, logger: logging.Logger = None):
         """Создает экземпляр FileService"""
         return FileService(upload_folder, logger)
+
+    @staticmethod
+    def create_thumbnail_service(
+        upload_folder: str,
+        thumbnail_folder: str,
+        thumbnail_url: str,
+        default_thumbnail: str,
+        logger: logging.Logger = None
+    ):
+        """Создает экземпляр ThumbnailService"""
+        return ThumbnailService(
+            upload_folder=upload_folder,
+            thumbnail_folder=thumbnail_folder,
+            thumbnail_url=thumbnail_url,
+            default_thumbnail=default_thumbnail,
+            logger=logger or logging.getLogger(__name__)
+        )
 
     @staticmethod
     def create_playback_service(upload_folder: str, db, socketio, logger: logging.Logger = None):
@@ -66,6 +84,13 @@ def init_services(config: Dict[str, Any], db, socketio=None, logger: logging.Log
             upload_folder=upload_folder,
             logger=logger
         ),
+        'thumbnail_service': ServiceFactory.create_thumbnail_service(
+            upload_folder=upload_folder,
+            thumbnail_folder=config.get('THUMBNAIL_FOLDER', str(Path(upload_folder) / 'thumbnails'),
+            thumbnail_url=config.get('THUMBNAIL_URL', '/media/thumbnails'),
+            default_thumbnail=config.get('DEFAULT_LOGO', 'default-preview.jpg'),
+            logger=logger
+        ),
         'playback_service': ServiceFactory.create_playback_service(
             upload_folder=upload_folder,
             db=db,
@@ -105,5 +130,6 @@ __all__ = [
     'PlaylistService',
     'SettingsService',
     'AuthService',
-    'SocketService'
+    'SocketService',
+    'ThumbnailService'  # Добавляем в экспортируемые классы
 ]
