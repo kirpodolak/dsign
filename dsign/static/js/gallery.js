@@ -75,37 +75,41 @@
   // Load media files from server
   async function loadMediaFiles() {
       try {
-          // Используем стандартный fetch с явным указанием параметров
-          const url = '/api/media/files?playlist_id=all';
+          const playlist_id = new URLSearchParams(window.location.search).get('playlist_id') || 'all';
+          const url = `/api/media/files?playlist_id=${playlist_id}`;
         
           const response = await fetch(url, {
-              headers: {
-                  'Content-Type': 'application/json',
-                  'Accept': 'application/json'
-              },
+              headers: { 'Accept': 'application/json' },
               credentials: 'include'
           });
-        
+
+          if (response.redirected) {
+              window.location.href = '/auth/login';
+              return;
+          }
+
           if (!response.ok) {
               throw new Error(`Server returned ${response.status} status`);
           }
-        
+
           const data = await response.json();
         
-          if (data?.success && Array.isArray(data.files)) {
-              currentFiles = data.files.map(file => ({
-                  name: file.filename || 'unnamed',
-                  type: getFileExtension(file.filename),
-                  date: file.uploadDate || file.modified || Date.now(),
-                  size: file.size || 0,
-                  path: `/api/media/${file.filename}`,
-                  mimetype: file.mimetype || null,
-                  dimensions: file.dimensions || null
-              }));
-              renderGallery(currentFiles);
-          } else {
+          if (!data?.success) {
               throw new Error(data?.error || 'Invalid response format');
           }
+
+          currentFiles = data.files.map(file => ({
+              name: file.filename,
+              type: file.type || getFileExtension(file.filename),
+              date: file.modified || Date.now(),
+              size: file.size || 0,
+              path: `/api/media/${encodeURIComponent(file.filename)}`,
+              mimetype: file.mimetype,
+              included: file.included || false,
+              is_video: file.is_video || false
+          }));
+
+          renderGallery(currentFiles);
       } catch (error) {
           console.error('Failed to load media files:', error);
           if (window.App?.Alerts?.show) {
