@@ -52,11 +52,23 @@
                 },
                 credentials: 'include'
             });
-            
-            if (!response.ok) throw new Error(`Ошибка сервера: ${response.status}`);
-            
+        
+            if (!response.ok) {
+                // Try to get error details from response
+                let errorMsg = `Ошибка сервера: ${response.status}`;
+                try {
+                    const errorData = await response.json();
+                    if (errorData.error) {
+                        errorMsg = errorData.error;
+                    }
+                } catch (e) {
+                    console.warn('Could not parse error response', e);
+                }
+                throw new Error(errorMsg);
+            }
+        
             const data = await response.json();
-            
+        
             if (data?.success) {
                 renderFileTable(data.files);
             } else {
@@ -69,11 +81,17 @@
     }
 
     function renderFileTable(files) {
-        if (!files || !Array.isArray(files)) {
-            showAlert('warning', 'Внимание', 'Нет файлов для отображения');
+        const fileListEl = document.getElementById('file-list');
+        const emptyMessage = document.getElementById('empty-playlist-message');
+    
+        if (!files || files.length === 0) {
+            fileListEl.innerHTML = '';
+            emptyMessage.style.display = 'block';
             return;
         }
-
+    
+        emptyMessage.style.display = 'none';
+    
         fileListEl.innerHTML = files.map((file, index) => `
             <tr>
                 <td>${index + 1}</td>
@@ -101,40 +119,48 @@
         }
 
         toggleButtonState(saveBtn, true);
-        
+    
         try {
-            const includedFiles = Array.from(document.querySelectorAll('.include-checkbox:checked'))
-                .map(checkbox => checkbox.dataset.id);
-                
-            const durations = {};
-            document.querySelectorAll('.duration-input').forEach(input => {
-                durations[input.dataset.id] = parseInt(input.value) || 10;
+            // Собираем выбранные файлы
+            const selectedFiles = [];
+            document.querySelectorAll('.file-item').forEach(item => {
+                const checkbox = item.querySelector('.file-checkbox');
+                if (checkbox?.checked) {
+                    const durationInput = item.querySelector('.duration-input');
+                    selectedFiles.push({
+                        id: item.dataset.fileId,
+                        duration: durationInput ? parseInt(durationInput.value) || 10 : 10
+                    });
+                }
             });
 
-            const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
             const response = await fetch(`/api/playlists/${playlistId}/files`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-CSRFToken': csrfToken
+                    'X-CSRFToken': getCSRFToken()
                 },
-                body: JSON.stringify({ 
-                    included_files: includedFiles, 
-                    durations 
+                body: JSON.stringify({
+                    files: selectedFiles
                 })
             });
 
-            if (!response.ok) throw new Error(`Ошибка сервера: ${response.status}`);
-            
-            const result = await response.json();
-            if (result.success) {
-                showAlert('success', 'Успех', 'Плейлист успешно сохранен');
-            } else {
-                throw new Error(result.error || 'Не удалось сохранить плейлист');
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                throw new Error(error.message || 'Ошибка сервера');
             }
+
+            const result = await response.json();
+            showAlert('success', 'Успех', 'Плейлист сохранен');
+        
+            // Обновляем состояние (если нужно)
+            if (window.App.Sockets) {
+                window.App.Sockets.emit('playlist_updated', {playlist_id: playlistId});
+            }
+        
         } catch (error) {
             console.error('Ошибка сохранения:', error);
-            showAlert('error', 'Ошибка', `Не удалось сохранить плейлист: ${error.message}`);
+            showAlert('error', 'Ошибка', error.message);
         } finally {
             toggleButtonState(saveBtn, false);
         }
