@@ -1,207 +1,197 @@
 (function() {
-    // Initialize global App object
-    window.App = window.App || {};
-    
-    // Default empty implementations for dependencies
-    const dependencies = {
-        Helpers: {
-            showPageLoader: () => console.log('Show loader'),
-            hidePageLoader: () => console.log('Hide loader'),
-            getCachedData: () => null,
-            setCachedData: () => {}
-        },
-        API: {
-            fetch: async () => { throw new Error('API not initialized'); }
-        },
-        Alerts: {
-            showAlert: (type, title, message) => console.log(`[${type}] ${title}: ${message}`),
-            showError: (title, message) => console.error(`${title}: ${message}`)
-        },
-        Sockets: {
-            emit: () => Promise.reject('Sockets not initialized')
+    // Глобальный флаг инициализации
+    if (window.__DSIGN_INITIALIZED__) return;
+    window.__DSIGN_INITIALIZED__ = true;
+
+    // Инициализация базового объекта App
+    window.App = window.App || {
+        Core: {
+            initialized: false,
+            onReadyCallbacks: [],
+            onReady: function(callback) {
+                if (this.initialized) {
+                    callback();
+                } else {
+                    this.onReadyCallbacks.push(callback);
+                }
+            }
         }
     };
 
-    // Merge with existing implementations
-    Object.keys(dependencies).forEach(namespace => {
-        window.App[namespace] = { ...dependencies[namespace], ...(window.App[namespace] || {}) };
-    });
+    // Конфигурация приложения
+    const CONFIG = {
+        AUTH_CHECK_INTERVAL: 30000,
+        MAX_API_RETRIES: 3,
+        INIT_RETRY_DELAY: 100
+    };
 
-    // Destructure with fallbacks
-    const { 
-        showPageLoader, 
-        hidePageLoader,
-        getCachedData,
-        setCachedData
-    } = window.App.Helpers;
-    
-    const { fetch: fetchAPI } = window.App.API;
-    const { showAlert, showError } = window.App.Alerts;
-    const { emit: socketEmit } = window.App.Sockets;
-
-    // Auth token cache key
-    const AUTH_CACHE_KEY = 'auth_status';
-    const AUTH_CACHE_TTL = 30000; // 30 seconds
-
-    /**
-     * Check authentication status with caching
-     * @returns {Promise<boolean>} True if authenticated
-     */
-    async function checkAuth() {
-        try {
-            // Check cache first
-            const cachedAuth = getCachedData(AUTH_CACHE_KEY);
-            if (cachedAuth !== null) {
-                return cachedAuth;
+    // Минимальные реализации зависимостей
+    const setupDependencies = () => {
+        window.App.Helpers = window.App.Helpers || {
+            showPageLoader: () => console.debug('[Loader] Showing'),
+            hidePageLoader: () => console.debug('[Loader] Hiding'),
+            getCachedData: (key) => localStorage.getItem(key),
+            setCachedData: (key, value, ttl) => {
+                const item = {
+                    value: value,
+                    expires: Date.now() + (ttl || 0)
+                };
+                localStorage.setItem(key, JSON.stringify(item));
             }
+        };
 
-            const response = await fetchAPI('/auth/api/check-auth', {
-                credentials: 'include',
-                headers: {
-                    'Accept': 'application/json',
-                    'X-Requested-With': 'XMLHttpRequest'
-                }
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
+        window.App.API = window.App.API || {
+            fetch: async (url, options) => {
+                const response = await fetch(url, {
+                    credentials: 'include',
+                    ...options
+                });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                return response;
             }
+        };
 
-            const data = await response.json();
-            const isAuthenticated = data?.authenticated === true;
-            
-            // Cache the result
-            setCachedData(AUTH_CACHE_KEY, isAuthenticated);
-            
-            return isAuthenticated;
-            
-        } catch (error) {
-            console.error('Auth check failed:', error);
-            return false;
-        }
-    }
+        window.App.Alerts = window.App.Alerts || {
+            showAlert: (type, title, message) => console.log(`[${type}] ${title}: ${message}`),
+            showError: (title, message) => console.error(`[Error] ${title}: ${message}`)
+        };
+    };
 
-    /**
-     * Handle authentication flow
-     * @returns {Promise<boolean>} True if should continue initialization
-     */
-    async function handleAuthentication() {
-        try {
-            const isAuthenticated = await checkAuth();
-            
-            if (!isAuthenticated) {
-                if (!window.location.pathname.includes('/auth/login')) {
-                    window.location.href = '/auth/login?redirect=' + encodeURIComponent(window.location.pathname);
-                }
+    // Сервис аутентификации
+    const authService = {
+        AUTH_KEY: 'auth_status',
+
+        async checkAuth() {
+            try {
+                // Проверка кеша
+                const cached = this.getCachedAuth();
+                if (cached !== null) return cached;
+
+                // Запрос к API
+                const response = await window.App.API.fetch('/auth/api/check-auth', {
+                    headers: { 'Accept': 'application/json' }
+                });
+                const data = await response.json();
+                const isAuthenticated = data?.authenticated === true;
+                
+                this.setCachedAuth(isAuthenticated);
+                return isAuthenticated;
+            } catch (error) {
+                console.debug('Auth check failed:', error);
                 return false;
             }
+        },
+
+        getCachedAuth() {
+            const item = localStorage.getItem(this.AUTH_KEY);
+            if (!item) return null;
             
-            return true;
+            const { value, expires } = JSON.parse(item);
+            if (expires && Date.now() > expires) return null;
             
-        } catch (error) {
-            showError('Authentication Error', 'Failed to verify login status');
+            return value;
+        },
+
+        setCachedAuth(value) {
+            const item = {
+                value: value,
+                expires: Date.now() + CONFIG.AUTH_CHECK_INTERVAL
+            };
+            localStorage.setItem(this.AUTH_KEY, JSON.stringify(item));
+        },
+
+        clearAuthCache() {
+            localStorage.removeItem(this.AUTH_KEY);
+        }
+    };
+
+    // Обработка аутентификации
+    const handleAuthFlow = async () => {
+        const isLoginPage = window.location.pathname.includes('/auth/login');
+        const isAuthenticated = await authService.checkAuth();
+
+        if (!isAuthenticated && !isLoginPage) {
+            const redirect = encodeURIComponent(window.location.pathname + window.location.search);
+            window.location.href = `/auth/login?redirect=${redirect}`;
             return false;
         }
-    }
 
-    /**
-     * Initialize UI components
-     */
-    async function initializeUI() {
+        if (isAuthenticated && isLoginPage) {
+            const redirectTo = new URLSearchParams(window.location.search).get('redirect') || '/';
+            window.location.href = redirectTo;
+            return false;
+        }
+
+        return true;
+    };
+
+    // Инициализация UI
+    const initializeUI = async () => {
         try {
-            // Initialize buttons if component exists
             if (window.App.Index?.initAllButtons) {
                 await window.App.Index.initAllButtons();
             }
-            
-            // Initialize player controls if component exists
-            if (window.App.PlayerControls?.setCurrentUser) {
-                const userResponse = await fetchAPI('/auth/api/current-user');
-                if (userResponse?.id) {
-                    window.App.PlayerControls.setCurrentUser(userResponse.id);
-                }
-            }
-            
         } catch (error) {
             console.error('UI initialization failed:', error);
-            showError('Initialization Error', 'Some components failed to load');
         }
-    }
+    };
 
-    /**
-     * Main application initialization
-     */
-    async function initializeApp() {
+    // Основная инициализация приложения
+    const initializeApp = async () => {
+        window.App.Helpers.showPageLoader();
+
         try {
-            showPageLoader();
-            
-            // Check authentication
-            const shouldContinue = await handleAuthentication();
+            // Проверка аутентификации
+            const shouldContinue = await handleAuthFlow();
             if (!shouldContinue) return;
-            
-            // Initialize UI components
+
+            // Инициализация UI
             await initializeUI();
-            
-            // Periodic auth check
-            setInterval(async () => {
-                const isAuthenticated = await checkAuth();
-                if (!isAuthenticated) {
-                    showAlert('warning', 'Session Expired', 'You will be redirected to login');
-                    setTimeout(() => {
-                        window.location.href = '/auth/login';
-                    }, 3000);
-                }
-            }, AUTH_CACHE_TTL);
+
+            // Периодическая проверка аутентификации
+            if (!window.location.pathname.includes('/auth/login')) {
+                setInterval(async () => {
+                    const isAuth = await authService.checkAuth();
+                    if (!isAuth) window.location.href = '/auth/login';
+                }, CONFIG.AUTH_CHECK_INTERVAL);
+            }
+
+            // Помечаем приложение как инициализированное
+            window.App.Core.initialized = true;
+            window.App.Core.onReadyCallbacks.forEach(cb => cb());
             
         } catch (error) {
             console.error('App initialization failed:', error);
-            showError('Initialization Failed', 'Application failed to start properly');
+            window.App.Alerts.showError('Initialization Error', 'Failed to start application');
         } finally {
-            hidePageLoader();
+            window.App.Helpers.hidePageLoader();
         }
-    }
+    };
 
-    /**
-     * Safe initialization wrapper
-     */
-    function safeInitialize() {
-        try {
-            // Wait for all dependencies to load
-            const checkDependencies = setInterval(() => {
-                if (window.App.API && window.App.Alerts && window.App.Helpers) {
-                    clearInterval(checkDependencies);
-                    initializeApp().catch(error => {
-                        console.error('Unhandled initialization error:', error);
-                    });
-                }
-            }, 100);
-            
-            // Timeout if dependencies don't load
-            setTimeout(() => {
-                clearInterval(checkDependencies);
-                showError('Error', 'Failed to load required components');
-            }, 5000);
-            
-        } catch (error) {
-            console.error('Startup error:', error);
+    // Проверка готовности зависимостей
+    const checkDependencies = () => {
+        if (!window.App.API?.fetch) {
+            setTimeout(checkDependencies, CONFIG.INIT_RETRY_DELAY);
+            return;
         }
-    }
+        initializeApp().catch(console.error);
+    };
 
-    // Start the application
-    if (document.readyState === 'complete' || document.readyState === 'interactive') {
-        safeInitialize();
+    // Старт приложения
+    setupDependencies();
+    
+    if (document.readyState === 'complete') {
+        checkDependencies();
     } else {
-        document.addEventListener('DOMContentLoaded', safeInitialize);
+        document.addEventListener('DOMContentLoaded', checkDependencies);
     }
 
-    // Expose public methods
+    // Публичный API
     window.App.Base = {
-        initializeApp: safeInitialize,
-        checkAuth,
+        checkAuth: authService.checkAuth.bind(authService),
         refreshAuth: () => {
-            // Clear cache and check auth again
-            setCachedData(AUTH_CACHE_KEY, null);
-            return checkAuth();
+            authService.clearAuthCache();
+            return authService.checkAuth();
         }
     };
 })();
