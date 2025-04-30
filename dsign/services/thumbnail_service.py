@@ -22,7 +22,7 @@ class ThumbnailService:
         default_thumbnail: str = DEFAULT_LOGO,
         thumbnail_size: tuple = (300, 300),
         ffmpeg_timeout: int = 15,
-        logger=None  # Добавляем параметр logger
+        logger=None
     ):
         self.upload_folder = Path(upload_folder)
         self.thumbnail_folder = Path(thumbnail_folder)
@@ -30,12 +30,13 @@ class ThumbnailService:
         self.thumbnail_size = thumbnail_size
         self.default_thumbnail = default_thumbnail
         self.ffmpeg_timeout = ffmpeg_timeout
-        self.logger = logger or logging.getLogger(__name__)  # Инициализируем логгер
+        self.logger = logger or logging.getLogger(__name__)
         self.lock = Lock()
         self.ffmpeg_available = self._check_ffmpeg()
         self._ensure_dirs()
         
-        current_app.logger.info(
+        # Используем self.logger вместо current_app.logger
+        self.logger.info(
             f"ThumbnailService initialized. "
             f"Upload folder: {self.upload_folder}, "
             f"Thumbnail folder: {self.thumbnail_folder}, "
@@ -47,7 +48,7 @@ class ThumbnailService:
         try:
             self.thumbnail_folder.mkdir(exist_ok=True, parents=True)
         except Exception as e:
-            current_app.logger.error(f"Failed to create thumbnail directory: {str(e)}")
+            self.logger.error(f"Failed to create thumbnail directory: {str(e)}")
             raise RuntimeError("Could not initialize thumbnail storage")
 
     def _check_ffmpeg(self) -> bool:
@@ -61,85 +62,60 @@ class ThumbnailService:
             )
             return result.returncode == 0
         except (subprocess.SubprocessError, FileNotFoundError):
-            current_app.logger.warning("FFmpeg is not available. Video thumbnails will be disabled")
+            self.logger.warning("FFmpeg is not available. Video thumbnails will be disabled")
             return False
 
     def get_thumbnail_url(self, filename: str) -> str:
         """
         Возвращает полный URL для доступа к миниатюре.
-        
-        Args:
-            filename: Исходное имя файла
-            
-        Returns:
-            str: URL вида /media/thumbnails/thumb_filename.jpg
         """
         return f"{self.thumbnail_url}/thumb_{filename}"
 
     def generate_thumbnail(self, filename: str) -> Optional[Path]:
         """
         Генерирует и возвращает путь к миниатюре.
-        
-        Args:
-            filename: Имя исходного файла
-            
-        Returns:
-            Path: Путь к сгенерированной миниатюре или None при ошибке
         """
         file_path = self.upload_folder / filename
         if not file_path.exists():
-            current_app.logger.warning(f"Source file not found: {filename}")
+            self.logger.warning(f"Source file not found: {filename}")
             return None
 
         thumb_path = self.thumbnail_folder / f"thumb_{filename}"
         
-        # Проверка кэша перед генерацией
         if thumb_path.exists():
             return thumb_path
 
-        with self.lock:  # Защита от race condition
+        with self.lock:
             try:
                 ext = file_path.suffix.lower()
                 
-                # Обработка изображений
                 if ext in ('.jpg', '.jpeg', '.png', '.webp'):
                     return self._generate_image_thumbnail(file_path, thumb_path)
-                
-                # Обработка видео (только если ffmpeg доступен)
                 elif ext in ('.mp4', '.avi', '.mov') and self.ffmpeg_available:
                     return self._generate_video_thumbnail(file_path, thumb_path)
                 
-                # Неподдерживаемый формат
-                current_app.logger.warning(f"Unsupported file type for thumbnails: {filename}")
+                self.logger.warning(f"Unsupported file type for thumbnails: {filename}")
                 return None
                 
             except Exception as e:
-                current_app.logger.error(f"Failed to generate thumbnail for {filename}: {str(e)}")
+                self.logger.error(f"Failed to generate thumbnail for {filename}: {str(e)}")
                 return None
 
-    def _generate_image_thumbnail(
-        self, 
-        source_path: Path, 
-        thumb_path: Path
-    ) -> Optional[Path]:
+    def _generate_image_thumbnail(self, source_path: Path, thumb_path: Path) -> Optional[Path]:
         """Генерирует миниатюру для изображения"""
         try:
             with Image.open(source_path) as img:
-                # Сохраняем пропорции
                 img.thumbnail(self.thumbnail_size)
-                
-                # Конвертируем в RGB если нужно (для PNG с альфа-каналом)
                 if img.mode in ('RGBA', 'P'):
                     img = img.convert('RGB')
-                
                 img.save(thumb_path, quality=85, optimize=True)
                 return thumb_path
                 
         except UnidentifiedImageError:
-            current_app.logger.error(f"Corrupted image file: {source_path.name}")
+            self.logger.error(f"Corrupted image file: {source_path.name}")
             return None
         except Exception as e:
-            current_app.logger.error(f"Image thumbnail error: {str(e)}")
+            self.logger.error(f"Image thumbnail error: {str(e)}")
             return None
 
     def _generate_video_thumbnail(
@@ -157,7 +133,7 @@ class ThumbnailService:
                 '-vframes', '1',
                 '-q:v', '2',
                 '-vf', f'scale={self.thumbnail_size[0]}:-1',
-                '-y',  # Перезаписать если существует
+                '-y',
                 str(thumb_path)
             ]
             
@@ -172,24 +148,14 @@ class ThumbnailService:
             return thumb_path if thumb_path.exists() else None
             
         except subprocess.TimeoutExpired:
-            current_app.logger.error(f"Video thumbnail timeout for {source_path.name}")
+            self.logger.error(f"Video thumbnail timeout for {source_path.name}")
             return None
         except subprocess.CalledProcessError as e:
-            current_app.logger.error(
-                f"FFmpeg error for {source_path.name}: {e.stderr.decode().strip()}"
-            )
+            self.logger.error(f"FFmpeg error for {source_path.name}: {e.stderr.decode().strip()}")
             return None
 
     def cleanup_thumbnails(self, max_age_days: int = 30) -> int:
-        """
-        Очищает старые миниатюры.
-        
-        Args:
-            max_age_days: Максимальный возраст файлов в днях
-            
-        Returns:
-            int: Количество удаленных файлов
-        """
+        """Очищает старые миниатюры."""
         deleted = 0
         now = time.time()
         cutoff = now - (max_age_days * 86400)
@@ -200,11 +166,11 @@ class ThumbnailService:
                     thumb_file.unlink()
                     deleted += 1
                     
-            current_app.logger.info(f"Cleaned up {deleted} old thumbnails")
+            self.logger.info(f"Cleaned up {deleted} old thumbnails")
             return deleted
             
         except Exception as e:
-            current_app.logger.error(f"Thumbnail cleanup failed: {str(e)}")
+            self.logger.error(f"Thumbnail cleanup failed: {str(e)}")
             return 0
 
     def get_default_thumbnail_path(self) -> Path:
@@ -212,7 +178,7 @@ class ThumbnailService:
         default_path = self.upload_folder / self.default_thumbnail
         
         if not default_path.exists():
-            current_app.logger.critical("Default thumbnail image is missing!")
+            self.logger.critical("Default thumbnail image is missing!")
             raise FileNotFoundError(f"Default thumbnail not found at {default_path}")
             
         return default_path
