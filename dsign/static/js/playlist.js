@@ -88,43 +88,52 @@
         }
     }
 
-    // Загрузка превью с кэшированием
+    // Предпросмотр изображений
     async function loadPreview(file) {
         const cacheKey = `preview-${file.filename}`;
+    
+        // Check memory cache first
         if (previewCache.has(cacheKey)) {
             return previewCache.get(cacheKey);
         }
 
-        const previewUrl = `/api/media/thumbnail/${encodeURIComponent(file.filename)}?t=${Date.now()}`;
+        // For video files, use default preview if we've tried before
+        if (file.is_video && sessionStorage.getItem(`video-fallback-${file.filename}`)) {
+            return '/static/images/default-preview.jpg';
+        }
+
+        const previewUrl = `/api/media/thumbnail/${encodeURIComponent(file.filename)}`;
         const fallbackUrl = '/static/images/default-preview.jpg';
-    
+
         try {
-            // Проверка доступности эндпоинта
-            const response = await fetch(previewUrl, { credentials: 'include' });
-            if (!response.ok) throw new Error('Bad response');
-        
-            return new Promise((resolve) => {
-                const img = new Image();
-                img.onload = () => {
-                    previewCache.set(cacheKey, previewUrl);
-                    resolve(previewUrl);
-                };
-                img.onerror = () => {
-                    previewCache.set(cacheKey, fallbackUrl);
-                    resolve(fallbackUrl);
-                };
-                img.src = previewUrl;
+            const response = await fetch(previewUrl, {
+                credentials: 'include'
             });
+        
+            // If we got a valid image response
+            if (response.ok && response.headers.get('Content-Type')?.startsWith('image/')) {
+                previewCache.set(cacheKey, previewUrl);
+                return previewUrl;
+            }
+        
+            throw new Error('Invalid thumbnail response');
+        
         } catch (error) {
-            console.error(`Preview load failed for ${file.filename}:`, error);
+            console.warn(`Preview load failed for ${file.filename}:`, error);
+        
+            // Mark video files to use fallback in future
+            if (file.is_video) {
+                sessionStorage.setItem(`video-fallback-${file.filename}`, 'true');
+            }
+        
             return fallbackUrl;
         }
     }
 
     // Рендеринг таблицы файлов
-    async function renderFileTable(files) {
+    function renderFileTable(files) {
         if (!fileListEl) return;
-    
+
         const emptyMessage = document.getElementById('empty-playlist-message');
         if (!files || files.length === 0) {
             fileListEl.innerHTML = '';
@@ -135,29 +144,34 @@
         if (emptyMessage) emptyMessage.style.display = 'none';
         fileListEl.innerHTML = '';
 
-        for (const [index, file] of files.entries()) {
+        files.forEach((file, index) => {
             const row = document.createElement('tr');
-            const previewUrl = await loadPreview(file);
-            
+            const img = document.createElement('img');
+            img.src = '/static/images/default-preview.jpg';  // Prevents flickering
+            img.alt = 'Preview';
+            img.className = `file-preview ${file.is_video ? 'video-thumbnail' : ''}`;
+            img.dataset.filename = file.filename;
+        
             row.innerHTML = `
                 <td>${index + 1}</td>
                 <td><input type="checkbox" class="include-checkbox" data-filename="${file.filename}" ${file.included ? 'checked' : ''}></td>
-                <td>
-                    <img src="${previewUrl}" 
-                         alt="Preview" 
-                         class="file-preview ${file.is_video ? 'video-thumbnail' : ''}"
-                         data-filename="${file.filename}"
-                         onerror="this.src='/static/images/default-preview.jpg?v='+Date.now()">
-                </td>
+                <td></td>
                 <td>${file.filename}</td>
                 <td>
                     <input type="number" class="duration-input" data-filename="${file.filename}" 
                           value="${file.duration || 10}" min="1" ${file.is_video ? 'readonly' : ''}>
                 </td>
             `;
-            
+        
+            // Insert the img element we created
+            row.querySelector('td:nth-child(3)').appendChild(img);
             fileListEl.appendChild(row);
-        }
+        
+            // Load the preview async
+            loadPreview(file).then(url => {
+                img.src = url;
+            });
+        });
     }
 
     // Сохранение плейлиста
