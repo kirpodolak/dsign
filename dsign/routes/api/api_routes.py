@@ -820,9 +820,11 @@ def init_api_routes(api_bp, services):
             if not hasattr(current_app, 'thumbnail_service'):
                 current_app.logger.error("ThumbnailService not initialized")
                 abort(500)
-            
+        
             # Skip processing for video files if ffmpeg isn't available
-            if filename.lower().endswith(('.mp4', '.avi', '.mov')) and not current_app.thumbnail_service.ffmpeg_available:
+            is_video = filename.lower().endswith(('.mp4', '.avi', '.mov', '.mkv'))
+        
+            if is_video and not current_app.thumbnail_service.ffmpeg_available:
                 current_app.logger.debug(f"Skipping video thumbnail for {filename}, ffmpeg not available")
                 return send_from_directory(
                     current_app.static_folder,
@@ -831,7 +833,7 @@ def init_api_routes(api_bp, services):
                 )
                 
             thumb_path = current_app.thumbnail_service.generate_thumbnail(filename)
-            
+        
             if not thumb_path:
                 current_app.logger.warning(f"Thumbnail not generated for {filename}")
                 return send_from_directory(
@@ -839,7 +841,19 @@ def init_api_routes(api_bp, services):
                     'images/default-preview.jpg',
                     max_age=3600
                 )
-                
+            
+            # Verify the thumbnail is valid before sending
+            try:
+                with Image.open(thumb_path) as img:
+                    img.verify()
+            except Exception as e:
+                current_app.logger.error(f"Invalid thumbnail for {filename}: {str(e)}")
+                return send_from_directory(
+                    current_app.static_folder,
+                    'images/default-preview.jpg',
+                    max_age=3600
+                )
+            
             # Set proper caching headers
             response = send_from_directory(
                 current_app.thumbnail_service.thumbnail_folder,
@@ -849,7 +863,7 @@ def init_api_routes(api_bp, services):
             )
             response.headers['Cache-Control'] = 'public, max-age=86400'
             return response
-            
+        
         except Exception as e:
             current_app.logger.error(f"Failed to serve thumbnail for {filename}: {str(e)}")
             return send_from_directory(
@@ -857,3 +871,38 @@ def init_api_routes(api_bp, services):
                 'images/default-preview.jpg',
                 max_age=3600
             )
+            
+    @api_bp.route('/debug/thumbnails', methods=['GET'])
+    @login_required
+    def list_thumbnails():
+        """Debug endpoint to list generated thumbnails"""
+        thumb_dir = current_app.thumbnail_service.thumbnail_folder
+        thumbs = []
+        for f in thumb_dir.glob('thumb_*'):
+            thumbs.append({
+                'name': f.name,
+                'size': f.stat().st_size,
+                'modified': f.stat().st_mtime
+            })
+        return jsonify({'thumbnails': thumbs})
+
+    @api_bp.route('/debug/thumbnail/<filename>', methods=['GET'])
+    @login_required
+    def get_thumbnail_debug(filename):
+        """Debug endpoint to inspect a specific thumbnail"""
+        thumb_path = current_app.thumbnail_service.thumbnail_folder / f"thumb_{filename}"
+        if not thumb_path.exists():
+            return jsonify({'error': 'Thumbnail not found'}), 404
+        
+        try:
+            with Image.open(thumb_path) as img:
+                return jsonify({
+                    'filename': filename,
+                    'size': thumb_path.stat().st_size,
+                    'format': img.format,
+                    'mode': img.mode,
+                    'width': img.width,
+                    'height': img.height
+                })
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
