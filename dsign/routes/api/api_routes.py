@@ -817,30 +817,25 @@ def init_api_routes(api_bp, services):
     @api_bp.route('/media/thumbnail/<filename>', methods=['GET'])
     def get_media_thumbnail(filename):
         try:
-            if not hasattr(current_app, 'services'):
-                current_app.logger.error("Services not initialized")
-                abort(500)
-            
-            thumbnail_service = current_app.services.get('thumbnail_service')
-            if not thumbnail_service:
-                current_app.logger.error("ThumbnailService not found")
+            if not hasattr(current_app, 'thumbnail_service'):
+                current_app.logger.error("ThumbnailService not initialized")
                 abort(500)
         
-            thumb_path = thumbnail_service.generate_thumbnail(filename)
-        
+            thumb_path = current_app.thumbnail_service.generate_thumbnail(filename)
+    
             if not thumb_path:
                 current_app.logger.warning(f"Thumbnail not generated for {filename}")
                 return send_from_directory(
                     current_app.static_folder,
                     'images/default-preview.jpg'
                 )
-            
+        
             return send_from_directory(
-                thumbnail_service.thumbnail_folder,
+                current_app.thumbnail_service.thumbnail_folder,
                 thumb_path.name,
                 mimetype='image/jpeg'
             )
-        
+    
         except Exception as e:
             current_app.logger.error(f"Failed to serve thumbnail for {filename}: {str(e)}", exc_info=True)
             return send_from_directory(
