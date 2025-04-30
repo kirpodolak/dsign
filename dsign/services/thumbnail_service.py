@@ -118,42 +118,54 @@ class ThumbnailService:
             self.logger.error(f"Image thumbnail error: {str(e)}")
             return None
 
-    def _generate_video_thumbnail(
-        self, 
-        source_path: Path, 
-        thumb_path: Path,
-        time_pos: str = "00:00:01"
-    ) -> Optional[Path]:
-        """Генерирует миниатюру для видео через FFmpeg"""
-        try:
-            cmd = [
-                'ffmpeg',
-                '-i', str(source_path),
-                '-ss', time_pos,
-                '-vframes', '1',
-                '-q:v', '2',
-                '-vf', f'scale={self.thumbnail_size[0]}:-1',
-                '-y',
-                str(thumb_path)
-            ]
+    def _generate_video_thumbnail(self, source_path: Path, thumb_path: Path) -> Optional[Path]:
+        """Generate video thumbnail with multiple fallback strategies"""
+        attempts = [
+            {"time": "00:00:01", "scale": f"scale={self.thumbnail_size[0]}:-1"},
+            {"time": "00:00:00", "scale": f"scale={self.thumbnail_size[0]}:-1"},
+            {"time": "00:00:05", "scale": "scale=iw*sar:ih"},  # Try different scaling
+        ]
+    
+        for attempt in attempts:
+            try:
+                cmd = [
+                    'ffmpeg',
+                    '-i', str(source_path),
+                    '-ss', attempt["time"],
+                    '-vframes', '1',
+                    '-q:v', '2',
+                    '-vf', attempt["scale"],
+                    '-y',
+                    str(thumb_path)
+                ]
             
-            subprocess.run(
-                cmd,
-                check=True,
-                timeout=self.ffmpeg_timeout,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    timeout=self.ffmpeg_timeout,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
             
-            return thumb_path if thumb_path.exists() else None
+                # Verify the thumbnail was created and is valid
+                if thumb_path.exists() and thumb_path.stat().st_size > 1024:
+                    try:
+                        with Image.open(thumb_path) as img:
+                            img.verify()
+                        return thumb_path
+                    except Exception:
+                        continue
+                        
+            except subprocess.TimeoutExpired:
+                self.logger.warning(f"Timeout generating thumbnail for {source_path.name}")
+                continue
+            except Exception as e:
+                self.logger.warning(f"Attempt failed for {source_path.name}: {str(e)}")
+                continue
+    
+        self.logger.error(f"All thumbnail generation attempts failed for {source_path.name}")
+        return None
             
-        except subprocess.TimeoutExpired:
-            self.logger.error(f"Video thumbnail timeout for {source_path.name}")
-            return None
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"FFmpeg error for {source_path.name}: {e.stderr.decode().strip()}")
-            return None
-
     def cleanup_thumbnails(self, max_age_days: int = 30) -> int:
         """Очищает старые миниатюры."""
         deleted = 0
