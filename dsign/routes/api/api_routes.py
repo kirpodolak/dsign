@@ -820,25 +820,40 @@ def init_api_routes(api_bp, services):
             if not hasattr(current_app, 'thumbnail_service'):
                 current_app.logger.error("ThumbnailService not initialized")
                 abort(500)
-        
+            
+            # Skip processing for video files if ffmpeg isn't available
+            if filename.lower().endswith(('.mp4', '.avi', '.mov')) and not current_app.thumbnail_service.ffmpeg_available:
+                current_app.logger.debug(f"Skipping video thumbnail for {filename}, ffmpeg not available")
+                return send_from_directory(
+                    current_app.static_folder,
+                    'images/default-preview.jpg',
+                    max_age=3600
+                )
+                
             thumb_path = current_app.thumbnail_service.generate_thumbnail(filename)
-    
+            
             if not thumb_path:
                 current_app.logger.warning(f"Thumbnail not generated for {filename}")
                 return send_from_directory(
                     current_app.static_folder,
-                    'images/default-preview.jpg'
+                    'images/default-preview.jpg',
+                    max_age=3600
                 )
-        
-            return send_from_directory(
+                
+            # Set proper caching headers
+            response = send_from_directory(
                 current_app.thumbnail_service.thumbnail_folder,
                 thumb_path.name,
-                mimetype='image/jpeg'
+                mimetype='image/jpeg',
+                max_age=86400  # Cache for 24 hours
             )
-    
+            response.headers['Cache-Control'] = 'public, max-age=86400'
+            return response
+            
         except Exception as e:
-            current_app.logger.error(f"Failed to serve thumbnail for {filename}: {str(e)}", exc_info=True)
+            current_app.logger.error(f"Failed to serve thumbnail for {filename}: {str(e)}")
             return send_from_directory(
                 current_app.static_folder,
-                'images/default-preview.jpg'
+                'images/default-preview.jpg',
+                max_age=3600
             )
