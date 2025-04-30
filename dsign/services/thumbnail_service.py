@@ -120,50 +120,58 @@ class ThumbnailService:
 
     def _generate_video_thumbnail(self, source_path: Path, thumb_path: Path) -> Optional[Path]:
         """Generate video thumbnail with multiple fallback strategies"""
-        attempts = [
-            {"time": "00:00:01", "scale": f"scale={self.thumbnail_size[0]}:-1"},
-            {"time": "00:00:00", "scale": f"scale={self.thumbnail_size[0]}:-1"},
-            {"time": "00:00:05", "scale": "scale=iw*sar:ih"},  # Try different scaling
-        ]
+        self.logger.info(f"Generating thumbnail for video: {source_path.name}")
     
-        for attempt in attempts:
-            try:
-                cmd = [
-                    'ffmpeg',
-                    '-i', str(source_path),
-                    '-ss', attempt["time"],
-                    '-vframes', '1',
-                    '-q:v', '2',
-                    '-vf', attempt["scale"],
-                    '-y',
-                    str(thumb_path)
-                ]
+        # Ensure the source file exists and is readable
+        if not source_path.exists():
+            self.logger.error(f"Source video file not found: {source_path}")
+            return None
+        
+        try:
+            # First attempt: try to get a frame at 1 second
+            cmd = [
+                'ffmpeg',
+                '-i', str(source_path),
+                '-ss', '00:00:01',
+                '-vframes', '1',
+                '-q:v', '2',
+                '-vf', f'scale={self.thumbnail_size[0]}:-1',
+                '-y',
+                str(thumb_path)
+            ]
+        
+            self.logger.debug(f"Running FFmpeg command: {' '.join(cmd)}")
+        
+            result = subprocess.run(
+                cmd,
+                check=False,
+                timeout=self.ffmpeg_timeout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+        
+            # Check if thumbnail was created successfully
+            if thumb_path.exists() and thumb_path.stat().st_size > 1024:
+                try:
+                    with Image.open(thumb_path) as img:
+                        img.verify()
+                    self.logger.info(f"Successfully generated thumbnail for {source_path.name}")
+                    return thumb_path
+                except Exception as img_error:
+                    self.logger.warning(f"Generated thumbnail is invalid: {str(img_error)}")
+                    thumb_path.unlink()  # Remove invalid thumbnail
+            else:
+                self.logger.warning("Thumbnail generation failed or produced empty file")
+                if result.stderr:
+                    self.logger.debug(f"FFmpeg stderr: {result.stderr}")
             
-                result = subprocess.run(
-                    cmd,
-                    check=False,
-                    timeout=self.ffmpeg_timeout,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-            
-                # Verify the thumbnail was created and is valid
-                if thumb_path.exists() and thumb_path.stat().st_size > 1024:
-                    try:
-                        with Image.open(thumb_path) as img:
-                            img.verify()
-                        return thumb_path
-                    except Exception:
-                        continue
-                        
-            except subprocess.TimeoutExpired:
-                self.logger.warning(f"Timeout generating thumbnail for {source_path.name}")
-                continue
-            except Exception as e:
-                self.logger.warning(f"Attempt failed for {source_path.name}: {str(e)}")
-                continue
+        except subprocess.TimeoutExpired:
+            self.logger.warning(f"Timeout generating thumbnail for {source_path.name}")
+        except Exception as e:
+            self.logger.error(f"Error generating thumbnail: {str(e)}")
     
-        self.logger.error(f"All thumbnail generation attempts failed for {source_path.name}")
+        # Fallback to default thumbnail
         return None
             
     def cleanup_thumbnails(self, max_age_days: int = 30) -> int:
