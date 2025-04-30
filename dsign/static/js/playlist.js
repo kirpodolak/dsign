@@ -97,11 +97,6 @@
             return previewCache.get(cacheKey);
         }
 
-        // For video files, use default preview if we've tried before
-        if (file.is_video && sessionStorage.getItem(`video-fallback-${file.filename}`)) {
-            return '/static/images/default-preview.jpg';
-        }
-
         const previewUrl = `/api/media/thumbnail/${encodeURIComponent(file.filename)}`;
         const fallbackUrl = '/static/images/default-preview.jpg';
 
@@ -110,10 +105,26 @@
                 credentials: 'include'
             });
         
-            // If we got a valid image response
             if (response.ok && response.headers.get('Content-Type')?.startsWith('image/')) {
-                previewCache.set(cacheKey, previewUrl);
-                return previewUrl;
+                const blob = await response.blob();
+            
+                // Verify the image is valid and has reasonable size
+                if (blob.size > 1024) {
+                    const url = URL.createObjectURL(blob);
+                    previewCache.set(cacheKey, url);
+                
+                    // Add video indicator if needed
+                    if (file.is_video) {
+                        setTimeout(() => {
+                            const img = document.querySelector(`img[data-filename="${file.filename}"]`);
+                            if (img) {
+                                img.classList.add('video-thumbnail');
+                            }
+                        }, 100);
+                    }
+                
+                    return url;
+                }
             }
         
             throw new Error('Invalid thumbnail response');
@@ -121,7 +132,7 @@
         } catch (error) {
             console.warn(`Preview load failed for ${file.filename}:`, error);
         
-            // Mark video files to use fallback in future
+            // For video files, mark to use fallback in future
             if (file.is_video) {
                 sessionStorage.setItem(`video-fallback-${file.filename}`, 'true');
             }
