@@ -10,6 +10,8 @@ from dsign.models import PlaybackProfile, PlaylistProfileAssignment, Playlist, d
 from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
 from PIL import Image
 from dsign.config.config import THUMBNAIL_FOLDER, THUMBNAIL_URL
+from dsign.services import ThumbnailService
+
 
 thumbnail_lock = Lock()
 
@@ -18,6 +20,7 @@ def init_api_routes(api_bp, services):
     playback_service = services.get('playback_service')
     playlist_service = services.get('playlist_service')
     file_service = services.get('file_service')
+    thumbnail_service = services.get('thumbnail_service')
     socketio = services.get('socketio')
     UPLOAD_LOGO_NAME = "idle_logo.jpg"
     MAX_LOGO_SIZE = 5 * 1024 * 1024  # 5MB
@@ -728,27 +731,6 @@ def init_api_routes(api_bp, services):
     @api_bp.route('/media/<path:filename>', methods=['GET'])
     def serve_media(filename):
         try:
-            # Проверяем запрос на миниатюру
-            is_thumb = 'thumb=1' in request.query_string.decode()
-        
-            if is_thumb:
-                # Получаем путь к миниатюре
-                thumb_path = file_service.get_media_thumbnail(filename)
-                if thumb_path:
-                    return send_from_directory(
-                        file_service.upload_folder,
-                        thumb_path,
-                        mimetype='image/jpeg',
-                        as_attachment=False
-                    )
-                # Если миниатюры нет - возвращаем дефолтное изображение
-                return send_from_directory(
-                    current_app.static_folder,
-                    'images/default-preview.jpg',
-                    mimetype='image/jpeg'
-                )
-            
-            # Обычная обработка файла
             upload_folder = current_app.config.get('UPLOAD_FOLDER', '/var/lib/dsign/media')
             file_path = os.path.join(upload_folder, filename)
         
@@ -835,32 +817,33 @@ def init_api_routes(api_bp, services):
     @api_bp.route('/media/thumbnail/<filename>', methods=['GET'])
     def get_media_thumbnail(filename):
         try:
-            if not filename.lower().endswith(('.mp4', '.avi', '.mov')):
-                return send_from_directory(current_app.static_folder, 'images/default-file-icon.png')
-        
-            thumb_path = os.path.join(current_app.config['THUMBNAIL_FOLDER'], f"thumb_{filename}")
-        
-            # Проверка с блокировкой для избежания race condition
-            with thumbnail_lock:
-                if os.path.exists(thumb_path):
-                    return send_from_directory(current_app.config['THUMBNAIL_FOLDER'], f"thumb_{filename}")
-                
-                os.makedirs(current_app.config['THUMBNAIL_FOLDER'], exist_ok=True)
+            if not hasattr(current_app, 'services'):
+                current_app.logger.error("Services not initialized")
+                abort(500)
             
-                # Генерация миниатюры с таймаутом
-                input_path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
-                try:
-                    subprocess.run([
-                        'ffmpeg', '-i', input_path,
-                        '-ss', '00:00:01', '-vframes', '1', '-q:v', '2',
-                        thumb_path
-                    ], check=True, timeout=10)
-                except subprocess.TimeoutExpired:
-                    current_app.logger.warning(f"Thumbnail generation timeout for {filename}")
-                    raise
-                
-            return send_from_directory(current_app.config['THUMBNAIL_FOLDER'], f"thumb_{filename}")
+            thumbnail_service = current_app.services.get('thumbnail_service')
+            if not thumbnail_service:
+                current_app.logger.error("ThumbnailService not found")
+                abort(500)
+        
+            thumb_path = thumbnail_service.generate_thumbnail(filename)
+        
+            if not thumb_path:
+                current_app.logger.warning(f"Thumbnail not generated for {filename}")
+                return send_from_directory(
+                    current_app.static_folder,
+                    'images/default-preview.jpg'
+                )
+            
+            return send_from_directory(
+                thumbnail_service.thumbnail_folder,
+                thumb_path.name,
+                mimetype='image/jpeg'
+            )
         
         except Exception as e:
-            current_app.logger.error(f"Failed to generate thumbnail for {filename}: {str(e)}")
-            return send_from_directory(current_app.static_folder, 'images/default-preview.jpg')
+            current_app.logger.error(f"Failed to serve thumbnail for {filename}: {str(e)}", exc_info=True)
+            return send_from_directory(
+                current_app.static_folder,
+                'images/default-preview.jpg'
+            )
