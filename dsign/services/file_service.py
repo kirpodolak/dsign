@@ -225,53 +225,12 @@ class FileService:
         return 0
         
     def get_media_thumbnail(self, filename: str) -> Optional[str]:
-        """
-        Получение пути к миниатюре медиафайла с кэшированием
-        
-        Args:
-            filename: Имя исходного файла
-            
-        Returns:
-            str: Путь к миниатюре или None если не удалось создать
-        """
-        # Проверка кэша
-        if filename in self.THUMBNAIL_CACHE:
-            cached_path = self.THUMBNAIL_CACHE[filename]
-            if Path(cached_path).exists():
-                return cached_path
-            del self.THUMBNAIL_CACHE[filename]  # Удаляем из кэша если файл пропал
-
+        """Получение пути к миниатюре через ThumbnailService"""
         try:
-            file_path = os.path.join(self.upload_folder, filename)
-            if not os.path.exists(file_path):
-                return None
-
-            # Для видео возвращаем оригинальный путь (превью будет генерироваться на клиенте)
-            if filename.lower().endswith(('.mp4', '.avi')):
-                return file_path
-
-            # Создаем папку для миниатюр если ее нет
-            thumb_dir = os.path.join(self.upload_folder, 'thumbnails')
-            os.makedirs(thumb_dir, exist_ok=True)
-
-            thumb_path = os.path.join(thumb_dir, f"thumb_{filename}")
-            
-            # Если миниатюра уже существует - возвращаем ее
-            if os.path.exists(thumb_path):
-                self.THUMBNAIL_CACHE[filename] = thumb_path
-                return thumb_path
-
-            # Создаем миниатюру
-            with Image.open(file_path) as img:
-                img.thumbnail(self.THUMBNAIL_SIZE)
-                img.save(thumb_path, quality=85)
-
-            # Сохраняем в кэш
-            self.THUMBNAIL_CACHE[filename] = thumb_path
-            return thumb_path
-
+            thumb_path = self.thumbnail_service.generate_thumbnail(filename)
+            return str(thumb_path) if thumb_path else None
         except Exception as e:
-            self.logger.error(f"Failed to create thumbnail for {filename}: {str(e)}", exc_info=True)
+            self.logger.error(f"Thumbnail error: {str(e)}")
             return None
             
     def get_media_files_with_playlist_info(self, playlist_id=None, db_session=None):
