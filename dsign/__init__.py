@@ -7,12 +7,32 @@ from pathlib import Path
 from threading import Thread
 
 from dsign.config.config import Config, config
+from dsign.services import init_services
 
 def should_display_logo(db_session) -> bool:
     """Проверяет, нужно ли отображать логотип (нет активных плейлистов)"""
     from .models import PlaybackStatus
     status = db_session.query(PlaybackStatus).first()
     return not (status and status.playlist_id)
+
+def check_mpv_service(logger, timeout=5, retries=3):
+    """Проверяет статус MPV сервиса"""
+    for attempt in range(retries):
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", "dsign-mpv.service"],
+                check=True,
+                timeout=timeout,
+                capture_output=True,
+                text=True
+            )
+            if result.stdout.strip() == "active":
+                return True
+            logger.warning(f"MPV service not active (attempt {attempt + 1}/{retries})")
+        except subprocess.SubprocessError as e:
+            logger.warning(f"MPV service check failed: {str(e)} (attempt {attempt + 1}/{retries})")
+        time.sleep(1)
+    return False
 
 def create_app(config_class=config) -> Flask:
     # Настройка логирования
@@ -25,59 +45,46 @@ def create_app(config_class=config) -> Flask:
     try:
         app = Flask(__name__)
         app.config.from_object(config_class)
-
         app.static_folder = config_class.STATIC_FOLDER
         app.static_url_path = '/static'
         app.logger.setLevel(logging.INFO if not app.debug else logging.DEBUG)
         logger.info("Application instance created")
 
-        # 1. Запуск MPV сервиса
-        logger.info("Starting MPV service...")
-        try:
-            subprocess.run(
-                ["sudo", "systemctl", "enable", "--now", "dsign-mpv.service"],
-                check=True,
-                timeout=30
-            )
-            logger.info("MPV service enabled and started")
-            time.sleep(3)  # Даем время для инициализации
-        except Exception as e:
-            logger.error(f"MPV service error: {str(e)}")
-            raise RuntimeError("MPV service initialization failed") from e
+        # 1. Проверка MPV сервиса
+        logger.info("Checking MPV service status...")
+        if not check_mpv_service(logger):
+            logger.error("MPV service is not active")
+            raise RuntimeError("MPV service is not running")
+        logger.info("MPV service is active and ready")
 
         # 2. Инициализация расширений
         logger.info("Initializing extensions...")
         from .extensions import init_extensions, db, socketio
-        services = init_extensions(app)
+        init_extensions(app)
         csrf = CSRFProtect(app)
         logger.info("Extensions initialized successfully")
 
-        # 3. Инициализация сервисов
+        # 3. Инициализация сервисов внутри контекста приложения
         logger.info("Initializing services...")
-        from dsign.services.settings_service import SettingsService
-        from dsign.services.playlist_service import PlaylistService
-        from dsign.services.file_service import FileService
-        from dsign.services.playback_service import PlaybackService
-        
         with app.app_context():
-            # Инициализация сервисов
-            app.settings_service = SettingsService(
-                settings_file=config_class.SETTINGS_FILE,
-                upload_folder=config_class.UPLOAD_FOLDER
-            )
-            
-            app.file_service = FileService(upload_folder=config_class.UPLOAD_FOLDER)
-            app.playlist_service = PlaylistService(db.session)
-            
-            # Инициализация PlaybackService
-            app.playback_service = PlaybackService(
-                upload_folder=config_class.UPLOAD_FOLDER,
-                db_session=db.session,
+            services = init_services(
+                config={
+                    'UPLOAD_FOLDER': config_class.UPLOAD_FOLDER,
+                    'SECRET_KEY': config_class.SECRET_KEY,
+                    'SETTINGS_FILE': config_class.SETTINGS_FILE,
+                    'THUMBNAIL_FOLDER': config_class.THUMBNAIL_FOLDER,
+                    'THUMBNAIL_URL': config_class.THUMBNAIL_URL,
+                    'DEFAULT_LOGO': config_class.DEFAULT_LOGO
+                },
+                db=db,
                 socketio=socketio,
                 logger=logger
             )
             
-        logger.info("Services initialized successfully")
+            # Прикрепляем сервисы к app
+            for name, service in services.items():
+                if name != 'db':  # db уже есть в extensions
+                    setattr(app, name, service)
 
         # Проверка обязательных сервисов
         required_services = [
@@ -93,7 +100,7 @@ def create_app(config_class=config) -> Flask:
                 raise RuntimeError(f"Missing required service: {service}")
         logger.info("All required services verified")
 
-        # Настройка сервиса воспроизведения
+        # Настройка сервиса воспроизведения с таймаутами
         logger.info("Configuring playback service...")
         from .models import PlaybackStatus
         
@@ -108,13 +115,17 @@ def create_app(config_class=config) -> Flask:
                     logger.info("No active playlist found, starting idle logo...")
             
                     def start_idle_logo():
-                        try:
-                            if not app.playback_service.display_idle_logo():
-                                logger.warning("Initial idle logo display failed, retrying...")
+                        max_attempts = 3
+                        for attempt in range(max_attempts):
+                            try:
+                                if app.playback_service.display_idle_logo():
+                                    return
+                                logger.warning(f"Idle logo display failed (attempt {attempt + 1}/{max_attempts})")
                                 time.sleep(2)  # Задержка перед повторной попыткой
-                                app.playback_service.display_idle_logo()
-                        except Exception as e:
-                            logger.error(f"Failed to display idle logo: {str(e)}")
+                            except Exception as e:
+                                logger.error(f"Failed to display idle logo (attempt {attempt + 1}): {str(e)}")
+                                time.sleep(2)
+                        logger.error("All attempts to display idle logo failed")
             
                     # Запуск в фоновом потоке
                     Thread(target=start_idle_logo, daemon=True).start()
