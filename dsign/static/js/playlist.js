@@ -42,8 +42,8 @@
     function setupCheckboxHandlers() {
         document.addEventListener('change', (e) => {
             if (e.target.classList.contains('include-checkbox')) {
-                const fileId = e.target.dataset.id;
-                console.log(`File ${fileId} ${e.target.checked ? 'added to' : 'removed from'} playlist`);
+                const filename = e.target.dataset.filename;
+                console.log(`File ${filename} ${e.target.checked ? 'added to' : 'removed from'} playlist`);
             }
         });
     }
@@ -90,14 +90,19 @@
 
     // Загрузка превью с кэшированием
     async function loadPreview(file) {
-        const cacheKey = `preview-${file.id}`;
-        if (previewCache.has(cacheKey)) return previewCache.get(cacheKey);
-        
+        const cacheKey = `preview-${file.filename}`;
+        if (previewCache.has(cacheKey)) {
+            return previewCache.get(cacheKey);
+        }
+
+        const previewUrl = `/api/media/thumbnail/${encodeURIComponent(file.filename)}?t=${Date.now()}`;
+        const fallbackUrl = '/static/images/default-preview.jpg';
+    
         try {
-            const previewUrl = file.is_video 
-                ? `/api/media/thumbnail/${encodeURIComponent(file.filename)}?t=${Date.now()}`
-                : `/api/media/${encodeURIComponent(file.filename)}?thumb=1`;
-            
+            // Проверка доступности эндпоинта
+            const response = await fetch(previewUrl, { credentials: 'include' });
+            if (!response.ok) throw new Error('Bad response');
+        
             return new Promise((resolve) => {
                 const img = new Image();
                 img.onload = () => {
@@ -105,14 +110,14 @@
                     resolve(previewUrl);
                 };
                 img.onerror = () => {
-                    previewCache.set(cacheKey, '/static/images/default-preview.jpg');
-                    resolve('/static/images/default-preview.jpg');
+                    previewCache.set(cacheKey, fallbackUrl);
+                    resolve(fallbackUrl);
                 };
                 img.src = previewUrl;
             });
         } catch (error) {
-            console.error('Ошибка загрузки превью:', error);
-            return '/static/images/default-preview.jpg';
+            console.error(`Preview load failed for ${file.filename}:`, error);
+            return fallbackUrl;
         }
     }
 
@@ -136,16 +141,17 @@
             
             row.innerHTML = `
                 <td>${index + 1}</td>
-                <td><input type="checkbox" class="include-checkbox" data-id="${file.id}" ${file.included ? 'checked' : ''}></td>
+                <td><input type="checkbox" class="include-checkbox" data-filename="${file.filename}" ${file.included ? 'checked' : ''}></td>
                 <td>
                     <img src="${previewUrl}" 
                          alt="Preview" 
                          class="file-preview ${file.is_video ? 'video-thumbnail' : ''}"
+                         data-filename="${file.filename}"
                          onerror="this.src='/static/images/default-preview.jpg?v='+Date.now()">
                 </td>
                 <td>${file.filename}</td>
                 <td>
-                    <input type="number" class="duration-input" data-id="${file.id}" 
+                    <input type="number" class="duration-input" data-filename="${file.filename}" 
                           value="${file.duration || 10}" min="1" ${file.is_video ? 'readonly' : ''}>
                 </td>
             `;
@@ -166,8 +172,8 @@
         try {
             const selectedFiles = Array.from(document.querySelectorAll('.include-checkbox:checked'))
                 .map(checkbox => ({
-                    id: checkbox.dataset.id,
-                    duration: parseInt(document.querySelector(`.duration-input[data-id="${checkbox.dataset.id}"]`)?.value || 10)
+                    filename: checkbox.dataset.filename,
+                    duration: parseInt(document.querySelector(`.duration-input[data-filename="${checkbox.dataset.filename}"]`)?.value || 10)
                 }));
 
             const response = await fetch(`/api/playlists/${playlistId}/files`, {
