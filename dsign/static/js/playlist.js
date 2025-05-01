@@ -203,20 +203,24 @@
         toggleButtonState(saveBtn, true);
 
         try {
-            // Собираем выбранные файлы с учетом типа
+            // Собираем и валидируем файлы
             const selectedFiles = Array.from(document.querySelectorAll('.include-checkbox:checked'))
                 .map(checkbox => {
                     const filename = checkbox.dataset.filename;
-                    const isVideo = filename.toLowerCase().endsWith(('.mp4', '.avi', '.mov', '.mkv'));
-                    
+                    if (!filename || typeof filename !== 'string') return null;
+
+                    const isVideo = ['.mp4', '.avi', '.mov', '.mkv'].some(ext =>
+                        filename.toLowerCase().endsWith(ext));
+
                     return {
                         filename: filename,
-                        duration: isVideo ? 0 : parseInt(
+                        duration: isVideo ? 0 : Math.max(1, parseInt(
                             document.querySelector(`.duration-input[data-filename="${filename}"]`)?.value || 10
-                        ),
-                        is_video: isVideo // Добавляем флаг типа файла
+                        )),
+                        is_video: isVideo
                     };
-                });
+                })
+                .filter(Boolean);
 
             if (selectedFiles.length === 0) {
                 throw new Error('Не выбрано ни одного файла');
@@ -228,40 +232,35 @@
                     'Content-Type': 'application/json',
                     'X-CSRFToken': getCSRFToken()
                 },
-                body: JSON.stringify({ 
+                body: JSON.stringify({
                     files: selectedFiles,
-                    // Можно добавить дополнительную метаинформацию
                     meta: {
-                        force_video_full_duration: true // Явное указание серверу игнорировать длительность для видео
+                        force_video_full_duration: true,
+                        timestamp: new Date().toISOString()
                     }
                 })
             });
 
             if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData?.error || 'Ошибка сервера при сохранении');
+                const errorData = await response.json().catch(() => ({ }));
+                throw new Error(errorData.error || `HTTP error ${response.status}`);
             }
 
-            // Успешное сохранение
             showAlert('success', 'Успех', 'Плейлист сохранен');
-            
-            // Очищаем кэш и перезагружаем данные
             sessionStorage.removeItem(`media-files-${playlistId}`);
             await loadMediaFiles();
-            
-            // Уведомляем другие клиенты об обновлении
+
             if (window.App?.Sockets) {
-                window.App.Sockets.emit('playlist_updated', { 
+                window.App.Sockets.emit('playlist_updated', {
                     playlist_id: playlistId,
                     updated_files: selectedFiles.length
                 });
             }
 
         } catch (error) {
-            console.error('Ошибка сохранения плейлиста:', error);
+            console.error('Ошибка сохранения:', error);
             showAlert('error', 'Ошибка', error.message || 'Не удалось сохранить плейлист');
-            
-            // Дополнительная обработка специфических ошибок
+
             if (error.message.includes('недостаточно места')) {
                 showAlert('warning', 'Внимание', 'Недостаточно места на сервере');
             }
