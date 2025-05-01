@@ -72,33 +72,33 @@ class ThumbnailService:
         return f"{self.thumbnail_url}/thumb_{filename}"
 
     def generate_thumbnail(self, filename: str) -> Optional[Path]:
-        """
-        Генерирует и возвращает путь к миниатюре.
-        """
+        """Генерирует миниатюру с правильным расширением .jpg"""
         file_path = self.upload_folder / filename
         if not file_path.exists():
             self.logger.warning(f"Source file not found: {filename}")
             return None
 
-        thumb_path = self.thumbnail_folder / f"thumb_{filename}"
-        
+        # Всегда используем .jpg для миниатюр
+        thumb_name = f"thumb_{Path(filename).stem}.jpg"
+        thumb_path = self.thumbnail_folder / thumb_name
+    
         if thumb_path.exists():
             return thumb_path
 
         with self.lock:
             try:
                 ext = file_path.suffix.lower()
-                
+            
                 if ext in ('.jpg', '.jpeg', '.png', '.webp'):
                     return self._generate_image_thumbnail(file_path, thumb_path)
-                elif ext in ('.mp4', '.avi', '.mov') and self.ffmpeg_available:
+                elif ext in ('.mp4', '.avi', '.mov'):
                     return self._generate_video_thumbnail(file_path, thumb_path)
-                
-                self.logger.warning(f"Unsupported file type for thumbnails: {filename}")
+            
+                self.logger.warning(f"Unsupported file type: {filename}")
                 return None
-                
+            
             except Exception as e:
-                self.logger.error(f"Failed to generate thumbnail for {filename}: {str(e)}")
+                self.logger.error(f"Failed to generate thumbnail: {str(e)}")
                 return None
 
     def _generate_image_thumbnail(self, source_path: Path, thumb_path: Path) -> Optional[Path]:
@@ -119,16 +119,8 @@ class ThumbnailService:
             return None
 
     def _generate_video_thumbnail(self, source_path: Path, thumb_path: Path) -> Optional[Path]:
-        """Generate video thumbnail with multiple fallback strategies"""
-        self.logger.info(f"Generating thumbnail for video: {source_path.name}")
-    
-        # Ensure the source file exists and is readable
-        if not source_path.exists():
-            self.logger.error(f"Source video file not found: {source_path}")
-            return None
-        
+        """Генерирует миниатюру для видео с явным указанием формата"""
         try:
-            # First attempt: try to get a frame at 1 second
             cmd = [
                 'ffmpeg',
                 '-i', str(source_path),
@@ -136,42 +128,34 @@ class ThumbnailService:
                 '-vframes', '1',
                 '-q:v', '2',
                 '-vf', f'scale={self.thumbnail_size[0]}:-1',
+                '-f', 'mjpeg',  # Явно указываем формат вывода
                 '-y',
                 str(thumb_path)
             ]
         
-            self.logger.debug(f"Running FFmpeg command: {' '.join(cmd)}")
-        
             result = subprocess.run(
                 cmd,
-                check=False,
+                check=True,
                 timeout=self.ffmpeg_timeout,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
+                stderr=subprocess.PIPE
             )
         
-            # Check if thumbnail was created successfully
-            if thumb_path.exists() and thumb_path.stat().st_size > 1024:
+            # Дополнительная проверка
+            if thumb_path.exists():
                 try:
                     with Image.open(thumb_path) as img:
                         img.verify()
-                    self.logger.info(f"Successfully generated thumbnail for {source_path.name}")
                     return thumb_path
-                except Exception as img_error:
-                    self.logger.warning(f"Generated thumbnail is invalid: {str(img_error)}")
-                    thumb_path.unlink()  # Remove invalid thumbnail
-            else:
-                self.logger.warning("Thumbnail generation failed or produced empty file")
-                if result.stderr:
-                    self.logger.debug(f"FFmpeg stderr: {result.stderr}")
-            
-        except subprocess.TimeoutExpired:
-            self.logger.warning(f"Timeout generating thumbnail for {source_path.name}")
+                except Exception as e:
+                    self.logger.error(f"Invalid thumbnail image: {str(e)}")
+                    thumb_path.unlink()
+                
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"FFmpeg failed: {e.stderr.decode()}")
         except Exception as e:
-            self.logger.error(f"Error generating thumbnail: {str(e)}")
+            self.logger.error(f"Video thumbnail error: {str(e)}")
     
-        # Fallback to default thumbnail
         return None
             
     def cleanup_thumbnails(self, max_age_days: int = 30) -> int:
