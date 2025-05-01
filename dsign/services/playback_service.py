@@ -357,3 +357,15 @@ class PlaybackService:
                 return True
             time.sleep(check_interval)
         return False
+        
+    def play_file(self, file_info):
+        """Воспроизводит файл с учетом его типа"""
+        if file_info.get('is_video'):
+            # Для видео - воспроизводим полностью
+            self._play_video_full(file_info['filename'])
+        else:
+            # Для изображений - используем указанную длительность
+            self._show_image(
+                file_info['filename'],
+                duration=file_info['duration']
+            )
