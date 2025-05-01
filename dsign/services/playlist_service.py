@@ -4,11 +4,18 @@ from datetime import datetime
 import logging
 from flask import current_app
 import time
+from dsign.models import Playlist
 
 class PlaylistService:
-    def __init__(self, db_session, logger: Optional[logging.Logger] = None):
-        self.db = db_session
-        self.logger = logger or logging.getLogger(__name__)
+    def __init__(self, db, logger=None):
+        """Инициализация с сессией базы данных"""
+        self._db = db  # Используем защищенный атрибут
+        self.logger = logging.getLogger(__name__)
+
+    @property
+    def db_session(self):
+        """Геттер для сессии базы данных"""
+        return self._db_session
 
     def _safe_parse_datetime(self, dt_value) -> Optional[datetime]:
         """Универсальный парсер дат с защитой от ошибок"""
@@ -183,82 +190,65 @@ class PlaylistService:
             self.logger.error(f"Failed to delete playlist {playlist_id}: {str(e)}", exc_info=True)
             raise RuntimeError(f"Failed to delete playlist {playlist_id}") from e
 
-    def update_playlist_files(self, playlist_id: int, files_data: List[Dict]) -> Dict[str, bool]:
-        """Обновление файлов в плейлисте с поддержкой file_id"""
-        from ..models import Playlist, PlaylistFiles
-
+    def update_playlist_files(self, playlist_id: int, files_data: List[Dict]) -> Dict:
+        """Обновляет файлы в плейлисте"""
         try:
-            if not isinstance(files_data, list):
-                raise ValueError("files_data must be a list")
+            playlist = self.db.session.query(Playlist).get(playlist_id)
+            if not playlist:
+                return {"success": False, "error": "Playlist not found"}
 
-            self.db.session.begin_nested()
-
-            # Удаляем старые файлы плейлиста
-            self.db.session.query(PlaylistFiles).filter(
-                PlaylistFiles.playlist_id == playlist_id
-            ).delete(synchronize_session=False)
-
-            # Добавляем новые файлы
-            for order, file_data in enumerate(files_data, start=1):
+            processed_files = []
+            for file_data in files_data:
                 if not isinstance(file_data, dict):
-                    raise ValueError(f"Invalid file data at position {order}")
-            
-                # Поддержка как file_id (из галереи), так и file_name (для обратной совместимости)
-                file_id = file_data.get('id')
-                file_name = file_data.get('name')
-            
-                if not file_id and not file_name:
-                    raise ValueError(f"File data must contain 'id' or 'name' at position {order}")
+                    continue
+                    
+                filename = file_data.get('filename') or file_data.get('name')
+                if not filename:
+                    continue
+                    
+                is_video = filename.lower().endswith(('.mp4', '.avi', '.mov'))
+                processed_files.append({
+                    'filename': filename,
+                    'duration': 0 if is_video else int(file_data.get('duration', 10)),
+                    'is_video': is_video
+                })
 
-                self.db.session.add(PlaylistFiles(
-                    playlist_id=playlist_id,
-                    file_id=file_id,  # Основной вариант (связь с медиагалереей)
-                    file_name=file_name,  # Фолбэк (если file_id нет)
-                    duration=int(file_data.get('duration', 0)),
-                    order=order,
-                    created_at=int(time.time())  # Можно заменить на datetime.utcnow()
-                ))
+            if not processed_files:
+                return {"success": False, "error": "No valid files provided"}
 
-            # Обновляем дату модификации плейлиста
-            self.db.session.query(Playlist).filter(
-                Playlist.id == playlist_id
-            ).update({
-                'last_modified': int(time.time())
-            }, synchronize_session=False)
-
+            playlist.files = processed_files
             self.db.session.commit()
-            return {"success": True}
-
+            return {"success": True, "updated": len(processed_files)}
+            
         except Exception as e:
             self.db.session.rollback()
-            self.logger.error(f"Failed to update files in playlist {playlist_id}: {str(e)}", exc_info=True)
-            raise RuntimeError(f"Failed to update files in playlist {playlist_id}") from e
+            if self.logger:
+                self.logger.error(f"Failed to update playlist: {str(e)}")
+            return {"success": False, "error": str(e)}
     
     def reorder_single_item(self, playlist_id: int, item_id: int, new_position: int) -> bool:
-        """Изменение позиции одного элемента"""
+        """Перемещает элемент плейлиста на новую позицию"""
         try:
-            items = self.db.session.query(PlaylistFiles).filter_by(
-                playlist_id=playlist_id
-            ).order_by(PlaylistFiles.order).all()
-
-            # Находим перемещаемый элемент
-            item = next((x for x in items if x.id == item_id), None)
-            if not item:
-                raise ValueError("Item not found")
-
-            # Обновляем позиции
-            items.remove(item)
-            items.insert(new_position - 1, item)
-
-            with self.db.session.begin_nested():
-                for idx, item in enumerate(items, start=1):
-                    item.order = idx
-                    self.db.session.add(item)
-
-            self.db.session.commit()
-            return True
-
+            with self.db_session.begin():
+                # Получаем текущий порядок
+                playlist = self.db_session.query(Playlist).get(playlist_id)
+                if not playlist:
+                    return False
+                
+                files = playlist.files_order or []
+                
+                # Находим и перемещаем элемент
+                if item_id not in files:
+                    return False
+                
+                files.remove(item_id)
+                files.insert(new_position - 1, item_id)
+                
+                # Обновляем порядок
+                playlist.files_order = files
+                self.db_session.commit()
+                return True
+                
         except Exception as e:
-            self.db.session.rollback()
-            self.logger.error(f"Reorder failed: {str(e)}")
+            self.logger.error(f"Error reordering item: {str(e)}")
             return False
