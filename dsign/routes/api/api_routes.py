@@ -518,7 +518,7 @@ def init_api_routes(api_bp, services):
                 "error": str(e)
             }), 500
     
-    api_bp.route('/playlists/<int:playlist_id>/files', methods=['POST'])
+    @api_bp.route('/playlists/<int:playlist_id>/files', methods=['POST'])
     @login_required
     def update_playlist_files(playlist_id):
         try:
@@ -526,18 +526,21 @@ def init_api_routes(api_bp, services):
             if not data or 'files' not in data:
                 return jsonify({"success": False, "error": "Missing files data"}), 400
 
-            # Получаем сервис из app context
-            playlist_service = current_app.services['playlist_service']
-        
+            # Логирование для отладки
+            current_app.logger.debug(f"Updating playlist {playlist_id} with files: {data.get('files')}")
+
+            # Используем сервис из замыкания
             result = playlist_service.update_playlist_files(playlist_id, data.get('files', []))
-        
+            
             if not result.get('success'):
+                current_app.logger.error(f"Playlist update failed: {result.get('error')}")
                 return jsonify(result), 400
 
+            current_app.logger.info(f"Playlist {playlist_id} updated successfully")
             return jsonify(result)
         
         except Exception as e:
-            current_app.logger.error(f"API error: {str(e)}")
+            current_app.logger.error(f"API error: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": "Internal server error"}), 500
     
     # ======================
