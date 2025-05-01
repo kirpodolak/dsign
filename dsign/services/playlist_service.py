@@ -7,15 +7,10 @@ import time
 from dsign.models import Playlist
 
 class PlaylistService:
-    def __init__(self, db, logger=None):
+    def __init__(self, db_session, logger=None):
         """Инициализация с сессией базы данных"""
-        self._db = db  # Используем защищенный атрибут
+        self.db_session = db_session  # Используем защищенный атрибут
         self.logger = logging.getLogger(__name__)
-
-    @property
-    def db_session(self):
-        """Геттер для сессии базы данных"""
-        return self._db_session
 
     def _safe_parse_datetime(self, dt_value) -> Optional[datetime]:
         """Универсальный парсер дат с защитой от ошибок"""
@@ -192,38 +187,41 @@ class PlaylistService:
 
     def update_playlist_files(self, playlist_id: int, files_data: List[Dict]) -> Dict:
         """Обновляет файлы в плейлисте"""
+        from ..models import PlaylistFiles
+    
         try:
-            playlist = self.db.session.query(Playlist).get(playlist_id)
+            playlist = self.db_session.query(Playlist).get(playlist_id)
             if not playlist:
                 return {"success": False, "error": "Playlist not found"}
-
-            processed_files = []
-            for file_data in files_data:
+        
+            # Удаляем старые файлы плейлиста
+            self.db_session.query(PlaylistFiles).filter_by(playlist_id=playlist_id).delete()
+        
+            # Добавляем новые файлы
+            for idx, file_data in enumerate(files_data, 1):
                 if not isinstance(file_data, dict):
                     continue
-                    
+                
                 filename = file_data.get('filename') or file_data.get('name')
                 if not filename:
                     continue
-                    
+                
                 is_video = filename.lower().endswith(('.mp4', '.avi', '.mov'))
-                processed_files.append({
-                    'filename': filename,
-                    'duration': 0 if is_video else int(file_data.get('duration', 10)),
-                    'is_video': is_video
-                })
-
-            if not processed_files:
-                return {"success": False, "error": "No valid files provided"}
-
-            playlist.files = processed_files
-            self.db.session.commit()
-            return {"success": True, "updated": len(processed_files)}
-            
+                playlist_file = PlaylistFiles(
+                    playlist_id=playlist_id,
+                    file_name=filename,
+                    duration=0 if is_video else int(file_data.get('duration', 10)),
+                    order=idx
+                )
+                self.db_session.add(playlist_file)
+        
+            playlist.last_modified = int(time.time())
+            self.db_session.commit()
+            return {"success": True, "updated": len(files_data)}
+        
         except Exception as e:
-            self.db.session.rollback()
-            if self.logger:
-                self.logger.error(f"Failed to update playlist: {str(e)}")
+            self.db_session.rollback()
+            self.logger.error(f"Failed to update playlist files: {str(e)}")
             return {"success": False, "error": str(e)}
     
     def reorder_single_item(self, playlist_id: int, item_id: int, new_position: int) -> bool:
