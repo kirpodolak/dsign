@@ -2,6 +2,7 @@ from threading import Lock
 import os
 import shutil
 import subprocess
+from pathlib import Path 
 from flask import jsonify, request, send_from_directory, abort, current_app, send_file
 from flask_login import login_required
 from flask_wtf.csrf import validate_csrf
@@ -517,7 +518,7 @@ def init_api_routes(api_bp, services):
                 "error": str(e)
             }), 500
     
-    @api_bp.route('/playlists/<int:playlist_id>/files', methods=['POST'])
+    api_bp.route('/playlists/<int:playlist_id>/files', methods=['POST'])
     @login_required
     def update_playlist_files(playlist_id):
         try:
@@ -525,25 +526,19 @@ def init_api_routes(api_bp, services):
             if not data or 'files' not in data:
                 return jsonify({"success": False, "error": "Missing files data"}), 400
 
-            # Проверяем существование плейлиста
-            playlist = db.session.query(Playlist).get(playlist_id)
-            if not playlist:
-                return jsonify({"success": False, "error": "Playlist not found"}), 404
+            # Получаем сервис из app context
+            playlist_service = current_app.services['playlist_service']
+        
+            result = playlist_service.update_playlist_files(playlist_id, data.get('files', []))
+        
+            if not result.get('success'):
+                return jsonify(result), 400
 
-            # Обновляем файлы плейлиста
-            result = playlist_service.update_playlist_files(
-                playlist_id,
-                data.get('files', [])
-            )
-
-            if socketio:
-                socketio.emit('playlist_updated', {'playlist_id': playlist_id})
-
-            return jsonify({"success": True, "updated": result})
+            return jsonify(result)
         
         except Exception as e:
-            current_app.logger.error(f"Error updating playlist files: {str(e)}")
-            return jsonify({"success": False, "error": str(e)}), 500
+            current_app.logger.error(f"API error: {str(e)}")
+            return jsonify({"success": False, "error": "Internal server error"}), 500
     
     # ======================
     # Media File Handling (/api/media)
@@ -817,60 +812,38 @@ def init_api_routes(api_bp, services):
     @api_bp.route('/media/thumbnail/<filename>', methods=['GET'])
     def get_media_thumbnail(filename):
         try:
-            if not hasattr(current_app, 'thumbnail_service'):
-                current_app.logger.error("ThumbnailService not initialized")
-                abort(500)
+            # Всегда используем .jpg в пути
+            thumb_name = f"thumb_{Path(filename).stem}.jpg"
         
-            # Skip processing for video files if ffmpeg isn't available
-            is_video = filename.lower().endswith(('.mp4', '.avi', '.mov', '.mkv'))
-        
-            if is_video and not current_app.thumbnail_service.ffmpeg_available:
-                current_app.logger.debug(f"Skipping video thumbnail for {filename}, ffmpeg not available")
+            # Пробуем отдать готовую миниатюру
+            thumb_path = current_app.thumbnail_service.thumbnail_folder / thumb_name
+            if thumb_path.exists():
                 return send_from_directory(
-                    current_app.static_folder,
-                    'images/default-preview.jpg',
-                    max_age=3600
+                    current_app.thumbnail_service.thumbnail_folder,
+                    thumb_name,
+                    mimetype='image/jpeg',
+                    max_age=86400
                 )
-                
+        
+            # Генерация новой миниатюры
             thumb_path = current_app.thumbnail_service.generate_thumbnail(filename)
-        
-            if not thumb_path:
-                current_app.logger.warning(f"Thumbnail not generated for {filename}")
+            if thumb_path:
                 return send_from_directory(
-                    current_app.static_folder,
-                    'images/default-preview.jpg',
-                    max_age=3600
+                    current_app.thumbnail_service.thumbnail_folder,
+                    thumb_path.name,
+                    mimetype='image/jpeg',
+                    max_age=86400
                 )
             
-            # Verify the thumbnail is valid before sending
-            try:
-                with Image.open(thumb_path) as img:
-                    img.verify()
-            except Exception as e:
-                current_app.logger.error(f"Invalid thumbnail for {filename}: {str(e)}")
-                return send_from_directory(
-                    current_app.static_folder,
-                    'images/default-preview.jpg',
-                    max_age=3600
-                )
-            
-            # Set proper caching headers
-            response = send_from_directory(
-                current_app.thumbnail_service.thumbnail_folder,
-                thumb_path.name,
-                mimetype='image/jpeg',
-                max_age=86400  # Cache for 24 hours
-            )
-            response.headers['Cache-Control'] = 'public, max-age=86400'
-            return response
-        
         except Exception as e:
-            current_app.logger.error(f"Failed to serve thumbnail for {filename}: {str(e)}")
-            return send_from_directory(
-                current_app.static_folder,
-                'images/default-preview.jpg',
-                max_age=3600
-            )
+            current_app.logger.error(f"Thumbnail error: {str(e)}")
+        
+        # Fallback
+        return send_from_directory(
+            current_app.static_folder,
+            'images/default-preview.jpg',
+            max_age=3600
+        )
             
     @api_bp.route('/debug/thumbnails', methods=['GET'])
     @login_required
