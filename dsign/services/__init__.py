@@ -143,7 +143,7 @@ def init_services(
                 socketio=socketio,
                 logger=logger
             ),
-            'playlist_service': PlaylistService(db, logger),
+            'playlist_service': PlaylistService(db.session, logger),
             'settings_service': SettingsService(
                 settings_file=config.get('SETTINGS_FILE', 'settings.json'),
                 upload_folder=config['UPLOAD_FOLDER'],
