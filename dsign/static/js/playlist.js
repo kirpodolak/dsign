@@ -142,7 +142,7 @@
     }
 
     // Рендеринг таблицы файлов
-    function renderFileTable(files) {
+     function renderFileTable(files) {
         if (!fileListEl) return;
 
         const emptyMessage = document.getElementById('empty-playlist-message');
@@ -158,10 +158,13 @@
         files.forEach((file, index) => {
             const row = document.createElement('tr');
             const img = document.createElement('img');
-            img.src = '/static/images/default-preview.jpg';  // Prevents flickering
+            img.src = '/static/images/default-preview.jpg'; // Заглушка для предотвращения мерцания
             img.alt = 'Preview';
             img.className = `file-preview ${file.is_video ? 'video-thumbnail' : ''}`;
             img.dataset.filename = file.filename;
+        
+            // Определяем, является ли файл видео (по расширению или флагу is_video)
+            const isVideo = file.is_video || ['.mp4', '.avi', '.mov', '.mkv'].some(ext => file.filename.toLowerCase().endsWith(ext));
         
             row.innerHTML = `
                 <td>${index + 1}</td>
@@ -169,16 +172,21 @@
                 <td></td>
                 <td>${file.filename}</td>
                 <td>
-                    <input type="number" class="duration-input" data-filename="${file.filename}" 
-                          value="${file.duration || 10}" min="1" ${file.is_video ? 'readonly' : ''}>
+                    ${isVideo ? 
+                        // Для видео - статический текст
+                        '<span class="video-duration">Полное видео</span>' : 
+                        // Для изображений - поле ввода длительности
+                        `<input type="number" class="duration-input" data-filename="${file.filename}" 
+                          value="${file.duration || 10}" min="1">`
+                    }
                 </td>
             `;
         
-            // Insert the img element we created
+            // Вставляем элемент изображения
             row.querySelector('td:nth-child(3)').appendChild(img);
             fileListEl.appendChild(row);
         
-            // Load the preview async
+            // Загружаем превью асинхронно
             loadPreview(file).then(url => {
                 img.src = url;
             });
@@ -193,13 +201,26 @@
         }
 
         toggleButtonState(saveBtn, true);
-    
+
         try {
+            // Собираем выбранные файлы с учетом типа
             const selectedFiles = Array.from(document.querySelectorAll('.include-checkbox:checked'))
-                .map(checkbox => ({
-                    filename: checkbox.dataset.filename,
-                    duration: parseInt(document.querySelector(`.duration-input[data-filename="${checkbox.dataset.filename}"]`)?.value || 10)
-                }));
+                .map(checkbox => {
+                    const filename = checkbox.dataset.filename;
+                    const isVideo = filename.toLowerCase().endsWith(('.mp4', '.avi', '.mov', '.mkv'));
+                    
+                    return {
+                        filename: filename,
+                        duration: isVideo ? 0 : parseInt(
+                            document.querySelector(`.duration-input[data-filename="${filename}"]`)?.value || 10
+                        ),
+                        is_video: isVideo // Добавляем флаг типа файла
+                    };
+                });
+
+            if (selectedFiles.length === 0) {
+                throw new Error('Не выбрано ни одного файла');
+            }
 
             const response = await fetch(`/api/playlists/${playlistId}/files`, {
                 method: 'POST',
@@ -207,21 +228,43 @@
                     'Content-Type': 'application/json',
                     'X-CSRFToken': getCSRFToken()
                 },
-                body: JSON.stringify({ files: selectedFiles })
+                body: JSON.stringify({ 
+                    files: selectedFiles,
+                    // Можно добавить дополнительную метаинформацию
+                    meta: {
+                        force_video_full_duration: true // Явное указание серверу игнорировать длительность для видео
+                    }
+                })
             });
 
-            if (!response.ok) throw new Error((await response.json())?.error || 'Ошибка сервера');
-            
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData?.error || 'Ошибка сервера при сохранении');
+            }
+
+            // Успешное сохранение
             showAlert('success', 'Успех', 'Плейлист сохранен');
+            
+            // Очищаем кэш и перезагружаем данные
             sessionStorage.removeItem(`media-files-${playlistId}`);
             await loadMediaFiles();
             
+            // Уведомляем другие клиенты об обновлении
             if (window.App?.Sockets) {
-                window.App.Sockets.emit('playlist_updated', { playlist_id: playlistId });
+                window.App.Sockets.emit('playlist_updated', { 
+                    playlist_id: playlistId,
+                    updated_files: selectedFiles.length
+                });
             }
+
         } catch (error) {
-            console.error('Ошибка сохранения:', error);
-            showAlert('error', 'Ошибка', error.message);
+            console.error('Ошибка сохранения плейлиста:', error);
+            showAlert('error', 'Ошибка', error.message || 'Не удалось сохранить плейлист');
+            
+            // Дополнительная обработка специфических ошибок
+            if (error.message.includes('недостаточно места')) {
+                showAlert('warning', 'Внимание', 'Недостаточно места на сервере');
+            }
         } finally {
             toggleButtonState(saveBtn, false);
         }
