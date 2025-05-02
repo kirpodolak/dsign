@@ -40,11 +40,11 @@ class PlaylistService:
         """Получение активного плейлиста"""
         from ..models import PlaybackStatus, Playlist
         try:
-            status = self.db.session.query(PlaybackStatus).first()
+            status = self.db_session.query(PlaybackStatus).first()
             if not status or not status.playlist_id:
                 return None
 
-            playlist = self.db.session.query(Playlist).get(status.playlist_id)
+            playlist = self.db_session.query(Playlist).get(status.playlist_id)
             if not playlist:
                 return None
 
@@ -62,7 +62,7 @@ class PlaylistService:
         """Получение всех плейлистов с использованием ORM"""
         from ..models import Playlist
         try:
-            playlists = self.db.session.query(Playlist).order_by(Playlist.last_modified.desc()).all()
+            playlists = self.db_session.query(Playlist).order_by(Playlist.last_modified.desc()).all()
             
             result = []
             for playlist in playlists:
@@ -100,12 +100,12 @@ class PlaylistService:
                 last_modified=int(time.time())
             )
             
-            self.db.session.add(playlist)
-            self.db.session.commit()
+            self.db_session.add(playlist)
+            self.db_session.commit()
             
             return {"playlist_id": playlist.id}
         except Exception as e:
-            self.db.session.rollback()
+            self.db_session.rollback()
             self.logger.error(f"Failed to create playlist: {str(e)}", exc_info=True)
             raise RuntimeError("Failed to create playlist") from e
 
@@ -114,7 +114,7 @@ class PlaylistService:
         from ..models import Playlist, PlaylistFiles
 
         try:
-            playlist = self.db.session.query(Playlist).get(playlist_id)
+            playlist = self.db_session.query(Playlist).get(playlist_id)
             if not playlist:
                 raise ValueError(f"Playlist {playlist_id} not found")
 
@@ -149,7 +149,7 @@ class PlaylistService:
         from ..models import Playlist
 
         try:
-            playlist = self.db.session.query(Playlist).get(playlist_id)
+            playlist = self.db_session.query(Playlist).get(playlist_id)
             if not playlist:
                 raise ValueError(f"Playlist {playlist_id} not found")
 
@@ -159,11 +159,11 @@ class PlaylistService:
                 playlist.customer = data.get('customer', '')
             
             playlist.last_modified = int(time.time())
-            self.db.session.commit()
+            self.db_session.commit()
             
             return {"success": True}
         except Exception as e:
-            self.db.session.rollback()
+            self.db_session.rollback()
             self.logger.error(f"Failed to update playlist {playlist_id}: {str(e)}", exc_info=True)
             raise RuntimeError(f"Failed to update playlist {playlist_id}") from e
 
@@ -172,16 +172,16 @@ class PlaylistService:
         from ..models import Playlist
 
         try:
-            playlist = self.db.session.query(Playlist).get(playlist_id)
+            playlist = self.db_session.query(Playlist).get(playlist_id)
             if not playlist:
                 raise ValueError(f"Playlist {playlist_id} not found")
 
-            self.db.session.delete(playlist)
-            self.db.session.commit()
+            self.db_session.delete(playlist)
+            self.db_session.commit()
             
             return {"success": True}
         except Exception as e:
-            self.db.session.rollback()
+            self.db_session.rollback()
             self.logger.error(f"Failed to delete playlist {playlist_id}: {str(e)}", exc_info=True)
             raise RuntimeError(f"Failed to delete playlist {playlist_id}") from e
 
