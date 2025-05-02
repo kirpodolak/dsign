@@ -28,6 +28,9 @@ class Config:
     DEFAULT_LOGO_PATH = '/var/lib/dsign/media/idle_logo.jpg'
     THUMBNAIL_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbnails')
     THUMBNAIL_URL = '/media/thumbnails'  # URL-префикс для доступа к миниатюрам
+    M3U_EXPORT_DIR = os.path.join(BASE_DIR, 'static/playlists')
+    MEDIA_ROOT = '/var/lib/dsign/media'  # Физический путь к файлам
+    MEDIA_URL = '/media/'  # URL-префикс для доступа к файлам
     
     # Создаем директории, если они не существуют
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -35,6 +38,7 @@ class Config:
     os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
     os.makedirs(STATIC_FOLDER, exist_ok=True)
     os.makedirs(THUMBNAIL_FOLDER, exist_ok=True)
+    os.makedirs(M3U_EXPORT_DIR, exist_ok=True)
 
     # Настройки приложения
     SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey123")
@@ -93,6 +97,9 @@ MAX_CONTENT_LENGTH = config.MAX_CONTENT_LENGTH
 CORS_SUPPORTS_CREDENTIALS = config.CORS_SUPPORTS_CREDENTIALS
 THUMBNAIL_FOLDER = config.THUMBNAIL_FOLDER
 THUMBNAIL_URL = config.THUMBNAIL_URL
+M3U_EXPORT_DIR = config.M3U_EXPORT_DIR
+MEDIA_ROOT = config.MEDIA_ROOT
+MEDIA_URL = config.MEDIA_URL
 
 __all__ = [
     'config',
@@ -110,4 +117,7 @@ __all__ = [
     'BASE_DIR',
     'THUMBNAIL_FOLDER',
     'THUMBNAIL_URL',
+    'M3U_EXPORT_DIR',
+    'MEDIA_ROOT',
+    'MEDIA_URL',
 ]
