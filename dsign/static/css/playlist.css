@@ -63,3 +63,59 @@
     border-radius: 4px;
     color: #6c757d;
 }
+
+/* Стили для уведомлений */
+#alerts-container {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 10000;
+    max-width: 350px;
+    width: 100%;
+}
+
+.alert {
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    margin-bottom: 15px;
+    border-radius: 8px;
+    overflow: hidden;
+    animation: slideIn 0.3s ease-out forwards;
+    transition: none;
+}
+
+.alert.hide {
+    animation: fadeOut 0.3s ease-in forwards;
+}
+
+.alert-success {
+    background-color: #d1e7dd;
+    color: #0f5132;
+    border-color: #badbcc;
+}
+
+.alert-error {
+    background-color: #f8d7da;
+    color: #842029;
+    border-color: #f5c2c7;
+}
+
+.alert-warning {
+    background-color: #fff3cd;
+    color: #664d03;
+    border-color: #ffecb5;
+}
+
+.alert-info {
+    background-color: #cfe2ff;
+    color: #084298;
+    border-color: #b6d4fe;
+}
+
+@keyframes slideIn {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes fadeOut {
+    to { opacity: 0; transform: translateX(100%); }
+}
