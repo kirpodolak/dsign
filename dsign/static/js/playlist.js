@@ -12,90 +12,114 @@
     const playlistId = getPlaylistId();
     const fileListEl = document.getElementById('file-list');
     const saveBtn = document.getElementById('save-playlist');
-    const exportBtn = document.getElementById('export-m3u'); // Новая кнопка экспорта
+    const exportBtn = document.getElementById('export-m3u');
 
-    // Улучшенная реализация showAlert
-    const showAlert = window.App?.Alerts?.show || function(type, title, message) {
-        // Создаем контейнер для уведомлений, если его еще нет
-        let alertsContainer = document.getElementById('alerts-container');
-        if (!alertsContainer) {
-            alertsContainer = document.createElement('div');
-            alertsContainer.id = 'alerts-container';
-            alertsContainer.style.position = 'fixed';
-            alertsContainer.style.top = '20px';
-            alertsContainer.style.right = '20px';
-            alertsContainer.style.zIndex = '10000';
-            alertsContainer.style.maxWidth = '350px';
-            alertsContainer.style.width = '100%';
-            document.body.appendChild(alertsContainer);
-        }
+    // Универсальная функция для показа уведомлений
+    const ui = {
+        showAlert(message, type = 'info', duration = 5000) {
+            // Создаем контейнер для уведомлений, если его еще нет
+            let alertsContainer = document.getElementById('alerts-container');
+            if (!alertsContainer) {
+                alertsContainer = document.createElement('div');
+                alertsContainer.id = 'alerts-container';
+                alertsContainer.style.position = 'fixed';
+                alertsContainer.style.top = '20px';
+                alertsContainer.style.right = '20px';
+                alertsContainer.style.zIndex = '10000';
+                alertsContainer.style.maxWidth = '350px';
+                alertsContainer.style.width = '100%';
+                document.body.appendChild(alertsContainer);
+            }
 
-        // Создаем элемент уведомления
-        const alertDiv = document.createElement('div');
-        alertDiv.className = `alert alert-${type} alert-dismissible fade show`;
-        alertDiv.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
-        alertDiv.style.marginBottom = '15px';
-        alertDiv.style.borderRadius = '8px';
-        alertDiv.style.overflow = 'hidden';
-        alertDiv.style.animation = 'slideIn 0.3s ease-out forwards';
-    
-        // Добавляем анимацию в стили
-        const style = document.createElement('style');
-        style.textContent = `
-            @keyframes slideIn {
-                from { transform: translateX(100%); opacity: 0; }
-                to { transform: translateX(0); opacity: 1; }
-            }
-            @keyframes fadeOut {
-                to { opacity: 0; transform: translateX(100%); }
-            }
-            .alert.fade.show {
-                transition: none;
-            }
-            .alert.fade.hide {
-                animation: fadeOut 0.3s ease-in forwards;
-            }
-        `;
-        document.head.appendChild(style);
+            // Создаем элемент уведомления
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `alert alert-${type}`;
+            alertDiv.style.cssText = `
+                padding: 15px;
+                margin-bottom: 15px;
+                border-radius: 8px;
+                background: ${this.getAlertColor(type)};
+                color: white;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                animation: slideIn 0.3s ease-out forwards;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+            `;
 
-        // Внутренняя структура уведомления
-        alertDiv.innerHTML = `
-            <div class="d-flex align-items-center">
-                <div class="flex-grow-1">
-                    <strong>${title}</strong>
-                    <div class="alert-message">${message}</div>
+            // Добавляем иконку в зависимости от типа
+            const icons = {
+                success: 'fa-check-circle',
+                error: 'fa-times-circle',
+                warning: 'fa-exclamation-triangle',
+                info: 'fa-info-circle'
+            };
+
+            alertDiv.innerHTML = `
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <i class="fas ${icons[type] || 'fa-info-circle'}" style="font-size: 1.5rem;"></i>
+                    <div>
+                        <div style="font-weight: bold; margin-bottom: 5px;">${type === 'error' ? 'Ошибка' : 
+                            type === 'success' ? 'Успех' : 
+                            type === 'warning' ? 'Внимание' : 'Информация'}</div>
+                        <div>${message}</div>
+                    </div>
                 </div>
-                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-            </div>
-        `;
+                <button class="alert-close-btn" style="background: none; border: none; color: white; cursor: pointer;">
+                    <i class="fas fa-times"></i>
+                </button>
+            `;
 
-        // Добавляем уведомление в контейнер
-        alertsContainer.prepend(alertDiv);
+            // Добавляем уведомление в контейнер
+            alertsContainer.prepend(alertDiv);
 
-        // Настраиваем автоматическое закрытие
-        const closeButton = alertDiv.querySelector('.btn-close');
-        closeButton.addEventListener('click', () => {
-            alertDiv.classList.add('hide');
-            setTimeout(() => alertDiv.remove(), 300);
-        });
+            // Настраиваем закрытие по клику
+            const closeBtn = alertDiv.querySelector('.alert-close-btn');
+            closeBtn.addEventListener('click', () => {
+                this.closeAlert(alertDiv);
+            });
 
-        // Автоматическое закрытие через 5 секунд
-        setTimeout(() => {
+            // Автоматическое закрытие
+            setTimeout(() => {
+                this.closeAlert(alertDiv);
+            }, duration);
+
+            return {
+                element: alertDiv,
+                close: () => this.closeAlert(alertDiv)
+            };
+        },
+
+        closeAlert(alertDiv) {
             if (alertDiv.parentNode) {
-                alertDiv.classList.add('hide');
+                alertDiv.style.animation = 'fadeOut 0.3s ease-in forwards';
                 setTimeout(() => alertDiv.remove(), 300);
             }
-        }, 5000);
+        },
 
-        // Возвращаем объект для ручного управления
-        return {
-            element: alertDiv,
-            close: () => {
-                alertDiv.classList.add('hide');
-                setTimeout(() => alertDiv.remove(), 300);
-            }
-        };
+        getAlertColor(type) {
+            const colors = {
+                success: '#28a745',
+                error: '#dc3545',
+                warning: '#ffc107',
+                info: '#17a2b8'
+            };
+            return colors[type] || colors.info;
+        }
     };
+
+    // Добавляем CSS анимации
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes fadeOut {
+            to { opacity: 0; transform: translateX(100%); }
+        }
+    `;
+    document.head.appendChild(style);
 
     function toggleButtonState(button, isLoading) {
         if (!button) return;
@@ -123,7 +147,7 @@
     // Загрузка медиафайлов с кэшированием
     async function loadMediaFiles() {
         if (!playlistId) {
-            showAlert('error', 'Ошибка', 'Неверный ID плейлиста');
+            ui.showAlert('Неверный ID плейлиста', 'error');
             return;
         }
 
@@ -156,7 +180,7 @@
             renderFileTable(data.files);
         } catch (error) {
             console.error('Ошибка загрузки файлов:', error);
-            showAlert('error', 'Ошибка', `Не удалось загрузить медиафайлы: ${error.message}`);
+            ui.showAlert(`Не удалось загрузить медиафайлы: ${error.message}`, 'error');
         }
     }
 
@@ -230,12 +254,11 @@
         files.forEach((file, index) => {
             const row = document.createElement('tr');
             const img = document.createElement('img');
-            img.src = '/static/images/default-preview.jpg'; // Заглушка для предотвращения мерцания
+            img.src = '/static/images/default-preview.jpg';
             img.alt = 'Preview';
             img.className = `file-preview ${file.is_video ? 'video-thumbnail' : ''}`;
             img.dataset.filename = file.filename;
         
-            // Определяем, является ли файл видео (по расширению или флагу is_video)
             const isVideo = file.is_video || ['.mp4', '.avi', '.mov', '.mkv'].some(ext => file.filename.toLowerCase().endsWith(ext));
         
             row.innerHTML = `
@@ -252,11 +275,9 @@
                 </td>
             `;
         
-            // Вставляем элемент изображения
             row.querySelector('td:nth-child(3)').appendChild(img);
             fileListEl.appendChild(row);
         
-            // Загружаем превью асинхронно
             loadPreview(file).then(url => {
                 img.src = url;
             });
@@ -266,14 +287,13 @@
     // Сохранение плейлиста с генерацией M3U
     async function savePlaylist() {
         if (!playlistId) {
-            showAlert('error', 'Ошибка', 'Неверный ID плейлиста');
+            ui.showAlert('Неверный ID плейлиста', 'error');
             return;
         }
 
         toggleButtonState(saveBtn, true);
 
         try {
-            // Собираем файлы с учетом порядка и валидацией
             const rows = Array.from(document.querySelectorAll('#file-list tr'));
             const selectedFiles = [];
             let hasErrors = false;
@@ -288,12 +308,10 @@
                         throw new Error(`Некорректное имя файла в строке ${index + 1}`);
                     }
 
-                    // Определяем тип файла по расширению
                     const fileExt = filename.toLowerCase().split('.').pop();
                     const isVideo = ['mp4', 'avi', 'mov', 'mkv'].includes(fileExt);
                     const isImage = ['jpg', 'jpeg', 'png'].includes(fileExt);
 
-                    // Валидация длительности
                     let duration = 10;
                     if (!isVideo) {
                         const durationInput = row.querySelector('.duration-input');
@@ -312,7 +330,7 @@
 
                 } catch (error) {
                     console.error(`Ошибка обработки файла: ${error.message}`);
-                    showAlert('warning', 'Внимание', error.message);
+                    ui.showAlert(error.message, 'warning');
                     hasErrors = true;
                 }
             }
@@ -325,7 +343,6 @@
                 throw new Error('Не выбрано ни одного файла');
             }
 
-            // Отправка данных на сервер
             const response = await fetch(`/api/playlists/${playlistId}/files`, {
                 method: 'POST',
                 headers: {
@@ -335,7 +352,7 @@
                 body: JSON.stringify({
                     files: selectedFiles,
                     meta: {
-                        generate_m3u: true // Явно указываем, что нужно сгенерировать M3U
+                        generate_m3u: true
                     }
                 })
             });
@@ -345,19 +362,16 @@
             if (!response.ok || !result.success) {
                 const errorMsg = result.error || `HTTP error ${response.status}`;
                 
-                // Специальная обработка ошибок валидации
                 if (errorMsg.includes('file_name') || errorMsg.includes('invalid')) {
                     throw new Error('Ошибка данных. Пожалуйста, обновите страницу и попробуйте снова.');
                 }
                 throw new Error(errorMsg);
             }
 
-            // Успешное сохранение
-            showAlert('success', 'Успех', 'Плейлист сохранен. M3U файл обновлен.');
+            ui.showAlert('Плейлист сохранен. M3U файл обновлен.', 'success');
             sessionStorage.removeItem(`media-files-${playlistId}`);
             await loadMediaFiles();
 
-            // Отправка события обновления через сокеты
             if (window.App?.Sockets) {
                 window.App.Sockets.emit('playlist_updated', {
                     playlist_id: playlistId,
@@ -369,7 +383,6 @@
         } catch (error) {
             console.error('Ошибка сохранения:', error);
             
-            // Улучшенные сообщения об ошибках
             let errorMessage = error.message;
             if (error.message.includes('недостаточно места')) {
                 errorMessage = 'Недостаточно места на сервере';
@@ -377,14 +390,14 @@
                 errorMessage = 'Ошибка валидации данных';
             }
             
-            showAlert('error', 'Ошибка', errorMessage || 'Не удалось сохранить плейлист');
+            ui.showAlert(errorMessage || 'Не удалось сохранить плейлист', 'error');
 
         } finally {
             toggleButtonState(saveBtn, false);
         }
     }
 
-    // Экспорт M3U (дополнительная функция)
+    // Экспорт M3U
     async function exportM3U() {
         if (!playlistId) return;
         
@@ -399,13 +412,13 @@
             const result = await response.json();
             
             if (result.success) {
-                showAlert('success', 'Успех', `M3U файл успешно экспортирован: ${result.filename}`);
+                ui.showAlert(`M3U файл успешно экспортирован: ${result.filename}`, 'success');
             } else {
                 throw new Error(result.error || 'Ошибка экспорта');
             }
         } catch (error) {
             console.error('Ошибка экспорта:', error);
-            showAlert('error', 'Ошибка', error.message || 'Не удалось экспортировать M3U');
+            ui.showAlert(error.message || 'Не удалось экспортировать M3U', 'error');
         }
     }
 
@@ -415,7 +428,6 @@
             if (fileListEl && saveBtn) {
                 saveBtn.addEventListener('click', savePlaylist);
                 
-                // Добавляем обработчик для кнопки экспорта, если она есть
                 if (exportBtn) {
                     exportBtn.addEventListener('click', exportM3U);
                 }
@@ -430,7 +442,7 @@
                             loadMediaFiles();
                             
                             if (data.m3u_generated) {
-                                showAlert('info', 'Обновление', 'M3U файл был автоматически обновлен');
+                                ui.showAlert('M3U файл был автоматически обновлен', 'info');
                             }
                         }
                     });
@@ -440,7 +452,7 @@
             }
         } catch (error) {
             console.error('Ошибка инициализации:', error);
-            showAlert('error', 'Ошибка', 'Не удалось загрузить плейлист');
+            ui.showAlert('Не удалось загрузить плейлист', 'error');
         }
     });
 })();
