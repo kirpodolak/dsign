@@ -16,14 +16,85 @@
 
     // Улучшенная реализация showAlert
     const showAlert = window.App?.Alerts?.show || function(type, title, message) {
+        // Создаем контейнер для уведомлений, если его еще нет
+        let alertsContainer = document.getElementById('alerts-container');
+        if (!alertsContainer) {
+            alertsContainer = document.createElement('div');
+            alertsContainer.id = 'alerts-container';
+            alertsContainer.style.position = 'fixed';
+            alertsContainer.style.top = '20px';
+            alertsContainer.style.right = '20px';
+            alertsContainer.style.zIndex = '10000';
+            alertsContainer.style.maxWidth = '350px';
+            alertsContainer.style.width = '100%';
+            document.body.appendChild(alertsContainer);
+        }
+
+        // Создаем элемент уведомления
         const alertDiv = document.createElement('div');
-        alertDiv.className = `alert alert-${type} fade show`;
-        alertDiv.innerHTML = `
-            <strong>${title}</strong> ${message}
-            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+        alertDiv.className = `alert alert-${type} alert-dismissible fade show`;
+        alertDiv.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
+        alertDiv.style.marginBottom = '15px';
+        alertDiv.style.borderRadius = '8px';
+        alertDiv.style.overflow = 'hidden';
+        alertDiv.style.animation = 'slideIn 0.3s ease-out forwards';
+    
+        // Добавляем анимацию в стили
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes slideIn {
+                from { transform: translateX(100%); opacity: 0; }
+                to { transform: translateX(0); opacity: 1; }
+            }
+            @keyframes fadeOut {
+                to { opacity: 0; transform: translateX(100%); }
+            }
+            .alert.fade.show {
+                transition: none;
+            }
+            .alert.fade.hide {
+                animation: fadeOut 0.3s ease-in forwards;
+            }
         `;
-        document.body.prepend(alertDiv);
-        setTimeout(() => alertDiv.remove(), 5000);
+        document.head.appendChild(style);
+
+        // Внутренняя структура уведомления
+        alertDiv.innerHTML = `
+            <div class="d-flex align-items-center">
+                <div class="flex-grow-1">
+                    <strong>${title}</strong>
+                    <div class="alert-message">${message}</div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        `;
+
+        // Добавляем уведомление в контейнер
+        alertsContainer.prepend(alertDiv);
+
+        // Настраиваем автоматическое закрытие
+        const closeButton = alertDiv.querySelector('.btn-close');
+        closeButton.addEventListener('click', () => {
+            alertDiv.classList.add('hide');
+            setTimeout(() => alertDiv.remove(), 300);
+        });
+
+        // Автоматическое закрытие через 5 секунд
+        setTimeout(() => {
+            if (alertDiv.parentNode) {
+                alertDiv.classList.add('hide');
+                setTimeout(() => alertDiv.remove(), 300);
+            }
+        }, 5000);
+
+        // Возвращаем объект для ручного управления
+        return {
+            element: alertDiv,
+            close: () => {
+                alertDiv.classList.add('hide');
+                setTimeout(() => alertDiv.remove(), 300);
+            }
+        };
     };
 
     function toggleButtonState(button, isLoading) {
