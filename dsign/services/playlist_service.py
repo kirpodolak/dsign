@@ -1,10 +1,12 @@
+import os
+import re
 from sqlalchemy import func, text
 from typing import Dict, List, Optional
 from datetime import datetime
 import logging
 from flask import current_app
 import time
-from dsign.models import Playlist
+from dsign.models import Playlist, PlaylistFiles
 
 class PlaylistService:
     def __init__(self, db_session, logger=None):
@@ -145,7 +147,7 @@ class PlaylistService:
             raise RuntimeError(f"Failed to get playlist {playlist_id}") from e
 
     def update_playlist(self, playlist_id: int, data: Dict) -> Dict[str, bool]:
-        """Обновление информации о плейлисте"""
+        """Обновление информации о плейлисте с генерацией M3U"""
         from ..models import Playlist
 
         try:
@@ -153,6 +155,8 @@ class PlaylistService:
             if not playlist:
                 raise ValueError(f"Playlist {playlist_id} not found")
 
+            old_name = playlist.name
+            
             if 'name' in data:
                 playlist.name = data['name']
             if 'customer' in data:
@@ -160,6 +164,10 @@ class PlaylistService:
             
             playlist.last_modified = int(time.time())
             self.db_session.commit()
+
+            # Генерация M3U при изменении имени
+            if 'name' in data and data['name'] != old_name:
+                self._generate_m3u_for_playlist(playlist, old_name)
             
             return {"success": True}
         except Exception as e:
@@ -167,62 +175,181 @@ class PlaylistService:
             self.logger.error(f"Failed to update playlist {playlist_id}: {str(e)}", exc_info=True)
             raise RuntimeError(f"Failed to update playlist {playlist_id}") from e
 
-    def delete_playlist(self, playlist_id: int) -> Dict[str, bool]:
-        """Удаление плейлиста"""
-        from ..models import Playlist
+    def _generate_m3u_for_playlist(self, playlist):
+        """Генерация M3U файла для плейлиста"""
+        try:
+            # Получаем настройки из конфига
+            config = current_app.config
+            media_url = config['MEDIA_URL']
+            export_dir = config['M3U_EXPORT_DIR']
+            
+            # Базовый URL берем из конфига или используем fallback
+            base_url = config.get('MEDIA_BASE_URL', 'http://localhost').rstrip('/')
+            
+            m3u_content = "#EXTM3U\n"
+            for file in sorted(playlist.files, key=lambda x: x.order):
+                if not file.file_name:
+                    continue
+                
+                # Проверяем существование файла
+                file_path = os.path.join(config['MEDIA_ROOT'], file.file_name)
+                if not os.path.exists(file_path):
+                    self.logger.warning(f"File not found: {file_path}")
+                    continue
+                
+                file_ext = file.file_name.lower().split('.')[-1]
+            
+                if file.duration and file_ext in ['jpg', 'jpeg', 'png']:
+                    m3u_content += f"#EXTVLCOPT:run-time={file.duration}\n"
+            
+                # Формируем URL к файлу
+                m3u_content += f"{base_url}{media_url}{file.file_name}\n"
+        
+            # Создаем безопасное имя файла
+            safe_name = re.sub(r'[\\/*?:"<>|]', "_", playlist.name)
+            filename = f"{safe_name}.m3u"
+            filepath = os.path.join(export_dir, filename)
+        
+            # Создаем директорию если не существует
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+            # Записываем файл с явным указанием кодировки
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(m3u_content)
+            
+            self.logger.info(f"M3U playlist successfully generated: {filepath}")
+            return True
+        
+        except Exception as e:
+            self.logger.error(f"M3U generation failed: {str(e)}", exc_info=True)
+            raise RuntimeError("M3U generation failed") from e
 
+    def delete_playlist(self, playlist_id):
+        """Удаляет плейлист и связанный M3U файл"""
+        try:
+            # Сначала пытаемся удалить M3U файл
+            m3u_result = self.delete_playlist_m3u(playlist_id)
+            if not m3u_result['success']:
+                current_app.logger.warning(f"M3U deletion warning: {m3u_result.get('message')}")
+
+            # Затем удаляем сам плейлист из БД
+            playlist = self.db_session.query(Playlist).get(playlist_id)
+            if not playlist:
+                return {
+                    "success": False,
+                    "error": f"Playlist {playlist_id} not found",
+                    "deleted_m3u": m3u_result['success']
+                }
+
+            self.db_session.delete(playlist)
+            self.db_session.commit()
+        
+            return {
+                "success": True,
+                "message": f"Playlist {playlist_id} deleted successfully",
+                "deleted_m3u": m3u_result['success'],
+                "playlist_name": playlist.name
+            }
+        
+        except Exception as e:
+            current_app.logger.error(f"Error deleting playlist {playlist_id}: {str(e)}", exc_info=True)
+            self.db_session.rollback()
+            return {
+                "success": False,
+                "error": str(e),
+                "deleted_m3u": False
+            }
+
+    def delete_playlist_m3u(self, playlist_id):
+        """Удаляет M3U файл для указанного плейлиста"""
+        try:
+            playlist = self.db_session.query(Playlist).get(playlist_id)
+            if not playlist:
+                return {
+                    "success": False,
+                    "error": f"Playlist {playlist_id} not found"
+                }
+
+            safe_name = re.sub(r'[\\/*?:"<>|]', "_", playlist.name)
+            filename = f"{safe_name}.m3u"
+            filepath = os.path.join(current_app.config['M3U_EXPORT_DIR'], filename)
+
+            result = {"success": False, "filepath": filepath}
+        
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                    current_app.logger.info(f"Successfully deleted M3U file: {filepath}")
+                    result.update({
+                        "success": True,
+                        "message": "M3U file deleted"
+                    })
+                except Exception as e:
+                    current_app.logger.error(f"Error deleting M3U file {filepath}: {str(e)}")
+                    result['error'] = str(e)
+            else:
+                result.update({
+                    "success": True,
+                    "message": "M3U file not found (no action needed)"
+                })
+            
+            return result
+        
+        except Exception as e:
+            current_app.logger.error(f"Error in M3U deletion process: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    def update_playlist_files(self, playlist_id: int, files_data: List) -> Dict[str, bool]:
+        """Обновление файлов плейлиста с учетом порядка"""
         try:
             playlist = self.db_session.query(Playlist).get(playlist_id)
             if not playlist:
                 raise ValueError(f"Playlist {playlist_id} not found")
 
-            self.db_session.delete(playlist)
-            self.db_session.commit()
-            
-            return {"success": True}
-        except Exception as e:
-            self.db_session.rollback()
-            self.logger.error(f"Failed to delete playlist {playlist_id}: {str(e)}", exc_info=True)
-            raise RuntimeError(f"Failed to delete playlist {playlist_id}") from e
-
-    def update_playlist_files(self, playlist_id: int, files_data: List[Dict]) -> Dict:
-        """Обновляет файлы в плейлисте"""
-        from ..models import PlaylistFiles
-    
-        try:
-            playlist = self.db_session.query(Playlist).get(playlist_id)
-            if not playlist:
-                return {"success": False, "error": "Playlist not found"}
-        
-            # Удаляем старые файлы плейлиста
+            # Удаляем существующие файлы
             self.db_session.query(PlaylistFiles).filter_by(playlist_id=playlist_id).delete()
         
-            # Добавляем новые файлы
-            for idx, file_data in enumerate(files_data, 1):
-                if not isinstance(file_data, dict):
-                    continue
+            # Добавляем новые файлы с проверкой
+            for order, file_data in enumerate(files_data, start=1):
+                if not file_data.get('file_name'):
+                    raise ValueError("Missing required field: file_name")
                 
-                filename = file_data.get('filename') or file_data.get('name')
-                if not filename:
-                    continue
-                
-                is_video = filename.lower().endswith(('.mp4', '.avi', '.mov'))
-                playlist_file = PlaylistFiles(
+                # Проверяем существование файла
+                file_path = os.path.join(current_app.config['MEDIA_ROOT'], file_data['file_name'])
+                if not os.path.exists(file_path):
+                    raise ValueError(f"File not found: {file_data['file_name']}")
+            
+                new_file = PlaylistFiles(
                     playlist_id=playlist_id,
-                    file_name=filename,
-                    duration=0 if is_video else int(file_data.get('duration', 10)),
-                    order=idx
+                    file_name=file_data['file_name'],
+                    duration=file_data.get('duration', 10),
+                    order=file_data.get('order', order)
                 )
-                self.db_session.add(playlist_file)
+                self.db_session.add(new_file)
         
+            # Обновляем время модификации
             playlist.last_modified = int(time.time())
             self.db_session.commit()
-            return {"success": True, "updated": len(files_data)}
         
+            # Пытаемся сгенерировать M3U (не критично для сохранения плейлиста)
+            try:
+                self._generate_m3u_for_playlist(playlist)
+            except Exception as m3u_error:
+                self.logger.error(f"M3U generation failed: {str(m3u_error)}")
+                return {
+                    "success": True,
+                    "warning": "Playlist saved but M3U generation failed"
+                }
+        
+            return {"success": True}
+            
         except Exception as e:
             self.db_session.rollback()
-            self.logger.error(f"Failed to update playlist files: {str(e)}")
-            return {"success": False, "error": str(e)}
+            self.logger.error(f"Failed to update playlist files {playlist_id}: {str(e)}", exc_info=True)
+            raise RuntimeError(f"Failed to update playlist files {playlist_id}") from e
     
     def reorder_single_item(self, playlist_id: int, item_id: int, new_position: int) -> bool:
         """Перемещает элемент плейлиста на новую позицию"""
