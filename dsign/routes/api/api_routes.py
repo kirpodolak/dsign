@@ -448,9 +448,16 @@ def init_api_routes(api_bp, services):
                 }), 400
 
             result = playlist_service.update_playlist(playlist_id, data)
+            
+            # Логирование успешного обновления
+            if result.get('success'):
+                current_app.logger.info(f"Playlist {playlist_id} metadata updated successfully")
+                if 'name' in data:
+                    current_app.logger.debug(f"M3U file regenerated for playlist {playlist_id}")
+            
             return jsonify(result)
         except Exception as e:
-            current_app.logger.error(f"Error updating playlist: {str(e)}")
+            current_app.logger.error(f"Error updating playlist {playlist_id}: {str(e)}", exc_info=True)
             return jsonify({
                 "success": False,
                 "error": str(e)
@@ -460,17 +467,31 @@ def init_api_routes(api_bp, services):
     @login_required
     def delete_playlist(playlist_id):
         try:
-            # Remove any profile assignments first
+            # Получаем имя плейлиста перед удалением для удаления M3U файла
+            playlist = db.session.query(Playlist).get(playlist_id)
+            playlist_name = playlist.name if playlist else None
+
+            # Удаляем привязки к профилям
             db.session.query(PlaylistProfileAssignment).filter_by(
                 playlist_id=playlist_id
             ).delete()
 
             result = playlist_service.delete_playlist(playlist_id)
+            
+            # Удаление M3U файла через сервис
+            if result.get('success') and playlist_name:
+                try:
+                    playlist_service._delete_m3u_file(playlist_name)
+                    current_app.logger.info(f"M3U file deleted for playlist {playlist_id}")
+                except Exception as e:
+                    current_app.logger.warning(f"Could not delete M3U file for playlist {playlist_id}: {str(e)}")
+
             if socketio:
                 socketio.emit('playlist_deleted', {'playlist_id': playlist_id})
+                
             return jsonify(result)
         except Exception as e:
-            current_app.logger.error(f"Error deleting playlist: {str(e)}")
+            current_app.logger.error(f"Error deleting playlist {playlist_id}: {str(e)}", exc_info=True)
             return jsonify({
                 "success": False,
                 "error": str(e)
@@ -525,21 +546,21 @@ def init_api_routes(api_bp, services):
             if not data or 'files' not in data:
                 return jsonify({"success": False, "error": "Missing files data"}), 400
 
-            # Логирование для отладки
-            current_app.logger.debug(f"Updating playlist {playlist_id} with files: {data.get('files')}")
+            current_app.logger.debug(f"Updating files for playlist {playlist_id} with {len(data.get('files', []))} files")
 
-            # Используем сервис из замыкания
             result = playlist_service.update_playlist_files(playlist_id, data.get('files', []))
             
             if not result.get('success'):
-                current_app.logger.error(f"Playlist update failed: {result.get('error')}")
+                current_app.logger.error(f"Playlist files update failed: {result.get('error')}")
                 return jsonify(result), 400
 
-            current_app.logger.info(f"Playlist {playlist_id} updated successfully")
+            current_app.logger.info(f"Playlist {playlist_id} files updated successfully")
+            current_app.logger.debug(f"M3U file regenerated for playlist {playlist_id}")
+            
             return jsonify(result)
         
         except Exception as e:
-            current_app.logger.error(f"API error: {str(e)}", exc_info=True)
+            current_app.logger.error(f"API error updating playlist files {playlist_id}: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": "Internal server error"}), 500
     
     # ======================
