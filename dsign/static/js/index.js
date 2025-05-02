@@ -87,8 +87,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
 
                 if (!response.ok) {
-                    const error = new Error(`HTTP error! status: ${response.status}`);
+                    let errorDetails = '';
+                    try {
+                        const errorResponse = await response.json();
+                        errorDetails = errorResponse.message || JSON.stringify(errorResponse);
+                    } catch (e) {
+                        errorDetails = await response.text();
+                    }
+                    
+                    const error = new Error(`HTTP error! status: ${response.status}. Details: ${errorDetails}`);
                     error.status = response.status;
+                    error.details = errorDetails;
                     throw error;
                 }
 
@@ -109,13 +118,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
         async getPlaylists() {
             const response = await this.request(CONFIG.api.endpoints.playlists);
-            return Array.isArray(response) ? response : (response.playlists || []);
+            const playlists = Array.isArray(response) ? response : (response.playlists || []);
+            // Обеспечиваем, что customer всегда будет строкой (даже пустой)
+            return playlists.map(playlist => ({
+                ...playlist,
+                customer: playlist.customer || ''
+            }));
         },
 
         async createPlaylist(data) {
             const response = await this.request(CONFIG.api.endpoints.playlists, {
                 method: 'POST',
-                body: JSON.stringify(data)
+                body: JSON.stringify({
+                    ...data,
+                    customer: data.customer || '' // Всегда отправляем строку
+                })
             });
             return response;
         },
@@ -269,7 +286,6 @@ document.addEventListener('DOMContentLoaded', () => {
         renderPlaylists(playlists) {
             let tableBody = document.querySelector('#playlist-table-body');
             if (!tableBody) {
-                // Create tbody if it doesn't exist
                 const table = document.querySelector('#playlist-table');
                 if (table) {
                     tableBody = document.createElement('tbody');
@@ -283,13 +299,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const playlistsArray = Array.isArray(playlists) ? playlists : [];
     
-            console.log('Rendering playlists to:', tableBody);
-            console.log('Playlist data:', playlistsArray);
+            console.log('Rendering playlists with customer data:', playlistsArray.map(p => ({
+                id: p.id,
+                name: p.name,
+                customer: p.customer,
+                files_count: p.files_count
+            })));
 
             tableBody.innerHTML = playlistsArray.map(playlist => `
                 <tr data-id="${playlist.id}">
                     <td>${this.escapeHtml(playlist.name || 'Unnamed')}</td>
-                    <td>${this.escapeHtml(playlist.customer || 'No customer')}</td>
+                    <td>${this.escapeHtml(playlist.customer)}</td>
                     <td>${playlist.files_count || 0}</td>
                     <td class="status-badge"></td>
                     <td>
@@ -313,7 +333,7 @@ document.addEventListener('DOMContentLoaded', () => {
         },
 
         escapeHtml(unsafe) {
-            if (!unsafe) return '';
+            if (unsafe === null || unsafe === undefined) return '';
             return unsafe.toString()
                 .replace(/&/g, "&amp;")
                 .replace(/</g, "&lt;")
@@ -348,7 +368,6 @@ document.addEventListener('DOMContentLoaded', () => {
         updateLogo(logoPath) {
             if (!elements.logoImage) return;
 
-            // Reset fallback flag when trying to load a new logo
             if (logoPath) {
                 state.fallbackLogoUsed = false;
                 state.logoLoadAttempts = 0;
@@ -442,7 +461,6 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 console.log('Initializing application...');
                 
-                // Ensure table body exists before proceeding
                 await this.ensureTableBodyExists();
                 console.log('Playlist table element found:', elements.playlistTableBody);
 
@@ -477,7 +495,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (elements.playlistTableBody) {
                         resolve();
                     } else {
-                        // Try to create the table body if it doesn't exist
                         const table = document.querySelector('#playlist-table');
                         if (table) {
                             const tableBody = document.createElement('tbody');
@@ -518,14 +535,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 try {
                     const response = await api.createPlaylist({
                         name: formData.get('name'),
-                        customer: formData.get('customer')
+                        customer: formData.get('customer') || ''
                     });
 
-                    // Add new playlist to state
                     state.playlists = [...state.playlists, {
                         id: response.playlist_id,
                         name: formData.get('name'),
-                        customer: formData.get('customer'),
+                        customer: formData.get('customer') || '',
                         files_count: 0
                     }];
                     
@@ -641,16 +657,40 @@ document.addEventListener('DOMContentLoaded', () => {
                         ui.showAlert('Playback stopped', 'info');
                         
                     } else if (btn.classList.contains('edit')) {
-                        // Fix for edit button - use correct URL format
                         window.location.href = `/playlist/${playlistId}`;
                         
                     } else if (btn.classList.contains('delete')) {
                         if (confirm('Are you sure you want to delete this playlist?')) {
-                            await api.deletePlaylist(playlistId);
-                            // Update UI immediately after successful deletion
-                            state.playlists = state.playlists.filter(p => p.id !== playlistId);
-                            ui.renderPlaylists(state.playlists);
-                            ui.showAlert('Playlist deleted', 'info');
+                            try {
+                                // Show loading state
+                                const icon = btn.querySelector('i');
+                                if (icon) {
+                                    icon.className = 'fas fa-spinner fa-spin';
+                                }
+                                btn.disabled = true;
+
+                                await api.deletePlaylist(playlistId);
+                                
+                                // Remove the playlist row immediately
+                                const row = document.querySelector(`tr[data-id="${playlistId}"]`);
+                                if (row) {
+                                    row.remove();
+                                }
+                                
+                                // Update state
+                                state.playlists = state.playlists.filter(p => p.id !== playlistId);
+                                ui.showAlert('Playlist deleted', 'info');
+                            } catch (error) {
+                                console.error('Delete failed:', error);
+                                ui.showAlert('Failed to delete playlist: ' + (error.details || error.message), 'error');
+                                
+                                // Reset button state
+                                const icon = btn.querySelector('i');
+                                if (icon) {
+                                    icon.className = 'fas fa-trash';
+                                }
+                                btn.disabled = false;
+                            }
                         }
                     }
                 } catch (error) {
