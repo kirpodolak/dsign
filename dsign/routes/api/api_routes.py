@@ -375,8 +375,7 @@ def init_api_routes(api_bp, services):
             return jsonify({
                 "success": True,
                 "playlists": [{
-                    "id": p.id,
-                    "name": p.name,
+                    **p.to_dict(),
                     "profile_id": assignments.get(p.id)
                 } for p in playlists]
             })
