@@ -1,3 +1,4 @@
+# Головной init
 from flask import Flask
 from flask_wtf import CSRFProtect
 import logging
@@ -8,6 +9,7 @@ from threading import Thread
 
 from dsign.config.config import Config, config
 from dsign.services import init_services
+from dsign.services.logger import ServiceLogger
 
 def should_display_logo(db_session) -> bool:
     """Проверяет, нужно ли отображать логотип (нет активных плейлистов)"""
@@ -35,37 +37,35 @@ def check_mpv_service(logger, timeout=5, retries=3):
     return False
 
 def create_app(config_class=config) -> Flask:
-    # Настройка логирования
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    logger = logging.getLogger(__name__)
-
+    """Фабрика для создания экземпляра Flask приложения"""
+    # Инициализация приложения с ServiceLogger
+    app = Flask(__name__)
+    app.config.from_object(config_class)
+    app.static_folder = config_class.STATIC_FOLDER
+    app.static_url_path = '/static'
+    
+    # Установка ServiceLogger как основного логгера
+    app.logger = ServiceLogger('FlaskApp')
+    
     try:
-        app = Flask(__name__)
-        app.config.from_object(config_class)
-        app.static_folder = config_class.STATIC_FOLDER
-        app.static_url_path = '/static'
-        app.logger.setLevel(logging.INFO if not app.debug else logging.DEBUG)
-        logger.info("Application instance created")
+        app.logger.info("Starting application initialization")
 
         # 1. Проверка MPV сервиса
-        logger.info("Checking MPV service status...")
-        if not check_mpv_service(logger):
-            logger.error("MPV service is not active")
+        app.logger.info("Checking MPV service status...")
+        if not check_mpv_service(app.logger):
+            app.logger.error("MPV service is not active")
             raise RuntimeError("MPV service is not running")
-        logger.info("MPV service is active and ready")
+        app.logger.info("MPV service is active and ready")
 
         # 2. Инициализация расширений
-        logger.info("Initializing extensions...")
+        app.logger.info("Initializing extensions...")
         from .extensions import init_extensions, db, socketio
         init_extensions(app)
         csrf = CSRFProtect(app)
-        logger.info("Extensions initialized successfully")
+        app.logger.info("Extensions initialized successfully")
 
-        # 3. Инициализация сервисов внутри контекста приложения
-        logger.info("Initializing services...")
+        # 3. Инициализация сервисов
+        app.logger.info("Initializing services...")
         with app.app_context():
             services = init_services(
                 config={
@@ -78,12 +78,12 @@ def create_app(config_class=config) -> Flask:
                 },
                 db=db,
                 socketio=socketio,
-                logger=logger
+                logger=app.logger
             )
             
             # Прикрепляем сервисы к app
             for name, service in services.items():
-                if name != 'db':  # db уже есть в extensions
+                if name != 'db':
                     setattr(app, name, service)
 
         # Проверка обязательных сервисов
@@ -96,23 +96,23 @@ def create_app(config_class=config) -> Flask:
         
         for service in required_services:
             if not hasattr(app, service):
-                logger.error(f"Required service not found: {service}")
+                app.logger.error(f"Required service not found: {service}")
                 raise RuntimeError(f"Missing required service: {service}")
-        logger.info("All required services verified")
+        app.logger.info("All required services verified")
 
-        # Настройка сервиса воспроизведения с таймаутами
-        logger.info("Configuring playback service...")
+        # Настройка сервиса воспроизведения
+        app.logger.info("Configuring playback service...")
         from .models import PlaybackStatus
         
         with app.app_context():
             try:
-                # Проверка подключения к БД и получение статуса воспроизведения
+                # Проверка подключения к БД
                 playback_status = db.session.query(PlaybackStatus).first()
-                logger.info("Database connection verified")
+                app.logger.info("Database connection verified")
         
                 # Определение состояния воспроизведения
                 if not playback_status or not playback_status.playlist_id:
-                    logger.info("No active playlist found, starting idle logo...")
+                    app.logger.info("No active playlist found, starting idle logo...")
             
                     def start_idle_logo():
                         max_attempts = 3
@@ -120,50 +120,50 @@ def create_app(config_class=config) -> Flask:
                             try:
                                 if app.playback_service.display_idle_logo():
                                     return
-                                logger.warning(f"Idle logo display failed (attempt {attempt + 1}/{max_attempts})")
-                                time.sleep(2)  # Задержка перед повторной попыткой
-                            except Exception as e:
-                                logger.error(f"Failed to display idle logo (attempt {attempt + 1}): {str(e)}")
+                                app.logger.warning(f"Idle logo display failed (attempt {attempt + 1}/{max_attempts})")
                                 time.sleep(2)
-                        logger.error("All attempts to display idle logo failed")
+                            except Exception as e:
+                                app.logger.error(f"Failed to display idle logo (attempt {attempt + 1}): {str(e)}")
+                                time.sleep(2)
+                        app.logger.error("All attempts to display idle logo failed")
             
                     # Запуск в фоновом потоке
                     Thread(target=start_idle_logo, daemon=True).start()
                 else:
-                    logger.info(f"Active playlist found (ID: {playback_status.playlist_id}), resuming playback...")
+                    app.logger.info(f"Active playlist found (ID: {playback_status.playlist_id}), resuming playback...")
                     try:
                         if not app.playlist_service.play(playback_status.playlist_id):
-                            logger.error("Failed to resume playlist playback, falling back to idle logo")
+                            app.logger.error("Failed to resume playlist playback, falling back to idle logo")
                             app.playback_service.display_idle_logo()
                     except Exception as e:
-                        logger.error(f"Error resuming playback: {str(e)}")
-                        logger.info("Falling back to idle logo due to playback error")
+                        app.logger.error(f"Error resuming playback: {str(e)}")
+                        app.logger.info("Falling back to idle logo due to playback error")
                         app.playback_service.display_idle_logo()
                 
             except Exception as db_error:
-                logger.error(f"Database/playback initialization failed: {str(db_error)}")
-                logger.info("Attempting to start idle logo as fallback")
+                app.logger.error(f"Database/playback initialization failed: {str(db_error)}")
+                app.logger.info("Attempting to start idle logo as fallback")
                 try:
                     app.playback_service.display_idle_logo()
                 except Exception as logo_error:
-                    logger.critical(f"Complete initialization failure: {str(logo_error)}")
+                    app.logger.critical(f"Complete initialization failure: {str(logo_error)}")
                 raise RuntimeError("Initialization failed") from db_error
 
         # Инициализация маршрутов
-        logger.info("Initializing routes...")
+        app.logger.info("Initializing routes...")
         from .routes import init_routes
         init_routes(app, services)
-        logger.info("Routes initialized successfully")
+        app.logger.info("Routes initialized successfully")
 
         # Регистрация обработчиков ошибок
         register_error_handlers(app)
-        logger.info("Error handlers registered")
+        app.logger.info("Error handlers registered")
 
-        logger.info("Application initialization completed successfully")
+        app.logger.info("Application initialization completed successfully")
         return app
 
     except Exception as e:
-        logger.critical(f"Application initialization failed: {str(e)}", exc_info=True)
+        app.logger.critical(f"Application initialization failed: {str(e)}")
         raise RuntimeError(f"Application startup failed: {str(e)}") from e
 
 def register_error_handlers(app: Flask) -> None:
