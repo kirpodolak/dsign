@@ -15,118 +15,213 @@
                     this.onReadyCallbacks.push(callback);
                 }
             }
+        },
+        config: {
+            debug: process.env.NODE_ENV !== 'production',
+            socketReconnectDelay: 1000,
+            maxSocketRetries: 5,
+            authCheckInterval: 60000
         }
     };
 
-    // Конфигурация приложения
-    const CONFIG = {
-        AUTH_CHECK_INTERVAL: 60000,
-        MAX_API_RETRIES: 3,
-        INIT_RETRY_DELAY: 100
+    // Инициализация логгера (интеграция с logging.js)
+    const initializeLogger = () => {
+        if (!window.App.Logger && typeof window.AppLogger !== 'undefined') {
+            window.App.Logger = new window.AppLogger('AppCore');
+        } else {
+            window.App.Logger = window.App.Logger || {
+                debug: (...args) => window.App.config.debug && console.debug('[DEBUG]', ...args),
+                info: (...args) => console.log('[INFO]', ...args),
+                warn: (...args) => console.warn('[WARN]', ...args),
+                error: (message, error, context) => {
+                    console.error('[ERROR]', message, error || '');
+                    if (window.App.Sockets?.isConnected) {
+                        window.App.Sockets.emit('client_error', {
+                            level: 'error',
+                            message,
+                            error: error?.toString(),
+                            stack: error?.stack,
+                            context,
+                            url: window.location.href
+                        });
+                    }
+                },
+                trackEvent: (eventData) => {
+                    if (window.App.Sockets?.isConnected) {
+                        window.App.Sockets.emit('client_event', eventData);
+                    }
+                }
+            };
+        }
     };
 
     // Минимальные реализации зависимостей
     const setupDependencies = () => {
+        initializeLogger();
+
         window.App.Helpers = window.App.Helpers || {
-            showPageLoader: () => console.debug('[Loader] Showing'),
-            hidePageLoader: () => console.debug('[Loader] Hiding'),
-            getCachedData: (key) => localStorage.getItem(key),
+            getCachedData: (key) => {
+                try {
+                    const item = localStorage.getItem(key);
+                    return item ? JSON.parse(item) : null;
+                } catch (e) {
+                    window.App.Logger.error('Failed to parse cached data', e, { key });
+                    return null;
+                }
+            },
             setCachedData: (key, value, ttl) => {
-                const item = {
-                    value: value,
-                    expires: Date.now() + (ttl || 0)
-                };
-                localStorage.setItem(key, JSON.stringify(item));
+                try {
+                    const item = {
+                        value: value,
+                        expires: ttl ? Date.now() + ttl : null
+                    };
+                    localStorage.setItem(key, JSON.stringify(item));
+                } catch (e) {
+                    window.App.Logger.error('Failed to cache data', e, { key });
+                }
+            },
+            getToken: () => {
+                try {
+                    return localStorage.getItem('auth_token');
+                } catch (e) {
+                    window.App.Logger.error('Failed to get auth token', e);
+                    return null;
+                }
             }
         };
 
         window.App.API = window.App.API || {
-            fetch: async (url, options) => {
-                const response = await fetch(url, {
-                    credentials: 'include',
-                    ...options
-                });
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                return response;
+            fetch: async (url, options = {}) => {
+                const startTime = performance.now();
+                const requestId = Math.random().toString(36).substring(2, 9);
+                
+                try {
+                    window.App.Logger.debug(`API Request [${requestId}]: ${url}`, {
+                        method: options.method || 'GET',
+                        headers: options.headers
+                    });
+
+                    const headers = {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                        ...options.headers
+                    };
+
+                    const token = window.App.Helpers.getToken();
+                    if (token) {
+                        headers['Authorization'] = `Bearer ${token}`;
+                    }
+
+                    const response = await fetch(url, {
+                        credentials: 'include',
+                        ...options,
+                        headers
+                    });
+
+                    const duration = (performance.now() - startTime).toFixed(2);
+                    window.App.Logger.debug(`API Response [${requestId}]: ${response.status} (${duration}ms)`, {
+                        status: response.status,
+                        url
+                    });
+
+                    if (response.status === 401) {
+                        window.App.Logger.warn('Authentication expired', { url });
+                        window.App.Base.handleUnauthorized();
+                        throw new Error('Authentication required');
+                    }
+
+                    if (!response.ok) {
+                        const errorData = await response.json().catch(() => ({}));
+                        throw new Error(errorData.message || `HTTP ${response.status}`);
+                    }
+
+                    return response;
+                } catch (error) {
+                    window.App.Logger.error(`API Request [${requestId}] failed:`, error, {
+                        url,
+                        method: options.method || 'GET'
+                    });
+                    throw error;
+                }
             }
         };
 
         window.App.Alerts = window.App.Alerts || {
-            showAlert: (type, title, message) => console.log(`[${type}] ${title}: ${message}`),
-            showError: (title, message) => console.error(`[Error] ${title}: ${message}`)
+            showAlert: (type, title, message) => {
+                window.App.Logger.info(`Alert: ${title}`, { type, message });
+                // UI integration would go here
+            },
+            showError: (title, message, error) => {
+                window.App.Logger.error(`Error Alert: ${title}`, error, { message });
+                // UI integration would go here
+            }
         };
     };
 
     // Сервис аутентификации
     const authService = {
-        AUTH_KEY: 'auth_status',
-
         async checkAuth() {
             try {
-                // Проверка кеша
-                const cached = this.getCachedAuth();
-                if (cached !== null) return cached;
-
-                // Запрос к API
-                const response = await window.App.API.fetch('/auth/api/check-auth', {
-                    headers: { 'Accept': 'application/json' }
-                });
-        
-                if (!response.ok) {
-                    this.clearAuthCache();
-                    return false;
-                }
-        
+                window.App.Logger.debug('Checking authentication status');
+                const response = await window.App.API.fetch('/auth/api/check-auth');
                 const data = await response.json();
-                const isAuthenticated = data?.authenticated === true;
-        
-                this.setCachedAuth(isAuthenticated);
-                return isAuthenticated;
+                
+                if (data?.authenticated && data?.token) {
+                    window.App.Logger.debug('User authenticated');
+                    localStorage.setItem('auth_token', data.token);
+                    return true;
+                }
+                
+                window.App.Logger.debug('User not authenticated');
+                this.clearAuth();
+                return false;
             } catch (error) {
-                console.debug('Auth check failed:', error);
-                this.clearAuthCache();
+                window.App.Logger.error('Authentication check failed', error);
+                this.clearAuth();
                 return false;
             }
         },
 
-        getCachedAuth() {
-            const item = localStorage.getItem(this.AUTH_KEY);
-            if (!item) return null;
+        clearAuth() {
+            window.App.Logger.debug('Clearing authentication data');
+            localStorage.removeItem('auth_token');
+            window.App.Helpers.setCachedData('auth_status', { value: false });
             
-            const { value, expires } = JSON.parse(item);
-            if (expires && Date.now() > expires) return null;
-            
-            return value;
+            if (window.App.Sockets) {
+                window.App.Sockets.disconnect();
+            }
         },
 
-        setCachedAuth(value) {
-            const item = {
-                value: value,
-                expires: Date.now() + CONFIG.AUTH_CHECK_INTERVAL
-            };
-            localStorage.setItem(this.AUTH_KEY, JSON.stringify(item));
-        },
-
-        clearAuthCache() {
-            localStorage.removeItem(this.AUTH_KEY);
+        handleUnauthorized() {
+            window.App.Logger.warn('Handling unauthorized access');
+            this.clearAuth();
+            const redirect = encodeURIComponent(window.location.pathname + window.location.search);
+            window.location.href = `/auth/login?redirect=${redirect}`;
         }
     };
 
     // Обработка аутентификации
     const handleAuthFlow = async () => {
-        if (window.App.isNavigationInProgress) return true;
+        if (window.App.isNavigationInProgress) {
+            window.App.Logger.debug('Navigation already in progress');
+            return true;
+        }
     
         const isLoginPage = window.location.pathname.includes('/auth/login');
+        window.App.Logger.debug(`Auth flow check: isLoginPage=${isLoginPage}`);
+        
         const isAuthenticated = await authService.checkAuth();
+        window.App.Logger.debug(`Auth status: authenticated=${isAuthenticated}`);
 
         if (!isAuthenticated && !isLoginPage) {
+            window.App.Logger.warn('Unauthorized access - redirecting to login');
             window.App.isNavigationInProgress = true;
-            const redirect = encodeURIComponent(window.location.pathname + window.location.search);
-            window.location.href = `/auth/login?redirect=${redirect}`;
+            authService.handleUnauthorized();
             return false;
         }
 
         if (isAuthenticated && isLoginPage) {
+            window.App.Logger.debug('Authenticated on login page - redirecting to home');
             window.App.isNavigationInProgress = true;
             const redirectTo = new URLSearchParams(window.location.search).get('redirect') || '/';
             window.location.href = redirectTo;
@@ -136,73 +231,119 @@
         return true;
     };
 
-    // Инициализация UI
-    const initializeUI = async () => {
-        try {
-            if (window.App.Index?.initAllButtons) {
-                await window.App.Index.initAllButtons();
+    // Инициализация WebSocket
+    const initializeWebSockets = () => {
+        window.App.Core.onReady(() => {
+            if (!window.App.Sockets) {
+                window.App.Logger.debug('Initializing WebSocket connection');
+                // Реальная инициализация происходит в sockets.js
             }
-        } catch (error) {
-            console.error('UI initialization failed:', error);
-        }
+        });
     };
 
     // Основная инициализация приложения
     const initializeApp = async () => {
-        window.App.Helpers.showPageLoader();
+        window.App.Logger.info('Starting application initialization');
 
         try {
             // Проверка аутентификации
             const shouldContinue = await handleAuthFlow();
-            if (!shouldContinue) return;
+            if (!shouldContinue) {
+                window.App.Logger.debug('Auth flow interrupted');
+                return;
+            }
 
-            // Инициализация UI
-            await initializeUI();
+            // Инициализация WebSocket
+            initializeWebSockets();
 
             // Периодическая проверка аутентификации
             if (!window.location.pathname.includes('/auth/login')) {
+                window.App.Logger.debug('Setting up periodic auth checks');
                 setInterval(async () => {
+                    window.App.Logger.debug('Running periodic auth check');
                     const isAuth = await authService.checkAuth();
-                    if (!isAuth) window.location.href = '/auth/login';
-                }, CONFIG.AUTH_CHECK_INTERVAL);
+                    if (!isAuth) {
+                        window.App.Logger.warn('Periodic check failed - unauthorized');
+                        authService.handleUnauthorized();
+                    }
+                }, window.App.config.authCheckInterval);
             }
 
             // Помечаем приложение как инициализированное
             window.App.Core.initialized = true;
-            window.App.Core.onReadyCallbacks.forEach(cb => cb());
+            window.App.Logger.info('App core initialized, executing ready callbacks');
             
+            window.App.Core.onReadyCallbacks.forEach(cb => {
+                try {
+                    cb();
+                } catch (error) {
+                    window.App.Logger.error('Error in ready callback:', error);
+                }
+            });
+            
+            window.App.Logger.info('Application initialized successfully');
         } catch (error) {
-            console.error('App initialization failed:', error);
-            window.App.Alerts.showError('Initialization Error', 'Failed to start application');
-        } finally {
-            window.App.Helpers.hidePageLoader();
+            window.App.Logger.error('Application initialization failed:', error);
+            window.App.Alerts.showError('Initialization Error', 'Failed to start application', error);
         }
-    };
-
-    // Проверка готовности зависимостей
-    const checkDependencies = () => {
-        if (!window.App.API?.fetch) {
-            setTimeout(checkDependencies, CONFIG.INIT_RETRY_DELAY);
-            return;
-        }
-        initializeApp().catch(console.error);
     };
 
     // Старт приложения
-    setupDependencies();
-    
-    if (document.readyState === 'complete') {
-        checkDependencies();
-    } else {
-        document.addEventListener('DOMContentLoaded', checkDependencies);
-    }
+    const startApp = () => {
+        try {
+            window.App.Logger.debug('Setting up application dependencies');
+            setupDependencies();
+            
+            if (document.readyState === 'complete') {
+                window.App.Logger.debug('DOM already loaded, starting immediately');
+                initializeApp().catch(err => window.App.Logger.error('Startup error:', err));
+            } else {
+                window.App.Logger.debug('Waiting for DOM content to load');
+                document.addEventListener('DOMContentLoaded', () => {
+                    window.App.Logger.debug('DOM content loaded, starting initialization');
+                    initializeApp().catch(err => window.App.Logger.error('Startup error:', err));
+                });
+            }
+        } catch (error) {
+            console.error('Critical startup error:', error);
+        }
+    };
 
     // Публичный API
     window.App.Base = {
         checkAuth: authService.checkAuth.bind(authService),
-        refreshAuth: () => {
-            authService.clearAuthCache();
-            return authService.checkAuth();
+        refreshAuth: authService.clearAuth.bind(authService),
+        handleUnauthorized: authService.handleUnauthorized.bind(authService),
+        getConfig: () => ({ ...window.App.config }),
+        setDebugMode: (enabled) => { 
+            window.App.config.debug = enabled;
+            window.App.Logger.debug(`Debug mode ${enabled ? 'enabled' : 'disabled'}`);
+        },
+        trackEvent: (eventData) => {
+            if (window.App.Logger.trackEvent) {
+                window.App.Logger.trackEvent(eventData);
+            }
         }
     };
+
+    // Глобальный обработчик ошибок
+    window.addEventListener('error', (event) => {
+        window.App.Logger.error('Unhandled error:', event.error, {
+            message: event.message,
+            source: event.filename,
+            line: event.lineno,
+            column: event.colno
+        });
+    });
+
+    // Обработчик необработанных promise rejections
+    window.addEventListener('unhandledrejection', (event) => {
+        window.App.Logger.error('Unhandled promise rejection:', event.reason, {
+            promise: event.promise
+        });
+    });
+
+    // Запуск приложения
+    window.App.Logger.debug('Starting application bootstrap');
+    startApp();
 })();
