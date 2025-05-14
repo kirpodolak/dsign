@@ -3,27 +3,359 @@ from datetime import datetime, timedelta
 from flask_socketio import SocketIO, disconnect
 from flask import request, current_app
 import jwt
-import logging
+from .logger import ServiceLogger
+from threading import Lock
 
 class SocketService:
-    def __init__(self, socketio: SocketIO, db_session, logger: Optional[logging.Logger] = None):
+    def __init__(self, socketio: SocketIO, db_session, logger=None):
         """
         Инициализация сервиса сокетов
         :param socketio: Экземпляр SocketIO
         :param db_session: Сессия базы данных
-        :param logger: Логгер (опционально)
         """
         self.socketio = socketio
         self.db = db_session
-        self.logger = logger or logging.getLogger(__name__)
+        self.logger = ServiceLogger('SocketService')
         self.connected_clients = {}
+        self.clients_lock = Lock()
+        self.activity_check_interval = 15  # seconds
 
-        # Регистрация обработчиков событий
+        # Конфигурация, соответствующая фронтенду
+        self.config = {
+            'max_retries': 5,
+            'reconnect_attempts': 5,
+            'reconnect_delay': 1000
+        }
+
+        self.register_handlers()
+        self.start_activity_checker()
+
+    def register_handlers(self):
+        """Регистрация всех обработчиков событий"""
         self.socketio.on_event('connect', self.handle_connect)
         self.socketio.on_event('disconnect', self.handle_disconnect)
         self.socketio.on_event('authenticate', self.handle_authentication)
         self.socketio.on_event('request_profiles', self.handle_profiles_request)
         self.socketio.on_event('apply_profile', self.handle_apply_profile)
+        self.socketio.on_event('ping', self.handle_ping)
+
+        # Добавлены обработчики для событий фронтенда
+        self.socketio.on_event('get_playback_state', self.handle_get_playback_state)
+        self.socketio.on_event('get_playlist_state', self.handle_get_playlist_state)
+
+    def start_activity_checker(self):
+        """Запуск фоновой проверки активности клиентов"""
+        def activity_check():
+            while True:
+                self.socketio.sleep(self.activity_check_interval)
+                self.check_activity()
+                
+        self.socketio.start_background_task(activity_check)
+
+    def handle_connect(self):
+        """Обработчик подключения клиента"""
+        client_ip = request.remote_addr
+        with self.clients_lock:
+            self.connected_clients[request.sid] = {
+                'authenticated': False,
+                'connect_time': datetime.utcnow(),
+                'last_activity': datetime.utcnow(),
+                'ip_address': client_ip,
+                'reconnect_attempts': 0  # Добавлено для отслеживания попыток переподключения
+            }
+        
+        self.logger.info('New client connection', {
+            'ip': client_ip,
+            'sid': request.sid
+        })
+
+    def handle_disconnect(self):
+        """Обработчик отключения клиента"""
+        sid = request.sid
+        self.logger.info('Client disconnected', {'sid': sid})
+        self.cleanup_client(sid)
+
+    def handle_ping(self):
+        """Обработчик ping-сообщения для проверки активности"""
+        sid = request.sid
+        with self.clients_lock:
+            if sid in self.connected_clients:
+                self.connected_clients[sid]['last_activity'] = datetime.utcnow()
+                self.logger.debug('Ping received', {'sid': sid})
+        return 'pong'
+
+    def handle_authentication(self, data: Dict):
+        """Обработчик аутентификации WebSocket"""
+        sid = request.sid
+        try:
+            token = self.verify_socket_token(data.get('token'))
+            user_id = token['user_id']
+            
+            # Проверяем существование пользователя в БД
+            from ..models import User
+            user = self.db.session.query(User).get(user_id)
+            if not user:
+                raise ValueError('User not found')
+            
+            # Обновляем информацию о клиенте
+            with self.clients_lock:
+                if sid in self.connected_clients:
+                    self.connected_clients[sid].update({
+                        'user_id': user_id,
+                        'authenticated': True,
+                        'last_activity': datetime.utcnow()
+                    })
+                else:
+                    self.logger.warning('Client not found during authentication', {'sid': sid})
+                    disconnect(sid)
+                    return
+            
+            self.logger.info('User authenticated', {
+                'user_id': user_id,
+                'sid': sid
+            })
+            self.socketio.emit('authentication_result', {'success': True}, room=sid)
+            
+        except Exception as e:
+            self.logger.error('Authentication failed', {
+                'error': str(e),
+                'sid': sid
+            })
+            self.socketio.emit('authentication_result', {
+                'success': False,
+                'error': str(e)
+            }, room=sid)
+            self.cleanup_client(sid)
+
+    def cleanup_client(self, sid: str):
+        """Очистка ресурсов клиента"""
+        with self.clients_lock:
+            if sid in self.connected_clients:
+                client_info = self.connected_clients[sid]
+                user_id = client_info.get('user_id', 'unknown')
+                self.logger.info('Cleaning up client resources', {
+                    'sid': sid,
+                    'user_id': user_id
+                })
+                del self.connected_clients[sid]
+                disconnect(sid)
+
+    def check_activity(self):
+        """Проверка активности клиентов"""
+        now = datetime.utcnow()
+        timeout = current_app.config.get('SOCKET_AUTH_TIMEOUT', 5)
+        inactive_clients = []
+
+        with self.clients_lock:
+            for sid, client in self.connected_clients.items():
+                last_active = (now - client['last_activity']).seconds
+                
+                if not client['authenticated']:
+                    connect_time = (now - client['connect_time']).seconds
+                    if connect_time > timeout:
+                        inactive_clients.append(sid)
+                        self.logger.warning('Authentication timeout', {'sid': sid})
+                elif last_active > 60:  # 60 секунд без активности
+                    inactive_clients.append(sid)
+                    self.logger.warning('Client inactive', {
+                        'sid': sid,
+                        'inactive_seconds': last_active
+                    })
+
+        # Отключаем неактивных клиентов
+        for sid in inactive_clients:
+            self.socketio.emit('inactivity_timeout', {
+                'message': 'Disconnected due to inactivity'
+            }, room=sid)
+            self.cleanup_client(sid)
+
+    def is_authenticated(self, sid: str) -> bool:
+        """Проверка аутентификации клиента"""
+        with self.clients_lock:
+            client = self.connected_clients.get(sid)
+            return client and client['authenticated']
+
+    # Новые методы для обработки событий фронтенда
+    def handle_get_playback_state(self, data: Dict):
+        """Обработчик запроса состояния воспроизведения"""
+        sid = request.sid
+        if not self.is_authenticated(sid):
+            self.logger.warning('Unauthorized playback state request', {'sid': sid})
+            disconnect(sid)
+            return
+
+        try:
+            from ..models import PlaybackState
+            state = self.db.session.query(PlaybackState).first()
+            if state:
+                self.socketio.emit('playback_update', {
+                    'state': state.state,
+                    'current_time': state.current_time,
+                    'playlist_item_id': state.playlist_item_id
+                }, room=sid)
+        except Exception as e:
+            self.logger.error('Failed to get playback state', {
+                'error': str(e),
+                'sid': sid
+            })
+
+    def handle_get_playlist_state(self, data: Dict):
+        """Обработчик запроса состояния плейлиста"""
+        sid = request.sid
+        if not self.is_authenticated(sid):
+            self.logger.warning('Unauthorized playlist state request', {'sid': sid})
+            disconnect(sid)
+            return
+
+        try:
+            from ..models import Playlist
+            playlist = self.db.session.query(Playlist).get(data.get('playlist_id'))
+            if playlist:
+                self.socketio.emit('playlist_update', {
+                    'id': playlist.id,
+                    'name': playlist.name,
+                    'items': [item.to_dict() for item in playlist.items]
+                }, room=sid)
+        except Exception as e:
+            self.logger.error('Failed to get playlist state', {
+                'error': str(e),
+                'sid': sid,
+                'playlist_id': data.get('playlist_id')
+            })
+
+    def emit_playlist_update(self, playlist_id: Optional[int] = None):
+        """
+        Отправка обновления плейлиста
+        :param playlist_id: ID активного плейлиста
+        """
+        from ..models import Playlist, PlaylistProfileAssignment, PlaybackProfile
+
+        data: Dict[str, Any] = {'active_playlist': None}
+        
+        try:
+            if playlist_id:
+                playlist = self.db.session.query(Playlist).get(playlist_id)
+                if playlist:
+                    data['active_playlist'] = {
+                        'id': playlist.id,
+                        'name': playlist.name,
+                        'customer': playlist.customer or "N/A"
+                    }
+                    
+                    # Добавляем информацию о профиле
+                    assignment = self.db.session.query(PlaylistProfileAssignment).filter_by(
+                        playlist_id=playlist_id
+                    ).first()
+                
+                    if assignment:
+                        profile = self.db.session.query(PlaybackProfile).get(assignment.profile_id)
+                        if profile:
+                            data['assigned_profile'] = {
+                                'id': profile.id,
+                                'name': profile.name
+                            }
+            
+            # Получаем список активных клиентов
+            with self.clients_lock:
+                active_sids = [sid for sid in self.connected_clients 
+                             if self.is_authenticated(sid)]
+            
+            # Отправляем обновление
+            for sid in active_sids:
+                try:
+                    self.socketio.emit('playlist_update', data, room=sid)
+                except Exception as e:
+                    self.logger.error('Failed to send update', {
+                        'sid': sid,
+                        'error': str(e)
+                    })
+                    self.cleanup_client(sid)
+                    
+            self.logger.debug('Playlist update sent', {
+                'playlist_id': playlist_id,
+                'recipients_count': len(active_sids)
+            })
+            
+        except Exception as e:
+            self.logger.error('Failed to prepare playlist update', {
+                'error': str(e),
+                'playlist_id': playlist_id
+            })
+
+    def handle_profiles_request(self, data: Dict):
+        """Отправка списка профилей клиенту"""
+        sid = request.sid
+        if not self.is_authenticated(sid):
+            self.logger.warning('Unauthorized profiles request', {'sid': sid})
+            disconnect(sid)
+            return
+
+        try:
+            from ..models import PlaybackProfile
+            profiles = self.db.session.query(PlaybackProfile).all()
+            self.socketio.emit('profiles_list', {
+                'profiles': [{
+                    'id': p.id,
+                    'name': p.name,
+                    'type': p.profile_type
+                } for p in profiles]
+            }, room=sid)
+            
+            self.logger.debug('Profiles list sent', {'sid': sid})
+            
+        except Exception as e:
+            self.logger.error('Failed to send profiles', {
+                'sid': sid,
+                'error': str(e)
+            })
+            self.cleanup_client(sid)
+
+    def handle_apply_profile(self, data: Dict):
+        """Применение профиля настроек"""
+        sid = request.sid
+        if not self.is_authenticated(sid):
+            self.logger.warning('Unauthorized profile apply attempt', {'sid': sid})
+            disconnect(sid)
+            return
+
+        profile_id = data.get('profile_id')
+        playlist_id = data.get('playlist_id')
+    
+        try:
+            if profile_id and playlist_id:
+                from ..models import PlaylistProfileAssignment
+                # Назначаем профиль плейлисту
+                assignment = self.db.session.query(PlaylistProfileAssignment).filter_by(
+                    playlist_id=playlist_id
+                ).first()
+            
+                if assignment:
+                    assignment.profile_id = profile_id
+                else:
+                    assignment = PlaylistProfileAssignment(
+                        playlist_id=playlist_id,
+                        profile_id=profile_id
+                    )
+                    self.db.session.add(assignment)
+                
+                self.db.session.commit()
+                self.socketio.emit('profile_applied', {'success': True}, room=sid)
+                self.logger.info('Profile applied', {
+                    'profile_id': profile_id,
+                    'playlist_id': playlist_id,
+                    'sid': sid
+                })
+                
+        except Exception as e:
+            self.logger.error('Failed to apply profile', {
+                'error': str(e),
+                'profile_id': profile_id,
+                'playlist_id': playlist_id
+            })
+            self.socketio.emit('profile_applied', {
+                'success': False,
+                'error': str(e)
+            }, room=sid)
 
     def generate_socket_token(self, user_id: int) -> str:
         """Генерация JWT токена для WebSocket аутентификации"""
@@ -41,145 +373,3 @@ class SocketService:
             raise ValueError('Token expired')
         except jwt.InvalidTokenError:
             raise ValueError('Invalid token')
-
-    def handle_connect(self):
-        """Обработчик подключения клиента"""
-        self.logger.info(f'Client connecting from {request.remote_addr}')
-        # Ожидаем аутентификацию в течение 5 секунд
-        request.sid_auth_timeout = current_app.config.get('SOCKET_AUTH_TIMEOUT', 5)
-
-    def handle_authentication(self, data: Dict):
-        """Обработчик аутентификации WebSocket"""
-        try:
-            token = self.verify_socket_token(data.get('token'))
-            user_id = token['user_id']
-            
-            # Проверяем существование пользователя в БД
-            from ..models import User
-            user = self.db.session.query(User).get(user_id)
-            if not user:
-                raise ValueError('User not found')
-            
-            # Сохраняем информацию о клиенте
-            self.connected_clients[request.sid] = {
-                'user_id': user_id,
-                'authenticated': True,
-                'last_activity': datetime.utcnow()
-            }
-            
-            self.logger.info(f'User {user_id} authenticated via WebSocket')
-            self.socketio.emit('authentication_result', {'success': True}, room=request.sid)
-            
-        except Exception as e:
-            self.logger.error(f'WebSocket authentication failed: {str(e)}')
-            self.socketio.emit('authentication_result', {
-                'success': False,
-                'error': str(e)
-            }, room=request.sid)
-            disconnect()
-
-    def handle_disconnect(self):
-        """Обработчик отключения клиента"""
-        if request.sid in self.connected_clients:
-            user_id = self.connected_clients[request.sid]['user_id']
-            self.logger.info(f'User {user_id} disconnected')
-            del self.connected_clients[request.sid]
-        else:
-            self.logger.info('Unauthenticated client disconnected')
-
-    def is_authenticated(self, sid: str) -> bool:
-        """Проверка аутентификации клиента"""
-        client = self.connected_clients.get(sid)
-        return client and client['authenticated']
-
-    def emit_playlist_update(self, playlist_id: Optional[int] = None):
-        """
-        Отправка обновления плейлиста
-        :param playlist_id: ID активного плейлиста
-        """
-        from ..models import Playlist, PlaylistProfileAssignment, PlaybackProfile
-
-        data: Dict[str, Any] = {'active_playlist': None}
-        
-        if playlist_id:
-            playlist = self.db.session.query(Playlist).get(playlist_id)
-            if playlist:
-                data['active_playlist'] = {
-                    'id': playlist.id,
-                    'name': playlist.name,
-                    'customer': playlist.customer or "N/A"
-                }
-                
-                # Добавляем информацию о профиле
-                assignment = self.db.session.query(PlaylistProfileAssignment).filter_by(
-                    playlist_id=playlist_id
-                ).first()
-            
-                if assignment:
-                    profile = self.db.session.query(PlaybackProfile).get(assignment.profile_id)
-                    if profile:
-                        data['assigned_profile'] = {
-                            'id': profile.id,
-                            'name': profile.name
-                        }
-        
-        # Отправляем только аутентифицированным клиентам
-        for sid in list(self.connected_clients.keys()):
-            if self.is_authenticated(sid):
-                self.socketio.emit('playlist_update', data, room=sid)
-        
-    def handle_profiles_request(self, data: Dict):
-        """Отправка списка профилей клиенту"""
-        if not self.is_authenticated(request.sid):
-            disconnect()
-            return
-
-        from ..models import PlaybackProfile
-        profiles = self.db.session.query(PlaybackProfile).all()
-        self.socketio.emit('profiles_list', {
-            'profiles': [{
-                'id': p.id,
-                'name': p.name,
-                'type': p.profile_type
-            } for p in profiles]
-        }, room=request.sid)
-
-    def handle_apply_profile(self, data: Dict):
-        """Применение профиля настроек"""
-        if not self.is_authenticated(request.sid):
-            disconnect()
-            return
-
-        profile_id = data.get('profile_id')
-        playlist_id = data.get('playlist_id')
-    
-        if profile_id and playlist_id:
-            from ..models import PlaylistProfileAssignment
-            # Назначаем профиль плейлисту
-            assignment = self.db.session.query(PlaylistProfileAssignment).filter_by(
-                playlist_id=playlist_id
-            ).first()
-        
-            if assignment:
-                assignment.profile_id = profile_id
-            else:
-                assignment = PlaylistProfileAssignment(
-                    playlist_id=playlist_id,
-                    profile_id=profile_id
-                )
-                self.db.session.add(assignment)
-            
-            self.db.session.commit()
-            self.socketio.emit('profile_applied', {'success': True}, room=request.sid)
-
-    def check_auth_timeouts(self):
-        """Проверка таймаутов аутентификации"""
-        timeout = current_app.config.get('SOCKET_AUTH_TIMEOUT', 5)
-        now = datetime.utcnow()
-        
-        for sid, info in list(self.connected_clients.items()):
-            if not info['authenticated'] and (now - info['connect_time']).seconds > timeout:
-                self.logger.warning(f'Disconnecting client {sid} due to auth timeout')
-                self.socketio.emit('auth_timeout', {}, room=sid)
-                disconnect(sid)
-                del self.connected_clients[sid]
