@@ -3,10 +3,11 @@ import logging
 from werkzeug.utils import secure_filename
 from flask import send_from_directory
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from PIL import Image
 import io
 from dsign.models import Playlist
+from .logger import ServiceLogger
 
 class FileService:
     ALLOWED_MEDIA_EXTENSIONS = {'jpg', 'jpeg', 'png', 'mp4', 'avi'}
@@ -17,17 +18,37 @@ class FileService:
     THUMBNAIL_CACHE = {}  # Классовый кэш для миниатюр
     THUMBNAIL_SIZE = (200, 200)  # Размер миниатюры
 
-    def __init__(self, upload_folder: str, logger: Optional[logging.Logger] = None):
-        """
-        Инициализация сервиса работы с файлами
-        
-        Args:
-            upload_folder: Путь к папке для загрузки файлов
-            logger: Логгер (опционально)
-        """
+    def __init__(
+        self, 
+        upload_folder: str, 
+        logger: Optional[Union[logging.Logger, ServiceLogger]] = None,
+        thumbnail_service: Optional['ThumbnailService'] = None  # Добавлено
+    ):
         self.upload_folder = Path(upload_folder)
-        self.logger = logger or logging.getLogger(__name__)
+        self.logger = logger or ServiceLogger(self.__class__.__name__)
+        self.thumbnail_service = thumbnail_service  # Добавлено
         self._ensure_directories()
+
+    def _log_error(self, message: str, exc_info: bool = True, extra: Optional[Dict[str, Any]] = None):
+        """Унифицированный метод для логирования ошибок"""
+        extra_data = {'module': 'FileService'}
+        if extra:
+            extra_data.update(extra)
+        self.logger.error(message, exc_info=exc_info, extra=extra_data)
+
+    def _log_info(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        """Унифицированный метод для информационных логов"""
+        extra_data = {'module': 'FileService'}
+        if extra:
+            extra_data.update(extra)
+        self.logger.info(message, extra=extra_data)
+
+    def _log_warning(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        """Унифицированный метод для предупреждений"""
+        extra_data = {'module': 'FileService'}
+        if extra:
+            extra_data.update(extra)
+        self.logger.warning(message, extra=extra_data)
 
     def _ensure_directories(self) -> None:
         """Создание необходимых директорий"""
@@ -36,7 +57,7 @@ class FileService:
             (self.upload_folder / 'logo').mkdir(exist_ok=True)
             (self.upload_folder / 'tmp').mkdir(exist_ok=True)
         except Exception as e:
-            self.logger.error(f"Failed to create directories: {str(e)}", exc_info=True)
+            self._log_error(f"Failed to create directories: {str(e)}", extra={'action': 'create_directories'})
             raise RuntimeError("Failed to create upload directories")
 
     def allowed_file(self, filename: str, file_size: int = 0) -> bool:
@@ -82,7 +103,7 @@ class FileService:
                     })
             return files
         except Exception as e:
-            self.logger.error(f"Failed to get media files: {str(e)}", exc_info=True)
+            self._log_error(f"Failed to get media files: {str(e)}", extra={'action': 'get_media_files'})
             return []
 
     def serve_media_file(self, filename: str, thumb: bool = False):
@@ -106,8 +127,6 @@ class FileService:
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"File {filename} not found")
         
-            # Добавляем заголовки с метаданными
-            stat = os.stat(file_path)
             headers = {
                 'X-File-Size': str(stat.st_size),
                 'X-File-Modified': str(stat.st_mtime),
@@ -119,7 +138,8 @@ class FileService:
                 headers=headers
             )
         except Exception as e:
-            self.logger.error(f"Failed to serve file {filename}: {str(e)}", exc_info=True)
+            self._log_error(f"Failed to serve file {filename}: {str(e)}", 
+                          extra={'filename': filename, 'action': 'serve_media_file'})
             raise
 
     def _get_mime_type(self, ext: str) -> str:
@@ -144,9 +164,11 @@ class FileService:
                     file_path = self.upload_folder / filename
                     file.save(file_path)
                     saved_files.append(filename)
-                    self.logger.info(f"Successfully uploaded file: {filename}")
+                    self._log_info(f"Successfully uploaded file: {filename}", 
+                                 extra={'filename': filename, 'action': 'file_upload'})
                 except Exception as e:
-                    self.logger.error(f"Failed to upload file {file.filename}: {str(e)}", exc_info=True)
+                    self._log_error(f"Failed to upload file {file.filename}: {str(e)}", 
+                                  extra={'filename': file.filename, 'action': 'file_upload'})
         return saved_files
 
     def handle_logo_upload(self, logo) -> Dict[str, Any]:
@@ -165,16 +187,20 @@ class FileService:
             
         if not self.allowed_logo_file(logo.filename, logo.content_length):
             error_msg = 'Invalid file type or size exceeds limit (max 2MB)'
-            self.logger.warning(f"Rejected logo upload: {error_msg}")
+            self._log_warning(error_msg, extra={
+                'action': 'logo_upload',
+                'filename': logo.filename,
+                'file_size': logo.content_length
+            })
             return {'success': False, 'error': error_msg}
 
         try:
             filename = self.DEFAULT_LOGO
             file_path = self.upload_folder / filename
             
-            # Сохраняем новый логотип
             logo.save(file_path)
-            self.logger.info("Logo uploaded successfully")
+            self._log_info("Logo uploaded successfully", 
+                         extra={'filename': filename, 'action': 'logo_upload'})
             
             return {
                 'success': True,
@@ -183,7 +209,7 @@ class FileService:
             }
         except Exception as e:
             error_msg = f"Failed to upload logo: {str(e)}"
-            self.logger.error(error_msg, exc_info=True)
+            self._log_error(error_msg, extra={'action': 'logo_upload'})
             return {'success': False, 'error': error_msg}
 
     def delete_files(self, filenames: List[str]) -> Dict[str, Any]:
@@ -197,12 +223,14 @@ class FileService:
                 if file_path.exists():
                     file_path.unlink()
                     deleted.append(filename)
-                    self.logger.info(f"Deleted file: {filename}")
+                    self._log_info(f"Deleted file: {filename}", 
+                                 extra={'filename': filename, 'action': 'delete_file'})
                 else:
                     failed.append(filename)
             except Exception as e:
                 failed.append(filename)
-                self.logger.error(f"Failed to delete file {filename}: {str(e)}", exc_info=True)
+                self._log_error(f"Failed to delete file {filename}: {str(e)}", 
+                               extra={'filename': filename, 'action': 'delete_file'})
         
         return {
             "deleted": deleted,
@@ -226,11 +254,17 @@ class FileService:
         
     def get_media_thumbnail(self, filename: str) -> Optional[str]:
         """Получение пути к миниатюре через ThumbnailService"""
+        if not hasattr(self, 'thumbnail_service') or not self.thumbnail_service:
+            self._log_warning("Thumbnail service not available", 
+                            extra={'filename': filename})
+            return None
+    
         try:
             thumb_path = self.thumbnail_service.generate_thumbnail(filename)
             return str(thumb_path) if thumb_path else None
         except Exception as e:
-            self.logger.error(f"Thumbnail error: {str(e)}")
+            self._log_error(f"Thumbnail error: {str(e)}", 
+                          extra={'filename': filename, 'action': 'generate_thumbnail'})
             return None
             
     def get_media_files_with_playlist_info(self, playlist_id=None, db_session=None):
@@ -244,13 +278,11 @@ class FileService:
             if not db_session:
                 raise RuntimeError("Database session not provided")
             
-            # Получаем файлы плейлиста из БД
             playlist_files = set()
             playlist = db_session.query(Playlist).get(playlist_id)
             if playlist:
                 playlist_files = {f.file_name for f in playlist.files}
             
-            # Добавляем флаг принадлежности
             return [{
                 **file,
                 'included': file['filename'] in playlist_files,
@@ -258,5 +290,6 @@ class FileService:
             } for file in all_files]
             
         except Exception as e:
-            self.logger.error(f"Error in get_media_files_with_playlist_info: {str(e)}")
+            self._log_error(f"Error in get_media_files_with_playlist_info: {str(e)}", 
+                          extra={'playlist_id': playlist_id, 'action': 'get_playlist_files'})
             raise
