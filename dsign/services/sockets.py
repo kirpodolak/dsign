@@ -7,18 +7,21 @@ from .logger import ServiceLogger
 from threading import Lock
 
 class SocketService:
-    def __init__(self, socketio: SocketIO, db_session, logger=None):
+    def __init__(self, socketio: SocketIO, db_session, app=None, logger=None):
         """
         Инициализация сервиса сокетов
         :param socketio: Экземпляр SocketIO
         :param db_session: Сессия базы данных
+        :param app: Экземпляр Flask приложения
         """
         self.socketio = socketio
         self.db = db_session
+        self.app = app or current_app._get_current_object()
         self.logger = ServiceLogger('SocketService')
         self.connected_clients = {}
         self.clients_lock = Lock()
         self.activity_check_interval = 15  # seconds
+        self.socket_auth_timeout = 300  # 5 minutes timeout by default
 
         # Конфигурация, соответствующая фронтенду
         self.config = {
@@ -48,8 +51,11 @@ class SocketService:
         def activity_check():
             while True:
                 self.socketio.sleep(self.activity_check_interval)
-                self.check_activity()
-                
+                try:
+                    self.check_activity()
+                except Exception as e:
+                    self.logger.error('Activity check failed', {'error': str(e)})
+
         self.socketio.start_background_task(activity_check)
 
     def handle_connect(self):
@@ -61,7 +67,7 @@ class SocketService:
                 'connect_time': datetime.utcnow(),
                 'last_activity': datetime.utcnow(),
                 'ip_address': client_ip,
-                'reconnect_attempts': 0  # Добавлено для отслеживания попыток переподключения
+                'reconnect_attempts': 0
             }
         
         self.logger.info('New client connection', {
@@ -75,13 +81,15 @@ class SocketService:
         self.logger.info('Client disconnected', {'sid': sid})
         self.cleanup_client(sid)
 
-    def handle_ping(self):
+    def handle_ping(self, data=None):
         """Обработчик ping-сообщения для проверки активности"""
         sid = request.sid
         with self.clients_lock:
             if sid in self.connected_clients:
                 self.connected_clients[sid]['last_activity'] = datetime.utcnow()
                 self.logger.debug('Ping received', {'sid': sid})
+                if data and isinstance(data, dict) and data.get('echo'):
+                    return {'pong': data['echo']}
         return 'pong'
 
     def handle_authentication(self, data: Dict):
@@ -143,7 +151,6 @@ class SocketService:
     def check_activity(self):
         """Проверка активности клиентов"""
         now = datetime.utcnow()
-        timeout = current_app.config.get('SOCKET_AUTH_TIMEOUT', 5)
         inactive_clients = []
 
         with self.clients_lock:
@@ -152,7 +159,7 @@ class SocketService:
                 
                 if not client['authenticated']:
                     connect_time = (now - client['connect_time']).seconds
-                    if connect_time > timeout:
+                    if connect_time > self.socket_auth_timeout:
                         inactive_clients.append(sid)
                         self.logger.warning('Authentication timeout', {'sid': sid})
                 elif last_active > 60:  # 60 секунд без активности
@@ -175,7 +182,6 @@ class SocketService:
             client = self.connected_clients.get(sid)
             return client and client['authenticated']
 
-    # Новые методы для обработки событий фронтенда
     def handle_get_playback_state(self, data: Dict):
         """Обработчик запроса состояния воспроизведения"""
         sid = request.sid
