@@ -17,7 +17,7 @@
             }
         },
         config: {
-            debug: process.env.NODE_ENV !== 'production',
+            debug: window.location.hostname === 'localhost',
             socketReconnectDelay: 1000,
             maxSocketRetries: 5,
             authCheckInterval: 60000
