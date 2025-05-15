@@ -1,5 +1,5 @@
 # В начале файла:
-from ...logger import setup_logger
+from dsign.services.logger import setup_logger
 logger = setup_logger('LogAPI')
 
 @api.route('/api/logs', methods=['POST'])
