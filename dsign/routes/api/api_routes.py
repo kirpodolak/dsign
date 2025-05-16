@@ -2,6 +2,7 @@ from threading import Lock
 import os
 import shutil
 import subprocess
+import traceback
 from pathlib import Path 
 from flask import jsonify, request, send_from_directory, abort, current_app, send_file
 from flask_login import login_required
@@ -646,76 +647,81 @@ def init_api_routes(api_bp, services):
     def upload_logo():
         try:
             if 'logo' not in request.files:
-                current_app.logger.error("No file part in request")
-                return jsonify({
-                    "success": False,
-                    "error": "No file provided"
-                }), 400
+                return jsonify({"success": False, "error": "No file provided"}), 400
 
             file = request.files['logo']
             if not file.filename:
-                current_app.logger.error("Empty filename")
-                return jsonify({
-                    "success": False,
-                    "error": "Empty filename"
-                }), 400
+                return jsonify({"success": False, "error": "Empty filename"}), 400
 
-            # Check file size
+            # Проверка размера и формата файла
             file.seek(0, os.SEEK_END)
             file_size = file.tell()
             file.seek(0)
-            if file_size > MAX_LOGO_SIZE:
+        
+            if file_size > current_app.config['MAX_LOGO_SIZE']:
                 return jsonify({
                     "success": False,
-                    "error": f"File too large (max {MAX_LOGO_SIZE/1024/1024}MB)"
+                    "error": f"File too large (max {current_app.config['MAX_LOGO_SIZE']//1024//1024}MB)"
                 }), 400
 
-            # Verify image format
             try:
                 img = Image.open(file.stream)
                 img.verify()
                 file.stream.seek(0)
-            except Exception as img_error:
-                current_app.logger.error(f"Invalid image: {str(img_error)}")
+                if img.format.lower() not in ('jpeg', 'jpg', 'png'):
+                    raise ValueError("Unsupported format")
+            except Exception:
                 return jsonify({
                     "success": False,
-                    "error": "Invalid image file"
+                    "error": "Invalid image file (only JPEG/PNG allowed)"
                 }), 400
 
-            filename = secure_filename("idle_logo.jpg")
-            file_path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
+            # Сохранение файла
+            filename = secure_filename(current_app.config['IDLE_LOGO'])
+            upload_folder = current_app.config['UPLOAD_FOLDER']
+            file_path = os.path.join(upload_folder, filename)
         
-            # Remove old file if exists
+            # Создаем backup
+            backup_path = None
             if os.path.exists(file_path):
-                os.unlink(file_path)
-            
-            file.save(file_path)
-        
-            # Verify file was saved
-            if not os.path.exists(file_path):
-                current_app.logger.error(f"File save failed to {file_path}")
+                backup_path = f"{file_path}.bak"
+                os.rename(file_path, backup_path)
+
+            try:
+                file.save(file_path)
+                os.chmod(file_path, 0o644)
+
+                # Обновляем логотип в плеере
+                if not playback_service.restart_idle_logo(upload_folder, filename):
+                    raise RuntimeError("Failed to update player")
+
+                # Успешное завершение
+                if backup_path and os.path.exists(backup_path):
+                    os.unlink(backup_path)
+
+                return jsonify({
+                    "success": True,
+                    "message": "Logo updated successfully",
+                    "timestamp": int(time.time())
+                })
+
+            except Exception as e:
+                # Восстановление из backup
+                if backup_path and os.path.exists(backup_path):
+                    if os.path.exists(file_path):
+                        os.unlink(file_path)
+                    os.rename(backup_path, file_path)
+                    playback_service.restart_idle_logo(upload_folder, filename)
+
+                current_app.logger.error(f"Logo upload failed: {str(e)}")
                 return jsonify({
                     "success": False,
-                    "error": "Save failed"
+                    "error": str(e),
+                    "recovered": backup_path is not None
                 }), 500
-
-            # Restart logo display
-            if not playback_service.restart_idle_logo():
-                current_app.logger.error("Failed to restart logo display")
-                return jsonify({
-                    "success": False,
-                    "error": "Display restart failed",
-                    "logo_status": playback_service.get_current_logo_status()
-                }), 500
-
-            return jsonify({
-                "success": True,
-                "filename": filename,
-                "logo_status": playback_service.get_current_logo_status()
-            })
 
         except Exception as e:
-            current_app.logger.error(f"Logo upload failed: {str(e)}", exc_info=True)
+            current_app.logger.error(f"Unexpected error: {str(e)}")
             return jsonify({
                 "success": False,
                 "error": "Internal server error"
