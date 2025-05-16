@@ -49,9 +49,24 @@ class PlaybackService:
             self._logo_manager
         )
         
+        self.logo_manager = LogoManager(
+            logger=self.logger,
+            socketio=self.socketio,
+            upload_folder=self.upload_folder,
+            db_session=self.db_session,
+            mpv_manager=self._mpv_manager
+        )
+        
         # Initialize with retry
         self._init_with_retry()
 
+    def display_idle_logo(self):
+        return self.logo_manager.display_idle_logo()
+        
+    def restart_idle_logo(self):
+        """Proxy to logo manager"""
+        return self.logo_manager.restart_idle_logo()
+        
     def _sanitize_extra_data(self, extra_data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Remove reserved keys from extra_data to prevent LogRecord conflicts"""
         if not extra_data:
