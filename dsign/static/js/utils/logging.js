@@ -1,44 +1,42 @@
 export class AppLogger {
     constructor(moduleName = 'App') {
-        this.moduleName = moduleName;
-		this.enableServerLogging = true;
-    }
-
-    log(message, data = null) {
-        const entry = {
-            timestamp: new Date().toISOString(),
-			module: this.moduleName,
-			message,
-			data
-		};
-        console.log(JSON.stringify(entry));
-    }
-
-    debug(message, data = null) {
-        if (window.App.config.debug) {
-            console.debug(`[${this.moduleName}] ${message}`, data || '');
+        if (!window.App) {
+            console.error('AppLogger: window.App not initialized');
+            throw new Error('App framework not loaded');
         }
+        
+        this.moduleName = moduleName;
+        this.enableServerLogging = true;
+        this.debugEnabled = window.App.config?.debug || false;
     }
 
-    warn(message, data = null) {
-        console.warn(`[${this.moduleName}] ${message}`, data || '');
-        this._trackIfNeeded('warn', message, data);
+    // Добавить проверку на доступность сокетов
+    _canSendToServer() {
+        return this.enableServerLogging && 
+               window.App?.Sockets?.isConnected && 
+               typeof window.App.Sockets.emit === 'function';
     }
 
+    // Обновить метод error
     error(message, error = null, context = null) {
-        console.error(`[${this.moduleName}] ${message}`, error || '');
-        this._trackIfNeeded('error', message, { error, context });
-    }
-
-    _trackIfNeeded(level, message, data) {
-        if (this.enableServerLogging && window.App.Sockets?.isConnected) {
-            window.App.Sockets.emit('client_error', {
-                level,
-                module: this.moduleName,
-                message,
-                data,
-                url: window.location.href
-            });
+        const errorData = {
+            message: `${this.moduleName}: ${message}`,
+            stack: error?.stack,
+            context
+        };
+        
+        console.error(errorData.message, error || '', context || '');
+        
+        if (this._canSendToServer()) {
+            try {
+                window.App.Sockets.emit('client_error', {
+                    ...errorData,
+                    level: 'error',
+                    url: window.location.href
+                });
+            } catch (e) {
+                console.error('Failed to send error to server:', e);
+            }
         }
     }
 }
