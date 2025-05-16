@@ -5,7 +5,7 @@
         INITIAL_RETRY_DELAY: 1000,
         MAX_RETRY_DELAY: 30000, // 30 секунд максимальная задержка
         PING_INTERVAL: 25000, // 25 секунд между ping-запросами
-        AUTH_TIMEOUT: 5000 // 5 секунд на аутентификацию
+        AUTH_TIMEOUT: 30000 // 30 секунд на аутентификацию
     };
 
     // Основной класс для управления сокетами
@@ -41,7 +41,7 @@
                     transports: ['websocket', 'polling'],
                     auth: (cb) => {
                         // Автоматическая отправка токена при подключении
-                        const token = window.App.Auth?.getToken();
+                        const token = window.App.Helpers?.getToken();
                         cb({ token });
                     }
                 });
