@@ -46,8 +46,14 @@ class Config:
 
     # Разрешенные расширения файлов
     ALLOWED_LOGO_EXTENSIONS = {'jpg', 'png', 'jpeg'}
+    ALLOWED_LOGO_TYPES = ['image/jpeg', 'image/png']  # MIME-типы
     ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif', 'mp4', 'avi'}
-
+    
+    # Настройки загрузки файлов
+    MAX_LOGO_SIZE = 2 * 1024 * 1024  # 2MB
+    MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB для других изображений
+    MAX_VIDEO_SIZE = 100 * 1024 * 1024  # 100MB для видео
+    
     # Настройки сессии
     SESSION_COOKIE_NAME = 'dsign_session'
     SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "False").lower() == "true"
@@ -120,4 +126,8 @@ __all__ = [
     'M3U_EXPORT_DIR',
     'MEDIA_ROOT',
     'MEDIA_URL',
+    'MAX_LOGO_SIZE',
+    'MAX_IMAGE_SIZE',
+    'MAX_VIDEO_SIZE',
+    'ALLOWED_LOGO_TYPES',
 ]
