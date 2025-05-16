@@ -44,7 +44,30 @@ class MPVManager:
                 "systemd_managed": True
             }
         )
+        
+        self._last_known_state = {
+            'paused': True,
+            'volume': 100,
+            'mute': False
+        }
 
+    def _cache_mpv_state(self):
+        """Кеширует важные параметры MPV"""
+        props = ["pause", "volume", "mute"]
+        for prop in props:
+            resp = self._mpv_manager._send_command({
+                "command": ["get_property", prop]
+            })
+            if resp and "data" in resp:
+                self._last_known_state[prop] = resp["data"]
+    
+    def _restore_mpv_state(self):
+        """Восстанавливает кешированное состояние"""
+        for prop, value in self._last_known_state.items():
+            self._send_ipc_command({
+                "command": ["set", prop, value]
+            })
+    
     def _log_operation(self, operation: str, status: str, details: Dict[str, Any] = None):
         """Унифицированное логирование операций"""
         log_data = {
