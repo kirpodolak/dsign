@@ -5,6 +5,7 @@ from flask import request, current_app
 import jwt
 from .logger import ServiceLogger
 from threading import Lock
+import time
 
 class SocketService:
     def __init__(self, socketio: SocketIO, db_session, app=None, logger=None):
@@ -21,17 +22,20 @@ class SocketService:
         self.connected_clients = {}
         self.clients_lock = Lock()
         self.activity_check_interval = 15  # seconds
-        self.socket_auth_timeout = 300  # 5 minutes timeout by default
+        self.socket_auth_timeout = 30  # 30 seconds timeout to match frontend
+        self.server_version = "1.0.0"  # Версия сервера для проверки совместимости
 
         # Конфигурация, соответствующая фронтенду
         self.config = {
             'max_retries': 5,
             'reconnect_attempts': 5,
-            'reconnect_delay': 1000
+            'reconnect_delay': 1000,
+            'ping_interval': 25  # seconds to match frontend
         }
 
         self.register_handlers()
         self.start_activity_checker()
+        self.start_version_broadcaster()
 
     def register_handlers(self):
         """Регистрация всех обработчиков событий"""
@@ -41,8 +45,8 @@ class SocketService:
         self.socketio.on_event('request_profiles', self.handle_profiles_request)
         self.socketio.on_event('apply_profile', self.handle_apply_profile)
         self.socketio.on_event('ping', self.handle_ping)
-
-        # Добавлены обработчики для событий фронтенда
+        self.socketio.on_event('heartbeat', self.handle_heartbeat)
+        self.socketio.on_event('get_server_version', self.handle_get_version)
         self.socketio.on_event('get_playback_state', self.handle_get_playback_state)
         self.socketio.on_event('get_playlist_state', self.handle_get_playlist_state)
 
@@ -58,22 +62,53 @@ class SocketService:
 
         self.socketio.start_background_task(activity_check)
 
+    def start_version_broadcaster(self):
+        """Периодическая рассылка версии сервера"""
+        def broadcast_version():
+            while True:
+                self.socketio.sleep(300)  # Каждые 5 минут
+                try:
+                    with self.clients_lock:
+                        active_sids = [sid for sid in self.connected_clients 
+                                     if self.is_authenticated(sid)]
+                    
+                    for sid in active_sids:
+                        self.socketio.emit('server_version', self.server_version, room=sid)
+                except Exception as e:
+                    self.logger.error('Version broadcast failed', {'error': str(e)})
+
+        self.socketio.start_background_task(broadcast_version)
+
     def handle_connect(self):
         """Обработчик подключения клиента"""
         client_ip = request.remote_addr
+        token = request.args.get('token')
+        
         with self.clients_lock:
             self.connected_clients[request.sid] = {
                 'authenticated': False,
                 'connect_time': datetime.utcnow(),
                 'last_activity': datetime.utcnow(),
                 'ip_address': client_ip,
-                'reconnect_attempts': 0
+                'reconnect_attempts': 0,
+                'token': token  # Сохраняем токен при подключении
             }
         
         self.logger.info('New client connection', {
             'ip': client_ip,
             'sid': request.sid
         })
+
+        # Немедленная проверка токена при подключении, если он есть
+        if token:
+            try:
+                decoded = self.verify_socket_token(token)
+                self.handle_authentication({'token': token})
+            except Exception as e:
+                self.logger.warning('Invalid token on connect', {
+                    'error': str(e),
+                    'sid': request.sid
+                })
 
     def handle_disconnect(self):
         """Обработчик отключения клиента"""
@@ -91,6 +126,28 @@ class SocketService:
                 if data and isinstance(data, dict) and data.get('echo'):
                     return {'pong': data['echo']}
         return 'pong'
+
+    def handle_heartbeat(self, data: Dict):
+        """Обработчик heartbeat сообщения"""
+        sid = request.sid
+        timestamp = data.get('timestamp')
+        
+        with self.clients_lock:
+            if sid in self.connected_clients:
+                self.connected_clients[sid]['last_activity'] = datetime.utcnow()
+                self.logger.debug('Heartbeat received', {'sid': sid})
+                
+                # Рассчитываем задержку
+                if timestamp:
+                    latency = int((time.time() * 1000) - timestamp)
+                    return {'latency': latency}
+        
+        return {'error': 'Invalid heartbeat'}
+
+    def handle_get_version(self):
+        """Обработчик запроса версии сервера"""
+        sid = request.sid
+        self.socketio.emit('server_version', self.server_version, room=sid)
 
     def handle_authentication(self, data: Dict):
         """Обработчик аутентификации WebSocket"""
@@ -122,17 +179,36 @@ class SocketService:
                 'user_id': user_id,
                 'sid': sid
             })
-            self.socketio.emit('authentication_result', {'success': True}, room=sid)
+            
+            # Отправляем результат аутентификации
+            self.socketio.emit('authentication_result', {
+                'success': True,
+                'version': self.server_version
+            }, room=sid)
             
         except Exception as e:
             self.logger.error('Authentication failed', {
                 'error': str(e),
                 'sid': sid
             })
+            
+            error_msg = str(e)
+            if isinstance(e, jwt.ExpiredSignatureError):
+                error_msg = 'Token expired'
+            elif isinstance(e, jwt.InvalidTokenError):
+                error_msg = 'Invalid token'
+                
             self.socketio.emit('authentication_result', {
                 'success': False,
-                'error': str(e)
+                'error': error_msg
             }, room=sid)
+            
+            # Отправляем специальное событие для ошибок авторизации
+            if 'token' in str(e).lower() or 'auth' in str(e).lower():
+                self.socketio.emit('auth_error', {
+                    'message': error_msg
+                }, room=sid)
+                
             self.cleanup_client(sid)
 
     def cleanup_client(self, sid: str):
@@ -162,18 +238,21 @@ class SocketService:
                     if connect_time > self.socket_auth_timeout:
                         inactive_clients.append(sid)
                         self.logger.warning('Authentication timeout', {'sid': sid})
+                        self.socketio.emit('auth_timeout', {
+                            'message': 'Authentication timeout'
+                        }, room=sid)
                 elif last_active > 60:  # 60 секунд без активности
                     inactive_clients.append(sid)
                     self.logger.warning('Client inactive', {
                         'sid': sid,
                         'inactive_seconds': last_active
                     })
+                    self.socketio.emit('inactivity_timeout', {
+                        'message': 'Disconnected due to inactivity'
+                    }, room=sid)
 
         # Отключаем неактивных клиентов
         for sid in inactive_clients:
-            self.socketio.emit('inactivity_timeout', {
-                'message': 'Disconnected due to inactivity'
-            }, room=sid)
             self.cleanup_client(sid)
 
     def is_authenticated(self, sid: str) -> bool:
@@ -197,7 +276,8 @@ class SocketService:
                 self.socketio.emit('playback_update', {
                     'state': state.state,
                     'current_time': state.current_time,
-                    'playlist_item_id': state.playlist_item_id
+                    'playlist_item_id': state.playlist_item_id,
+                    'timestamp': datetime.utcnow().isoformat()
                 }, room=sid)
         except Exception as e:
             self.logger.error('Failed to get playback state', {
@@ -220,7 +300,8 @@ class SocketService:
                 self.socketio.emit('playlist_update', {
                     'id': playlist.id,
                     'name': playlist.name,
-                    'items': [item.to_dict() for item in playlist.items]
+                    'items': [item.to_dict() for item in playlist.items],
+                    'timestamp': datetime.utcnow().isoformat()
                 }, room=sid)
         except Exception as e:
             self.logger.error('Failed to get playlist state', {
@@ -266,6 +347,9 @@ class SocketService:
                 active_sids = [sid for sid in self.connected_clients 
                              if self.is_authenticated(sid)]
             
+            # Добавляем временную метку
+            data['timestamp'] = datetime.utcnow().isoformat()
+            
             # Отправляем обновление
             for sid in active_sids:
                 try:
@@ -304,7 +388,8 @@ class SocketService:
                     'id': p.id,
                     'name': p.name,
                     'type': p.profile_type
-                } for p in profiles]
+                } for p in profiles],
+                'timestamp': datetime.utcnow().isoformat()
             }, room=sid)
             
             self.logger.debug('Profiles list sent', {'sid': sid})
@@ -345,7 +430,10 @@ class SocketService:
                     self.db.session.add(assignment)
                 
                 self.db.session.commit()
-                self.socketio.emit('profile_applied', {'success': True}, room=sid)
+                self.socketio.emit('profile_applied', {
+                    'success': True,
+                    'timestamp': datetime.utcnow().isoformat()
+                }, room=sid)
                 self.logger.info('Profile applied', {
                     'profile_id': profile_id,
                     'playlist_id': playlist_id,
@@ -360,22 +448,39 @@ class SocketService:
             })
             self.socketio.emit('profile_applied', {
                 'success': False,
-                'error': str(e)
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat()
             }, room=sid)
 
     def generate_socket_token(self, user_id: int) -> str:
         """Генерация JWT токена для WebSocket аутентификации"""
         payload = {
             'user_id': user_id,
-            'exp': datetime.utcnow() + timedelta(minutes=5)
+            'exp': datetime.utcnow() + timedelta(minutes=30)  # Увеличен срок действия
         }
         return jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
 
     def verify_socket_token(self, token: str) -> Dict:
-        """Верификация JWT токена"""
+        """Верификация JWT токена с улучшенной обработкой ошибок"""
         try:
-            return jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
+            if not token:
+                raise ValueError('Empty token provided')
+                
+            decoded = jwt.decode(
+                token, 
+                current_app.config['SECRET_KEY'], 
+                algorithms=['HS256'],
+                options={'verify_exp': True}
+            )
+            
+            if not decoded.get('user_id'):
+                raise ValueError('Invalid token payload')
+                
+            return decoded
+            
         except jwt.ExpiredSignatureError:
             raise ValueError('Token expired')
-        except jwt.InvalidTokenError:
-            raise ValueError('Invalid token')
+        except jwt.InvalidTokenError as e:
+            raise ValueError(f'Invalid token: {str(e)}')
+        except Exception as e:
+            raise ValueError(f'Token verification failed: {str(e)}')
