@@ -16,7 +16,7 @@ document.addEventListener('DOMContentLoaded', () => {
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRFToken': document.querySelector('meta[name="csrf-token"]')?.content || 
-                              document.cookie.match(/csrf_token=([^;]+)/)?.[1] || ''				
+                              document.cookie.match(/csrf_token=([^;]+)/)?.[1] || ''                
             }
         },
         selectors: {
@@ -83,7 +83,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         ...CONFIG.api.headers,
                         'X-CSRFToken': csrfToken,
                         ...options.headers
-                    }
+                    },
+                    credentials: 'include' // Ensure cookies are sent with requests
                 });
 
                 if (!response.ok) {
@@ -119,7 +120,7 @@ document.addEventListener('DOMContentLoaded', () => {
         async getPlaylists() {
             const response = await this.request(CONFIG.api.endpoints.playlists);
             const playlists = Array.isArray(response) ? response : (response.playlists || []);
-            // Обеспечиваем, что customer всегда будет строкой (даже пустой)
+            // Ensure customer is always a string (even empty)
             return playlists.map(playlist => ({
                 ...playlist,
                 customer: playlist.customer || ''
@@ -131,7 +132,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 method: 'POST',
                 body: JSON.stringify({
                     ...data,
-                    customer: data.customer || '' // Всегда отправляем строку
+                    customer: data.customer || '' // Always send string
                 })
             });
             return response;
@@ -159,24 +160,39 @@ document.addEventListener('DOMContentLoaded', () => {
         async uploadLogo(formData) {
             try {
                 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || 
-                                document.cookie.match(/csrf_token=([^;]+)/)?.[1] || 
-                                '';
+                                document.cookie.match(/csrf_token=([^;]+)/)?.[1] || '';
                 
                 const response = await fetch(`${CONFIG.api.baseUrl}${CONFIG.api.endpoints.uploadLogo}`, {
                     method: 'POST',
                     headers: {
                         'X-CSRFToken': csrfToken
                     },
-                    body: formData
+                    body: formData,
+                    credentials: 'include'
                 });
 
                 if (!response.ok) {
-                    throw new Error('Logo upload failed');
+                    let errorDetails = '';
+                    try {
+                        const errorResponse = await response.json();
+                        errorDetails = errorResponse.message || JSON.stringify(errorResponse);
+                    } catch (e) {
+                        errorDetails = await response.text();
+                    }
+                    
+                    throw new Error(`Logo upload failed: ${errorDetails}`);
                 }
 
-                return await response.json();
+                const result = await response.json();
+                
+                // Update application state
+                state.fallbackLogoUsed = false;
+                state.logoLoadAttempts = 0;
+                
+                return result;
             } catch (error) {
                 console.error('Logo upload error:', error);
+                ui.showAlert(`Failed to upload logo: ${error.message}`, 'error');
                 throw error;
             }
         },
@@ -192,11 +208,19 @@ document.addEventListener('DOMContentLoaded', () => {
                     headers: {
                         'X-CSRFToken': csrfToken
                     },
-                    body: formData
+                    body: formData,
+                    credentials: 'include'
                 });
 
                 if (!response.ok) {
-                    throw new Error('Media upload failed');
+                    let errorDetails = '';
+                    try {
+                        const errorResponse = await response.json();
+                        errorDetails = errorResponse.message || JSON.stringify(errorResponse);
+                    } catch (e) {
+                        errorDetails = await response.text();
+                    }
+                    throw new Error(`Media upload failed: ${errorDetails}`);
                 }
 
                 return await response.json();
@@ -208,6 +232,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         async refreshPreview() {
             try {
+                state.isPreviewRefreshing = true;
                 await this.request(`${CONFIG.api.endpoints.previewImage}/capture`, {
                     method: 'POST'
                 });
@@ -215,6 +240,8 @@ document.addEventListener('DOMContentLoaded', () => {
             } catch (error) {
                 console.warn('Preview refresh failed:', error);
                 return false;
+            } finally {
+                state.isPreviewRefreshing = false;
             }
         }
     };
