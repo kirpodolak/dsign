@@ -3,35 +3,100 @@
     const CONFIG = {
         MAX_RETRIES: 5,
         INITIAL_RETRY_DELAY: 1000,
-        MAX_RETRY_DELAY: 30000, // 30 секунд максимальная задержка
-        PING_INTERVAL: 25000, // 25 секунд между ping-запросами
-        AUTH_TIMEOUT: 30000 // 30 секунд на аутентификацию
+        MAX_RETRY_DELAY: 30000,
+        PING_INTERVAL: 25000,
+        AUTH_TIMEOUT: 30000,
+        TOKEN_CHECK_INTERVAL: 500
     };
 
-    // Основной класс для управления сокетами
     class SocketManager {
-        constructor() {
+        constructor(options = {}) {
             this.socket = null;
             this.isConnected = false;
             this.isAuthenticated = false;
             this.reconnectAttempts = 0;
-            this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
+            this.reconnectDelay = options.reconnectDelay || CONFIG.INITIAL_RETRY_DELAY;
             this.pendingEvents = [];
             this.pingInterval = null;
             this.authTimeout = null;
-            this.init();
+            this.tokenCheckInterval = null;
+            
+            this.onError = options.onError || ((error) => {
+                console.error('[Socket] Error:', error);
+            });
+            
+            this.onTokenRefresh = options.onTokenRefresh || (() => {});
+            
+            this.initWithTokenCheck();
+        }
+
+        async initWithTokenCheck() {
+            try {
+                console.debug('[Socket] Starting connection with token check');
+                
+                const token = await this.waitForValidToken();
+                if (!token) {
+                    throw new Error('No valid authentication token available');
+                }
+                
+                this.init();
+            } catch (error) {
+                console.error('[Socket] Initialization error:', error);
+                this.handleRetry(error);
+            }
+        }
+
+        waitForValidToken() {
+            return new Promise((resolve, reject) => {
+                let attempts = 0;
+                const maxAttempts = 10;
+                
+                const checkToken = () => {
+                    attempts++;
+                    const token = this.getValidToken();
+                    
+                    if (token) {
+                        resolve(token);
+                    } else if (attempts >= maxAttempts) {
+                        reject(new Error('Token not available after maximum attempts'));
+                    } else {
+                        setTimeout(checkToken, CONFIG.TOKEN_CHECK_INTERVAL);
+                    }
+                };
+                
+                checkToken();
+            });
+        }
+
+        getValidToken() {
+            try {
+                const token = window.App.Helpers?.getToken();
+                if (!token) {
+                    console.warn('[Socket] No authentication token available');
+                    return null;
+                }
+                
+                const parts = token.split('.');
+                if (parts.length !== 3) {
+                    console.warn('[Socket] Invalid token format');
+                    return null;
+                }
+                
+                return token;
+            } catch (error) {
+                console.error('[Socket] Token validation error:', error);
+                return null;
+            }
         }
 
         init() {
             try {
                 console.debug('[Socket] Initializing connection...');
                 
-                // Проверяем доступность Socket.IO
                 if (typeof io === 'undefined') {
                     throw new Error('Socket.IO library not loaded');
                 }
 
-                // Очищаем предыдущее соединение
                 this.cleanup();
 
                 this.socket = io({
@@ -40,9 +105,16 @@
                     reconnectionDelay: this.reconnectDelay,
                     transports: ['websocket', 'polling'],
                     auth: (cb) => {
-                        // Автоматическая отправка токена при подключении
-                        const token = window.App.Helpers?.getToken();
-                        cb({ token });
+                        try {
+                            const token = this.getValidToken();
+                            if (!token) {
+                                throw new Error('No authentication token available');
+                            }
+                            cb({ token });
+                        } catch (authError) {
+                            this.onError(new Error(`Authentication error: ${authError.message}`));
+                            cb({ error: authError.message });
+                        }
                     }
                 });
 
@@ -54,7 +126,6 @@
         }
 
         setupEventHandlers() {
-            // Базовые обработчики соединения
             this.socket.on('connect', () => {
                 this.handleConnect();
             });
@@ -67,7 +138,6 @@
                 this.handleError(error);
             });
 
-            // Обработчики кастомных событий
             this.socket.on('authentication_result', (data) => {
                 this.handleAuthenticationResult(data);
             });
@@ -95,6 +165,27 @@
             this.socket.on('pong', (latency) => {
                 console.debug(`[Socket] Ping latency: ${latency}ms`);
             });
+
+            this.socket.on('auth_error', (error) => {
+                this.onError(new Error(`Authentication error: ${error.message}`));
+                window.App.Base?.handleUnauthorized();
+            });
+
+            this.socket.on('token_refresh', (newToken) => {
+                console.debug('[Socket] Received token refresh');
+                this.onTokenRefresh(newToken);
+            });
+
+            this.socket.on('reconnect_failed', () => {
+                this.onError(new Error('Max reconnection attempts reached'));
+                if (window.App.Alerts?.showError) {
+                    window.App.Alerts.showError(
+                        'Connection Error', 
+                        'Real-time updates disabled. Page will refresh.'
+                    );
+                }
+                setTimeout(() => location.reload(), 5000);
+            });
         }
 
         handleConnect() {
@@ -103,18 +194,16 @@
             this.reconnectAttempts = 0;
             this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
             
-            // Запускаем ping-интервал
             this.startPingInterval();
             
-            // Устанавливаем таймаут аутентификации
             this.authTimeout = setTimeout(() => {
                 if (!this.isAuthenticated) {
                     console.warn('[Socket] Authentication timeout');
                     this.socket.emit('auth_timeout');
+                    this.onError(new Error('Authentication timeout'));
                 }
             }, CONFIG.AUTH_TIMEOUT);
             
-            // Обрабатываем события, накопленные пока не было соединения
             this.processPendingEvents();
             
             if (window.App.Alerts?.showAlert) {
@@ -144,7 +233,6 @@
             this.isAuthenticated = false;
             this.cleanupTimers();
             
-            // Не показываем уведомление при преднамеренном отключении
             if (reason !== 'io client disconnect' && window.App.Alerts?.showAlert) {
                 const message = reason === 'io server disconnect' 
                     ? 'Disconnected by server' 
@@ -158,7 +246,6 @@
             console.error('[Socket] Connection error:', error);
             this.reconnectAttempts++;
             
-            // Экспоненциальная задержка
             this.reconnectDelay = Math.min(
                 this.reconnectDelay * 2,
                 CONFIG.MAX_RETRY_DELAY
@@ -192,30 +279,6 @@
                 window.App.Alerts.showAlert('error', 'Authentication Timeout', 'Please refresh the page');
             }
             this.disconnect();
-        }
-
-        startPingInterval() {
-            this.cleanupTimers();
-            this.pingInterval = setInterval(() => {
-                if (this.isConnected) {
-                    const start = Date.now();
-                    this.socket.emit('ping', {}, () => {
-                        const latency = Date.now() - start;
-                        this.socket.emit('pong', latency);
-                    });
-                }
-            }, CONFIG.PING_INTERVAL);
-        }
-
-        cleanupTimers() {
-            if (this.pingInterval) {
-                clearInterval(this.pingInterval);
-                this.pingInterval = null;
-            }
-            if (this.authTimeout) {
-                clearTimeout(this.authTimeout);
-                this.authTimeout = null;
-            }
         }
 
         handlePlaybackUpdate(data) {
@@ -279,12 +342,36 @@
             }
         }
 
+        startPingInterval() {
+            this.cleanupTimers();
+            this.pingInterval = setInterval(() => {
+                if (this.isConnected) {
+                    const start = Date.now();
+                    this.socket.emit('ping', {}, () => {
+                        const latency = Date.now() - start;
+                        this.socket.emit('pong', latency);
+                    });
+                }
+            }, CONFIG.PING_INTERVAL);
+        }
+
+        cleanupTimers() {
+            if (this.pingInterval) {
+                clearInterval(this.pingInterval);
+                this.pingInterval = null;
+            }
+            if (this.authTimeout) {
+                clearTimeout(this.authTimeout);
+                this.authTimeout = null;
+            }
+        }
+
         cleanup() {
             console.debug('[Socket] Cleaning up resources');
             this.cleanupTimers();
             
             if (this.socket) {
-                this.socket.off(); // Удаляем все обработчики событий
+                this.socket.off();
                 this.socket.disconnect();
                 this.socket = null;
             }
@@ -299,19 +386,9 @@
         }
 
         handleRetry(error) {
-            if (this.reconnectAttempts < CONFIG.MAX_RETRIES) {
-                console.log(`[Socket] Retrying connection (attempt ${this.reconnectAttempts + 1})...`);
-                setTimeout(() => this.init(), this.reconnectDelay);
-                this.reconnectAttempts++;
-            } else {
-                console.error('[Socket] Max initialization attempts reached', error);
-                if (window.App.Alerts?.showError) {
-                    window.App.Alerts.showError(
-                        'Connection Failed', 
-                        'Cannot establish connection. Please refresh the page.'
-                    );
-                }
-            }
+            console.log(`[Socket] Retrying connection (attempt ${this.reconnectAttempts + 1}/${CONFIG.MAX_RETRIES})...`);
+            setTimeout(() => this.initWithTokenCheck(), this.reconnectDelay);
+            this.reconnectAttempts++;
         }
     }
 
@@ -324,18 +401,16 @@
         }
 
         console.debug('[Socket] Initializing socket manager...');
-        window.App.Sockets = new SocketManager();
-        
-        // Глобальный обработчик ошибок
-        window.addEventListener('error', (event) => {
-            if (window.App.Sockets?.isConnected) {
-                window.App.Sockets.emit('client_error', {
-                    message: event.message,
-                    source: event.filename,
-                    lineno: event.lineno,
-                    colno: event.colno,
-                    error: event.error?.stack
-                });
+        window.App.Sockets = new SocketManager({
+            onError: (error) => {
+                console.error('[Socket] Global error handler:', error);
+                if (window.App.Alerts?.showError) {
+                    window.App.Alerts.showError('Socket Error', error.message);
+                }
+            },
+            onTokenRefresh: (newToken) => {
+                console.debug('[Socket] Updating token from refresh');
+                localStorage.setItem('auth_token', newToken);
             }
         });
     }
