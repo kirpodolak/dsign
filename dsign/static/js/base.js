@@ -164,101 +164,66 @@
         };
     };
 
-    // Сервис аутентификации с безопасными обращениями
-    const authService = {
-        async checkAuth() {
-            try {
-                window.App.Logger?.debug('Checking authentication status');
-                const response = await window.App.API?.fetch('/auth/api/check-auth');
-                const data = await response?.json();
-                
-                if (data?.authenticated && data?.token) {
-                    window.App.Logger?.debug('User authenticated');
-                    localStorage.setItem('auth_token', data.token);
-                    return true;
-                }
-                
-                window.App.Logger?.debug('User not authenticated');
-                this.clearAuth();
-                return false;
-            } catch (error) {
-                window.App.Logger?.error('Authentication check failed', error);
-                this.clearAuth();
-                return false;
-            }
-        },
-
-        clearAuth() {
-            window.App.Logger?.debug('Clearing authentication data');
-            localStorage.removeItem('auth_token');
-            window.App.Helpers?.setCachedData('auth_status', { value: false });
-            
-            if (window.App?.Sockets) {
-                window.App.Sockets.disconnect();
-            }
-        },
-
-        handleUnauthorized() {
-            // Добавляем проверку, чтобы избежать циклических редиректов
-            if (window.location.pathname.startsWith('/auth/login')) {
-                window.App.Logger?.debug('Already on login page, skipping redirect');
-                return;
-            }
-            
-            window.App.Logger?.warn('Handling unauthorized access');
-            this.clearAuth();
-            
-            // Добавляем задержку перед редиректом
-            setTimeout(() => {
-                const redirect = encodeURIComponent(window.location.pathname + window.location.search);
-                window.location.href = `/auth/login?redirect=${redirect}`;
-            }, 100);
-        }
-    };
-
     // Обработка аутентификации
     const handleAuthFlow = async () => {
         if (window.App?.isNavigationInProgress) {
             window.App.Logger?.debug('Navigation already in progress');
             return true;
         }
-    
+
         const isLoginPage = window.location.pathname.includes('/auth/login');
         window.App.Logger?.debug(`Auth flow check: isLoginPage=${isLoginPage}`);
         
-        const isAuthenticated = await authService.checkAuth();
-        window.App.Logger?.debug(`Auth status: authenticated=${isAuthenticated}`);
+        try {
+            const token = window.App.Helpers?.getToken();
+            if (!token && !isLoginPage) {
+                window.App.Logger?.warn('No token available - redirecting to login');
+                window.App.isNavigationInProgress = true;
+                window.App.Auth?.handleUnauthorized();
+                return false;
+            }
 
-        if (!isAuthenticated && !isLoginPage) {
-            window.App.Logger?.warn('Unauthorized access - redirecting to login');
-            window.App.isNavigationInProgress = true;
-            authService.handleUnauthorized();
+            // Для страницы логина не проверяем аутентификацию
+            if (isLoginPage) return true;
+
+            const isAuthenticated = await window.App.Auth?.checkAuth();
+            window.App.Logger?.debug(`Auth status: authenticated=${isAuthenticated}`);
+
+            if (!isAuthenticated) {
+                window.App.Logger?.warn('Unauthorized access - redirecting to login');
+                window.App.isNavigationInProgress = true;
+                window.App.Auth?.handleUnauthorized();
+                return false;
+            }
+
+            return true;
+        } catch (error) {
+            window.App.Logger?.error('Auth flow error:', error);
             return false;
         }
-
-        if (isAuthenticated && isLoginPage) {
-            window.App.Logger?.debug('Authenticated on login page - redirecting to home');
-            window.App.isNavigationInProgress = true;
-            const redirectTo = new URLSearchParams(window.location.search).get('redirect') || '/';
-            setTimeout(() => {
-                window.location.href = redirectTo;
-            }, 100);
-            return false;
-        }
-
-        return true;
     };
 
     // Инициализация WebSocket
     const initializeWebSockets = () => {
-        window.App.Core?.onReady(() => {
+        window.App.Core?.onReady(async () => {
             if (!window.App?.Sockets) {
-                window.App.Logger?.debug('Initializing WebSocket connection');
-                // Добавляем обработку ошибок WebSocket
                 try {
+                    // Ждем действительного токена перед подключением
+                    const token = await window.App.Auth?.waitForToken();
+                    if (!token) {
+                        window.App.Logger?.warn('WebSocket initialization aborted - no valid token');
+                        return;
+                    }
+
+                    window.App.Logger?.debug('Initializing WebSocket connection');
                     window.App.Sockets = new WebSocketManager({
                         onError: (error) => {
                             window.App.Logger?.error('WebSocket error:', error);
+                        },
+                        getToken: () => window.App.Helpers?.getToken(),
+                        handleRetry: () => {
+                            window.App.Logger?.debug('Attempting to reconnect WebSocket');
+                            setTimeout(initializeWebSockets, window.App.config?.socketReconnectDelay || 1000);
                         }
                     });
                 } catch (error) {
@@ -279,16 +244,19 @@
                 return;
             }
 
-            initializeWebSockets();
+            // Задержка перед инициализацией WebSocket для гарантированной загрузки токена
+            setTimeout(() => {
+                initializeWebSockets();
+            }, 500);
 
             if (!window.location.pathname.includes('/auth/login')) {
                 window.App.Logger?.debug('Setting up periodic auth checks');
                 setInterval(async () => {
                     window.App.Logger?.debug('Running periodic auth check');
-                    const isAuth = await authService.checkAuth();
+                    const isAuth = await window.App.Auth?.checkAuth();
                     if (!isAuth) {
                         window.App.Logger?.warn('Periodic check failed - unauthorized');
-                        authService.handleUnauthorized();
+                        window.App.Auth?.handleUnauthorized();
                     }
                 }, window.App.config?.authCheckInterval || 60000);
             }
@@ -333,7 +301,7 @@
                         });
                     });
                 }
-            }, 100); // Увеличиваем задержку для стабилизации
+            }, 100);
         } catch (error) {
             console.error('Critical startup error:', error);
         }
@@ -341,9 +309,9 @@
 
     // Публичный API с защитными проверками
     window.App.Base = {
-        checkAuth: authService.checkAuth.bind(authService),
-        refreshAuth: authService.clearAuth.bind(authService),
-        handleUnauthorized: authService.handleUnauthorized.bind(authService),
+        checkAuth: () => window.App.Auth?.checkAuth(),
+        refreshAuth: () => window.App.Auth?.clearAuth(),
+        handleUnauthorized: () => window.App.Auth?.handleUnauthorized(),
         getConfig: () => ({ ...(window.App?.config || {}) }),
         setDebugMode: (enabled) => { 
             if (window.App?.config) {
