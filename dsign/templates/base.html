@@ -5,15 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>Digital Signage</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
-    {% block styles %}{% endblock %}
     
-    <!-- External dependencies -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <!-- CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    {% block styles %}{% endblock %}
 </head>
 <body>
+    <!-- Page loader -->
     <div id="page-loader">
         <div class="loader-content">
             <i class="fas fa-spinner fa-spin"></i>
@@ -21,6 +20,7 @@
         </div>
     </div>
 
+    <!-- Navigation -->
     <nav>
         <a href="{{ url_for('main.index') }}" class="{% if request.endpoint == 'main.index' %}active{% endif %}">
             <i class="fas fa-home"></i> Home
@@ -36,27 +36,26 @@
         </a>
     </nav>
 
+    <!-- Main content -->
     <main>
         {% block content %}{% endblock %}
     </main>
 
+    <!-- Notification container -->
     <div id="notification-container"></div>
 
-    <!-- Load scripts -->
+    <!-- External dependencies -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
+    <!-- Core scripts -->
+    <script src="/static/js/utils/helpers.js"></script>
     <script src="/static/js/base.js"></script>
     <script src="/static/js/utils/sockets.js"></script>
+    <script src="/static/js/utils/player-controls.js"></script>
     
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            setTimeout(function() {
-                const loader = document.getElementById('page-loader');
-                if (loader) {
-                    loader.style.opacity = '0';
-                    setTimeout(() => loader.style.display = 'none', 300);
-                }
-            }, 500);
-        });
-    </script>
+    <!-- Application initialization -->
+    <script src="/static/js/utils/app-init.js"></script>
     
     {% block scripts %}{% endblock %}
 </body>
