@@ -14,16 +14,16 @@ class StaticFilter(Filter):
         return not any(path in msg for path in static_paths)
 
 def create_blueprints():
-    main_bp = Blueprint('main', __name__, template_folder='templates', static_folder='static', static_url_path='/static')
-    auth_bp = Blueprint('auth', __name__, url_prefix='/auth')
+    main_bp = Blueprint('main', __name__, template_folder='templates', 
+                       static_folder='static', static_url_path='/static')
     api_bp = Blueprint('api', __name__, url_prefix='/api')
-    return main_bp, auth_bp, api_bp
+    return main_bp, api_bp
 
 def init_routes(app, services: Dict[str, Any]):
     logger = logging.getLogger('dsign')
     logger.addFilter(StaticFilter())
 
-    main_bp, auth_bp, api_bp = create_blueprints()
+    main_bp, api_bp = create_blueprints()
 
     @main_bp.context_processor
     def inject_common_variables() -> Dict[str, Any]:
@@ -52,25 +52,28 @@ def init_routes(app, services: Dict[str, Any]):
 
         return common_vars
 
-    # Импорт и инициализация маршрутов
-    from .auth_routes import init_auth_routes
+    # Импорт маршрутов - изменено на прямой импорт auth_bp
+    from .auth_routes import auth_bp
     from .main_routes import init_main_routes
-    from .api.api_routes import init_api_routes  # Измененный импорт
+    from .api.api_routes import init_api_routes
 
-    # Инициализация каждого blueprint'а
-    init_auth_routes(auth_bp)
+    # Инициализация маршрутов
     init_main_routes(main_bp, services['settings_service'])
-    init_api_routes(api_bp, services)  # Единый вызов для всех API маршрутов
+    init_api_routes(api_bp, services)
 
-    # Проверка нужных сервисов
-    required_services = ['file_service', 'playback_service']
+    # Проверка сервисов
+    required_services = ['file_service', 'playback_service', 'socket_service']
     for svc in required_services:
         if svc not in services:
             raise RuntimeError(f"Missing required service: {svc}")
 
-    # Регистрация blueprint'ов в приложении
-    app.register_blueprint(auth_bp)
+    # Регистрация blueprint'ов
+    app.register_blueprint(auth_bp, url_prefix='/auth')
     app.register_blueprint(main_bp)
     app.register_blueprint(api_bp)
+
+    # Инициализация сокетов
+    if 'socket_service' in services:
+        services['socket_service'].init_app(app)
 
 __all__ = ['create_blueprints', 'init_routes']
