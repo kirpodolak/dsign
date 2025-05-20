@@ -172,6 +172,23 @@ class AuthService {
             checkToken();
         });
     }
+
+    /**
+     * Получает токен для WebSocket соединения
+     * @returns {Promise<string>} Токен для WebSocket
+     * @throws {Error} Если не удалось получить токен
+     */
+    async getSocketToken() {
+        try {
+            const response = await window.App.API.fetch('/api/socket-token');
+            if (!response.ok) throw new Error('Failed to get socket token');
+            const data = await response.json();
+            return data.token;
+        } catch (error) {
+            this.logger?.error('Socket token fetch failed', error);
+            throw error;
+        }
+    }
 }
 
 // Инициализация и экспорт сервиса
