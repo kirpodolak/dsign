@@ -1,21 +1,24 @@
 """
 /dsign/service/logger.py
-Модуль централизованного логирования сервисов
+Модуль централизованного логирования сервисов с поддержкой Flask
 """
 
 import logging
 from logging.handlers import RotatingFileHandler
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
 import json
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime  # <-- Восстановленный импорт
+from flask import Flask
+import sys
 
 class ServiceLogger:
-    def __init__(self, name: str, log_level: str = 'INFO'):
+    def __init__(self, name: str, log_level: str = 'INFO', log_dir: Union[str, Path] = 'logs'):
         """
         Инициализация логгера сервиса
         :param name: Имя сервиса/модуля
         :param log_level: Уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        :param log_dir: Директория для хранения логов
         """
         self.logger = logging.getLogger(name)
         self.logger.setLevel(log_level)
@@ -27,16 +30,16 @@ class ServiceLogger:
         )
         
         # Консольный вывод
-        console_handler = logging.StreamHandler()
+        console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(self.formatter)
         self.logger.addHandler(console_handler)
         
         # Файловый вывод с ротацией
-        log_dir = Path('logs')
+        log_dir = Path(log_dir)
         log_dir.mkdir(exist_ok=True)
         
         file_handler = RotatingFileHandler(
-            log_dir / 'service.log',
+            log_dir / f'{name}.log',
             maxBytes=10*1024*1024,  # 10 MB
             backupCount=5,
             encoding='utf-8'
@@ -68,10 +71,30 @@ class ServiceLogger:
     def critical(self, msg: str, extra: Optional[Dict[str, Any]] = None):
         self.logger.critical(self._format_message(msg, extra))
 
-def setup_logger(name: str) -> ServiceLogger:
+def setup_logger(name: str, **kwargs) -> ServiceLogger:
     """
     Фабрика для создания логгеров сервисов
     :param name: Имя сервиса/модуля
+    :param kwargs: Дополнительные параметры (log_level, log_dir)
     :return: Экземпляр ServiceLogger
     """
-    return ServiceLogger(name)
+    return ServiceLogger(name, **kwargs)
+
+def setup_flask_logging(app: Flask):
+    """
+    Настройка логирования для Flask приложения
+    :param app: Экземпляр Flask приложения
+    """
+    # Удаляем стандартные обработчики Flask
+    for handler in list(app.logger.handlers):
+        app.logger.removeHandler(handler)
+    
+    # Создаем и настраиваем логгер
+    service_logger = setup_logger('flask.app')
+    
+    # Перенаправляем логи Flask в наш логгер
+    app.logger.handlers = service_logger.logger.handlers
+    app.logger.setLevel(service_logger.logger.level)
+    
+    # Отключаем propagate чтобы избежать дублирования логов
+    app.logger.propagate = False
