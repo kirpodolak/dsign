@@ -457,6 +457,10 @@ def init_services(
                 socket_service = SocketService(socketio, db, logger)
                 services['socket_service'] = socket_service
                 logger.info("SocketService успешно инициализирован")
+                
+                # Привязываем socketio к сервису
+                socket_service.socketio = socketio
+                logger.info("SocketIO привязан к SocketService")
             except Exception as e:
                 logger.error("Ошибка инициализации SocketService", {
                     'error': str(e),
