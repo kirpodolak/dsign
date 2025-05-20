@@ -45,6 +45,13 @@
             this.lastActivity = Date.now();
             this.ipAddress = null;
             
+            // Connection state tracking
+            this.connectionState = {
+                lastSuccess: null,
+                lastError: null,
+                retryCount: 0
+            };
+            
             // Callbacks
             this.onError = options.onError || this.defaultErrorHandler;
             this.onTokenRefresh = options.onTokenRefresh || this.defaultTokenRefreshHandler;
@@ -79,7 +86,7 @@
                     }
                 }, CONFIG.CONNECTION_TIMEOUT);
                 
-                const token = await this.waitForValidToken();
+                const token = await this.getSocketToken();
                 if (!token) {
                     throw new Error('No valid authentication token available');
                 }
@@ -88,6 +95,30 @@
             } catch (error) {
                 console.error('[Socket] Initialization error:', error);
                 this.handleRetry(error);
+            }
+        }
+
+        async getSocketToken() {
+            try {
+                // First try to use AuthService if available
+                if (window.App?.Auth?.getSocketToken) {
+                    return await window.App.Auth.getSocketToken();
+                }
+                
+                // Fallback to direct API call
+                const response = await fetch('/api/socket-token', {
+                    credentials: 'include'
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to get socket token');
+                }
+                
+                const { token } = await response.json();
+                return token;
+            } catch (error) {
+                console.error('[Socket] Token fetch error:', error);
+                return null;
             }
         }
 
@@ -178,6 +209,13 @@
         async refreshToken() {
             try {
                 console.debug('[Socket] Refreshing token...');
+                
+                // First try to use AuthService if available
+                if (window.App?.Auth?.refreshToken) {
+                    return await window.App.Auth.refreshToken();
+                }
+                
+                // Fallback to direct API call
                 const response = await fetch('/api/refresh-token', {
                     method: 'POST',
                     credentials: 'include'
@@ -289,6 +327,10 @@
             this.reconnectAttempts = 0;
             this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
             
+            // Update connection state
+            this.connectionState.lastSuccess = new Date();
+            this.connectionState.retryCount = 0;
+            
             this.startPingInterval();
             this.scheduleTokenRefresh();
             
@@ -361,6 +403,12 @@
         handleError(error) {
             console.error('[Socket] Connection error:', error);
             this.reconnectAttempts++;
+            
+            // Update connection state
+            this.connectionState.lastError = {
+                time: new Date(),
+                error: error.message
+            };
             
             // Exponential backoff with jitter
             this.reconnectDelay = Math.min(
