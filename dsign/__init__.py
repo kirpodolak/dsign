@@ -89,8 +89,15 @@ def create_app(config_class=config) -> Flask:
             
             # Прикрепляем сервисы к app
             for name, service in services.items():
-                if name != 'db':
-                    setattr(app, name, service)
+                setattr(app, name, service)
+
+            # Проверка и инициализация SocketService
+            if 'socket_service' in services:
+                app.socket_service = services['socket_service']
+                app.socketio = socketio
+                app.logger.info("Socket service initialized and attached to app")
+            else:
+                app.logger.warning("Socket service not created during initialization")
 
         # Проверка обязательных сервисов
         required_services = [
