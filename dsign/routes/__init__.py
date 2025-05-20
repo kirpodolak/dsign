@@ -14,8 +14,10 @@ class StaticFilter(Filter):
         return not any(path in msg for path in static_paths)
 
 def create_blueprints():
-    main_bp = Blueprint('main', __name__, template_folder='templates', 
-                       static_folder='static', static_url_path='/static')
+    main_bp = Blueprint('main', __name__, 
+                       template_folder='templates',
+                       static_folder='static', 
+                       static_url_path='/static')
     api_bp = Blueprint('api', __name__, url_prefix='/api')
     return main_bp, api_bp
 
@@ -52,7 +54,7 @@ def init_routes(app, services: Dict[str, Any]):
 
         return common_vars
 
-    # Импорт маршрутов - изменено на прямой импорт auth_bp
+    # Импорт маршрутов
     from .auth_routes import auth_bp
     from .main_routes import init_main_routes
     from .api.api_routes import init_api_routes
@@ -67,13 +69,25 @@ def init_routes(app, services: Dict[str, Any]):
         if svc not in services:
             raise RuntimeError(f"Missing required service: {svc}")
 
-    # Регистрация blueprint'ов
-    app.register_blueprint(auth_bp, url_prefix='/auth')
-    app.register_blueprint(main_bp)
-    app.register_blueprint(api_bp)
+    # Регистрация blueprint'ов с проверкой на дублирование
+    if 'auth' not in app.blueprints:
+        app.register_blueprint(auth_bp, url_prefix='/auth')
+    if 'main' not in app.blueprints:
+        app.register_blueprint(main_bp)
+    if 'api' not in app.blueprints:
+        app.register_blueprint(api_bp)
 
-    # Инициализация сокетов
+    # Безопасная инициализация сокет-сервиса
     if 'socket_service' in services:
-        services['socket_service'].init_app(app)
+        try:
+            socket_service = services['socket_service']
+            if hasattr(socket_service, 'init_app'):
+                socket_service.init_app(app)
+                logger.info("Socket service initialized successfully")
+            else:
+                logger.warning("SocketService missing init_app method")
+        except Exception as e:
+            logger.error(f"Failed to initialize socket service: {str(e)}")
+            raise RuntimeError(f"Socket service initialization failed: {str(e)}")
 
 __all__ = ['create_blueprints', 'init_routes']
