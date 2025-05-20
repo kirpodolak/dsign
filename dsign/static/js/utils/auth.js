@@ -33,11 +33,14 @@ class AuthService {
             }
 
             const response = await window.App.API?.fetch('/auth/api/check-auth');
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            
             const data = await response?.json();
             
-            if (data?.authenticated && data?.token) {
+            if (data?.authenticated && data?.token_valid) {
                 this.logger?.debug('User authenticated');
-                this.setToken(data.token);
                 return true;
             }
             
@@ -119,7 +122,7 @@ class AuthService {
             this.logger?.info('User logged in successfully');
             
             // Инициируем подключение WebSocket если нужно
-            if (window.App.Sockets && !window.App.Sockets.isConnected) {
+            if (window.App.Sockets && !window.App.Sockets.isConnected()) {
                 setTimeout(() => {
                     window.App.Sockets.connect();
                 }, 300);
@@ -175,18 +178,47 @@ class AuthService {
 
     /**
      * Получает токен для WebSocket соединения
-     * @returns {Promise<string>} Токен для WebSocket
+     * @returns {Promise<{token: string, expiresIn: number, socketUrl: string}>} Данные для WebSocket соединения
      * @throws {Error} Если не удалось получить токен
      */
     async getSocketToken() {
         try {
-            const response = await window.App.API.fetch('/api/socket-token');
-            if (!response.ok) throw new Error('Failed to get socket token');
+            const response = await window.App.API.fetch('/auth/socket-token', {
+                credentials: 'include',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            });
+            
+            if (!response.ok) {
+                if (response.status === 401) {
+                    throw new Error('Authentication required');
+                }
+                if (response.status === 404) {
+                    throw new Error('Endpoint not found');
+                }
+                throw new Error(`HTTP ${response.status}`);
+            }
+            
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                throw new Error('Invalid response format');
+            }
+            
             const data = await response.json();
-            return data.token;
+            if (!data?.token) {
+                throw new Error('Invalid token response');
+            }
+            
+            return {
+                token: data.token,
+                expiresIn: data.expires_in || 300,
+                socketUrl: data.socket_url || '/socket.io'
+            };
         } catch (error) {
             this.logger?.error('Socket token fetch failed', error);
-            throw error;
+            throw new Error(`Failed to get socket token: ${error.message}`);
         }
     }
 }
