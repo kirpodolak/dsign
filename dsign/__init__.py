@@ -62,6 +62,12 @@ def create_app(config_class=config) -> Flask:
         from .extensions import init_extensions, db, socketio
         init_extensions(app)
         csrf = CSRFProtect(app)
+
+        # Регистрация auth blueprint
+        from .routes.auth_routes import auth_bp
+        app.register_blueprint(auth_bp, url_prefix='/auth')
+        app.logger.info("Auth blueprint registered at /auth")
+
         app.logger.info("Extensions initialized successfully")
 
         # 3. Инициализация сервисов
