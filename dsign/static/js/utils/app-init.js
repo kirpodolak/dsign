@@ -5,6 +5,8 @@
 
 class AppInitializer {
     static retryCount = 0;
+    static maxRetryCount = 3;
+    static retryDelay = 2000;
 
     static async init() {
         try {
@@ -51,7 +53,7 @@ class AppInitializer {
 
             // Verify token with server if not on login page
             if (!isLoginPage) {
-                const response = await fetch('/api/check-auth', {
+                const response = await fetch('/auth/api/check-auth', {
                     credentials: 'include'
                 });
                 
@@ -84,7 +86,6 @@ class AppInitializer {
     static handleRateLimitError() {
         const alertMessage = 'Too many requests. Please wait before trying again.';
         
-        // Show alert using SweetAlert2 if available
         if (typeof Swal !== 'undefined') {
             Swal.fire({
                 icon: 'error',
@@ -93,15 +94,13 @@ class AppInitializer {
                 timer: 5000
             });
         } else {
-            // Fallback to console and redirect
             console.error(alertMessage);
             window.location.href = '/auth/login?error=rate_limit';
         }
         
-        // Implement exponential backoff for retries
         const retryDelay = Math.min(
-            Math.pow(2, this.retryCount) * 1000, 
-            30000 // Max 30 seconds
+            Math.pow(2, this.retryCount) * 1000,
+            30000
         );
         
         setTimeout(() => {
@@ -112,7 +111,7 @@ class AppInitializer {
 
     static async verifyToken(token) {
         try {
-            const response = await fetch('/api/verify-token', {
+            const response = await fetch('/auth/api/verify-token', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -156,7 +155,6 @@ class AppInitializer {
     }
 
     static setupAlerts() {
-        // Fallback if SweetAlert2 isn't loaded
         if (typeof Swal === 'undefined') {
             console.warn('SweetAlert2 not available, using console fallback');
             window.showAlert = (type, title, message) => {
@@ -165,7 +163,6 @@ class AppInitializer {
             return;
         }
 
-        // Setup global alert handler
         document.addEventListener('app-alert', (event) => {
             try {
                 const { type, title, message, options } = event.detail;
@@ -185,7 +182,6 @@ class AppInitializer {
             }
         });
 
-        // Global alert shortcut
         window.showAlert = (type, title, message, options) => {
             document.dispatchEvent(new CustomEvent('app-alert', {
                 detail: { type, title, message, options }
@@ -194,11 +190,9 @@ class AppInitializer {
     }
 
     static setupErrorHandling() {
-        // Window error handler
         window.addEventListener('error', (event) => {
             console.error('[Global Error]', event.error);
             
-            // Handle auth errors
             if (this.isAuthError(event.error)) {
                 this.handleAuthError(event.error);
                 return;
@@ -211,7 +205,6 @@ class AppInitializer {
             );
         });
 
-        // Unhandled promise rejections
         window.addEventListener('unhandledrejection', (event) => {
             console.error('[Unhandled Rejection]', event.reason);
             
@@ -231,7 +224,6 @@ class AppInitializer {
             );
         });
 
-        // Network error handling
         this.setupNetworkErrorHandling();
     }
 
@@ -242,12 +234,10 @@ class AppInitializer {
     }
 
     static setupAuthMonitoring() {
-        // Check auth status every 5 minutes
         setInterval(() => {
             this.checkAuthStatus().catch(console.warn);
         }, 300000);
 
-        // Also check when page becomes visible
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
                 this.checkAuthStatus().catch(console.warn);
@@ -257,7 +247,7 @@ class AppInitializer {
 
     static async checkAuthStatus() {
         try {
-            const response = await fetch('/api/check-auth', {
+            const response = await fetch('/auth/api/check-auth', {
                 credentials: 'include'
             });
 
@@ -280,57 +270,77 @@ class AppInitializer {
         }
 
         try {
-            // Use AuthService instead of direct fetch
-            const token = await window.App.Auth?.getSocketToken?.();
+            // Use AuthService to get complete socket connection data
+            const { token, socketUrl, expiresIn } = await window.App.Auth.getSocketToken();
             if (!token) throw new Error('No socket token available');
 
-            // Initialize socket connection
-            const socket = io({
+            // Initialize socket connection with enhanced options
+            const socket = socketUrl ? io(socketUrl, {
                 auth: { token },
                 reconnection: true,
                 reconnectionAttempts: 5,
-                reconnectionDelay: 1000
+                reconnectionDelay: 1000,
+                reconnectionDelayMax: 5000,
+                timeout: 10000,
+                transports: ['websocket'],
+                upgrade: false
+            }) : io({
+                auth: { token },
+                reconnection: true,
+                reconnectionAttempts: 5,
+                reconnectionDelay: 1000,
+                reconnectionDelayMax: 5000,
+                timeout: 10000,
+                transports: ['websocket']
             });
 
-            // Global socket error handling
+            // Enhanced socket error handling
             socket.on('connect_error', (err) => {
                 console.error('Socket connection error:', err);
-                if (err.message.includes('auth')) {
+                if (err.message.includes('auth') || err.message.includes('token')) {
                     this.handleAuthError(err);
                 }
+            });
+
+            socket.on('disconnect', (reason) => {
+                console.log('Socket disconnected:', reason);
+                if (reason === 'io server disconnect') {
+                    this.handleAuthError(new Error('Server disconnected'));
+                }
+            });
+
+            socket.on('connect', () => {
+                console.log('Socket connected successfully');
+                this.retryCount = 0; // Reset retry counter on successful connection
             });
 
             // Store socket globally
             window.appSocket = socket;
 
-            // Add retry logic for initial connection
-            socket.on('connect_failed', () => {
-                console.warn('Socket connection failed, retrying...');
-                setTimeout(() => this.initWebSocket(), 2000);
-            });
-
         } catch (error) {
             console.error('Socket initialization failed:', error);
-            // Retry after delay if error is recoverable
-            if (!error.message.includes('auth')) {
-                setTimeout(() => this.initWebSocket(), 5000);
+            
+            // Implement retry logic with exponential backoff
+            if (this.retryCount < this.maxRetryCount && !error.message.includes('auth')) {
+                const delay = this.retryDelay * Math.pow(2, this.retryCount);
+                this.retryCount++;
+                console.warn(`Retrying WebSocket connection in ${delay}ms (attempt ${this.retryCount}/${this.maxRetryCount})`);
+                setTimeout(() => this.initWebSocket(), delay);
+            } else if (error.message.includes('auth')) {
+                this.handleAuthError(error);
             }
         }
     }
 
     static initModules() {
         document.addEventListener('app-ready', () => {
-            // Initialize player controls if available
             if (window.PlayerControls) {
                 PlayerControls.init();
             }
-
-            // Initialize other modules here...
         });
     }
 
     static setupNetworkErrorHandling() {
-        // Listen for online/offline events
         window.addEventListener('offline', () => {
             this.showError(
                 'Connection Lost',
@@ -351,11 +361,9 @@ class AppInitializer {
     static handleAuthError(error) {
         console.error('[Auth Error]', error);
         
-        // Clear auth data
         localStorage.removeItem('authToken');
         this.deleteCookie('authToken');
         
-        // Show alert and redirect
         this.showError(
             'Session Expired',
             'Your session has expired. Please log in again.',
@@ -384,7 +392,6 @@ class AppInitializer {
     }
 
     static showFatalError(message) {
-        // Create emergency error display
         const errorDiv = document.createElement('div');
         errorDiv.style.cssText = `
             position: fixed;
@@ -406,7 +413,6 @@ class AppInitializer {
     }
 }
 
-// Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     try {
         AppInitializer.init();
@@ -416,7 +422,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-// Export for module compatibility
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = AppInitializer;
 }
