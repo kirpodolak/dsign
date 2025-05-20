@@ -280,16 +280,9 @@ class AppInitializer {
         }
 
         try {
-            // Get socket token from server
-            const response = await fetch('/api/socket-token', {
-                credentials: 'include'
-            });
-
-            if (!response.ok) {
-                throw new Error('Failed to get socket token');
-            }
-
-            const { token } = await response.json();
+            // Use AuthService instead of direct fetch
+            const token = await window.App.Auth?.getSocketToken?.();
+            if (!token) throw new Error('No socket token available');
 
             // Initialize socket connection
             const socket = io({
@@ -310,8 +303,18 @@ class AppInitializer {
             // Store socket globally
             window.appSocket = socket;
 
+            // Add retry logic for initial connection
+            socket.on('connect_failed', () => {
+                console.warn('Socket connection failed, retrying...');
+                setTimeout(() => this.initWebSocket(), 2000);
+            });
+
         } catch (error) {
             console.error('Socket initialization failed:', error);
+            // Retry after delay if error is recoverable
+            if (!error.message.includes('auth')) {
+                setTimeout(() => this.initWebSocket(), 5000);
+            }
         }
     }
 
