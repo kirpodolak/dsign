@@ -27,7 +27,7 @@ class ServiceFactory:
     @staticmethod
     def create_file_service(
         upload_folder: str, 
-        thumbnail_service=None,  # Добавлено
+        thumbnail_service=None,
         logger=None
     ) -> Optional[FileService]:
         logger = logger or setup_logger('FileService')
@@ -38,7 +38,7 @@ class ServiceFactory:
             return FileService(
                 upload_folder=upload_folder,
                 logger=logger,
-                thumbnail_service=thumbnail_service  # Добавлено
+                thumbnail_service=thumbnail_service
             )
         except Exception as e:
             logger.error('FileService initialization failed', {
@@ -111,6 +111,29 @@ class ServiceFactory:
         logger = logger or setup_logger('PlaybackService')
         try:
             logger.info('Initializing PlaybackService')
+            
+            # Проверка существования папки для загрузки
+            upload_path = Path(upload_folder)
+            if not upload_path.exists():
+                raise RuntimeError(f"Upload folder does not exist: {upload_folder}")
+            
+            # Проверка доступности MPV
+            try:
+                mpv_check = subprocess.run(['which', 'mpv'], capture_output=True, text=True)
+                if mpv_check.returncode != 0:
+                    raise RuntimeError("MPV player not found in PATH")
+                
+                mpv_version = subprocess.run(['mpv', '--version'], capture_output=True, text=True)
+                logger.info('MPV version check', {
+                    'version': mpv_version.stdout.split('\n')[0] if mpv_version.stdout else 'unknown'
+                })
+            except Exception as e:
+                logger.error('MPV check failed', {
+                    'error': str(e),
+                    'stack': True
+                })
+                raise RuntimeError(f"MPV player check failed: {str(e)}") from e
+
             return PlaybackService(
                 upload_folder=upload_folder,
                 db_session=db,
@@ -120,7 +143,12 @@ class ServiceFactory:
         except Exception as e:
             logger.error('PlaybackService initialization failed', {
                 'error': str(e),
-                'stack': True
+                'stack': True,
+                'exception_type': type(e).__name__,
+                'system': {
+                    'python': sys.version,
+                    'platform': platform.platform()
+                }
             })
             return None
         
@@ -275,14 +303,25 @@ def init_services(
                 capture_output=True
             ).returncode == 0
             
+            # Проверка MPV (для воспроизведения)
+            mpv_available = subprocess.run(
+                ["which", "mpv"],
+                capture_output=True
+            ).returncode == 0
+            
             logger.info("Проверка зависимостей выполнена", {
                 'Pillow': True,
-                'ffmpeg': ffmpeg_available
+                'ffmpeg': ffmpeg_available,
+                'mpv': mpv_available
             })
+            
+            if not mpv_available:
+                raise RuntimeError("MPV player not found in PATH")
+                
         except Exception as e:
             logger.critical("Ошибка проверки зависимостей", {
                 'error': str(e),
-                'required': ['Pillow (для изображений)', 'ffmpeg (для видео)']
+                'required': ['Pillow (для изображений)', 'ffmpeg (для видео)', 'mpv (для воспроизведения)']
             })
             raise RuntimeError(f"Системные зависимости не удовлетворены: {str(e)}")
 
@@ -359,14 +398,36 @@ def init_services(
             })
             raise RuntimeError(f"Ошибка инициализации FileService: {str(e)}") from e
 
-        # Инициализация опциональных сервисов
-        optional_services = [
-            ('playback_service', lambda: PlaybackService(
+        # Инициализация обязательных сервисов
+        mandatory_services = [
+            ('playback_service', lambda: ServiceFactory.create_playback_service(
                 upload_folder=config['UPLOAD_FOLDER'],
-                db_session=db,
+                db=db,
                 socketio=socketio,
                 logger=logger
-            )),
+            ))
+        ]
+
+        for name, factory in mandatory_services:
+            try:
+                service = factory()
+                if not service:
+                    raise RuntimeError(f"Service {name} returned None")
+                services[name] = service
+                logger.info(f"{name} успешно инициализирован")
+            except Exception as e:
+                logger.critical(f"Ошибка инициализации обязательного сервиса {name}", {
+                    'error': str(e),
+                    'stack': traceback.format_exc(),
+                    'system': {
+                        'python': sys.version,
+                        'platform': platform.platform()
+                    }
+                })
+                raise RuntimeError(f"Ошибка инициализации обязательного сервиса {name}: {str(e)}") from e
+
+        # Инициализация опциональных сервисов
+        optional_services = [
             ('playlist_service', lambda: PlaylistService(db.session, logger)),
             ('settings_service', lambda: SettingsService(
                 config.get('SETTINGS_FILE', 'settings.json'),
