@@ -36,12 +36,14 @@
             socketReconnectDelay: 1000,
             maxSocketRetries: 5,
             authCheckInterval: 60000,
-            apiTimeout: 30000
+            apiTimeout: 30000,
+            socketEndpoint: '/socket.io'
         },
         
         state: {
             navigationInProgress: false,
-            authChecked: false
+            authChecked: false,
+            socketInitialized: false
         }
     };
 
@@ -53,7 +55,7 @@
             warn: (...args) => console.warn('[WARN]', ...args),
             error: (message, error, context = {}) => {
                 console.error('[ERROR]', message, error || '');
-                if (window.App?.Sockets?.isConnected) {
+                if (window.appSocket?.connected) {
                     const errorData = {
                         level: 'error',
                         message,
@@ -65,7 +67,7 @@
                     };
                     
                     try {
-                        window.App.Sockets.emit('client_error', errorData);
+                        window.appSocket.emit('client_error', errorData);
                     } catch (socketError) {
                         console.error('Failed to send error via socket:', socketError);
                     }
@@ -180,8 +182,13 @@
 
                     if (response.status === 401) {
                         window.App.Logger.warn('Authentication expired', { url });
-                        window.App.Base.handleUnauthorized();
+                        window.App.Auth.handleUnauthorized();
                         throw new Error('Authentication required');
+                    }
+
+                    if (response.status === 429) {
+                        window.App.Logger.warn('Rate limit exceeded', { url });
+                        throw new Error('Too many requests');
                     }
 
                     if (!response.ok) {
@@ -231,12 +238,12 @@
                     if (!token) return false;
                     
                     // Verify token with backend
-                    const response = await window.App.API.fetch('/api/auth/verify', {
-                        method: 'POST',
-                        body: JSON.stringify({ token })
+                    const response = await window.App.API.fetch('/auth/api/check-auth', {
+                        method: 'GET'
                     });
                     
-                    return response.ok;
+                    const data = await response.json();
+                    return data?.authenticated || false;
                 } catch (error) {
                     window.App.Logger.warn('Auth check failed:', error);
                     return false;
@@ -249,10 +256,17 @@
                 window.App.state.navigationInProgress = true;
                 window.App.Helpers.clearToken();
                 
+                // Disconnect socket if exists
+                if (window.appSocket) {
+                    window.appSocket.disconnect();
+                    delete window.appSocket;
+                }
+                
                 // Don't redirect if already on login page
                 if (!window.location.pathname.includes('/auth/login')) {
                     window.App.Logger.warn('Redirecting to login');
-                    window.location.href = '/auth/login?redirect=' + encodeURIComponent(window.location.pathname);
+                    window.location.href = '/auth/login?redirect=' + 
+                        encodeURIComponent(window.location.pathname + window.location.search);
                 }
             },
             
@@ -282,33 +296,69 @@
     // WebSocket initialization with enhanced reconnection logic
     const initializeWebSockets = () => {
         window.App.Core.onReady(async () => {
-            if (window.App.Sockets) return;
+            if (window.App.state.socketInitialized) return;
             
             try {
-                const token = await window.App.Auth.waitForToken();
-                if (!token) {
-                    window.App.Logger.warn('WebSocket init aborted - no token');
+                // Check authentication first
+                const isAuth = await window.App.Auth.checkAuth();
+                if (!isAuth) {
+                    window.App.Logger.warn('WebSocket init aborted - not authenticated');
                     return;
                 }
 
                 window.App.Logger.debug('Initializing WebSocket connection');
                 
-                window.App.Sockets = new WebSocketManager({
-                    onError: (error) => {
-                        window.App.Logger.error('WebSocket error:', error);
-                    },
-                    onTokenRefresh: (newToken) => {
-                        window.App.Helpers.setToken(newToken, true);
-                        window.App.Logger.debug('WebSocket token refreshed');
-                    },
-                    getToken: window.App.Helpers.getToken,
-                    config: {
-                        reconnectDelay: window.App.config.socketReconnectDelay,
-                        maxRetries: window.App.config.maxSocketRetries
+                // Get fresh socket token
+                const { token, socketUrl } = await window.App.Auth.getSocketToken();
+                
+                // Initialize socket connection
+                const socket = io(socketUrl || window.App.config.socketEndpoint, {
+                    auth: { token },
+                    reconnection: true,
+                    reconnectionAttempts: window.App.config.maxSocketRetries,
+                    reconnectionDelay: window.App.config.socketReconnectDelay,
+                    transports: ['websocket']
+                });
+
+                // Store socket globally
+                window.appSocket = socket;
+                window.App.state.socketInitialized = true;
+
+                // Event handlers
+                socket.on('connect', () => {
+                    window.App.Logger.info('WebSocket connected');
+                });
+
+                socket.on('disconnect', (reason) => {
+                    window.App.Logger.warn('WebSocket disconnected:', reason);
+                });
+
+                socket.on('connect_error', (error) => {
+                    window.App.Logger.error('WebSocket connection error:', error);
+                    if (error.message.includes('auth')) {
+                        window.App.Auth.handleUnauthorized();
                     }
                 });
+
+                // Global socket interface
+                window.App.Sockets = {
+                    connect: () => socket.connect(),
+                    disconnect: () => socket.disconnect(),
+                    isConnected: () => socket.connected,
+                    emit: (event, data) => {
+                        if (socket.connected) {
+                            socket.emit(event, data);
+                        } else {
+                            window.App.Logger.warn('Socket not connected, cannot emit', event);
+                        }
+                    }
+                };
+
             } catch (error) {
-                window.App.Logger.error('WebSocket init failed:', error);
+                window.App.Logger.error('WebSocket initialization failed:', error);
+                if (error.message.includes('auth') || error.message.includes('token')) {
+                    window.App.Auth.handleUnauthorized();
+                }
             }
         });
     };
@@ -395,8 +445,15 @@
         handleUnauthorized: () => window.App.Auth?.handleUnauthorized?.(),
         refreshSession: async () => {
             try {
-                const response = await window.App.API.fetch('/api/auth/refresh');
-                return response.ok;
+                const response = await window.App.API.fetch('/auth/api/refresh-token');
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.token) {
+                        window.App.Helpers.setCachedData('authToken', data.token);
+                    }
+                    return true;
+                }
+                return false;
             } catch (error) {
                 window.App.Logger.error('Session refresh failed:', error);
                 return false;
