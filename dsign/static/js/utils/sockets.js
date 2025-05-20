@@ -1,486 +1,489 @@
-from typing import Optional, Dict, Any
-from datetime import datetime, timedelta
-from flask_socketio import SocketIO, disconnect
-from flask import request, current_app
-import jwt
-from .logger import ServiceLogger
-from threading import Lock
-import time
+/**
+ * Enhanced WebSocket Manager for real-time communication
+ * Handles connection, authentication, and event management with improved security
+ */
+(function() {
+    'use strict';
 
-class SocketService:
-    def __init__(self, socketio: SocketIO, db_session, app=None, logger=None):
-        """
-        Инициализация сервиса сокетов
-        :param socketio: Экземпляр SocketIO
-        :param db_session: Сессия базы данных
-        :param app: Экземпляр Flask приложения
-        """
-        self.socketio = socketio
-        self.db = db_session
-        self.app = app or current_app._get_current_object()
-        self.logger = ServiceLogger('SocketService')
-        self.connected_clients = {}
-        self.clients_lock = Lock()
-        self.activity_check_interval = 15  # seconds
-        self.socket_auth_timeout = 30  # 30 seconds timeout to match frontend
-        self.server_version = "1.0.0"  # Версия сервера для проверки совместимости
+    // Configuration constants with enhanced security settings
+    const CONFIG = {
+        MAX_RETRIES: 5,
+        INITIAL_RETRY_DELAY: 1000,
+        MAX_RETRY_DELAY: 30000,
+        PING_INTERVAL: 25000,
+        AUTH_TIMEOUT: 30000,
+        TOKEN_CHECK_INTERVAL: 500,
+        TOKEN_MAX_ATTEMPTS: 10,
+        TOKEN_REFRESH_THRESHOLD: 300000, // 5 minutes before expiration
+        MAX_EVENT_QUEUE: 50,
+        CONNECTION_TIMEOUT: 10000
+    };
 
-        # Конфигурация, соответствующая фронтенду
-        self.config = {
-            'max_retries': 5,
-            'reconnect_attempts': 5,
-            'reconnect_delay': 1000,
-            'ping_interval': 25  # seconds to match frontend
+    class SocketManager {
+        constructor(options = {}) {
+            // Connection state
+            this.socket = null;
+            this.isConnected = false;
+            this.isAuthenticated = false;
+            this.connectionEstablished = false;
+            
+            // Reconnection settings
+            this.reconnectAttempts = 0;
+            this.reconnectDelay = options.reconnectDelay || CONFIG.INITIAL_RETRY_DELAY;
+            
+            // Event management
+            this.pendingEvents = [];
+            this.eventHandlers = new Map();
+            
+            // Timers
+            this.pingInterval = null;
+            this.authTimeout = null;
+            this.connectionTimeout = null;
+            this.tokenRefreshTimer = null;
+            
+            // Security
+            this.lastActivity = Date.now();
+            this.ipAddress = null;
+            
+            // Callbacks
+            this.onError = options.onError || this.defaultErrorHandler;
+            this.onTokenRefresh = options.onTokenRefresh || this.defaultTokenRefreshHandler;
+            this.onReconnect = options.onReconnect || null;
+            
+            // Initialize connection
+            this.initWithTokenCheck();
         }
 
-        self.register_handlers()
-        self.start_activity_checker()
-        self.start_version_broadcaster()
-
-    def register_handlers(self):
-        """Регистрация всех обработчиков событий"""
-        self.socketio.on_event('connect', self.handle_connect)
-        self.socketio.on_event('disconnect', self.handle_disconnect)
-        self.socketio.on_event('authenticate', self.handle_authentication)
-        self.socketio.on_event('request_profiles', self.handle_profiles_request)
-        self.socketio.on_event('apply_profile', self.handle_apply_profile)
-        self.socketio.on_event('ping', self.handle_ping)
-        self.socketio.on_event('heartbeat', self.handle_heartbeat)
-        self.socketio.on_event('get_server_version', self.handle_get_version)
-        self.socketio.on_event('get_playback_state', self.handle_get_playback_state)
-        self.socketio.on_event('get_playlist_state', self.handle_get_playlist_state)
-
-    def start_activity_checker(self):
-        """Запуск фоновой проверки активности клиентов"""
-        def activity_check():
-            while True:
-                self.socketio.sleep(self.activity_check_interval)
-                try:
-                    self.check_activity()
-                except Exception as e:
-                    self.logger.error('Activity check failed', {'error': str(e)})
-
-        self.socketio.start_background_task(activity_check)
-
-    def start_version_broadcaster(self):
-        """Периодическая рассылка версии сервера"""
-        def broadcast_version():
-            while True:
-                self.socketio.sleep(300)  # Каждые 5 минут
-                try:
-                    with self.clients_lock:
-                        active_sids = [sid for sid in self.connected_clients 
-                                     if self.is_authenticated(sid)]
-                    
-                    for sid in active_sids:
-                        self.socketio.emit('server_version', self.server_version, room=sid)
-                except Exception as e:
-                    self.logger.error('Version broadcast failed', {'error': str(e)})
-
-        self.socketio.start_background_task(broadcast_version)
-
-    def handle_connect(self):
-        """Обработчик подключения клиента"""
-        client_ip = request.remote_addr
-        token = request.args.get('token')
-        
-        with self.clients_lock:
-            self.connected_clients[request.sid] = {
-                'authenticated': False,
-                'connect_time': datetime.utcnow(),
-                'last_activity': datetime.utcnow(),
-                'ip_address': client_ip,
-                'reconnect_attempts': 0,
-                'token': token  # Сохраняем токен при подключении
+        // Default error handler
+        defaultErrorHandler(error) {
+            console.error('[Socket] Error:', error);
+            if (window.App.Alerts?.showError) {
+                window.App.Alerts.showError('Connection Error', error.message);
             }
-        
-        self.logger.info('New client connection', {
-            'ip': client_ip,
-            'sid': request.sid
-        })
+        }
 
-        # Немедленная проверка токена при подключении, если он есть
-        if token:
-            try:
-                decoded = self.verify_socket_token(token)
-                self.handle_authentication({'token': token})
-            except Exception as e:
-                self.logger.warning('Invalid token on connect', {
-                    'error': str(e),
-                    'sid': request.sid
-                })
+        // Default token refresh handler
+        defaultTokenRefreshHandler(newToken) {
+            console.debug('[Socket] Token refreshed');
+            if (window.App.Helpers?.setToken) {
+                window.App.Helpers.setToken(newToken);
+            } else {
+                localStorage.setItem('authToken', newToken);
+            }
+        }
 
-    def handle_disconnect(self):
-        """Обработчик отключения клиента"""
-        sid = request.sid
-        self.logger.info('Client disconnected', {'sid': sid})
-        self.cleanup_client(sid)
-
-    def handle_ping(self, data=None):
-        """Обработчик ping-сообщения для проверки активности"""
-        sid = request.sid
-        with self.clients_lock:
-            if sid in self.connected_clients:
-                self.connected_clients[sid]['last_activity'] = datetime.utcnow()
-                self.logger.debug('Ping received', {'sid': sid})
-                if data and isinstance(data, dict) and data.get('echo'):
-                    return {'pong': data['echo']}
-        return 'pong'
-
-    def handle_heartbeat(self, data: Dict):
-        """Обработчик heartbeat сообщения"""
-        sid = request.sid
-        timestamp = data.get('timestamp')
-        
-        with self.clients_lock:
-            if sid in self.connected_clients:
-                self.connected_clients[sid]['last_activity'] = datetime.utcnow()
-                self.logger.debug('Heartbeat received', {'sid': sid})
+        async initWithTokenCheck() {
+            try {
+                console.debug('[Socket] Starting connection with token check');
                 
-                # Рассчитываем задержку
-                if timestamp:
-                    latency = int((time.time() * 1000) - timestamp)
-                    return {'latency': latency}
-        
-        return {'error': 'Invalid heartbeat'}
-
-    def handle_get_version(self):
-        """Обработчик запроса версии сервера"""
-        sid = request.sid
-        self.socketio.emit('server_version', self.server_version, room=sid)
-
-    def handle_authentication(self, data: Dict):
-        """Обработчик аутентификации WebSocket"""
-        sid = request.sid
-        try:
-            token = self.verify_socket_token(data.get('token'))
-            user_id = token['user_id']
-            
-            # Проверяем существование пользователя в БД
-            from ..models import User
-            user = self.db.session.query(User).get(user_id)
-            if not user:
-                raise ValueError('User not found')
-            
-            # Обновляем информацию о клиенте
-            with self.clients_lock:
-                if sid in self.connected_clients:
-                    self.connected_clients[sid].update({
-                        'user_id': user_id,
-                        'authenticated': True,
-                        'last_activity': datetime.utcnow()
-                    })
-                else:
-                    self.logger.warning('Client not found during authentication', {'sid': sid})
-                    disconnect(sid)
-                    return
-            
-            self.logger.info('User authenticated', {
-                'user_id': user_id,
-                'sid': sid
-            })
-            
-            # Отправляем результат аутентификации
-            self.socketio.emit('authentication_result', {
-                'success': True,
-                'version': self.server_version
-            }, room=sid)
-            
-        except Exception as e:
-            self.logger.error('Authentication failed', {
-                'error': str(e),
-                'sid': sid
-            })
-            
-            error_msg = str(e)
-            if isinstance(e, jwt.ExpiredSignatureError):
-                error_msg = 'Token expired'
-            elif isinstance(e, jwt.InvalidTokenError):
-                error_msg = 'Invalid token'
+                clearTimeout(this.connectionTimeout);
+                this.connectionTimeout = setTimeout(() => {
+                    if (!this.connectionEstablished) {
+                        this.onError(new Error('Connection timeout'));
+                        this.handleRetry();
+                    }
+                }, CONFIG.CONNECTION_TIMEOUT);
                 
-            self.socketio.emit('authentication_result', {
-                'success': False,
-                'error': error_msg
-            }, room=sid)
+                const token = await this.getSocketToken();
+                if (!token) {
+                    throw new Error('No valid authentication token available');
+                }
+                
+                this.init();
+            } catch (error) {
+                console.error('[Socket] Initialization error:', error);
+                this.handleRetry(error);
+            }
+        }
+
+        async getSocketToken() {
+            try {
+                // Use AuthService if available
+                if (window.App?.Auth?.getSocketToken) {
+                    const { token } = await window.App.Auth.getSocketToken();
+                    return token;
+                }
+                
+                // Fallback to direct API call
+                const response = await fetch('/auth/socket-token', {
+                    credentials: 'include'
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to get socket token');
+                }
+                
+                const data = await response.json();
+                return data.token;
+            } catch (error) {
+                console.error('[Socket] Token fetch error:', error);
+                return null;
+            }
+        }
+
+        validateTokenStructure(token) {
+            try {
+                const parts = token.split('.');
+                if (parts.length !== 3) {
+                    console.warn('[Socket] Invalid token format');
+                    return false;
+                }
+                
+                // Basic payload validation
+                const payload = JSON.parse(atob(parts[1]));
+                if (!payload.exp || !payload.sub) {
+                    console.warn('[Socket] Token missing required claims');
+                    return false;
+                }
+                
+                // Check if token is about to expire
+                const now = Date.now() / 1000;
+                if (payload.exp - now < CONFIG.TOKEN_REFRESH_THRESHOLD / 1000) {
+                    console.debug('[Socket] Token needs refresh');
+                    this.scheduleTokenRefresh();
+                }
+                
+                return true;
+            } catch (e) {
+                console.warn('[Socket] Token validation failed:', e);
+                return false;
+            }
+        }
+
+        scheduleTokenRefresh() {
+            if (this.tokenRefreshTimer) {
+                clearTimeout(this.tokenRefreshTimer);
+            }
             
-            # Отправляем специальное событие для ошибок авторизации
-            if 'token' in str(e).lower() or 'auth' in str(e).lower():
-                self.socketio.emit('auth_error', {
-                    'message': error_msg
-                }, room=sid)
+            this.tokenRefreshTimer = setTimeout(() => {
+                this.refreshToken();
+            }, CONFIG.TOKEN_REFRESH_THRESHOLD - 60000); // 1 minute before expiration
+        }
+
+        async refreshToken() {
+            try {
+                console.debug('[Socket] Refreshing token...');
                 
-            self.cleanup_client(sid)
-
-    def cleanup_client(self, sid: str):
-        """Очистка ресурсов клиента"""
-        with self.clients_lock:
-            if sid in self.connected_clients:
-                client_info = self.connected_clients[sid]
-                user_id = client_info.get('user_id', 'unknown')
-                self.logger.info('Cleaning up client resources', {
-                    'sid': sid,
-                    'user_id': user_id
-                })
-                del self.connected_clients[sid]
-                disconnect(sid)
-
-    def check_activity(self):
-        """Проверка активности клиентов"""
-        now = datetime.utcnow()
-        inactive_clients = []
-
-        with self.clients_lock:
-            for sid, client in self.connected_clients.items():
-                last_active = (now - client['last_activity']).seconds
+                // Use AuthService if available
+                if (window.App?.Auth?.refreshToken) {
+                    const success = await window.App.Auth.refreshToken();
+                    return success;
+                }
                 
-                if not client['authenticated']:
-                    connect_time = (now - client['connect_time']).seconds
-                    if connect_time > self.socket_auth_timeout:
-                        inactive_clients.append(sid)
-                        self.logger.warning('Authentication timeout', {'sid': sid})
-                        self.socketio.emit('auth_timeout', {
-                            'message': 'Authentication timeout'
-                        }, room=sid)
-                elif last_active > 60:  # 60 секунд без активности
-                    inactive_clients.append(sid)
-                    self.logger.warning('Client inactive', {
-                        'sid': sid,
-                        'inactive_seconds': last_active
-                    })
-                    self.socketio.emit('inactivity_timeout', {
-                        'message': 'Disconnected due to inactivity'
-                    }, room=sid)
+                // Fallback to direct API call
+                const response = await fetch('/auth/api/refresh-token', {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to refresh token');
+                }
+                
+                const { token } = await response.json();
+                if (this.onTokenRefresh) {
+                    this.onTokenRefresh(token);
+                }
+                
+                return true;
+            } catch (error) {
+                console.error('[Socket] Token refresh failed:', error);
+                throw error;
+            }
+        }
 
-        # Отключаем неактивных клиентов
-        for sid in inactive_clients:
-            self.cleanup_client(sid)
+        init() {
+            try {
+                console.debug('[Socket] Initializing connection...');
+                
+                if (typeof io === 'undefined') {
+                    throw new Error('Socket.IO library not loaded');
+                }
 
-    def is_authenticated(self, sid: str) -> bool:
-        """Проверка аутентификации клиента"""
-        with self.clients_lock:
-            client = self.connected_clients.get(sid)
-            return client and client['authenticated']
+                this.cleanup();
 
-    def handle_get_playback_state(self, data: Dict):
-        """Обработчик запроса состояния воспроизведения"""
-        sid = request.sid
-        if not self.is_authenticated(sid):
-            self.logger.warning('Unauthorized playback state request', {'sid': sid})
-            disconnect(sid)
-            return
+                this.socket = io({
+                    reconnection: true,
+                    reconnectionAttempts: CONFIG.MAX_RETRIES,
+                    reconnectionDelay: this.reconnectDelay,
+                    transports: ['websocket'],
+                    upgrade: false,
+                    timeout: CONFIG.CONNECTION_TIMEOUT,
+                    auth: (cb) => {
+                        try {
+                            this.getSocketToken().then(token => {
+                                if (!token) {
+                                    throw new Error('No authentication token available');
+                                }
+                                
+                                cb({ 
+                                    token,
+                                    userAgent: navigator.userAgent
+                                });
+                            }).catch(error => {
+                                this.onError(new Error(`Authentication error: ${error.message}`));
+                                cb({ error: error.message });
+                            });
+                        } catch (authError) {
+                            this.onError(new Error(`Authentication error: ${authError.message}`));
+                            cb({ error: authError.message });
+                        }
+                    }
+                });
 
-        try:
-            from ..models import PlaybackState
-            state = self.db.session.query(PlaybackState).first()
-            if state:
-                self.socketio.emit('playback_update', {
-                    'state': state.state,
-                    'current_time': state.current_time,
-                    'playlist_item_id': state.playlist_item_id,
-                    'timestamp': datetime.utcnow().isoformat()
-                }, room=sid)
-        except Exception as e:
-            self.logger.error('Failed to get playback state', {
-                'error': str(e),
-                'sid': sid
-            })
+                this.setupEventHandlers();
+            } catch (error) {
+                console.error('[Socket] Initialization error:', error);
+                this.handleRetry(error);
+            }
+        }
 
-    def handle_get_playlist_state(self, data: Dict):
-        """Обработчик запроса состояния плейлиста"""
-        sid = request.sid
-        if not self.is_authenticated(sid):
-            self.logger.warning('Unauthorized playlist state request', {'sid': sid})
-            disconnect(sid)
-            return
+        setupEventHandlers() {
+            // Connection events
+            this.socket.on('connect', () => this.handleConnect());
+            this.socket.on('disconnect', (reason) => this.handleDisconnect(reason));
+            this.socket.on('connect_error', (error) => this.handleError(error));
+            
+            // Authentication events
+            this.socket.on('authentication_result', (data) => this.handleAuthenticationResult(data));
+            this.socket.on('auth_error', (error) => this.handleAuthError(error));
+            this.socket.on('token_refresh', (newToken) => this.handleTokenRefresh(newToken));
+            
+            // Application events
+            this.socket.on('playback_update', (data) => this.handlePlaybackUpdate(data));
+            this.socket.on('playlist_update', (data) => this.handlePlaylistUpdate(data));
+            this.socket.on('system_notification', (data) => this.handleSystemNotification(data));
+            
+            // System events
+            this.socket.on('inactivity_timeout', () => this.handleInactivityTimeout());
+            this.socket.on('auth_timeout', () => this.handleAuthTimeout());
+            this.socket.on('pong', (latency) => this.handlePong(latency));
+            this.socket.on('reconnect_failed', () => this.handleReconnectFailed());
+            this.socket.on('reconnect_attempt', (attempt) => this.handleReconnectAttempt(attempt));
+        }
 
-        try:
-            from ..models import Playlist
-            playlist = self.db.session.query(Playlist).get(data.get('playlist_id'))
-            if playlist:
-                self.socketio.emit('playlist_update', {
-                    'id': playlist.id,
-                    'name': playlist.name,
-                    'items': [item.to_dict() for item in playlist.items],
-                    'timestamp': datetime.utcnow().isoformat()
-                }, room=sid)
-        except Exception as e:
-            self.logger.error('Failed to get playlist state', {
-                'error': str(e),
-                'sid': sid,
-                'playlist_id': data.get('playlist_id')
-            })
+        handleConnect() {
+            console.debug('[Socket] Connection established');
+            this.connectionEstablished = true;
+            clearTimeout(this.connectionTimeout);
+            
+            this.isConnected = true;
+            this.reconnectAttempts = 0;
+            this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
+            
+            this.startPingInterval();
+            this.scheduleTokenRefresh();
+            
+            // Set authentication timeout
+            this.authTimeout = setTimeout(() => {
+                if (!this.isAuthenticated) {
+                    console.warn('[Socket] Authentication timeout');
+                    this.socket.emit('auth_timeout');
+                    this.onError(new Error('Authentication timeout'));
+                }
+            }, CONFIG.AUTH_TIMEOUT);
+            
+            this.processPendingEvents();
+            
+            // Track activity
+            this.lastActivity = Date.now();
+        }
 
-    def emit_playlist_update(self, playlist_id: Optional[int] = None):
-        """
-        Отправка обновления плейлиста
-        :param playlist_id: ID активного плейлиста
-        """
-        from ..models import Playlist, PlaylistProfileAssignment, PlaybackProfile
+        handleAuthenticationResult(data) {
+            clearTimeout(this.authTimeout);
+            
+            if (data.success) {
+                this.isAuthenticated = true;
+                console.debug('[Socket] Authentication successful');
+            } else {
+                this.isAuthenticated = false;
+                console.error('[Socket] Authentication failed:', data.error);
+                this.showAlert('error', 'Authentication Failed', data.error);
+                this.disconnect();
+            }
+        }
 
-        data: Dict[str, Any] = {'active_playlist': None}
-        
-        try:
-            if playlist_id:
-                playlist = self.db.session.query(Playlist).get(playlist_id)
-                if playlist:
-                    data['active_playlist'] = {
-                        'id': playlist.id,
-                        'name': playlist.name,
-                        'customer': playlist.customer or "N/A"
+        handleTokenRefresh(newToken) {
+            console.debug('[Socket] Received token refresh');
+            if (this.onTokenRefresh) {
+                this.onTokenRefresh(newToken);
+            }
+        }
+
+        handleAuthError(error) {
+            this.onError(new Error(`Authentication error: ${error.message}`));
+            if (window.App.Base?.handleUnauthorized) {
+                window.App.Base.handleUnauthorized();
+            }
+        }
+
+        handleDisconnect(reason) {
+            console.log('[Socket] Disconnected:', reason);
+            this.isConnected = false;
+            this.isAuthenticated = false;
+            this.connectionEstablished = false;
+            this.cleanupTimers();
+            
+            if (reason !== 'io client disconnect') {
+                const message = reason === 'io server disconnect' 
+                    ? 'Disconnected by server' 
+                    : 'Connection lost - attempting to reconnect';
+                this.showAlert('warning', 'Disconnected', message);
+            }
+        }
+
+        handleError(error) {
+            console.error('[Socket] Connection error:', error);
+            this.reconnectAttempts++;
+            
+            // Exponential backoff with jitter
+            this.reconnectDelay = Math.min(
+                this.reconnectDelay * 2 + Math.random() * 1000,
+                CONFIG.MAX_RETRY_DELAY
+            );
+            
+            if (this.reconnectAttempts >= CONFIG.MAX_RETRIES) {
+                this.showAlert(
+                    'error', 
+                    'Connection Error', 
+                    'Real-time updates disabled. Please refresh the page.'
+                );
+            } else {
+                console.log(`[Socket] Retrying in ${Math.round(this.reconnectDelay/1000)} sec...`);
+                setTimeout(() => this.init(), this.reconnectDelay);
+            }
+        }
+
+        handleInactivityTimeout() {
+            console.warn('[Socket] Disconnected due to inactivity');
+            this.showAlert('warning', 'Session Expired', 'Your session has timed out due to inactivity');
+            this.disconnect();
+        }
+
+        handleAuthTimeout() {
+            console.warn('[Socket] Authentication timeout');
+            this.showAlert('error', 'Authentication Timeout', 'Please refresh the page');
+            this.disconnect();
+        }
+
+        emit(event, data) {
+            return new Promise((resolve, reject) => {
+                if (!this.isConnected || !this.isAuthenticated) {
+                    console.debug(`[Socket] Queueing event (${event}) while offline`);
+                    
+                    // Prevent queue from growing too large
+                    if (this.pendingEvents.length >= CONFIG.MAX_EVENT_QUEUE) {
+                        this.pendingEvents.shift();
                     }
                     
-                    # Добавляем информацию о профиле
-                    assignment = self.db.session.query(PlaylistProfileAssignment).filter_by(
-                        playlist_id=playlist_id
-                    ).first()
-                
-                    if assignment:
-                        profile = self.db.session.query(PlaybackProfile).get(assignment.profile_id)
-                        if profile:
-                            data['assigned_profile'] = {
-                                'id': profile.id,
-                                'name': profile.name
-                            }
-            
-            # Получаем список активных клиентов
-            with self.clients_lock:
-                active_sids = [sid for sid in self.connected_clients 
-                             if self.is_authenticated(sid)]
-            
-            # Добавляем временную метку
-            data['timestamp'] = datetime.utcnow().isoformat()
-            
-            # Отправляем обновление
-            for sid in active_sids:
-                try:
-                    self.socketio.emit('playlist_update', data, room=sid)
-                except Exception as e:
-                    self.logger.error('Failed to send update', {
-                        'sid': sid,
-                        'error': str(e)
-                    })
-                    self.cleanup_client(sid)
-                    
-            self.logger.debug('Playlist update sent', {
-                'playlist_id': playlist_id,
-                'recipients_count': len(active_sids)
-            })
-            
-        except Exception as e:
-            self.logger.error('Failed to prepare playlist update', {
-                'error': str(e),
-                'playlist_id': playlist_id
-            })
+                    this.pendingEvents.push({ event, data, resolve, reject });
+                    return;
+                }
 
-    def handle_profiles_request(self, data: Dict):
-        """Отправка списка профилей клиенту"""
-        sid = request.sid
-        if not self.is_authenticated(sid):
-            self.logger.warning('Unauthorized profiles request', {'sid': sid})
-            disconnect(sid)
-            return
-
-        try:
-            from ..models import PlaybackProfile
-            profiles = self.db.session.query(PlaybackProfile).all()
-            self.socketio.emit('profiles_list', {
-                'profiles': [{
-                    'id': p.id,
-                    'name': p.name,
-                    'type': p.profile_type
-                } for p in profiles],
-                'timestamp': datetime.utcnow().isoformat()
-            }, room=sid)
-            
-            self.logger.debug('Profiles list sent', {'sid': sid})
-            
-        except Exception as e:
-            self.logger.error('Failed to send profiles', {
-                'sid': sid,
-                'error': str(e)
-            })
-            self.cleanup_client(sid)
-
-    def handle_apply_profile(self, data: Dict):
-        """Применение профиля настроек"""
-        sid = request.sid
-        if not self.is_authenticated(sid):
-            self.logger.warning('Unauthorized profile apply attempt', {'sid': sid})
-            disconnect(sid)
-            return
-
-        profile_id = data.get('profile_id')
-        playlist_id = data.get('playlist_id')
-    
-        try:
-            if profile_id and playlist_id:
-                from ..models import PlaylistProfileAssignment
-                # Назначаем профиль плейлисту
-                assignment = self.db.session.query(PlaylistProfileAssignment).filter_by(
-                    playlist_id=playlist_id
-                ).first()
-            
-                if assignment:
-                    assignment.profile_id = profile_id
-                else:
-                    assignment = PlaylistProfileAssignment(
-                        playlist_id=playlist_id,
-                        profile_id=profile_id
-                    )
-                    self.db.session.add(assignment)
-                
-                self.db.session.commit()
-                self.socketio.emit('profile_applied', {
-                    'success': True,
-                    'timestamp': datetime.utcnow().isoformat()
-                }, room=sid)
-                self.logger.info('Profile applied', {
-                    'profile_id': profile_id,
-                    'playlist_id': playlist_id,
-                    'sid': sid
-                })
-                
-        except Exception as e:
-            self.logger.error('Failed to apply profile', {
-                'error': str(e),
-                'profile_id': profile_id,
-                'playlist_id': playlist_id
-            })
-            self.socketio.emit('profile_applied', {
-                'success': False,
-                'error': str(e),
-                'timestamp': datetime.utcnow().isoformat()
-            }, room=sid)
-
-    def generate_socket_token(self, user_id: int) -> str:
-        """Генерация JWT токена для WebSocket аутентификации"""
-        payload = {
-            'user_id': user_id,
-            'exp': datetime.utcnow() + timedelta(minutes=30)  # Увеличен срок действия
+                console.debug(`[Socket] Emitting event: ${event}`, data);
+                this.socket.emit(event, data, (response) => {
+                    if (response?.error) {
+                        console.error(`[Socket] Event ${event} failed:`, response.error);
+                        reject(response.error);
+                    } else {
+                        console.debug(`[Socket] Event ${event} successful`, response);
+                        resolve(response);
+                    }
+                });
+            });
         }
-        return jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
 
-    def verify_socket_token(self, token: str) -> Dict:
-        """Верификация JWT токена с улучшенной обработкой ошибок"""
-        try:
-            if not token:
-                raise ValueError('Empty token provided')
-                
-            decoded = jwt.decode(
-                token, 
-                current_app.config['SECRET_KEY'], 
-                algorithms=['HS256'],
-                options={'verify_exp': True}
-            )
+        processPendingEvents() {
+            while (this.pendingEvents.length > 0) {
+                const { event, data, resolve, reject } = this.pendingEvents.shift();
+                this.emit(event, data).then(resolve).catch(reject);
+            }
+        }
+
+        startPingInterval() {
+            this.cleanupTimers();
+            this.pingInterval = setInterval(() => {
+                if (this.isConnected) {
+                    const start = Date.now();
+                    this.socket.emit('ping', {}, () => {
+                        const latency = Date.now() - start;
+                        this.socket.emit('pong', latency);
+                    });
+                }
+            }, CONFIG.PING_INTERVAL);
+        }
+
+        cleanupTimers() {
+            clearInterval(this.pingInterval);
+            clearTimeout(this.authTimeout);
+            clearTimeout(this.connectionTimeout);
+            clearTimeout(this.tokenRefreshTimer);
+        }
+
+        cleanup() {
+            console.debug('[Socket] Cleaning up resources');
+            this.cleanupTimers();
             
-            if not decoded.get('user_id'):
-                raise ValueError('Invalid token payload')
-                
-            return decoded
+            if (this.socket) {
+                this.socket.off();
+                this.socket.disconnect();
+                this.socket = null;
+            }
             
-        except jwt.ExpiredSignatureError:
-            raise ValueError('Token expired')
-        except jwt.InvalidTokenError as e:
-            raise ValueError(f'Invalid token: {str(e)}')
-        except Exception as e:
-            raise ValueError(f'Token verification failed: {str(e)}')
+            this.isConnected = false;
+            this.isAuthenticated = false;
+            this.connectionEstablished = false;
+        }
+
+        disconnect() {
+            console.debug('[Socket] Disconnecting...');
+            this.cleanup();
+        }
+
+        handleRetry(error) {
+            if (this.reconnectAttempts >= CONFIG.MAX_RETRIES) {
+                this.onError(new Error('Max retry attempts reached'));
+                return;
+            }
+            
+            console.log(`[Socket] Retrying connection (attempt ${this.reconnectAttempts + 1}/${CONFIG.MAX_RETRIES})...`);
+            setTimeout(() => this.initWithTokenCheck(), this.reconnectDelay);
+            this.reconnectAttempts++;
+        }
+    }
+
+    // Initialize after App and DOM are ready
+    function initialize() {
+        if (!window.App) {
+            console.warn('[Socket] App not initialized, waiting...');
+            setTimeout(initialize, 100);
+            return;
+        }
+
+        console.debug('[Socket] Initializing socket manager...');
+        window.App.Sockets = new SocketManager({
+            onError: (error) => {
+                console.error('[Socket] Global error handler:', error);
+                if (window.App.Alerts?.showError) {
+                    window.App.Alerts.showError('Socket Error', error.message);
+                }
+            },
+            onTokenRefresh: (newToken) => {
+                console.debug('[Socket] Updating token from refresh');
+                if (window.App.Helpers?.setToken) {
+                    window.App.Helpers.setToken(newToken);
+                }
+            },
+            onReconnect: (attempt) => {
+                console.debug(`[Socket] Reconnect attempt ${attempt}`);
+            }
+        });
+    }
+
+    // Start initialization when DOM is ready
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+        initialize();
+    } else {
+        document.addEventListener('DOMContentLoaded', initialize);
+    }
+})();
