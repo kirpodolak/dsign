@@ -8,22 +8,22 @@ from threading import Lock
 import time
 
 class SocketService:
-    def __init__(self, socketio: SocketIO, db_session, app=None, logger=None):
+    def __init__(self, socketio: Optional[SocketIO] = None, db_session=None, app=None, logger=None):
         """
         Инициализация сервиса сокетов
-        :param socketio: Экземпляр SocketIO
+        :param socketio: Экземпляр SocketIO (опционально)
         :param db_session: Сессия базы данных
         :param app: Экземпляр Flask приложения
         """
         self.socketio = socketio
         self.db = db_session
-        self.app = app or current_app._get_current_object()
-        self.logger = ServiceLogger('SocketService')
+        self.app = app or current_app._get_current_object() if current_app else None
+        self.logger = logger or ServiceLogger('SocketService')
         self.connected_clients = {}
         self.clients_lock = Lock()
         self.activity_check_interval = 15  # seconds
         self.socket_auth_timeout = 30  # 30 seconds timeout to match frontend
-        self.server_version = "1.0.0"  # Версия сервера для проверки совместимости
+        self.server_version = "1.0.0"
 
         # Конфигурация, соответствующая фронтенду
         self.config = {
@@ -33,12 +33,29 @@ class SocketService:
             'ping_interval': 25  # seconds to match frontend
         }
 
+        if socketio:
+            self.register_handlers()
+            self.start_activity_checker()
+            self.start_version_broadcaster()
+
+    def init_app(self, app, socketio: Optional[SocketIO] = None):
+        """Инициализация с Flask приложением"""
+        self.app = app
+        if socketio:
+            self.socketio = socketio
+        elif not self.socketio:
+            self.socketio = SocketIO(app, async_mode='eventlet')
+        
         self.register_handlers()
         self.start_activity_checker()
         self.start_version_broadcaster()
+        self.logger.info("SocketService initialized with Flask app")
 
     def register_handlers(self):
         """Регистрация всех обработчиков событий"""
+        if not self.socketio:
+            raise RuntimeError("SocketIO not initialized")
+            
         self.socketio.on_event('connect', self.handle_connect)
         self.socketio.on_event('disconnect', self.handle_disconnect)
         self.socketio.on_event('authenticate', self.handle_authentication)
@@ -52,6 +69,9 @@ class SocketService:
 
     def start_activity_checker(self):
         """Запуск фоновой проверки активности клиентов"""
+        if not self.socketio:
+            raise RuntimeError("SocketIO not initialized")
+
         def activity_check():
             while True:
                 self.socketio.sleep(self.activity_check_interval)
@@ -64,6 +84,9 @@ class SocketService:
 
     def start_version_broadcaster(self):
         """Периодическая рассылка версии сервера"""
+        if not self.socketio:
+            raise RuntimeError("SocketIO not initialized")
+
         def broadcast_version():
             while True:
                 self.socketio.sleep(300)  # Каждые 5 минут
@@ -81,6 +104,9 @@ class SocketService:
 
     def handle_connect(self):
         """Обработчик подключения клиента"""
+        if not self.socketio:
+            return
+
         client_ip = request.remote_addr
         token = request.args.get('token')
         
@@ -91,7 +117,7 @@ class SocketService:
                 'last_activity': datetime.utcnow(),
                 'ip_address': client_ip,
                 'reconnect_attempts': 0,
-                'token': token  # Сохраняем токен при подключении
+                'token': token
             }
         
         self.logger.info('New client connection', {
@@ -99,7 +125,6 @@ class SocketService:
             'sid': request.sid
         })
 
-        # Немедленная проверка токена при подключении, если он есть
         if token:
             try:
                 decoded = self.verify_socket_token(token)
@@ -117,7 +142,7 @@ class SocketService:
         self.cleanup_client(sid)
 
     def handle_ping(self, data=None):
-        """Обработчик ping-сообщения для проверки активности"""
+        """Обработчик ping-сообщения"""
         sid = request.sid
         with self.clients_lock:
             if sid in self.connected_clients:
@@ -137,7 +162,6 @@ class SocketService:
                 self.connected_clients[sid]['last_activity'] = datetime.utcnow()
                 self.logger.debug('Heartbeat received', {'sid': sid})
                 
-                # Рассчитываем задержку
                 if timestamp:
                     latency = int((time.time() * 1000) - timestamp)
                     return {'latency': latency}
@@ -146,23 +170,27 @@ class SocketService:
 
     def handle_get_version(self):
         """Обработчик запроса версии сервера"""
+        if not self.socketio:
+            return
+
         sid = request.sid
         self.socketio.emit('server_version', self.server_version, room=sid)
 
     def handle_authentication(self, data: Dict):
         """Обработчик аутентификации WebSocket"""
+        if not self.socketio or not self.db:
+            return
+
         sid = request.sid
         try:
             token = self.verify_socket_token(data.get('token'))
             user_id = token['user_id']
             
-            # Проверяем существование пользователя в БД
             from ..models import User
             user = self.db.session.query(User).get(user_id)
             if not user:
                 raise ValueError('User not found')
             
-            # Обновляем информацию о клиенте
             with self.clients_lock:
                 if sid in self.connected_clients:
                     self.connected_clients[sid].update({
@@ -180,7 +208,6 @@ class SocketService:
                 'sid': sid
             })
             
-            # Отправляем результат аутентификации
             self.socketio.emit('authentication_result', {
                 'success': True,
                 'version': self.server_version
@@ -203,7 +230,6 @@ class SocketService:
                 'error': error_msg
             }, room=sid)
             
-            # Отправляем специальное событие для ошибок авторизации
             if 'token' in str(e).lower() or 'auth' in str(e).lower():
                 self.socketio.emit('auth_error', {
                     'message': error_msg
@@ -213,6 +239,9 @@ class SocketService:
 
     def cleanup_client(self, sid: str):
         """Очистка ресурсов клиента"""
+        if not self.socketio:
+            return
+
         with self.clients_lock:
             if sid in self.connected_clients:
                 client_info = self.connected_clients[sid]
@@ -226,6 +255,9 @@ class SocketService:
 
     def check_activity(self):
         """Проверка активности клиентов"""
+        if not self.socketio:
+            return
+
         now = datetime.utcnow()
         inactive_clients = []
 
@@ -241,7 +273,7 @@ class SocketService:
                         self.socketio.emit('auth_timeout', {
                             'message': 'Authentication timeout'
                         }, room=sid)
-                elif last_active > 60:  # 60 секунд без активности
+                elif last_active > 60:
                     inactive_clients.append(sid)
                     self.logger.warning('Client inactive', {
                         'sid': sid,
@@ -251,7 +283,6 @@ class SocketService:
                         'message': 'Disconnected due to inactivity'
                     }, room=sid)
 
-        # Отключаем неактивных клиентов
         for sid in inactive_clients:
             self.cleanup_client(sid)
 
@@ -263,6 +294,9 @@ class SocketService:
 
     def handle_get_playback_state(self, data: Dict):
         """Обработчик запроса состояния воспроизведения"""
+        if not self.socketio or not self.db:
+            return
+
         sid = request.sid
         if not self.is_authenticated(sid):
             self.logger.warning('Unauthorized playback state request', {'sid': sid})
@@ -287,6 +321,9 @@ class SocketService:
 
     def handle_get_playlist_state(self, data: Dict):
         """Обработчик запроса состояния плейлиста"""
+        if not self.socketio or not self.db:
+            return
+
         sid = request.sid
         if not self.is_authenticated(sid):
             self.logger.warning('Unauthorized playlist state request', {'sid': sid})
@@ -311,10 +348,10 @@ class SocketService:
             })
 
     def emit_playlist_update(self, playlist_id: Optional[int] = None):
-        """
-        Отправка обновления плейлиста
-        :param playlist_id: ID активного плейлиста
-        """
+        """Отправка обновления плейлиста"""
+        if not self.socketio or not self.db:
+            return
+
         from ..models import Playlist, PlaylistProfileAssignment, PlaybackProfile
 
         data: Dict[str, Any] = {'active_playlist': None}
@@ -329,7 +366,6 @@ class SocketService:
                         'customer': playlist.customer or "N/A"
                     }
                     
-                    # Добавляем информацию о профиле
                     assignment = self.db.session.query(PlaylistProfileAssignment).filter_by(
                         playlist_id=playlist_id
                     ).first()
@@ -342,15 +378,12 @@ class SocketService:
                                 'name': profile.name
                             }
             
-            # Получаем список активных клиентов
             with self.clients_lock:
                 active_sids = [sid for sid in self.connected_clients 
                              if self.is_authenticated(sid)]
             
-            # Добавляем временную метку
             data['timestamp'] = datetime.utcnow().isoformat()
             
-            # Отправляем обновление
             for sid in active_sids:
                 try:
                     self.socketio.emit('playlist_update', data, room=sid)
@@ -374,6 +407,9 @@ class SocketService:
 
     def handle_profiles_request(self, data: Dict):
         """Отправка списка профилей клиенту"""
+        if not self.socketio or not self.db:
+            return
+
         sid = request.sid
         if not self.is_authenticated(sid):
             self.logger.warning('Unauthorized profiles request', {'sid': sid})
@@ -403,6 +439,9 @@ class SocketService:
 
     def handle_apply_profile(self, data: Dict):
         """Применение профиля настроек"""
+        if not self.socketio or not self.db:
+            return
+
         sid = request.sid
         if not self.is_authenticated(sid):
             self.logger.warning('Unauthorized profile apply attempt', {'sid': sid})
@@ -415,7 +454,6 @@ class SocketService:
         try:
             if profile_id and playlist_id:
                 from ..models import PlaylistProfileAssignment
-                # Назначаем профиль плейлисту
                 assignment = self.db.session.query(PlaylistProfileAssignment).filter_by(
                     playlist_id=playlist_id
                 ).first()
@@ -454,21 +492,27 @@ class SocketService:
 
     def generate_socket_token(self, user_id: int) -> str:
         """Генерация JWT токена для WebSocket аутентификации"""
+        if not self.app:
+            raise RuntimeError("Flask application not initialized")
+
         payload = {
             'user_id': user_id,
-            'exp': datetime.utcnow() + timedelta(minutes=30)  # Увеличен срок действия
+            'exp': datetime.utcnow() + timedelta(minutes=30)
         }
-        return jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
+        return jwt.encode(payload, self.app.config['SECRET_KEY'], algorithm='HS256')
 
     def verify_socket_token(self, token: str) -> Dict:
-        """Верификация JWT токена с улучшенной обработкой ошибок"""
+        """Верификация JWT токена"""
+        if not self.app:
+            raise RuntimeError("Flask application not initialized")
+
         try:
             if not token:
                 raise ValueError('Empty token provided')
                 
             decoded = jwt.decode(
                 token, 
-                current_app.config['SECRET_KEY'], 
+                self.app.config['SECRET_KEY'], 
                 algorithms=['HS256'],
                 options={'verify_exp': True}
             )
