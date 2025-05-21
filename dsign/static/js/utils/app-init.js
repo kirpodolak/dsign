@@ -7,10 +7,19 @@ class AppInitializer {
     static retryCount = 0;
     static maxRetryCount = 3;
     static retryDelay = 2000;
+    static debugMode = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
     static async init() {
         try {
-            // Check authentication first
+            // Initialize global state first
+            this.initGlobalState();
+
+            // Prevent redirect loops before any auth checks
+            if (this.preventRedirectLoops()) {
+                return;
+            }
+
+            // Check authentication
             const isAuthenticated = await this.checkAuth();
             if (!isAuthenticated) {
                 return;
@@ -29,19 +38,45 @@ class AppInitializer {
             this.initModules();
 
         } catch (error) {
-            console.error('Initialization error:', error);
+            console.error('[AppInitializer] Initialization error:', error);
             this.showFatalError('Application initialization failed');
         }
     }
 
+    static initGlobalState() {
+        window.App = window.App || {};
+        window.App.state = window.App.state || {
+            navigationInProgress: false,
+            socketConnected: false,
+            initialized: true,
+            lastAuthCheck: null
+        };
+
+        if (this.debugMode) {
+            console.debug('[AppInitializer] Global state initialized', window.App.state);
+        }
+    }
+
+    static preventRedirectLoops() {
+        const isLoginPage = window.location.pathname.includes('/auth/login');
+        const hasRedirectLoop = window.location.search.includes('redirect=%2Fauth%2Flogin');
+        
+        if (isLoginPage && hasRedirectLoop) {
+            console.warn('[AppInitializer] Redirect loop detected, resetting to login');
+            window.location.href = '/auth/login';
+            return true;
+        }
+        return false;
+    }
+
     static async checkAuth() {
         try {
-            // Add protective check
-            if (!window.App?.state) {
-                window.App.state = { navigationInProgress: false };
+            if (window.App.state.navigationInProgress) {
+                if (this.debugMode) {
+                    console.debug('[AppInitializer] Navigation already in progress');
+                }
+                return false;
             }
-
-            if (window.App.state.navigationInProgress) return false;
 
             // Get token from storage
             const token = window.App.Helpers?.getToken?.() || 
@@ -51,7 +86,7 @@ class AppInitializer {
             const isLoginPage = window.location.pathname.includes('/auth/login');
             
             if (!token && !isLoginPage) {
-                console.warn('[Auth] No token found, redirecting to login');
+                console.warn('[AppInitializer] No token found, redirecting to login');
                 window.App.state.navigationInProgress = true;
                 const redirectUrl = encodeURIComponent(
                     window.location.pathname + window.location.search
@@ -63,7 +98,11 @@ class AppInitializer {
             // Verify token with server if not on login page
             if (!isLoginPage) {
                 const response = await fetch('/auth/api/check-auth', {
-                    credentials: 'include'
+                    credentials: 'include',
+                    headers: {
+                        'Cache-Control': 'no-cache',
+                        'Authorization': `Bearer ${token}`
+                    }
                 });
                 
                 if (response.status === 429) {
@@ -81,12 +120,14 @@ class AppInitializer {
                     this.handleAuthError(new Error('Invalid token'));
                     return false;
                 }
+
+                window.App.state.lastAuthCheck = Date.now();
             }
             
             return true;
 
         } catch (error) {
-            console.error('Auth check error:', error);
+            console.error('[AppInitializer] Auth check error:', error);
             this.handleAuthError(error);
             return false;
         }
@@ -130,7 +171,7 @@ class AppInitializer {
 
             return response.ok;
         } catch (error) {
-            console.error('Token verification failed:', error);
+            console.error('[AppInitializer] Token verification failed:', error);
             return false;
         }
     }
@@ -165,7 +206,7 @@ class AppInitializer {
 
     static setupAlerts() {
         if (typeof Swal === 'undefined') {
-            console.warn('SweetAlert2 not available, using console fallback');
+            console.warn('[AppInitializer] SweetAlert2 not available, using console fallback');
             window.showAlert = (type, title, message) => {
                 console.log(`[${type}] ${title}: ${message}`);
             };
@@ -187,7 +228,7 @@ class AppInitializer {
 
                 Swal.fire({ ...defaultOptions, ...options });
             } catch (e) {
-                console.error('Alert error:', e);
+                console.error('[AppInitializer] Alert error:', e);
             }
         });
 
@@ -200,7 +241,7 @@ class AppInitializer {
 
     static setupErrorHandling() {
         window.addEventListener('error', (event) => {
-            console.error('[Global Error]', event.error);
+            console.error('[AppInitializer] Global Error:', event.error);
             
             if (this.isAuthError(event.error)) {
                 this.handleAuthError(event.error);
@@ -215,7 +256,7 @@ class AppInitializer {
         });
 
         window.addEventListener('unhandledrejection', (event) => {
-            console.error('[Unhandled Rejection]', event.reason);
+            console.error('[AppInitializer] Unhandled Rejection:', event.reason);
             
             if (event.reason?.status === 401) {
                 this.handleAuthError(new Error('Session expired'));
@@ -244,20 +285,33 @@ class AppInitializer {
 
     static setupAuthMonitoring() {
         setInterval(() => {
-            this.checkAuthStatus().catch(console.warn);
-        }, 300000);
+            this.checkAuthStatus().catch(error => {
+                console.warn('[AppInitializer] Auth monitoring error:', error);
+            });
+        }, 300000); // 5 minutes
 
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
-                this.checkAuthStatus().catch(console.warn);
+                this.checkAuthStatus().catch(error => {
+                    console.warn('[AppInitializer] Visibility change auth check error:', error);
+                });
             }
         });
     }
 
     static async checkAuthStatus() {
         try {
+            const token = localStorage.getItem('authToken') || this.getCookie('authToken');
+            if (!token) {
+                this.handleAuthError(new Error('No token found'));
+                return;
+            }
+
             const response = await fetch('/auth/api/check-auth', {
-                credentials: 'include'
+                credentials: 'include',
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
             });
 
             if (response.status === 401) {
@@ -267,33 +321,24 @@ class AppInitializer {
             if (response.status === 429) {
                 this.handleRateLimitError();
             }
+
+            window.App.state.lastAuthCheck = Date.now();
         } catch (error) {
-            console.warn('Auth check failed:', error);
+            console.warn('[AppInitializer] Auth check failed:', error);
         }
     }
 
     static async initWebSocket() {
         if (typeof io === 'undefined') {
-            console.warn('Socket.io not available');
+            console.warn('[AppInitializer] Socket.io not available');
             return;
         }
 
         try {
-            // Use AuthService to get complete socket connection data
-            const { token, socketUrl, expiresIn } = await window.App.Auth.getSocketToken();
+            const { token, socketUrl } = await window.App.Auth.getSocketToken();
             if (!token) throw new Error('No socket token available');
 
-            // Initialize socket connection with enhanced options
-            const socket = socketUrl ? io(socketUrl, {
-                auth: { token },
-                reconnection: true,
-                reconnectionAttempts: 5,
-                reconnectionDelay: 1000,
-                reconnectionDelayMax: 5000,
-                timeout: 10000,
-                transports: ['websocket'],
-                upgrade: false
-            }) : io({
+            const socketOptions = {
                 auth: { token },
                 reconnection: true,
                 reconnectionAttempts: 5,
@@ -301,39 +346,39 @@ class AppInitializer {
                 reconnectionDelayMax: 5000,
                 timeout: 10000,
                 transports: ['websocket']
-            });
+            };
 
-            // Enhanced socket error handling
+            const socket = socketUrl ? io(socketUrl, socketOptions) : io(socketOptions);
+
             socket.on('connect_error', (err) => {
-                console.error('Socket connection error:', err);
+                console.error('[AppInitializer] Socket connection error:', err);
                 if (err.message.includes('auth') || err.message.includes('token')) {
                     this.handleAuthError(err);
                 }
             });
 
             socket.on('disconnect', (reason) => {
-                console.log('Socket disconnected:', reason);
+                console.log('[AppInitializer] Socket disconnected:', reason);
                 if (reason === 'io server disconnect') {
                     this.handleAuthError(new Error('Server disconnected'));
                 }
             });
 
             socket.on('connect', () => {
-                console.log('Socket connected successfully');
-                this.retryCount = 0; // Reset retry counter on successful connection
+                console.log('[AppInitializer] Socket connected successfully');
+                this.retryCount = 0;
+                window.App.state.socketConnected = true;
             });
 
-            // Store socket globally
             window.appSocket = socket;
 
         } catch (error) {
-            console.error('Socket initialization failed:', error);
+            console.error('[AppInitializer] Socket initialization failed:', error);
             
-            // Implement retry logic with exponential backoff
             if (this.retryCount < this.maxRetryCount && !error.message.includes('auth')) {
                 const delay = this.retryDelay * Math.pow(2, this.retryCount);
                 this.retryCount++;
-                console.warn(`Retrying WebSocket connection in ${delay}ms (attempt ${this.retryCount}/${this.maxRetryCount})`);
+                console.warn(`[AppInitializer] Retrying WebSocket connection in ${delay}ms (attempt ${this.retryCount}/${this.maxRetryCount})`);
                 setTimeout(() => this.initWebSocket(), delay);
             } else if (error.message.includes('auth')) {
                 this.handleAuthError(error);
@@ -368,11 +413,15 @@ class AppInitializer {
     }
 
     static handleAuthError(error) {
-        console.error('[Auth Error]', error);
+        console.error('[AppInitializer] Auth Error:', error);
         
         localStorage.removeItem('authToken');
         this.deleteCookie('authToken');
         
+        if (window.appSocket) {
+            window.appSocket.disconnect();
+        }
+
         this.showError(
             'Session Expired',
             'Your session has expired. Please log in again.',
@@ -424,9 +473,12 @@ class AppInitializer {
 
 document.addEventListener('DOMContentLoaded', () => {
     try {
+        if (AppInitializer.debugMode) {
+            console.debug('[AppInitializer] DOM fully loaded, initializing app');
+        }
         AppInitializer.init();
     } catch (error) {
-        console.error('Initialization failed:', error);
+        console.error('[AppInitializer] Initialization failed:', error);
         AppInitializer.showFatalError('Failed to initialize application');
     }
 });
