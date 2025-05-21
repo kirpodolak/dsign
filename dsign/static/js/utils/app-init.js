@@ -36,14 +36,23 @@ class AppInitializer {
 
     static async checkAuth() {
         try {
+            // Add protective check
+            if (!window.App?.state) {
+                window.App.state = { navigationInProgress: false };
+            }
+
+            if (window.App.state.navigationInProgress) return false;
+
             // Get token from storage
-            const token = localStorage.getItem('authToken') || 
+            const token = window.App.Helpers?.getToken?.() || 
+                         localStorage.getItem('authToken') || 
                          this.getCookie('authToken');
             
             const isLoginPage = window.location.pathname.includes('/auth/login');
             
             if (!token && !isLoginPage) {
                 console.warn('[Auth] No token found, redirecting to login');
+                window.App.state.navigationInProgress = true;
                 const redirectUrl = encodeURIComponent(
                     window.location.pathname + window.location.search
                 );
