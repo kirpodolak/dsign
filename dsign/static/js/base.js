@@ -211,8 +211,8 @@
 
     // Alert system with UI integration
     const initializeAlerts = () => {
-        window.App.Alerts = window.App.Alerts || {
-            showAlert: (type, title, message, options = {}) => {
+        const alertSystem = {
+            showAlert: function(type, title, message, options = {}) {
                 window.App.Logger.info(`Alert: ${title}`, { type, message });
                 
                 // Dispatch event for UI components
@@ -222,11 +222,15 @@
                 document.dispatchEvent(event);
             },
             
-            showError: (title, message, error) => {
+            showError: function(title, message, error) {
                 window.App.Logger.error(`Error Alert: ${title}`, error, { message });
                 this.showAlert('error', title, message || error?.message);
             }
         };
+
+        window.App.Alerts = window.App.Alerts || alertSystem;
+        // Bind context to prevent 'this' issues
+        window.App.Alerts.showError = alertSystem.showError.bind(alertSystem);
     };
 
     // Enhanced authentication flow
@@ -234,6 +238,16 @@
         window.App.Auth = window.App.Auth || {
             checkAuth: async () => {
                 try {
+                    // Initialize state if not exists
+                    if (!window.App.state) {
+                        window.App.state = {
+                            navigationInProgress: false,
+                            authChecked: false
+                        };
+                    }
+
+                    if (window.App.state.navigationInProgress) return false;
+                    
                     const token = window.App.Helpers.getToken();
                     if (!token) return false;
                     
@@ -250,7 +264,15 @@
                 }
             },
             
-            handleUnauthorized: () => {
+            handleUnauthorized: function() {
+                // Ensure state exists
+                if (!window.App.state) {
+                    window.App.state = {
+                        navigationInProgress: false,
+                        authChecked: false
+                    };
+                }
+
                 if (window.App.state.navigationInProgress) return;
                 
                 window.App.state.navigationInProgress = true;
@@ -262,11 +284,12 @@
                     delete window.appSocket;
                 }
                 
-                // Don't redirect if already on login page
-                if (!window.location.pathname.includes('/auth/login')) {
+                // Prevent redirect loops
+                const currentPath = window.location.pathname;
+                if (!currentPath.includes('/auth/login')) {
                     window.App.Logger.warn('Redirecting to login');
-                    window.location.href = '/auth/login?redirect=' + 
-                        encodeURIComponent(window.location.pathname + window.location.search);
+                    const redirectUrl = encodeURIComponent(currentPath + window.location.search);
+                    window.location.href = `/auth/login?redirect=${redirectUrl}`;
                 }
             },
             
@@ -289,6 +312,19 @@
                     
                     checkToken();
                 });
+            },
+            
+            getSocketToken: async () => {
+                try {
+                    const response = await window.App.API.fetch('/auth/socket-token');
+                    if (!response.ok) {
+                        throw new Error('Failed to get socket token');
+                    }
+                    return await response.json();
+                } catch (error) {
+                    window.App.Logger.error('Failed to get socket token:', error);
+                    throw error;
+                }
             }
         };
     };
@@ -317,7 +353,8 @@
                     reconnection: true,
                     reconnectionAttempts: window.App.config.maxSocketRetries,
                     reconnectionDelay: window.App.config.socketReconnectDelay,
-                    transports: ['websocket']
+                    transports: ['websocket'],
+                    upgrade: false
                 });
 
                 // Store socket globally
@@ -327,15 +364,17 @@
                 // Event handlers
                 socket.on('connect', () => {
                     window.App.Logger.info('WebSocket connected');
+                    window.App.state.socketConnected = true;
                 });
 
                 socket.on('disconnect', (reason) => {
                     window.App.Logger.warn('WebSocket disconnected:', reason);
+                    window.App.state.socketConnected = false;
                 });
 
                 socket.on('connect_error', (error) => {
                     window.App.Logger.error('WebSocket connection error:', error);
-                    if (error.message.includes('auth')) {
+                    if (error.message.includes('auth') || error.message.includes('token')) {
                         window.App.Auth.handleUnauthorized();
                     }
                 });
@@ -368,6 +407,15 @@
         window.App.Logger.info('Starting application initialization');
         
         try {
+            // Initialize state if not exists
+            if (!window.App.state) {
+                window.App.state = {
+                    navigationInProgress: false,
+                    authChecked: false,
+                    socketInitialized: false
+                };
+            }
+
             // Check authentication state
             const isLoginPage = window.location.pathname.includes('/auth/login');
             const token = window.App.Helpers.getToken();
@@ -410,11 +458,13 @@
             window.App.Core.onReadyCallbacks = [];
         } catch (error) {
             window.App.Logger.error('App initialization failed:', error);
-            window.App.Alerts.showError(
-                'Initialization Error', 
-                'Failed to start application', 
-                error
-            );
+            if (window.App.Alerts?.showError) {
+                window.App.Alerts.showError(
+                    'Initialization Error', 
+                    'Failed to start application', 
+                    error
+                );
+            }
         }
     };
 
@@ -436,6 +486,13 @@
             }
         } catch (error) {
             console.error('Bootstrap failed:', error);
+            if (window.App.Alerts?.showError) {
+                window.App.Alerts.showError(
+                    'Bootstrap Error',
+                    'Failed to initialize application',
+                    error
+                );
+            }
         }
     };
 
@@ -480,6 +537,9 @@
 
     window.addEventListener('unhandledrejection', (event) => {
         window.App.Logger?.error('Unhandled rejection:', event.reason);
+        if (window.App.Alerts?.showError) {
+            window.App.Alerts.showError('Async Error', 'An operation failed', event.reason);
+        }
     });
 
     // Start the application
