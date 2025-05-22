@@ -1,15 +1,24 @@
-/**
- * Application Initialization Module
- * Handles core application setup, authentication, and error handling
- */
+import { showAlert, showError } from './alerts.js';
+import { getToken, getCookie, deleteCookie } from './helpers.js';
+import AuthService from './auth.js';
+import SocketManager from './sockets.js';
+import PlayerControls from './player-controls.js';
+import AppLogger from './logging.js';
 
 class AppInitializer {
-    static retryCount = 0;
-    static maxRetryCount = 3;
-    static retryDelay = 2000;
-    static debugMode = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    constructor() {
+        this.retryCount = 0;
+        this.maxRetryCount = 3;
+        this.retryDelay = 2000;
+        this.debugMode = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-    static async init() {
+        this.logger = new AppLogger('AppInitializer');
+        this.authService = new AuthService();
+        this.socketManager = new SocketManager();
+        this.playerControls = new PlayerControls();
+    }
+
+    async init() {
         try {
             // Initialize global state first
             this.initGlobalState();
@@ -38,12 +47,12 @@ class AppInitializer {
             this.initModules();
 
         } catch (error) {
-            console.error('[AppInitializer] Initialization error:', error);
+            this.logger.error('Initialization error:', error);
             this.showFatalError('Application initialization failed');
         }
     }
 
-    static initGlobalState() {
+    initGlobalState() {
         window.App = window.App || {};
         window.App.state = window.App.state || {
             navigationInProgress: false,
@@ -53,40 +62,40 @@ class AppInitializer {
         };
 
         if (this.debugMode) {
-            console.debug('[AppInitializer] Global state initialized', window.App.state);
+            this.logger.debug('Global state initialized', window.App.state);
         }
     }
 
-    static preventRedirectLoops() {
+    preventRedirectLoops() {
         const isLoginPage = window.location.pathname.includes('/auth/login');
         const hasRedirectLoop = window.location.search.includes('redirect=%2Fauth%2Flogin');
         
         if (isLoginPage && hasRedirectLoop) {
-            console.warn('[AppInitializer] Redirect loop detected, resetting to login');
+            this.logger.warn('Redirect loop detected, resetting to login');
             window.location.href = '/auth/login';
             return true;
         }
         return false;
     }
 
-    static async checkAuth() {
+    async checkAuth() {
         try {
-            if (window.App.state.navigationInProgress) {
+            if (window.App.state?.navigationInProgress) {
                 if (this.debugMode) {
-                    console.debug('[AppInitializer] Navigation already in progress');
+                    this.logger.debug('Navigation already in progress');
                 }
                 return false;
             }
 
             // Get token from storage
-            const token = window.App.Helpers?.getToken?.() || 
+            const token = getToken() || 
                          localStorage.getItem('authToken') || 
-                         this.getCookie('authToken');
+                         getCookie('authToken');
             
             const isLoginPage = window.location.pathname.includes('/auth/login');
             
             if (!token && !isLoginPage) {
-                console.warn('[AppInitializer] No token found, redirecting to login');
+                this.logger.warn('No token found, redirecting to login');
                 window.App.state.navigationInProgress = true;
                 const redirectUrl = encodeURIComponent(
                     window.location.pathname + window.location.search
@@ -97,25 +106,7 @@ class AppInitializer {
 
             // Verify token with server if not on login page
             if (!isLoginPage) {
-                const response = await fetch('/auth/api/check-auth', {
-                    credentials: 'include',
-                    headers: {
-                        'Cache-Control': 'no-cache',
-                        'Authorization': `Bearer ${token}`
-                    }
-                });
-                
-                if (response.status === 429) {
-                    this.handleRateLimitError();
-                    return false;
-                }
-                
-                if (response.status === 401) {
-                    this.handleAuthError(new Error('Session expired'));
-                    return false;
-                }
-
-                const isValid = await this.verifyToken(token);
+                const isValid = await this.authService.verifyToken(token);
                 if (!isValid) {
                     this.handleAuthError(new Error('Invalid token'));
                     return false;
@@ -127,26 +118,16 @@ class AppInitializer {
             return true;
 
         } catch (error) {
-            console.error('[AppInitializer] Auth check error:', error);
+            this.logger.error('Auth check error:', error);
             this.handleAuthError(error);
             return false;
         }
     }
 
-    static handleRateLimitError() {
+    handleRateLimitError() {
         const alertMessage = 'Too many requests. Please wait before trying again.';
         
-        if (typeof Swal !== 'undefined') {
-            Swal.fire({
-                icon: 'error',
-                title: 'Rate Limit Exceeded',
-                text: alertMessage,
-                timer: 5000
-            });
-        } else {
-            console.error(alertMessage);
-            window.location.href = '/auth/login?error=rate_limit';
-        }
+        showError('Rate Limit Exceeded', alertMessage, { timer: 5000 });
         
         const retryDelay = Math.min(
             Math.pow(2, this.retryCount) * 1000,
@@ -159,29 +140,7 @@ class AppInitializer {
         }, retryDelay);
     }
 
-    static async verifyToken(token) {
-        try {
-            const response = await fetch('/auth/api/verify-token', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                }
-            });
-
-            return response.ok;
-        } catch (error) {
-            console.error('[AppInitializer] Token verification failed:', error);
-            return false;
-        }
-    }
-
-    static getCookie(name) {
-        const match = document.cookie.match(new RegExp(`(^| )${name}=([^;]+)`));
-        return match ? decodeURIComponent(match[2]) : null;
-    }
-
-    static async setupLoader() {
+    async setupLoader() {
         return new Promise((resolve) => {
             setTimeout(() => {
                 const loader = document.getElementById('page-loader');
@@ -204,11 +163,11 @@ class AppInitializer {
         });
     }
 
-    static setupAlerts() {
+    setupAlerts() {
         if (typeof Swal === 'undefined') {
-            console.warn('[AppInitializer] SweetAlert2 not available, using console fallback');
+            this.logger.warn('SweetAlert2 not available, using console fallback');
             window.showAlert = (type, title, message) => {
-                console.log(`[${type}] ${title}: ${message}`);
+                this.logger.log(`[${type}] ${title}: ${message}`);
             };
             return;
         }
@@ -228,7 +187,7 @@ class AppInitializer {
 
                 Swal.fire({ ...defaultOptions, ...options });
             } catch (e) {
-                console.error('[AppInitializer] Alert error:', e);
+                this.logger.error('Alert error:', e);
             }
         });
 
@@ -239,16 +198,16 @@ class AppInitializer {
         };
     }
 
-    static setupErrorHandling() {
+    setupErrorHandling() {
         window.addEventListener('error', (event) => {
-            console.error('[AppInitializer] Global Error:', event.error);
+            this.logger.error('Global Error:', event.error);
             
             if (this.isAuthError(event.error)) {
                 this.handleAuthError(event.error);
                 return;
             }
             
-            this.showError(
+            showError(
                 'Application Error',
                 event.message || 'An unexpected error occurred',
                 { timer: 5000 }
@@ -256,7 +215,7 @@ class AppInitializer {
         });
 
         window.addEventListener('unhandledrejection', (event) => {
-            console.error('[AppInitializer] Unhandled Rejection:', event.reason);
+            this.logger.error('Unhandled Rejection:', event.reason);
             
             if (event.reason?.status === 401) {
                 this.handleAuthError(new Error('Session expired'));
@@ -268,7 +227,7 @@ class AppInitializer {
                 return;
             }
             
-            this.showError(
+            showError(
                 'Async Error',
                 event.reason?.message || 'An async operation failed'
             );
@@ -277,108 +236,58 @@ class AppInitializer {
         this.setupNetworkErrorHandling();
     }
 
-    static isAuthError(error) {
+    isAuthError(error) {
         return error?.message?.includes('authentication') || 
                error?.message?.includes('token') ||
                error?.status === 401;
     }
 
-    static setupAuthMonitoring() {
+    setupAuthMonitoring() {
         setInterval(() => {
             this.checkAuthStatus().catch(error => {
-                console.warn('[AppInitializer] Auth monitoring error:', error);
+                this.logger.warn('Auth monitoring error:', error);
             });
         }, 300000); // 5 minutes
 
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
                 this.checkAuthStatus().catch(error => {
-                    console.warn('[AppInitializer] Visibility change auth check error:', error);
+                    this.logger.warn('Visibility change auth check error:', error);
                 });
             }
         });
     }
 
-    static async checkAuthStatus() {
+    async checkAuthStatus() {
         try {
-            const token = localStorage.getItem('authToken') || this.getCookie('authToken');
+            const token = localStorage.getItem('authToken') || getCookie('authToken');
             if (!token) {
                 this.handleAuthError(new Error('No token found'));
                 return;
             }
 
-            const response = await fetch('/auth/api/check-auth', {
-                credentials: 'include',
-                headers: {
-                    'Authorization': `Bearer ${token}`
-                }
-            });
-
-            if (response.status === 401) {
+            const isValid = await this.authService.verifyToken(token);
+            if (!isValid) {
                 this.handleAuthError(new Error('Session expired'));
-            }
-            
-            if (response.status === 429) {
-                this.handleRateLimitError();
             }
 
             window.App.state.lastAuthCheck = Date.now();
         } catch (error) {
-            console.warn('[AppInitializer] Auth check failed:', error);
+            this.logger.warn('Auth check failed:', error);
         }
     }
 
-    static async initWebSocket() {
-        if (typeof io === 'undefined') {
-            console.warn('[AppInitializer] Socket.io not available');
-            return;
-        }
-
+    async initWebSocket() {
         try {
-            const { token, socketUrl } = await window.App.Auth.getSocketToken();
-            if (!token) throw new Error('No socket token available');
-
-            const socketOptions = {
-                auth: { token },
-                reconnection: true,
-                reconnectionAttempts: 5,
-                reconnectionDelay: 1000,
-                reconnectionDelayMax: 5000,
-                timeout: 10000,
-                transports: ['websocket']
-            };
-
-            const socket = socketUrl ? io(socketUrl, socketOptions) : io(socketOptions);
-
-            socket.on('connect_error', (err) => {
-                console.error('[AppInitializer] Socket connection error:', err);
-                if (err.message.includes('auth') || err.message.includes('token')) {
-                    this.handleAuthError(err);
-                }
-            });
-
-            socket.on('disconnect', (reason) => {
-                console.log('[AppInitializer] Socket disconnected:', reason);
-                if (reason === 'io server disconnect') {
-                    this.handleAuthError(new Error('Server disconnected'));
-                }
-            });
-
-            socket.on('connect', () => {
-                console.log('[AppInitializer] Socket connected successfully');
-                this.retryCount = 0;
-                window.App.state.socketConnected = true;
-            });
-
-            window.appSocket = socket;
-
+            await this.socketManager.connect();
+            window.App.state.socketConnected = true;
         } catch (error) {
-            console.error('[AppInitializer] Socket initialization failed:', error);
+            this.logger.error('Socket initialization failed:', error);
             
             if (this.retryCount < this.maxRetryCount && !error.message.includes('auth')) {
                 const delay = this.retryDelay * Math.pow(2, this.retryCount);
                 this.retryCount++;
-                console.warn(`[AppInitializer] Retrying WebSocket connection in ${delay}ms (attempt ${this.retryCount}/${this.maxRetryCount})`);
+                this.logger.warn(`Retrying WebSocket connection in ${delay}ms (attempt ${this.retryCount}/${this.maxRetryCount})`);
                 setTimeout(() => this.initWebSocket(), delay);
             } else if (error.message.includes('auth')) {
                 this.handleAuthError(error);
@@ -386,17 +295,15 @@ class AppInitializer {
         }
     }
 
-    static initModules() {
+    initModules() {
         document.addEventListener('app-ready', () => {
-            if (window.PlayerControls) {
-                PlayerControls.init();
-            }
+            this.playerControls.init();
         });
     }
 
-    static setupNetworkErrorHandling() {
+    setupNetworkErrorHandling() {
         window.addEventListener('offline', () => {
-            this.showError(
+            showError(
                 'Connection Lost',
                 'You are currently offline. Some features may not work.',
                 { timer: false }
@@ -404,7 +311,7 @@ class AppInitializer {
         });
 
         window.addEventListener('online', () => {
-            this.showAlert(
+            showAlert(
                 'success',
                 'Connection Restored',
                 'You are back online'
@@ -412,17 +319,17 @@ class AppInitializer {
         });
     }
 
-    static handleAuthError(error) {
-        console.error('[AppInitializer] Auth Error:', error);
+    handleAuthError(error) {
+        this.logger.error('Auth Error:', error);
         
         localStorage.removeItem('authToken');
-        this.deleteCookie('authToken');
+        deleteCookie('authToken');
         
         if (window.appSocket) {
             window.appSocket.disconnect();
         }
 
-        this.showError(
+        showError(
             'Session Expired',
             'Your session has expired. Please log in again.',
             {
@@ -435,21 +342,7 @@ class AppInitializer {
         );
     }
 
-    static showError(title, message, options = {}) {
-        document.dispatchEvent(new CustomEvent('app-alert', {
-            detail: {
-                type: 'error',
-                title,
-                message,
-                options: {
-                    timer: 3000,
-                    ...options
-                }
-            }
-        }));
-    }
-
-    static showFatalError(message) {
+    showFatalError(message) {
         const errorDiv = document.createElement('div');
         errorDiv.style.cssText = `
             position: fixed;
@@ -465,24 +358,8 @@ class AppInitializer {
         errorDiv.textContent = `Fatal Error: ${message}`;
         document.body.prepend(errorDiv);
     }
-
-    static deleteCookie(name) {
-        document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=${window.location.hostname};`;
-    }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-    try {
-        if (AppInitializer.debugMode) {
-            console.debug('[AppInitializer] DOM fully loaded, initializing app');
-        }
-        AppInitializer.init();
-    } catch (error) {
-        console.error('[AppInitializer] Initialization failed:', error);
-        AppInitializer.showFatalError('Failed to initialize application');
-    }
-});
-
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = AppInitializer;
-}
+// Экспортируем singleton экземпляр
+const appInitializer = new AppInitializer();
+export default appInitializer;
