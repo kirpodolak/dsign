@@ -1,19 +1,23 @@
-// dsign/static/js/utils/auth.js
+/**
+ * Authentication service module
+ * @module AuthService
+ */
 
 /**
- * Сервис для работы с аутентификацией
- * Централизует все операции с токенами и состоянием авторизации
+ * Service for handling authentication, tokens and authorization state
  */
-class AuthService {
+export class AuthService {
     constructor() {
-        this.logger = window.App?.Logger;
+        // Initialize logger (will be set properly when App is available)
+        this.logger = typeof window !== 'undefined' ? window.App?.Logger : null;
         this.tokenKey = 'auth_token';
         this.authStatusKey = 'auth_status';
     }
 
     /**
-     * Проверяет статус аутентификации пользователя
-     * @returns {Promise<boolean>} true если пользователь аутентифицирован
+     * Check user authentication status
+     * @async
+     * @returns {Promise<boolean>} True if user is authenticated
      */
     async checkAuth() {
         try {
@@ -32,12 +36,17 @@ class AuthService {
                 return false;
             }
 
-            const response = await window.App.API?.fetch('/auth/api/check-auth');
+            // Use dynamic import for API if not available globally
+            const api = typeof window !== 'undefined' && window.App?.API 
+                ? window.App.API 
+                : await import('./api.js');
+
+            const response = await api.fetch('/auth/api/check-auth');
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
             
-            const data = await response?.json();
+            const data = await response.json();
             
             if (data?.authenticated && data?.token_valid) {
                 this.logger?.debug('User authenticated');
@@ -55,12 +64,14 @@ class AuthService {
     }
 
     /**
-     * Получает токен из localStorage
-     * @returns {string|null} Токен или null если отсутствует
+     * Get token from localStorage
+     * @returns {string|null} Token or null if not found
      */
     getToken() {
         try {
-            return localStorage.getItem(this.tokenKey);
+            return typeof localStorage !== 'undefined' 
+                ? localStorage.getItem(this.tokenKey) 
+                : null;
         } catch (e) {
             this.logger?.error('Failed to get auth token', e);
             return null;
@@ -68,35 +79,40 @@ class AuthService {
     }
 
     /**
-     * Сохраняет токен в localStorage
-     * @param {string} token JWT токен
+     * Save token to localStorage
+     * @param {string} token JWT token
      */
     setToken(token) {
         try {
-            localStorage.setItem(this.tokenKey, token);
-            this.logger?.debug('Token saved to storage');
+            if (typeof localStorage !== 'undefined') {
+                localStorage.setItem(this.tokenKey, token);
+                this.logger?.debug('Token saved to storage');
+            }
         } catch (e) {
             this.logger?.error('Failed to save auth token', e);
         }
     }
 
     /**
-     * Очищает данные аутентификации
+     * Clear authentication data
      */
     clearAuth() {
         this.logger?.debug('Clearing authentication data');
-        localStorage.removeItem(this.tokenKey);
-        window.App.Helpers?.setCachedData(this.authStatusKey, { value: false });
         
-        if (window.App?.Sockets) {
-            window.App.Sockets.disconnect();
+        if (typeof localStorage !== 'undefined') {
+            localStorage.removeItem(this.tokenKey);
+        }
+
+        if (typeof window !== 'undefined') {
+            window.App?.Helpers?.setCachedData?.(this.authStatusKey, { value: false });
+            window.App?.Sockets?.disconnect?.();
         }
     }
 
     /**
-     * Проверяет валидность формата и срока действия токена
-     * @param {string} token JWT токен
-     * @returns {boolean} true если токен валиден
+     * Validate token format and expiration
+     * @param {string} token JWT token
+     * @returns {boolean} True if token is valid
      */
     isTokenValid(token) {
         if (!token || token.split('.').length !== 3) {
@@ -113,16 +129,17 @@ class AuthService {
     }
 
     /**
-     * Обрабатывает успешный вход пользователя
-     * @param {object} response Ответ сервера
+     * Handle successful login
+     * @param {object} response Server response
      */
     handleLoginSuccess(response) {
         if (response?.token) {
             this.setToken(response.token);
             this.logger?.info('User logged in successfully');
             
-            // Инициируем подключение WebSocket если нужно
-            if (window.App.Sockets && !window.App.Sockets.isConnected()) {
+            if (typeof window !== 'undefined' && 
+                window.App?.Sockets && 
+                !window.App.Sockets.isConnected()) {
                 setTimeout(() => {
                     window.App.Sockets.connect();
                 }, 300);
@@ -133,9 +150,11 @@ class AuthService {
     }
 
     /**
-     * Обрабатывает неавторизованный доступ
+     * Handle unauthorized access
      */
     handleUnauthorized() {
+        if (typeof window === 'undefined') return;
+        
         if (window.location.pathname.startsWith('/auth/login')) {
             this.logger?.debug('Already on login page, skipping redirect');
             return;
@@ -145,16 +164,18 @@ class AuthService {
         this.clearAuth();
         
         setTimeout(() => {
-            const redirect = encodeURIComponent(window.location.pathname + window.location.search);
+            const redirect = encodeURIComponent(
+                window.location.pathname + window.location.search
+            );
             window.location.href = `/auth/login?redirect=${redirect}`;
         }, 100);
     }
 
     /**
-     * Ожидает появления валидного токена
-     * @param {number} [maxAttempts=5] Максимальное количество попыток
-     * @param {number} [delay=1000] Задержка между попытками (мс)
-     * @returns {Promise<string|null>} Токен или null если не найден
+     * Wait for valid token to appear
+     * @param {number} [maxAttempts=5] Maximum attempts
+     * @param {number} [delay=1000] Delay between attempts (ms)
+     * @returns {Promise<string|null>} Token or null if not found
      */
     waitForToken(maxAttempts = 5, delay = 1000) {
         return new Promise((resolve) => {
@@ -177,13 +198,19 @@ class AuthService {
     }
 
     /**
-     * Получает токен для WebSocket соединения
-     * @returns {Promise<{token: string, expiresIn: number, socketUrl: string}>} Данные для WebSocket соединения
-     * @throws {Error} Если не удалось получить токен
+     * Get WebSocket connection token
+     * @async
+     * @returns {Promise<{token: string, expiresIn: number, socketUrl: string}>} WebSocket connection data
+     * @throws {Error} If failed to get token
      */
     async getSocketToken() {
         try {
-            const response = await window.App.API.fetch('/auth/socket-token', {
+            // Use dynamic import for API if not available globally
+            const api = typeof window !== 'undefined' && window.App?.API 
+                ? window.App.API 
+                : await import('./api.js');
+
+            const response = await api.fetch('/auth/socket-token', {
                 credentials: 'include',
                 headers: {
                     'Accept': 'application/json',
@@ -202,7 +229,7 @@ class AuthService {
             }
             
             const contentType = response.headers.get('content-type');
-            if (!contentType || !contentType.includes('application/json')) {
+            if (!contentType?.includes('application/json')) {
                 throw new Error('Invalid response format');
             }
             
@@ -223,25 +250,19 @@ class AuthService {
     }
 }
 
-// Инициализация и экспорт сервиса
-window.App = window.App || {};
-window.App.Auth = new AuthService();
-
-/**
- * Инициализация обработчиков аутентификации
- */
-document.addEventListener('DOMContentLoaded', () => {
-    // Периодическая проверка аутентификации
-    if (!window.location.pathname.includes('/auth/login')) {
-        setInterval(() => {
-            window.App.Auth.checkAuth().catch(error => {
-                window.App.Logger?.error('Periodic auth check failed', error);
-            });
-        }, window.App.config?.authCheckInterval || 60000);
-    }
-});
-
-// Экспорт для использования в модульной системе
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = AuthService;
+// Initialize and export service for global access
+if (typeof window !== 'undefined') {
+    window.App = window.App || {};
+    window.App.Auth = window.App.Auth || new AuthService();
+    
+    // Initialize auth check handlers when DOM is ready
+    document.addEventListener('DOMContentLoaded', () => {
+        if (!window.location.pathname.includes('/auth/login')) {
+            setInterval(() => {
+                window.App.Auth.checkAuth().catch(error => {
+                    window.App.Logger?.error('Periodic auth check failed', error);
+                });
+            }, window.App.config?.authCheckInterval || 60000);
+        }
+    });
 }
