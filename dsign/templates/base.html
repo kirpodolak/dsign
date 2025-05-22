@@ -48,14 +48,15 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
-    <!-- Core scripts -->
-    <script src="/static/js/utils/helpers.js"></script>
-    <script src="/static/js/base.js"></script>
-    <script src="/static/js/utils/sockets.js"></script>
-    <script src="/static/js/utils/player-controls.js"></script>
-    
-    <!-- Application initialization -->
-    <script src="/static/js/utils/app-init.js"></script>
+    <!-- Main app initialization -->
+    <script type="module">
+        import App from '/static/js/base.js';
+        
+        // Initialize when DOM is ready
+        document.addEventListener('DOMContentLoaded', () => {
+            App.initialize();
+        });
+    </script>
     
     {% block scripts %}{% endblock %}
 </body>
