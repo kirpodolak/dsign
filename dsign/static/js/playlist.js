@@ -1,141 +1,181 @@
-(function() {
-    // Кэш для превью медиафайлов
-    const previewCache = new Map();
-    
-    // Получаем ID плейлиста из URL
-    function getPlaylistId() {
-        const params = new URLSearchParams(window.location.search);
-        let id = params.get('id') || window.location.pathname.split('/').pop();
-        return id && !isNaN(id) ? id : null;
+// Кэш для превью медиафайлов
+const previewCache = new Map();
+
+// Утилитные функции
+function getPlaylistId() {
+    const params = new URLSearchParams(window.location.search);
+    let id = params.get('id') || window.location.pathname.split('/').pop();
+    return id && !isNaN(id) ? id : null;
+}
+
+function getCSRFToken() {
+    return document.querySelector('meta[name="csrf-token"]')?.content || '';
+}
+
+function toggleButtonState(button, isLoading) {
+    if (!button) return;
+    button.disabled = isLoading;
+    button.innerHTML = isLoading ? 
+        '<i class="fas fa-spinner fa-spin"></i> Сохранение...' : 
+        '<i class="fas fa-save"></i> Сохранить плейлист';
+}
+
+// UI компонент для уведомлений
+class PlaylistUI {
+    constructor() {
+        this.setupStyles();
     }
 
-    const playlistId = getPlaylistId();
-    const fileListEl = document.getElementById('file-list');
-    const saveBtn = document.getElementById('save-playlist');
-    const exportBtn = document.getElementById('export-m3u');
-
-    // Универсальная функция для показа уведомлений
-    const ui = {
-        showAlert(message, type = 'info', duration = 5000) {
-            // Создаем контейнер для уведомлений, если его еще нет
-            let alertsContainer = document.getElementById('alerts-container');
-            if (!alertsContainer) {
-                alertsContainer = document.createElement('div');
-                alertsContainer.id = 'alerts-container';
-                alertsContainer.style.position = 'fixed';
-                alertsContainer.style.top = '20px';
-                alertsContainer.style.right = '20px';
-                alertsContainer.style.zIndex = '10000';
-                alertsContainer.style.maxWidth = '350px';
-                alertsContainer.style.width = '100%';
-                document.body.appendChild(alertsContainer);
+    setupStyles() {
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes slideIn {
+                from { transform: translateX(100%); opacity: 0; }
+                to { transform: translateX(0); opacity: 1; }
             }
+            @keyframes fadeOut {
+                to { opacity: 0; transform: translateX(100%); }
+            }
+        `;
+        document.head.appendChild(style);
+    }
 
-            // Создаем элемент уведомления
-            const alertDiv = document.createElement('div');
-            alertDiv.className = `alert alert-${type}`;
-            alertDiv.style.cssText = `
-                padding: 15px;
-                margin-bottom: 15px;
-                border-radius: 8px;
-                background: ${this.getAlertColor(type)};
-                color: white;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                animation: slideIn 0.3s ease-out forwards;
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-            `;
+    showAlert(message, type = 'info', duration = 5000) {
+        // Создаем контейнер для уведомлений, если его еще нет
+        let alertsContainer = document.getElementById('alerts-container');
+        if (!alertsContainer) {
+            alertsContainer = document.createElement('div');
+            alertsContainer.id = 'alerts-container';
+            alertsContainer.style.position = 'fixed';
+            alertsContainer.style.top = '20px';
+            alertsContainer.style.right = '20px';
+            alertsContainer.style.zIndex = '10000';
+            alertsContainer.style.maxWidth = '350px';
+            alertsContainer.style.width = '100%';
+            document.body.appendChild(alertsContainer);
+        }
 
-            // Добавляем иконку в зависимости от типа
-            const icons = {
-                success: 'fa-check-circle',
-                error: 'fa-times-circle',
-                warning: 'fa-exclamation-triangle',
-                info: 'fa-info-circle'
-            };
+        // Создаем элемент уведомления
+        const alertDiv = document.createElement('div');
+        alertDiv.className = `alert alert-${type}`;
+        alertDiv.style.cssText = `
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 8px;
+            background: ${this.getAlertColor(type)};
+            color: white;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            animation: slideIn 0.3s ease-out forwards;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        `;
 
-            alertDiv.innerHTML = `
-                <div style="display: flex; align-items: center; gap: 10px;">
-                    <i class="fas ${icons[type] || 'fa-info-circle'}" style="font-size: 1.5rem;"></i>
-                    <div>
-                        <div style="font-weight: bold; margin-bottom: 5px;">${type === 'error' ? 'Ошибка' : 
-                            type === 'success' ? 'Успех' : 
-                            type === 'warning' ? 'Внимание' : 'Информация'}</div>
-                        <div>${message}</div>
-                    </div>
+        // Добавляем иконку в зависимости от типа
+        const icons = {
+            success: 'fa-check-circle',
+            error: 'fa-times-circle',
+            warning: 'fa-exclamation-triangle',
+            info: 'fa-info-circle'
+        };
+
+        alertDiv.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <i class="fas ${icons[type] || 'fa-info-circle'}" style="font-size: 1.5rem;"></i>
+                <div>
+                    <div style="font-weight: bold; margin-bottom: 5px;">${type === 'error' ? 'Ошибка' : 
+                        type === 'success' ? 'Успех' : 
+                        type === 'warning' ? 'Внимание' : 'Информация'}</div>
+                    <div>${message}</div>
                 </div>
-                <button class="alert-close-btn" style="background: none; border: none; color: white; cursor: pointer;">
-                    <i class="fas fa-times"></i>
-                </button>
-            `;
+            </div>
+            <button class="alert-close-btn" style="background: none; border: none; color: white; cursor: pointer;">
+                <i class="fas fa-times"></i>
+            </button>
+        `;
 
-            // Добавляем уведомление в контейнер
-            alertsContainer.prepend(alertDiv);
+        // Добавляем уведомление в контейнер
+        alertsContainer.prepend(alertDiv);
 
-            // Настраиваем закрытие по клику
-            const closeBtn = alertDiv.querySelector('.alert-close-btn');
-            closeBtn.addEventListener('click', () => {
-                this.closeAlert(alertDiv);
-            });
+        // Настраиваем закрытие по клику
+        const closeBtn = alertDiv.querySelector('.alert-close-btn');
+        closeBtn.addEventListener('click', () => {
+            this.closeAlert(alertDiv);
+        });
 
-            // Автоматическое закрытие
-            setTimeout(() => {
-                this.closeAlert(alertDiv);
-            }, duration);
+        // Автоматическое закрытие
+        setTimeout(() => {
+            this.closeAlert(alertDiv);
+        }, duration);
 
-            return {
-                element: alertDiv,
-                close: () => this.closeAlert(alertDiv)
-            };
-        },
-
-        closeAlert(alertDiv) {
-            if (alertDiv.parentNode) {
-                alertDiv.style.animation = 'fadeOut 0.3s ease-in forwards';
-                setTimeout(() => alertDiv.remove(), 300);
-            }
-        },
-
-        getAlertColor(type) {
-            const colors = {
-                success: '#28a745',
-                error: '#dc3545',
-                warning: '#ffc107',
-                info: '#17a2b8'
-            };
-            return colors[type] || colors.info;
-        }
-    };
-
-    // Добавляем CSS анимации
-    const style = document.createElement('style');
-    style.textContent = `
-        @keyframes slideIn {
-            from { transform: translateX(100%); opacity: 0; }
-            to { transform: translateX(0); opacity: 1; }
-        }
-        @keyframes fadeOut {
-            to { opacity: 0; transform: translateX(100%); }
-        }
-    `;
-    document.head.appendChild(style);
-
-    function toggleButtonState(button, isLoading) {
-        if (!button) return;
-        button.disabled = isLoading;
-        button.innerHTML = isLoading ? 
-            '<i class="fas fa-spinner fa-spin"></i> Сохранение...' : 
-            '<i class="fas fa-save"></i> Сохранить плейлист';
+        return {
+            element: alertDiv,
+            close: () => this.closeAlert(alertDiv)
+        };
     }
 
-    // Функция для получения CSRF токена
-    function getCSRFToken() {
-        return document.querySelector('meta[name="csrf-token"]')?.content || '';
+    closeAlert(alertDiv) {
+        if (alertDiv.parentNode) {
+            alertDiv.style.animation = 'fadeOut 0.3s ease-in forwards';
+            setTimeout(() => alertDiv.remove(), 300);
+        }
+    }
+
+    getAlertColor(type) {
+        const colors = {
+            success: '#28a745',
+            error: '#dc3545',
+            warning: '#ffc107',
+            info: '#17a2b8'
+        };
+        return colors[type] || colors.info;
+    }
+}
+
+// Основной класс плейлиста
+export class PlaylistManager {
+    constructor() {
+        this.playlistId = getPlaylistId();
+        this.fileListEl = document.getElementById('file-list');
+        this.saveBtn = document.getElementById('save-playlist');
+        this.exportBtn = document.getElementById('export-m3u');
+        this.emptyMessage = document.getElementById('empty-playlist-message');
+        this.ui = new PlaylistUI();
+
+        this.init();
+    }
+
+    init() {
+        if (!this.fileListEl || !this.saveBtn) {
+            console.error('Не найдены необходимые элементы DOM');
+            return;
+        }
+
+        this.saveBtn.addEventListener('click', () => this.savePlaylist());
+        
+        if (this.exportBtn) {
+            this.exportBtn.addEventListener('click', () => this.exportM3U());
+        }
+        
+        this.loadMediaFiles();
+        this.setupCheckboxHandlers();
+        
+        if (window.App?.Sockets?.socket) {
+            window.App.Sockets.socket.on('playlist_updated', (data) => {
+                if (data.playlist_id == this.playlistId) {
+                    sessionStorage.removeItem(`media-files-${this.playlistId}`);
+                    this.loadMediaFiles();
+                    
+                    if (data.m3u_generated) {
+                        this.ui.showAlert('M3U файл был автоматически обновлен', 'info');
+                    }
+                }
+            });
+        }
     }
 
     // Обработчик изменений чекбоксов
-    function setupCheckboxHandlers() {
+    setupCheckboxHandlers() {
         document.addEventListener('change', (e) => {
             if (e.target.classList.contains('include-checkbox')) {
                 const filename = e.target.dataset.filename;
@@ -145,25 +185,25 @@
     }
 
     // Загрузка медиафайлов с кэшированием
-    async function loadMediaFiles() {
-        if (!playlistId) {
-            ui.showAlert('Неверный ID плейлиста', 'error');
+    async loadMediaFiles() {
+        if (!this.playlistId) {
+            this.ui.showAlert('Неверный ID плейлиста', 'error');
             return;
         }
 
         try {
-            const cacheKey = `media-files-${playlistId}`;
+            const cacheKey = `media-files-${this.playlistId}`;
             const cachedData = sessionStorage.getItem(cacheKey);
             
             if (cachedData) {
                 const cache = JSON.parse(cachedData);
                 if (Date.now() - cache.timestamp < 60000) {
-                    renderFileTable(cache.data.files);
+                    this.renderFileTable(cache.data.files);
                     return;
                 }
             }
 
-            const response = await fetch(`/api/media/files?playlist_id=${playlistId}`, {
+            const response = await fetch(`/api/media/files?playlist_id=${this.playlistId}`, {
                 headers: { 'Accept': 'application/json' },
                 credentials: 'include'
             });
@@ -177,15 +217,15 @@
                 timestamp: Date.now(), 
                 data: data 
             }));
-            renderFileTable(data.files);
+            this.renderFileTable(data.files);
         } catch (error) {
             console.error('Ошибка загрузки файлов:', error);
-            ui.showAlert(`Не удалось загрузить медиафайлы: ${error.message}`, 'error');
+            this.ui.showAlert(`Не удалось загрузить медиафайлы: ${error.message}`, 'error');
         }
     }
 
     // Предпросмотр изображений
-    async function loadPreview(file) {
+    async loadPreview(file) {
         const cacheKey = `preview-${file.filename}`;
     
         // Check memory cache first
@@ -238,18 +278,17 @@
     }
 
     // Рендеринг таблицы файлов
-    function renderFileTable(files) {
-        if (!fileListEl) return;
+    renderFileTable(files) {
+        if (!this.fileListEl) return;
 
-        const emptyMessage = document.getElementById('empty-playlist-message');
         if (!files || files.length === 0) {
-            fileListEl.innerHTML = '';
-            if (emptyMessage) emptyMessage.style.display = 'block';
+            this.fileListEl.innerHTML = '';
+            if (this.emptyMessage) this.emptyMessage.style.display = 'block';
             return;
         }
 
-        if (emptyMessage) emptyMessage.style.display = 'none';
-        fileListEl.innerHTML = '';
+        if (this.emptyMessage) this.emptyMessage.style.display = 'none';
+        this.fileListEl.innerHTML = '';
 
         files.forEach((file, index) => {
             const row = document.createElement('tr');
@@ -276,22 +315,22 @@
             `;
         
             row.querySelector('td:nth-child(3)').appendChild(img);
-            fileListEl.appendChild(row);
+            this.fileListEl.appendChild(row);
         
-            loadPreview(file).then(url => {
+            this.loadPreview(file).then(url => {
                 img.src = url;
             });
         });
     }
 
     // Сохранение плейлиста с генерацией M3U
-    async function savePlaylist() {
-        if (!playlistId) {
-            ui.showAlert('Неверный ID плейлиста', 'error');
+    async savePlaylist() {
+        if (!this.playlistId) {
+            this.ui.showAlert('Неверный ID плейлиста', 'error');
             return;
         }
 
-        toggleButtonState(saveBtn, true);
+        toggleButtonState(this.saveBtn, true);
 
         try {
             const rows = Array.from(document.querySelectorAll('#file-list tr'));
@@ -330,7 +369,7 @@
 
                 } catch (error) {
                     console.error(`Ошибка обработки файла: ${error.message}`);
-                    ui.showAlert(error.message, 'warning');
+                    this.ui.showAlert(error.message, 'warning');
                     hasErrors = true;
                 }
             }
@@ -343,7 +382,7 @@
                 throw new Error('Не выбрано ни одного файла');
             }
 
-            const response = await fetch(`/api/playlists/${playlistId}/files`, {
+            const response = await fetch(`/api/playlists/${this.playlistId}/files`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -368,13 +407,13 @@
                 throw new Error(errorMsg);
             }
 
-            ui.showAlert('Плейлист сохранен. M3U файл обновлен.', 'success');
-            sessionStorage.removeItem(`media-files-${playlistId}`);
-            await loadMediaFiles();
+            this.ui.showAlert('Плейлист сохранен. M3U файл обновлен.', 'success');
+            sessionStorage.removeItem(`media-files-${this.playlistId}`);
+            await this.loadMediaFiles();
 
             if (window.App?.Sockets) {
                 window.App.Sockets.emit('playlist_updated', {
-                    playlist_id: playlistId,
+                    playlist_id: this.playlistId,
                     updated_files: selectedFiles.length,
                     m3u_generated: true
                 });
@@ -390,19 +429,19 @@
                 errorMessage = 'Ошибка валидации данных';
             }
             
-            ui.showAlert(errorMessage || 'Не удалось сохранить плейлист', 'error');
+            this.ui.showAlert(errorMessage || 'Не удалось сохранить плейлист', 'error');
 
         } finally {
-            toggleButtonState(saveBtn, false);
+            toggleButtonState(this.saveBtn, false);
         }
     }
 
     // Экспорт M3U
-    async function exportM3U() {
-        if (!playlistId) return;
+    async exportM3U() {
+        if (!this.playlistId) return;
         
         try {
-            const response = await fetch(`/api/playlists/${playlistId}/export-m3u`, {
+            const response = await fetch(`/api/playlists/${this.playlistId}/export-m3u`, {
                 method: 'POST',
                 headers: {
                     'X-CSRFToken': getCSRFToken()
@@ -412,47 +451,24 @@
             const result = await response.json();
             
             if (result.success) {
-                ui.showAlert(`M3U файл успешно экспортирован: ${result.filename}`, 'success');
+                this.ui.showAlert(`M3U файл успешно экспортирован: ${result.filename}`, 'success');
             } else {
                 throw new Error(result.error || 'Ошибка экспорта');
             }
         } catch (error) {
             console.error('Ошибка экспорта:', error);
-            ui.showAlert(error.message || 'Не удалось экспортировать M3U', 'error');
+            this.ui.showAlert(error.message || 'Не удалось экспортировать M3U', 'error');
         }
     }
+}
 
-    // Инициализация
-    document.addEventListener('DOMContentLoaded', () => {
-        try {
-            if (fileListEl && saveBtn) {
-                saveBtn.addEventListener('click', savePlaylist);
-                
-                if (exportBtn) {
-                    exportBtn.addEventListener('click', exportM3U);
-                }
-                
-                loadMediaFiles();
-                setupCheckboxHandlers();
-                
-                if (window.App?.Sockets?.socket) {
-                    window.App.Sockets.socket.on('playlist_updated', (data) => {
-                        if (data.playlist_id == playlistId) {
-                            sessionStorage.removeItem(`media-files-${playlistId}`);
-                            loadMediaFiles();
-                            
-                            if (data.m3u_generated) {
-                                ui.showAlert('M3U файл был автоматически обновлен', 'info');
-                            }
-                        }
-                    });
-                }
-            } else {
-                console.error('Не найдены необходимые элементы DOM');
-            }
-        } catch (error) {
-            console.error('Ошибка инициализации:', error);
-            ui.showAlert('Не удалось загрузить плейлист', 'error');
-        }
-    });
-})();
+// Инициализация при загрузке DOM
+document.addEventListener('DOMContentLoaded', () => {
+    const playlistManager = new PlaylistManager();
+    
+    // Для обратной совместимости
+    window.App = window.App || {};
+    window.App.PlaylistManager = playlistManager;
+});
+
+export default PlaylistManager;
