@@ -1,78 +1,112 @@
-document.addEventListener('DOMContentLoaded', () => {
-    // DOM Elements
-    const elements = {
-        idleProfileSelect: document.getElementById('idle-profile-select'),
-        applyIdleBtn: document.getElementById('apply-idle-profile'),
-        playlistSelect: document.getElementById('playlist-select'),
-        profileSelect: document.getElementById('playlist-profile-select'),
-        assignBtn: document.getElementById('assign-profile'),
-        profileNameInput: document.getElementById('profile-name'),
-        profileTypeSelect: document.getElementById('profile-type'),
-        saveProfileBtn: document.getElementById('save-profile'),
-        settingsEditor: document.getElementById('profile-settings-editor'),
-        currentSettingsPanel: document.getElementById('current-settings-panel'),
-        mpvSettingsForm: document.getElementById('mpv-settings-form'),
-        profilesGrid: document.getElementById('profiles-grid'),
-        playlistAssignments: document.getElementById('playlist-assignments'),
-        currentSettingsDisplay: document.getElementById('current-settings-display'),
-        currentProfileIndicator: document.getElementById('current-profile-indicator')
-    };
+// Utility functions that can be shared across modules
+export function showAlert(message, type = 'info') {
+    const alert = document.createElement('div');
+    alert.className = `alert alert-${type}`;
+    alert.textContent = message;
+    alert.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        padding: 12px 20px;
+        border-radius: 4px;
+        background-color: ${getAlertColor(type)};
+        color: white;
+        z-index: 1000;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        animation: fadeIn 0.3s ease-out;
+    `;
 
-    // Application State
-    const state = {
-        currentProfile: null,
-        currentSettings: {},
-        profiles: [],
-        playlists: [],
-        assignments: {},
-        settingsSchema: {}
-    };
+    document.body.appendChild(alert);
 
-    // Main Initialization
-    async function init() {
+    setTimeout(() => {
+        alert.style.opacity = '0';
+        setTimeout(() => alert.remove(), 300);
+    }, 3000);
+}
+
+function getAlertColor(type) {
+    switch (type) {
+        case 'success': return '#28a745';
+        case 'error': return '#dc3545';
+        case 'warning': return '#ffc107';
+        default: return '#17a2b8';
+    }
+}
+
+export function getCSRFToken() {
+    return document.querySelector('meta[name="csrf-token"]')?.content || '';
+}
+
+// Main Settings Module
+export class SettingsManager {
+    constructor() {
+        this.elements = {
+            idleProfileSelect: document.getElementById('idle-profile-select'),
+            applyIdleBtn: document.getElementById('apply-idle-profile'),
+            playlistSelect: document.getElementById('playlist-select'),
+            profileSelect: document.getElementById('playlist-profile-select'),
+            assignBtn: document.getElementById('assign-profile'),
+            profileNameInput: document.getElementById('profile-name'),
+            profileTypeSelect: document.getElementById('profile-type'),
+            saveProfileBtn: document.getElementById('save-profile'),
+            settingsEditor: document.getElementById('profile-settings-editor'),
+            currentSettingsPanel: document.getElementById('current-settings-panel'),
+            mpvSettingsForm: document.getElementById('mpv-settings-form'),
+            profilesGrid: document.getElementById('profiles-grid'),
+            playlistAssignments: document.getElementById('playlist-assignments'),
+            currentSettingsDisplay: document.getElementById('current-settings-display'),
+            currentProfileIndicator: document.getElementById('current-profile-indicator')
+        };
+
+        this.state = {
+            currentProfile: null,
+            currentSettings: {},
+            profiles: [],
+            playlists: [],
+            assignments: {},
+            settingsSchema: {}
+        };
+
+        this.init();
+    }
+
+    async init() {
         try {
-            // Проверка существования элементов перед работой с ними
-            if (!elements.idleProfileSelect || !elements.profileSelect) {
+            if (!this.elements.idleProfileSelect || !this.elements.profileSelect) {
                 throw new Error('Required DOM elements not found');
             }
 
-            // Загрузка данных с обработкой ошибок
             const [profiles, playlists, assignments] = await Promise.all([
-                loadProfiles().catch(e => {
+                this.loadProfiles().catch(e => {
                     console.error('Profile load error:', e);
                     return [];
                 }),
-                loadPlaylists().catch(e => {
+                this.loadPlaylists().catch(e => {
                     console.error('Playlist load error:', e);
                     return [];
                 }),
-                loadAssignments().catch(e => {
+                this.loadAssignments().catch(e => {
                     console.error('Assignment load error:', e);
                     return {};
                 })
             ]);
 
-            // Обновление состояния с проверкой на null/undefined
-            state.profiles = Array.isArray(profiles) ? profiles : [];
-            state.playlists = Array.isArray(playlists) ? playlists : [];
-            state.assignments = assignments && typeof assignments === 'object' ? assignments : {};
+            this.state.profiles = Array.isArray(profiles) ? profiles : [];
+            this.state.playlists = Array.isArray(playlists) ? playlists : [];
+            this.state.assignments = assignments && typeof assignments === 'object' ? assignments : {};
 
-            // Рендеринг только если есть данные (теперь гарантировано есть массивы)
-            renderProfileSelects();
-            renderPlaylistAssignments();
+            this.renderProfileSelects();
+            this.renderPlaylistAssignments();
 
-            // Load additional data
             await Promise.all([
-                loadCurrentSettings(),
-                loadSettingsSchema()
+                this.loadCurrentSettings(),
+                this.loadSettingsSchema()
             ]);
 
-            renderCurrentSettings();
-            renderSettingsForm();
-            renderProfileGrid();
-
-            // Setup event listeners after initial render
-            setupEventListeners();
+            this.renderCurrentSettings();
+            this.renderSettingsForm();
+            this.renderProfileGrid();
+            this.setupEventListeners();
 
         } catch (error) {
             console.error('Initialization error:', error);
@@ -80,150 +114,147 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Data Loading Functions
-    async function loadProfiles() {
+    // Data loading methods
+    async loadProfiles() {
         try {
             const response = await fetch('/api/profiles');
             if (!response.ok) throw new Error('Failed to load profiles');
             
             const data = await response.json();
             if (data.success) {
-                state.profiles = Array.isArray(data.profiles) ? data.profiles : [];
-                return state.profiles;
+                this.state.profiles = Array.isArray(data.profiles) ? data.profiles : [];
+                return this.state.profiles;
             } else {
                 throw new Error(data.error || 'Invalid profiles data');
             }
         } catch (error) {
             console.error('Error loading profiles:', error);
             showAlert('Failed to load profiles. ' + error.message, 'error');
-            state.profiles = [];
+            this.state.profiles = [];
             return [];
         }
     }
 
-    async function loadPlaylists() {
+    async loadPlaylists() {
         try {
             const response = await fetch('/api/playlists');
             if (!response.ok) throw new Error('Failed to load playlists');
             
             const data = await response.json();
             if (data.success) {
-                state.playlists = Array.isArray(data.playlists) ? data.playlists : [];
-                return state.playlists;
+                this.state.playlists = Array.isArray(data.playlists) ? data.playlists : [];
+                return this.state.playlists;
             } else {
                 throw new Error(data.error || 'Invalid playlists data');
             }
         } catch (error) {
             console.error('Error loading playlists:', error);
             showAlert('Failed to load playlists. ' + error.message, 'error');
-            state.playlists = [];
+            this.state.playlists = [];
             return [];
         }
     }
 
-    async function loadAssignments() {
+    async loadAssignments() {
         try {
             const response = await fetch('/api/profiles/assignments');
             if (!response.ok) throw new Error('Failed to load assignments');
             
             const data = await response.json();
             if (data.success) {
-                state.assignments = data.assignments && typeof data.assignments === 'object' 
+                this.state.assignments = data.assignments && typeof data.assignments === 'object' 
                     ? data.assignments 
                     : {};
-                return state.assignments;
+                return this.state.assignments;
             } else {
                 throw new Error(data.error || 'Invalid assignments data');
             }
         } catch (error) {
             console.error('Error loading assignments:', error);
             showAlert('Failed to load profile assignments', 'error');
-            state.assignments = {};
+            this.state.assignments = {};
             return {};
         }
     }
 
-    async function loadCurrentSettings() {
+    async loadCurrentSettings() {
         try {
             const response = await fetch('/api/settings/current');
             if (!response.ok) throw new Error('Failed to load current settings');
             
             const data = await response.json();
             if (data.success) {
-                state.currentSettings = data.settings && typeof data.settings === 'object' 
+                this.state.currentSettings = data.settings && typeof data.settings === 'object' 
                     ? data.settings 
                     : {};
-                state.currentProfile = data.profile || null;
-                return { settings: state.currentSettings, profile: state.currentProfile };
+                this.state.currentProfile = data.profile || null;
+                return { settings: this.state.currentSettings, profile: this.state.currentProfile };
             } else {
                 throw new Error(data.error || 'Invalid settings data');
             }
         } catch (error) {
             console.error('Error loading current settings:', error);
             showAlert('Failed to load current settings', 'error');
-            state.currentSettings = {};
-            state.currentProfile = null;
+            this.state.currentSettings = {};
+            this.state.currentProfile = null;
             return { settings: {}, profile: null };
         }
     }
 
-    async function loadSettingsSchema() {
+    async loadSettingsSchema() {
         try {
             const response = await fetch('/api/settings/schema');
             if (!response.ok) throw new Error('Failed to load settings schema');
             
             const data = await response.json();
             if (data.success) {
-                state.settingsSchema = data.schema && typeof data.schema === 'object' 
+                this.state.settingsSchema = data.schema && typeof data.schema === 'object' 
                     ? data.schema 
                     : {};
-                return state.settingsSchema;
+                return this.state.settingsSchema;
             } else {
                 throw new Error(data.error || 'Invalid schema data');
             }
         } catch (error) {
             console.error('Error loading settings schema:', error);
             showAlert('Failed to load settings schema', 'error');
-            state.settingsSchema = {};
+            this.state.settingsSchema = {};
             return {};
         }
     }
 
-    // UI Rendering Functions
-    function renderProfileSelects() {
-        if (!elements.idleProfileSelect || !elements.profileSelect) return;
+    // Rendering methods
+    renderProfileSelects() {
+        if (!this.elements.idleProfileSelect || !this.elements.profileSelect) return;
 
-        // Clear existing options
-        elements.idleProfileSelect.innerHTML = '<option value="">Default</option>';
-        elements.profileSelect.innerHTML = '<option value="">Default</option>';
+        this.elements.idleProfileSelect.innerHTML = '<option value="">Default</option>';
+        this.elements.profileSelect.innerHTML = '<option value="">Default</option>';
 
-        // Add idle profiles
-        state.profiles
+        this.state.profiles
             .filter(profile => profile && profile.profile_type === 'idle')
             .forEach(profile => {
                 const option = document.createElement('option');
                 option.value = profile.id;
                 option.textContent = profile.name;
-                elements.idleProfileSelect.appendChild(option);
+                this.elements.idleProfileSelect.appendChild(option);
             });
 
-        // Add playlist profiles
-        state.profiles
+        this.state.profiles
             .filter(profile => profile && profile.profile_type === 'playlist')
             .forEach(profile => {
                 const option = document.createElement('option');
                 option.value = profile.id;
                 option.textContent = profile.name;
-                elements.profileSelect.appendChild(option);
+                this.elements.profileSelect.appendChild(option);
             });
     }
 
-    function renderProfileGrid() {
-        if (!elements.profilesGrid) return;
+    renderProfileGrid() {
+        if (!this.elements.profilesGrid) return;
         
-        elements.profilesGrid.innerHTML = '';
+        this.elements.profilesGrid.innerHTML = '';
         
-        state.profiles.forEach(profile => {
+        this.state.profiles.forEach(profile => {
             if (!profile) return;
             
             const card = document.createElement('div');
@@ -238,16 +269,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     <button class="btn-delete" data-id="${profile.id}">🗑️</button>
                 </div>
             `;
-            elements.profilesGrid.appendChild(card);
+            this.elements.profilesGrid.appendChild(card);
         });
     }
 
-    function renderPlaylistAssignments() {
-        if (!elements.playlistAssignments) return;
+    renderPlaylistAssignments() {
+        if (!this.elements.playlistAssignments) return;
         
-        elements.playlistAssignments.innerHTML = '';
+        this.elements.playlistAssignments.innerHTML = '';
         
-        state.playlists.forEach(playlist => {
+        this.state.playlists.forEach(playlist => {
             if (!playlist) return;
             
             const row = document.createElement('div');
@@ -256,55 +287,53 @@ document.addEventListener('DOMContentLoaded', () => {
                 <span class="playlist-name">${playlist.name}</span>
                 <select class="profile-select" data-playlist-id="${playlist.id}">
                     <option value="">Default</option>
-                    ${state.profiles
+                    ${this.state.profiles
                         .filter(p => p && p.profile_type === 'playlist')
                         .map(p => `<option value="${p.id}" 
-                            ${state.assignments[playlist.id] === p.id ? 'selected' : ''}>
+                            ${this.state.assignments[playlist.id] === p.id ? 'selected' : ''}>
                             ${p.name}
                         </option>`)
                         .join('')}
                 </select>
                 <button class="btn-save" data-playlist-id="${playlist.id}">Save</button>
             `;
-            elements.playlistAssignments.appendChild(row);
+            this.elements.playlistAssignments.appendChild(row);
         });
     }
 
-    function renderCurrentSettings() {
-        if (!elements.currentSettingsDisplay || !elements.currentProfileIndicator) return;
+    renderCurrentSettings() {
+        if (!this.elements.currentSettingsDisplay || !this.elements.currentProfileIndicator) return;
 
-        // Render current profile info
-        if (state.currentProfile) {
-            elements.currentProfileIndicator.innerHTML = `
-                <p>Current Profile: <strong>${state.currentProfile.name}</strong></p>
-                <p>Type: <strong>${state.currentProfile.profile_type}</strong></p>
+        if (this.state.currentProfile) {
+            this.elements.currentProfileIndicator.innerHTML = `
+                <p>Current Profile: <strong>${this.state.currentProfile.name}</strong></p>
+                <p>Type: <strong>${this.state.currentProfile.profile_type}</strong></p>
             `;
         } else {
-            elements.currentProfileIndicator.innerHTML = '<p>Using default settings</p>';
+            this.elements.currentProfileIndicator.innerHTML = '<p>Using default settings</p>';
         }
 
-        // Render current settings
-        elements.currentSettingsDisplay.innerHTML = `
-            <div><strong>Resolution:</strong> ${state.currentSettings.resolution || 'N/A'}</div>
-            <div><strong>Aspect Ratio:</strong> ${state.currentSettings.aspect_ratio || 'N/A'}</div>
-            <div><strong>Rotation:</strong> ${state.currentSettings.rotation || '0'}°</div>
-            <div><strong>Overscan:</strong> ${state.currentSettings.overscan ? 'On' : 'Off'}</div>
-            <div><strong>Volume:</strong> ${state.currentSettings.volume || '100'}%</div>
-            <div><strong>Mute:</strong> ${state.currentSettings.mute ? 'On' : 'Off'}</div>
+        this.elements.currentSettingsDisplay.innerHTML = `
+            <div><strong>Resolution:</strong> ${this.state.currentSettings.resolution || 'N/A'}</div>
+            <div><strong>Aspect Ratio:</strong> ${this.state.currentSettings.aspect_ratio || 'N/A'}</div>
+            <div><strong>Rotation:</strong> ${this.state.currentSettings.rotation || '0'}°</div>
+            <div><strong>Overscan:</strong> ${this.state.currentSettings.overscan ? 'On' : 'Off'}</div>
+            <div><strong>Volume:</strong> ${this.state.currentSettings.volume || '100'}%</div>
+            <div><strong>Mute:</strong> ${this.state.currentSettings.mute ? 'On' : 'Off'}</div>
         `;
     }
 
-    function renderSettingsForm() {
-        if (!elements.settingsEditor) return;
+    renderSettingsForm() {
+        if (!this.elements.settingsEditor) return;
 
-        elements.settingsEditor.innerHTML = '';
+        this.elements.settingsEditor.innerHTML = '';
 
-        if (!state.settingsSchema || Object.keys(state.settingsSchema).length === 0) {
-            elements.settingsEditor.innerHTML = '<p class="text-muted">No settings schema available</p>';
+        if (!this.state.settingsSchema || Object.keys(this.state.settingsSchema).length === 0) {
+            this.elements.settingsEditor.innerHTML = '<p class="text-muted">No settings schema available</p>';
             return;
         }
 
-        for (const [key, setting] of Object.entries(state.settingsSchema)) {
+        for (const [key, setting] of Object.entries(this.state.settingsSchema)) {
             if (!setting || typeof setting !== 'object') continue;
 
             const wrapper = document.createElement('div');
@@ -316,7 +345,7 @@ document.addEventListener('DOMContentLoaded', () => {
             wrapper.appendChild(label);
 
             let input;
-            const currentValue = state.currentSettings[key] ?? setting.default;
+            const currentValue = this.state.currentSettings[key] ?? setting.default;
 
             switch (setting.type) {
                 case 'select':
@@ -364,45 +393,34 @@ document.addEventListener('DOMContentLoaded', () => {
             input.id = `setting-${key}`;
             input.dataset.settingKey = key;
             wrapper.appendChild(input);
-            elements.settingsEditor.appendChild(wrapper);
+            this.elements.settingsEditor.appendChild(wrapper);
         }
     }
 
-    // Event Handlers
-    function setupEventListeners() {
-        // Apply idle profile
-        elements.applyIdleBtn?.addEventListener('click', handleApplyIdleProfile);
+    // Event handlers
+    setupEventListeners() {
+        this.elements.applyIdleBtn?.addEventListener('click', () => this.handleApplyIdleProfile());
+        this.elements.assignBtn?.addEventListener('click', () => this.handleAssignProfile());
+        this.elements.saveProfileBtn?.addEventListener('click', () => this.handleSaveProfile());
+        this.elements.mpvSettingsForm?.addEventListener('submit', (e) => this.handleMpvSettingsSubmit(e));
 
-        // Assign profile to playlist
-        elements.assignBtn?.addEventListener('click', handleAssignProfile);
-
-        // Save new profile
-        elements.saveProfileBtn?.addEventListener('click', handleSaveProfile);
-
-        // MPV settings form submission
-        elements.mpvSettingsForm?.addEventListener('submit', handleMpvSettingsSubmit);
-
-        // Delegated event listeners for dynamic content
         document.addEventListener('click', (e) => {
-            // Save playlist assignment
             if (e.target.classList.contains('btn-save')) {
-                handleSaveAssignment(e);
+                this.handleSaveAssignment(e);
             }
             
-            // Edit profile
             if (e.target.classList.contains('btn-edit')) {
-                handleEditProfile(e);
+                this.handleEditProfile(e);
             }
             
-            // Delete profile
             if (e.target.classList.contains('btn-delete')) {
-                handleDeleteProfile(e);
+                this.handleDeleteProfile(e);
             }
         });
     }
 
-    async function handleApplyIdleProfile() {
-        const profileId = elements.idleProfileSelect?.value;
+    async handleApplyIdleProfile() {
+        const profileId = this.elements.idleProfileSelect?.value;
         if (!profileId) return;
 
         try {
@@ -417,8 +435,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const result = await response.json();
             if (result.success) {
                 showAlert('Idle profile applied successfully', 'success');
-                await loadCurrentSettings();
-                renderCurrentSettings();
+                await this.loadCurrentSettings();
+                this.renderCurrentSettings();
             } else {
                 throw new Error(result.error || 'Failed to apply profile');
             }
@@ -428,9 +446,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function handleAssignProfile() {
-        const playlistId = elements.playlistSelect?.value;
-        const profileId = elements.profileSelect?.value || null;
+    async handleAssignProfile() {
+        const playlistId = this.elements.playlistSelect?.value;
+        const profileId = this.elements.profileSelect?.value || null;
 
         if (!playlistId) {
             return showAlert('Please select a playlist', 'warning');
@@ -449,8 +467,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const result = await response.json();
             if (result.success) {
                 showAlert('Profile assigned successfully', 'success');
-                await loadAssignments();
-                renderPlaylistAssignments();
+                await this.loadAssignments();
+                this.renderPlaylistAssignments();
             } else {
                 throw new Error(result.error || 'Failed to assign profile');
             }
@@ -460,7 +478,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function handleSaveAssignment(e) {
+    async handleSaveAssignment(e) {
         const playlistId = e.target.dataset.playlistId;
         const select = document.querySelector(`.profile-select[data-playlist-id="${playlistId}"]`);
         const profileId = select?.value;
@@ -478,7 +496,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const result = await response.json();
             if (result.success) {
                 showAlert('Assignment saved successfully', 'success');
-                await loadAssignments();
+                await this.loadAssignments();
             } else {
                 throw new Error(result.error || 'Failed to save assignment');
             }
@@ -488,16 +506,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function handleSaveProfile() {
-        const name = elements.profileNameInput?.value.trim();
-        const type = elements.profileTypeSelect?.value;
+    async handleSaveProfile() {
+        const name = this.elements.profileNameInput?.value.trim();
+        const type = this.elements.profileTypeSelect?.value;
 
         if (!name) {
             return showAlert('Please enter profile name', 'warning');
         }
 
         try {
-            const settings = collectSettingsFromForm();
+            const settings = this.collectSettingsFromForm();
             const response = await fetch('/api/profiles', {
                 method: 'POST',
                 headers: {
@@ -510,10 +528,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const result = await response.json();
             if (result.success) {
                 showAlert('Profile saved successfully', 'success');
-                elements.profileNameInput.value = '';
-                await loadProfiles();
-                renderProfileSelects();
-                renderProfileGrid();
+                this.elements.profileNameInput.value = '';
+                await this.loadProfiles();
+                this.renderProfileSelects();
+                this.renderProfileGrid();
             } else {
                 throw new Error(result.error || 'Failed to save profile');
             }
@@ -523,18 +541,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function handleEditProfile(e) {
+    async handleEditProfile(e) {
         const profileId = e.target.dataset.id;
-        const profile = state.profiles.find(p => p && p.id == profileId);
+        const profile = this.state.profiles.find(p => p && p.id == profileId);
         
         if (profile) {
-            elements.profileNameInput.value = profile.name;
-            elements.profileTypeSelect.value = profile.profile_type;
+            this.elements.profileNameInput.value = profile.name;
+            this.elements.profileTypeSelect.value = profile.profile_type;
             showAlert(`Editing profile: ${profile.name}`, 'info');
         }
     }
 
-    async function handleDeleteProfile(e) {
+    async handleDeleteProfile(e) {
         const profileId = e.target.dataset.id;
         if (!confirm('Are you sure you want to delete this profile?')) return;
 
@@ -549,9 +567,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const result = await response.json();
             if (result.success) {
                 showAlert('Profile deleted successfully', 'success');
-                await loadProfiles();
-                renderProfileSelects();
-                renderProfileGrid();
+                await this.loadProfiles();
+                this.renderProfileSelects();
+                this.renderProfileGrid();
             } else {
                 throw new Error(result.error || 'Failed to delete profile');
             }
@@ -561,10 +579,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function handleMpvSettingsSubmit(e) {
+    async handleMpvSettingsSubmit(e) {
         e.preventDefault();
         try {
-            const formData = new FormData(elements.mpvSettingsForm);
+            const formData = new FormData(this.elements.mpvSettingsForm);
             const settings = Object.fromEntries(formData.entries());
             
             const response = await fetch('/api/settings/update', {
@@ -579,8 +597,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const result = await response.json();
             if (result.success) {
                 showAlert('Settings updated successfully', 'success');
-                await loadCurrentSettings();
-                renderCurrentSettings();
+                await this.loadCurrentSettings();
+                this.renderCurrentSettings();
             } else {
                 throw new Error(result.error || 'Failed to update settings');
             }
@@ -590,10 +608,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Utility Functions
-    function collectSettingsFromForm() {
+    collectSettingsFromForm() {
         const settings = {};
-        const inputs = elements.settingsEditor?.querySelectorAll('[data-setting-key]') || [];
+        const inputs = this.elements.settingsEditor?.querySelectorAll('[data-setting-key]') || [];
 
         inputs.forEach(input => {
             const key = input.dataset.settingKey;
@@ -604,56 +621,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         return settings;
     }
+}
 
-    function startAutoRefresh() {
-        setInterval(async () => {
-            try {
-                await loadCurrentSettings();
-                renderCurrentSettings();
-            } catch (error) {
-                console.error('Auto-refresh error:', error);
-            }
-        }, 10000);
-    }
-
-    function showAlert(message, type = 'info') {
-        const alert = document.createElement('div');
-        alert.className = `alert alert-${type}`;
-        alert.textContent = message;
-        alert.style.cssText = `
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            padding: 12px 20px;
-            border-radius: 4px;
-            background-color: ${getAlertColor(type)};
-            color: white;
-            z-index: 1000;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            animation: fadeIn 0.3s ease-out;
-        `;
-
-        document.body.appendChild(alert);
-
-        setTimeout(() => {
-            alert.style.opacity = '0';
-            setTimeout(() => alert.remove(), 300);
-        }, 3000);
-    }
-
-    function getAlertColor(type) {
-        switch (type) {
-            case 'success': return '#28a745';
-            case 'error': return '#dc3545';
-            case 'warning': return '#ffc107';
-            default: return '#17a2b8';
-        }
-    }
-
-    function getCSRFToken() {
-        return document.querySelector('meta[name="csrf-token"]')?.content || '';
-    }
-
-    // Initialize the application
-    init();
+// Initialize when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+    new SettingsManager();
 });
