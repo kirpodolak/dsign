@@ -1,547 +1,385 @@
 /**
- * Core Application Initialization Module
+ * Core Application Initialization Module (ES Module)
  * Handles application bootstrap, authentication, and core services
  */
-(function() {
-    // Global initialization flag
-    if (window.__DSIGN_INITIALIZED__) return;
-    window.__DSIGN_INITIALIZED__ = true;
 
-    // Initialize core App object with enhanced structure
-    window.App = window.App || {
-        Core: {
-            initialized: false,
-            onReadyCallbacks: [],
-            onReady: function(callback) {
-                if (this.initialized && typeof callback === 'function') {
-                    try {
-                        callback();
-                    } catch (error) {
-                        this.handleError('Ready callback error:', error);
-                    }
-                } else {
-                    this.onReadyCallbacks.push(callback);
-                }
-            },
-            handleError: function(message, error) {
-                console.error('[Core]', message, error);
-                if (window.App.Logger?.error) {
-                    window.App.Logger.error(message, error);
-                }
-            }
-        },
-        
-        config: {
+import { io } from 'socket.io-client';
+import Swal from 'sweetalert2';
+import AppInitializer from './app-init.js';
+
+// Import other utils as needed
+import { getToken, clearToken, setCachedData, getCachedData } from './helpers.js';
+import AppLogger from './logging.js';
+
+class AppCore {
+    constructor() {
+        this.initialized = false;
+        this.onReadyCallbacks = [];
+        this.config = {
             debug: window.location.hostname === 'localhost',
             socketReconnectDelay: 1000,
             maxSocketRetries: 5,
             authCheckInterval: 60000,
             apiTimeout: 30000,
             socketEndpoint: '/socket.io'
-        },
-        
-        state: {
+        };
+        this.state = {
             navigationInProgress: false,
             authChecked: false,
             socketInitialized: false
-        }
-    };
-
-    // Enhanced logger initialization with fallback
-    const initializeLogger = () => {
-        const fallbackLogger = {
-            debug: (...args) => window.App?.config?.debug && console.debug('[DEBUG]', ...args),
-            info: (...args) => console.log('[INFO]', ...args),
-            warn: (...args) => console.warn('[WARN]', ...args),
-            error: (message, error, context = {}) => {
-                console.error('[ERROR]', message, error || '');
-                if (window.appSocket?.connected) {
-                    const errorData = {
-                        level: 'error',
-                        message,
-                        error: error?.toString(),
-                        stack: error?.stack,
-                        context,
-                        url: window.location.href,
-                        timestamp: new Date().toISOString()
-                    };
-                    
-                    try {
-                        window.appSocket.emit('client_error', errorData);
-                    } catch (socketError) {
-                        console.error('Failed to send error via socket:', socketError);
-                    }
-                }
-            }
         };
+        this.logger = new AppLogger('AppCore');
+        this.initializer = AppInitializer;
+    }
 
-        try {
-            window.App.Logger = window.App.Logger || fallbackLogger;
-            window.App.Logger.info('Logger initialized');
-        } catch (e) {
-            console.error('Logger initialization failed, using fallback', e);
-            window.App.Logger = fallbackLogger;
-        }
-    };
-
-    // Enhanced helpers initialization
-    const initializeHelpers = () => {
-        window.App.Helpers = window.App.Helpers || {
-            getCachedData: (key) => {
-                try {
-                    const item = localStorage.getItem(key);
-                    if (!item) return null;
-                    
-                    const parsed = JSON.parse(item);
-                    if (parsed.expires && parsed.expires < Date.now()) {
-                        localStorage.removeItem(key);
-                        return null;
-                    }
-                    return parsed.value;
-                } catch (e) {
-                    window.App.Logger.error('Failed to parse cached data', e, { key });
-                    return null;
-                }
-            },
-            
-            setCachedData: (key, value, ttl = null) => {
-                try {
-                    const item = {
-                        value,
-                        expires: ttl ? Date.now() + ttl : null
-                    };
-                    localStorage.setItem(key, JSON.stringify(item));
-                } catch (e) {
-                    window.App.Logger.error('Failed to cache data', e, { key });
-                }
-            },
-            
-            getToken: () => {
-                try {
-                    return localStorage.getItem('authToken') || 
-                           document.cookie.replace(/(?:(?:^|.*;\s*)authToken\s*=\s*([^;]*).*$)|^.*$/, '$1');
-                } catch (e) {
-                    window.App.Logger.error('Failed to get auth token', e);
-                    return null;
-                }
-            },
-            
-            clearToken: () => {
-                try {
-                    localStorage.removeItem('authToken');
-                    document.cookie = 'authToken=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
-                } catch (e) {
-                    window.App.Logger.error('Failed to clear auth token', e);
-                }
-            }
-        };
-    };
-
-    // Enhanced API service with timeout support
-    const initializeAPI = () => {
-        window.App.API = window.App.API || {
-            fetch: async (url, options = {}) => {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 
-                    options.timeout || window.App.config.apiTimeout);
-                
-                const requestId = Math.random().toString(36).substring(2, 9);
-                const startTime = performance.now();
-                
-                try {
-                    window.App.Logger.debug(`API Request [${requestId}]: ${url}`, {
-                        method: options.method || 'GET',
-                        headers: options.headers
-                    });
-
-                    const headers = {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json',
-                        ...options.headers
-                    };
-
-                    const token = window.App.Helpers.getToken();
-                    if (token) {
-                        headers['Authorization'] = `Bearer ${token}`;
-                    }
-
-                    const response = await fetch(url, {
-                        credentials: 'include',
-                        signal: controller.signal,
-                        ...options,
-                        headers
-                    });
-
-                    clearTimeout(timeoutId);
-                    const duration = (performance.now() - startTime).toFixed(2);
-                    
-                    window.App.Logger.debug(`API Response [${requestId}]: ${response.status} (${duration}ms)`, {
-                        status: response.status,
-                        url
-                    });
-
-                    if (response.status === 401) {
-                        window.App.Logger.warn('Authentication expired', { url });
-                        window.App.Auth.handleUnauthorized();
-                        throw new Error('Authentication required');
-                    }
-
-                    if (response.status === 429) {
-                        window.App.Logger.warn('Rate limit exceeded', { url });
-                        throw new Error('Too many requests');
-                    }
-
-                    if (!response.ok) {
-                        const errorData = await response.json().catch(() => ({}));
-                        throw new Error(errorData.message || `HTTP ${response.status}`);
-                    }
-
-                    return response;
-                } catch (error) {
-                    clearTimeout(timeoutId);
-                    window.App.Logger.error(`API Request [${requestId}] failed:`, error, {
-                        url,
-                        method: options.method || 'GET'
-                    });
-                    throw error;
-                }
-            }
-        };
-    };
-
-    // Alert system with UI integration
-    const initializeAlerts = () => {
-        const alertSystem = {
-            showAlert: function(type, title, message, options = {}) {
-                window.App.Logger.info(`Alert: ${title}`, { type, message });
-                
-                // Dispatch event for UI components
-                const event = new CustomEvent('app-alert', {
-                    detail: { type, title, message, ...options }
-                });
-                document.dispatchEvent(event);
-            },
-            
-            showError: function(title, message, error) {
-                window.App.Logger.error(`Error Alert: ${title}`, error, { message });
-                this.showAlert('error', title, message || error?.message);
-            }
-        };
-
-        window.App.Alerts = window.App.Alerts || alertSystem;
-        // Bind context to prevent 'this' issues
-        window.App.Alerts.showError = alertSystem.showError.bind(alertSystem);
-    };
-
-    // Enhanced authentication flow
-    const initializeAuth = () => {
-        window.App.Auth = window.App.Auth || {
-            checkAuth: async () => {
-                try {
-                    // Initialize state if not exists
-                    if (!window.App.state) {
-                        window.App.state = {
-                            navigationInProgress: false,
-                            authChecked: false
-                        };
-                    }
-
-                    if (window.App.state.navigationInProgress) return false;
-                    
-                    const token = window.App.Helpers.getToken();
-                    if (!token) return false;
-                    
-                    // Verify token with backend
-                    const response = await window.App.API.fetch('/auth/api/check-auth', {
-                        method: 'GET'
-                    });
-                    
-                    const data = await response.json();
-                    return data?.authenticated || false;
-                } catch (error) {
-                    window.App.Logger.warn('Auth check failed:', error);
-                    return false;
-                }
-            },
-            
-            handleUnauthorized: function() {
-                // Ensure state exists
-                if (!window.App.state) {
-                    window.App.state = {
-                        navigationInProgress: false,
-                        authChecked: false
-                    };
-                }
-
-                if (window.App.state.navigationInProgress) return;
-                
-                window.App.state.navigationInProgress = true;
-                window.App.Helpers.clearToken();
-                
-                // Disconnect socket if exists
-                if (window.appSocket) {
-                    window.appSocket.disconnect();
-                    delete window.appSocket;
-                }
-                
-                // Prevent redirect loops
-                const currentPath = window.location.pathname;
-                if (!currentPath.includes('/auth/login')) {
-                    window.App.Logger.warn('Redirecting to login');
-                    const redirectUrl = encodeURIComponent(currentPath + window.location.search);
-                    window.location.href = `/auth/login?redirect=${redirectUrl}`;
-                }
-            },
-            
-            waitForToken: async (maxAttempts = 10, interval = 500) => {
-                let attempts = 0;
-                
-                return new Promise((resolve, reject) => {
-                    const checkToken = () => {
-                        attempts++;
-                        const token = window.App.Helpers.getToken();
-                        
-                        if (token) {
-                            resolve(token);
-                        } else if (attempts >= maxAttempts) {
-                            reject(new Error('Token not available'));
-                        } else {
-                            setTimeout(checkToken, interval);
-                        }
-                    };
-                    
-                    checkToken();
-                });
-            },
-            
-            getSocketToken: async () => {
-                try {
-                    const response = await window.App.API.fetch('/auth/socket-token');
-                    if (!response.ok) {
-                        throw new Error('Failed to get socket token');
-                    }
-                    return await response.json();
-                } catch (error) {
-                    window.App.Logger.error('Failed to get socket token:', error);
-                    throw error;
-                }
-            }
-        };
-    };
-
-    // WebSocket initialization with enhanced reconnection logic
-    const initializeWebSockets = () => {
-        window.App.Core.onReady(async () => {
-            if (window.App.state.socketInitialized) return;
-            
+    onReady(callback) {
+        if (this.initialized && typeof callback === 'function') {
             try {
-                // Check authentication first
-                const isAuth = await window.App.Auth.checkAuth();
-                if (!isAuth) {
-                    window.App.Logger.warn('WebSocket init aborted - not authenticated');
-                    return;
-                }
-
-                window.App.Logger.debug('Initializing WebSocket connection');
-                
-                // Get fresh socket token
-                const { token, socketUrl } = await window.App.Auth.getSocketToken();
-                
-                // Initialize socket connection
-                const socket = io(socketUrl || window.App.config.socketEndpoint, {
-                    auth: { token },
-                    reconnection: true,
-                    reconnectionAttempts: window.App.config.maxSocketRetries,
-                    reconnectionDelay: window.App.config.socketReconnectDelay,
-                    transports: ['websocket'],
-                    upgrade: false
-                });
-
-                // Store socket globally
-                window.appSocket = socket;
-                window.App.state.socketInitialized = true;
-
-                // Event handlers
-                socket.on('connect', () => {
-                    window.App.Logger.info('WebSocket connected');
-                    window.App.state.socketConnected = true;
-                });
-
-                socket.on('disconnect', (reason) => {
-                    window.App.Logger.warn('WebSocket disconnected:', reason);
-                    window.App.state.socketConnected = false;
-                });
-
-                socket.on('connect_error', (error) => {
-                    window.App.Logger.error('WebSocket connection error:', error);
-                    if (error.message.includes('auth') || error.message.includes('token')) {
-                        window.App.Auth.handleUnauthorized();
-                    }
-                });
-
-                // Global socket interface
-                window.App.Sockets = {
-                    connect: () => socket.connect(),
-                    disconnect: () => socket.disconnect(),
-                    isConnected: () => socket.connected,
-                    emit: (event, data) => {
-                        if (socket.connected) {
-                            socket.emit(event, data);
-                        } else {
-                            window.App.Logger.warn('Socket not connected, cannot emit', event);
-                        }
-                    }
-                };
-
+                callback();
             } catch (error) {
-                window.App.Logger.error('WebSocket initialization failed:', error);
-                if (error.message.includes('auth') || error.message.includes('token')) {
-                    window.App.Auth.handleUnauthorized();
-                }
+                this.handleError('Ready callback error:', error);
             }
-        });
-    };
+        } else {
+            this.onReadyCallbacks.push(callback);
+        }
+    }
 
-    // Core application initialization
-    const initializeApp = async () => {
-        window.App.Logger.info('Starting application initialization');
-        
+    handleError(message, error) {
+        this.logger.error(message, error);
+    }
+
+    async initialize() {
+        this.logger.info('Starting application initialization');
+
         try {
-            // Initialize state if not exists
-            if (!window.App.state) {
-                window.App.state = {
-                    navigationInProgress: false,
-                    authChecked: false,
-                    socketInitialized: false
-                };
-            }
+            // Delegate initialization to AppInitializer
+            await this.initializer.init();
 
             // Check authentication state
             const isLoginPage = window.location.pathname.includes('/auth/login');
-            const token = window.App.Helpers.getToken();
+            const token = getToken();
             
             if (!token && !isLoginPage) {
-                window.App.Logger.warn('No token - redirecting to login');
-                window.App.Auth.handleUnauthorized();
+                this.logger.warn('No token - redirecting to login');
+                this.auth.handleUnauthorized();
                 return;
             }
 
             // Initialize WebSocket with delay
-            setTimeout(initializeWebSockets, 500);
+            setTimeout(() => this.initializeWebSockets(), 500);
             
             // Set up periodic auth checks for non-login pages
             if (!isLoginPage) {
-                window.App.Logger.debug('Setting up periodic auth checks');
+                this.logger.debug('Setting up periodic auth checks');
                 
                 setInterval(async () => {
-                    const isAuth = await window.App.Auth.checkAuth();
+                    const isAuth = await this.auth.checkAuth();
                     if (!isAuth) {
-                        window.App.Logger.warn('Periodic auth check failed');
-                        window.App.Auth.handleUnauthorized();
+                        this.logger.warn('Periodic auth check failed');
+                        this.auth.handleUnauthorized();
                     }
-                }, window.App.config.authCheckInterval);
+                }, this.config.authCheckInterval);
             }
 
             // Mark core as initialized
-            window.App.Core.initialized = true;
-            window.App.Logger.info('App core initialized');
+            this.initialized = true;
+            this.logger.info('App core initialized');
             
             // Execute ready callbacks
-            window.App.Core.onReadyCallbacks.forEach(cb => {
+            this.onReadyCallbacks.forEach(cb => {
                 try {
                     if (typeof cb === 'function') cb();
                 } catch (error) {
-                    window.App.Core.handleError('Ready callback error:', error);
+                    this.handleError('Ready callback error:', error);
                 }
             });
             
-            window.App.Core.onReadyCallbacks = [];
+            this.onReadyCallbacks = [];
         } catch (error) {
-            window.App.Logger.error('App initialization failed:', error);
-            if (window.App.Alerts?.showError) {
-                window.App.Alerts.showError(
+            this.logger.error('App initialization failed:', error);
+            if (this.alerts) {
+                this.alerts.showError(
                     'Initialization Error', 
                     'Failed to start application', 
                     error
                 );
             }
         }
-    };
+    }
 
-    // Application bootstrap sequence
-    const bootstrap = () => {
+    async initializeWebSockets() {
+        if (this.state.socketInitialized) return;
+        
         try {
-            // Initialize core services
-            initializeLogger();
-            initializeHelpers();
-            initializeAPI();
-            initializeAlerts();
-            initializeAuth();
+            // Check authentication first
+            const isAuth = await this.auth.checkAuth();
+            if (!isAuth) {
+                this.logger.warn('WebSocket init aborted - not authenticated');
+                return;
+            }
+
+            this.logger.debug('Initializing WebSocket connection');
             
-            // Start application
-            if (document.readyState === 'complete') {
-                initializeApp();
-            } else {
-                document.addEventListener('DOMContentLoaded', initializeApp);
-            }
-        } catch (error) {
-            console.error('Bootstrap failed:', error);
-            if (window.App.Alerts?.showError) {
-                window.App.Alerts.showError(
-                    'Bootstrap Error',
-                    'Failed to initialize application',
-                    error
-                );
-            }
-        }
-    };
+            // Get fresh socket token
+            const { token, socketUrl } = await this.auth.getSocketToken();
+            
+            // Initialize socket connection
+            const socket = io(socketUrl || this.config.socketEndpoint, {
+                auth: { token },
+                reconnection: true,
+                reconnectionAttempts: this.config.maxSocketRetries,
+                reconnectionDelay: this.config.socketReconnectDelay,
+                transports: ['websocket'],
+                upgrade: false
+            });
 
-    // Public API with safety checks
-    window.App.Base = {
-        checkAuth: () => window.App.Auth?.checkAuth?.(),
-        handleUnauthorized: () => window.App.Auth?.handleUnauthorized?.(),
-        refreshSession: async () => {
-            try {
-                const response = await window.App.API.fetch('/auth/api/refresh-token');
-                if (response.ok) {
-                    const data = await response.json();
-                    if (data.token) {
-                        window.App.Helpers.setCachedData('authToken', data.token);
-                    }
-                    return true;
+            // Store socket globally
+            window.appSocket = socket;
+            this.state.socketInitialized = true;
+
+            // Event handlers
+            socket.on('connect', () => {
+                this.logger.info('WebSocket connected');
+                this.state.socketConnected = true;
+            });
+
+            socket.on('disconnect', (reason) => {
+                this.logger.warn('WebSocket disconnected:', reason);
+                this.state.socketConnected = false;
+            });
+
+            socket.on('connect_error', (error) => {
+                this.logger.error('WebSocket connection error:', error);
+                if (error.message.includes('auth') || error.message.includes('token')) {
+                    this.auth.handleUnauthorized();
                 }
-                return false;
-            } catch (error) {
-                window.App.Logger.error('Session refresh failed:', error);
-                return false;
-            }
-        },
-        getConfig: () => ({ ...window.App?.config }),
-        setDebugMode: (enabled) => {
-            if (window.App?.config) {
-                window.App.config.debug = enabled;
-                window.App.Logger.info(`Debug mode ${enabled ? 'enabled' : 'disabled'}`);
+            });
+
+            // Expose socket interface
+            this.sockets = {
+                connect: () => socket.connect(),
+                disconnect: () => socket.disconnect(),
+                isConnected: () => socket.connected,
+                emit: (event, data) => {
+                    if (socket.connected) {
+                        socket.emit(event, data);
+                    } else {
+                        this.logger.warn('Socket not connected, cannot emit', event);
+                    }
+                }
+            };
+
+        } catch (error) {
+            this.logger.error('WebSocket initialization failed:', error);
+            if (error.message.includes('auth') || error.message.includes('token')) {
+                this.auth.handleUnauthorized();
             }
         }
-    };
+    }
+}
 
-    // Global error handling
-    window.addEventListener('error', (event) => {
-        window.App.Logger?.error('Global error:', event.error, {
-            message: event.message,
-            source: event.filename,
-            line: event.lineno,
-            column: event.colno
+class AuthService {
+    constructor() {
+        this.logger = new AppLogger('AuthService');
+    }
+
+    async checkAuth() {
+        try {
+            const token = getToken();
+            if (!token) return false;
+            
+            const response = await fetch('/auth/api/check-auth', {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+            
+            const data = await response.json();
+            return data?.authenticated || false;
+        } catch (error) {
+            this.logger.warn('Auth check failed:', error);
+            return false;
+        }
+    }
+
+    handleUnauthorized() {
+        if (window.App?.state?.navigationInProgress) return;
+        
+        window.App.state.navigationInProgress = true;
+        clearToken();
+        
+        // Disconnect socket if exists
+        if (window.appSocket) {
+            window.appSocket.disconnect();
+            delete window.appSocket;
+        }
+        
+        // Prevent redirect loops
+        const currentPath = window.location.pathname;
+        if (!currentPath.includes('/auth/login')) {
+            this.logger.warn('Redirecting to login');
+            const redirectUrl = encodeURIComponent(currentPath + window.location.search);
+            window.location.href = `/auth/login?redirect=${redirectUrl}`;
+        }
+    }
+
+    async waitForToken(maxAttempts = 10, interval = 500) {
+        let attempts = 0;
+        
+        return new Promise((resolve, reject) => {
+            const checkToken = () => {
+                attempts++;
+                const token = getToken();
+                
+                if (token) {
+                    resolve(token);
+                } else if (attempts >= maxAttempts) {
+                    reject(new Error('Token not available'));
+                } else {
+                    setTimeout(checkToken, interval);
+                }
+            };
+            
+            checkToken();
         });
-    });
+    }
 
-    window.addEventListener('unhandledrejection', (event) => {
-        window.App.Logger?.error('Unhandled rejection:', event.reason);
-        if (window.App.Alerts?.showError) {
-            window.App.Alerts.showError('Async Error', 'An operation failed', event.reason);
+    async getSocketToken() {
+        try {
+            const response = await fetch('/auth/socket-token');
+            if (!response.ok) {
+                throw new Error('Failed to get socket token');
+            }
+            return await response.json();
+        } catch (error) {
+            this.logger.error('Failed to get socket token:', error);
+            throw error;
         }
-    });
+    }
+}
 
-    // Start the application
-    bootstrap();
-})();
+class AlertSystem {
+    constructor() {
+        this.logger = new AppLogger('AlertSystem');
+    }
+
+    showAlert(type, title, message, options = {}) {
+        this.logger.info(`Alert: ${title}`, { type, message });
+        
+        // Dispatch event for UI components
+        const event = new CustomEvent('app-alert', {
+            detail: { type, title, message, ...options }
+        });
+        document.dispatchEvent(event);
+    }
+    
+    showError(title, message, error) {
+        this.logger.error(`Error Alert: ${title}`, error, { message });
+        this.showAlert('error', title, message || error?.message);
+    }
+}
+
+class APIService {
+    constructor() {
+        this.logger = new AppLogger('APIService');
+    }
+
+    async fetch(url, options = {}) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 
+            options.timeout || window.App.config.apiTimeout);
+        
+        const requestId = Math.random().toString(36).substring(2, 9);
+        const startTime = performance.now();
+        
+        try {
+            this.logger.debug(`API Request [${requestId}]: ${url}`, {
+                method: options.method || 'GET',
+                headers: options.headers
+            });
+
+            const headers = {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                ...options.headers
+            };
+
+            const token = getToken();
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+            }
+
+            const response = await fetch(url, {
+                credentials: 'include',
+                signal: controller.signal,
+                ...options,
+                headers
+            });
+
+            clearTimeout(timeoutId);
+            const duration = (performance.now() - startTime).toFixed(2);
+            
+            this.logger.debug(`API Response [${requestId}]: ${response.status} (${duration}ms)`, {
+                status: response.status,
+                url
+            });
+
+            if (response.status === 401) {
+                this.logger.warn('Authentication expired', { url });
+                window.App.auth.handleUnauthorized();
+                throw new Error('Authentication required');
+            }
+
+            if (response.status === 429) {
+                this.logger.warn('Rate limit exceeded', { url });
+                throw new Error('Too many requests');
+            }
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.message || `HTTP ${response.status}`);
+            }
+
+            return response;
+        } catch (error) {
+            clearTimeout(timeoutId);
+            this.logger.error(`API Request [${requestId}] failed:`, error, {
+                url,
+                method: options.method || 'GET'
+            });
+            throw error;
+        }
+    }
+}
+
+// Initialize and export the App instance
+const App = new AppCore();
+App.logger = new AppLogger('App');
+App.auth = new AuthService();
+App.alerts = new AlertSystem();
+App.api = new APIService();
+
+// Initialize when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+    App.initialize();
+});
+
+// Global error handling
+window.addEventListener('error', (event) => {
+    App.logger.error('Global error:', event.error, {
+        message: event.message,
+        source: event.filename,
+        line: event.lineno,
+        column: event.colno
+    });
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+    App.logger.error('Unhandled rejection:', event.reason);
+    if (App.alerts) {
+        App.alerts.showError('Async Error', 'An operation failed', event.reason);
+    }
+});
+
+export default App;
