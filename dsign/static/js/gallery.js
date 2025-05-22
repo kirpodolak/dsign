@@ -1,52 +1,61 @@
-(function() {
-  // Global App objects
-  window.App = window.App || {};
-  window.App.Helpers = window.App.Helpers || {};
-  window.App.Alerts = window.App.Alerts || {
-    show: function(message, type = 'info') {
-      const alertBox = document.createElement('div');
-      alertBox.className = `alert alert-${type}`;
-      alertBox.textContent = message;
-      document.body.appendChild(alertBox);
-      setTimeout(() => alertBox.remove(), 3000);
-    }
-  };
+// Utility functions
+function getFileExtension(filename) {
+  if (!filename) return '';
+  const parts = filename.split('.');
+  return parts.length > 1 ? parts.pop().toLowerCase() : '';
+}
 
-  // DOM Elements
-  const mediaGallery = document.getElementById('media-gallery');
-  const uploadForm = document.getElementById('upload-form');
-  const fileInput = document.getElementById('file-upload');
-  const uploadBtn = document.getElementById('upload-btn');
-  const deleteBtn = document.getElementById('delete-selected');
-  const selectAllBtn = document.getElementById('select-all');
-  const searchInput = document.getElementById('search-input');
-  const sortSelect = document.getElementById('sort-select');
-  const groupSelect = document.getElementById('group-select');
-  const previewModal = document.getElementById('preview-modal');
-  const closeModal = document.querySelector('.close-modal');
-  const previewContainer = document.getElementById('preview-container');
-  const previewFilename = document.getElementById('preview-filename');
-  const previewFilesize = document.getElementById('preview-filesize');
-  const previewDate = document.getElementById('preview-date');
+function formatFileSize(bytes) {
+  if (typeof bytes !== 'number' || bytes < 0) return '0 Bytes';
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
 
-  // State
-  let currentFiles = [];
-  let selectedFiles = new Set();
+function formatDate(timestamp) {
+  if (!timestamp) return 'Unknown date';
+  try {
+    return new Date(timestamp).toLocaleString();
+  } catch {
+    return 'Invalid date';
+  }
+}
 
-  // Constants
-  const ALLOWED_IMAGE_TYPES = ['jpg', 'jpeg', 'png', 'gif'];
-  const ALLOWED_VIDEO_TYPES = ['mp4', 'webm', 'ogg'];
-  const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
-  const PLACEHOLDER_IMAGE = '/static/images/placeholder.jpg';
+// Constants
+const ALLOWED_IMAGE_TYPES = ['jpg', 'jpeg', 'png', 'gif'];
+const ALLOWED_VIDEO_TYPES = ['mp4', 'webm', 'ogg'];
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+const PLACEHOLDER_IMAGE = '/static/images/placeholder.jpg';
 
-  // Utility functions
-  function getFileExtension(filename) {
-    if (!filename) return '';
-    const parts = filename.split('.');
-    return parts.length > 1 ? parts.pop().toLowerCase() : '';
+export class MediaGallery {
+  constructor() {
+    // DOM Elements
+    this.mediaGallery = document.getElementById('media-gallery');
+    this.uploadForm = document.getElementById('upload-form');
+    this.fileInput = document.getElementById('file-upload');
+    this.uploadBtn = document.getElementById('upload-btn');
+    this.deleteBtn = document.getElementById('delete-selected');
+    this.selectAllBtn = document.getElementById('select-all');
+    this.searchInput = document.getElementById('search-input');
+    this.sortSelect = document.getElementById('sort-select');
+    this.groupSelect = document.getElementById('group-select');
+    this.previewModal = document.getElementById('preview-modal');
+    this.closeModal = document.querySelector('.close-modal');
+    this.previewContainer = document.getElementById('preview-container');
+    this.previewFilename = document.getElementById('preview-filename');
+    this.previewFilesize = document.getElementById('preview-filesize');
+    this.previewDate = document.getElementById('preview-date');
+
+    // State
+    this.currentFiles = [];
+    this.selectedFiles = new Set();
+
+    this.initEventListeners();
   }
 
-  function isValidFile(file) {
+  isValidFile(file) {
     if (!file) return false;
     const ext = getFileExtension(file.name);
     return (ALLOWED_IMAGE_TYPES.includes(ext) || 
@@ -54,85 +63,67 @@
            file.size <= MAX_FILE_SIZE;
   }
 
-  function formatFileSize(bytes) {
-    if (typeof bytes !== 'number' || bytes < 0) return '0 Bytes';
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-  }
-
-  function formatDate(timestamp) {
-    if (!timestamp) return 'Unknown date';
+  // Load media files from server
+  async loadMediaFiles() {
     try {
-      return new Date(timestamp).toLocaleString();
-    } catch {
-      return 'Invalid date';
+      const playlist_id = new URLSearchParams(window.location.search).get('playlist_id') || 'all';
+      const url = `/api/media/files?playlist_id=${playlist_id}`;
+    
+      const response = await fetch(url, {
+        headers: { 'Accept': 'application/json' },
+        credentials: 'include'
+      });
+
+      if (response.redirected) {
+        window.location.href = '/auth/login';
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(`Server returned ${response.status} status`);
+      }
+
+      const data = await response.json();
+    
+      if (!data?.success) {
+        throw new Error(data?.error || 'Invalid response format');
+      }
+
+      this.currentFiles = data.files.map(file => ({
+        name: file.filename,
+        type: file.type || getFileExtension(file.filename),
+        date: file.modified || Date.now(),
+        size: file.size || 0,
+        path: `/api/media/${encodeURIComponent(file.filename)}`,
+        mimetype: file.mimetype,
+        included: file.included || false,
+        is_video: file.is_video || false
+      }));
+
+      this.renderGallery(this.currentFiles);
+    } catch (error) {
+      console.error('Failed to load media files:', error);
+      if (window.App?.Alerts?.show) {
+        window.App.Alerts.show(`Error loading files: ${error.message}`, 'error');
+      }
     }
   }
 
-  // Load media files from server
-  async function loadMediaFiles() {
-      try {
-          const playlist_id = new URLSearchParams(window.location.search).get('playlist_id') || 'all';
-          const url = `/api/media/files?playlist_id=${playlist_id}`;
-        
-          const response = await fetch(url, {
-              headers: { 'Accept': 'application/json' },
-              credentials: 'include'
-          });
-
-          if (response.redirected) {
-              window.location.href = '/auth/login';
-              return;
-          }
-
-          if (!response.ok) {
-              throw new Error(`Server returned ${response.status} status`);
-          }
-
-          const data = await response.json();
-        
-          if (!data?.success) {
-              throw new Error(data?.error || 'Invalid response format');
-          }
-
-          currentFiles = data.files.map(file => ({
-              name: file.filename,
-              type: file.type || getFileExtension(file.filename),
-              date: file.modified || Date.now(),
-              size: file.size || 0,
-              path: `/api/media/${encodeURIComponent(file.filename)}`,
-              mimetype: file.mimetype,
-              included: file.included || false,
-              is_video: file.is_video || false
-          }));
-
-          renderGallery(currentFiles);
-      } catch (error) {
-          console.error('Failed to load media files:', error);
-          if (window.App?.Alerts?.show) {
-              window.App.Alerts.show(`Error loading files: ${error.message}`, 'error');
-          }
-      }
-  }
-
   // Filter and sort files
-  function processFiles(files) {
+  processFiles(files) {
     if (!Array.isArray(files)) return [];
     
     // Filter by search
     let filtered = [...files];
-    if (searchInput?.value) {
-      const searchTerm = searchInput.value.toLowerCase().trim();
+    if (this.searchInput?.value) {
+      const searchTerm = this.searchInput.value.toLowerCase().trim();
       filtered = filtered.filter(file => 
         file.name?.toLowerCase().includes(searchTerm)
       );
     }
 
     // Sort
-    const sortValue = sortSelect?.value;
+    const sortValue = this.sortSelect?.value;
     filtered.sort((a, b) => {
       switch (sortValue) {
         case 'name-asc': return a.name?.localeCompare(b.name);
@@ -148,9 +139,9 @@
   }
 
   // Group files
-  function groupFiles(files) {
+  groupFiles(files) {
     if (!Array.isArray(files)) return [];
-    const groupValue = groupSelect?.value;
+    const groupValue = this.groupSelect?.value;
     if (groupValue === 'none') return files;
 
     const groups = {};
@@ -175,39 +166,39 @@
   }
 
   // Render media gallery
-  function renderGallery(files) {
-    if (!mediaGallery) return;
+  renderGallery(files) {
+    if (!this.mediaGallery) return;
     
-    mediaGallery.innerHTML = '';
+    this.mediaGallery.innerHTML = '';
     
     if (!Array.isArray(files) || files.length === 0) {
-      mediaGallery.innerHTML = '<p class="empty-message">No media files found.</p>';
-      toggleDeleteButton(false);
-      toggleSelectAllButton(false);
+      this.mediaGallery.innerHTML = '<p class="empty-message">No media files found.</p>';
+      this.toggleDeleteButton(false);
+      this.toggleSelectAllButton(false);
       return;
     }
 
-    const processedFiles = processFiles(files);
-    const groupedFiles = groupFiles(processedFiles);
+    const processedFiles = this.processFiles(files);
+    const groupedFiles = this.groupFiles(processedFiles);
 
     if (Array.isArray(groupedFiles)) {
-      renderFiles(groupedFiles);
+      this.renderFiles(groupedFiles);
     } else {
       // Render grouped files
       Object.entries(groupedFiles).forEach(([groupName, groupFiles]) => {
         const groupHeader = document.createElement('div');
         groupHeader.className = 'group-header';
         groupHeader.textContent = groupName;
-        mediaGallery.appendChild(groupHeader);
-        renderFiles(groupFiles);
+        this.mediaGallery.appendChild(groupHeader);
+        this.renderFiles(groupFiles);
       });
     }
 
-    toggleDeleteButton(selectedFiles.size > 0);
-    toggleSelectAllButton(processedFiles.length > 0);
+    this.toggleDeleteButton(this.selectedFiles.size > 0);
+    this.toggleSelectAllButton(processedFiles.length > 0);
   }
 
-  function renderFiles(files) {
+  renderFiles(files) {
     if (!Array.isArray(files)) return;
 
     files.forEach(file => {
@@ -223,7 +214,7 @@
       checkbox.className = 'file-checkbox';
       checkbox.id = `checkbox-${file.name}`;
       checkbox.dataset.filename = file.name;
-      checkbox.checked = selectedFiles.has(file.name);
+      checkbox.checked = this.selectedFiles.has(file.name);
       item.appendChild(checkbox);
 
       const checkboxLabel = document.createElement('label');
@@ -259,7 +250,7 @@
       // Click handler for preview
       previewContainer.addEventListener('click', (e) => {
         if (e.target?.tagName !== 'INPUT' && e.target?.tagName !== 'LABEL') {
-          showPreview({
+          this.showPreview({
             ...file,
             path: `/api/media/${file.name}`
           });
@@ -274,7 +265,7 @@
       fileNameDiv.textContent = file.name;
       item.appendChild(fileNameDiv);
 
-      mediaGallery.appendChild(item);
+      this.mediaGallery.appendChild(item);
     });
 
     // Add event listeners to checkboxes
@@ -282,36 +273,36 @@
       checkbox.addEventListener('change', function() {
         const filename = this.dataset.filename;
         if (this.checked) {
-          selectedFiles.add(filename);
+          this.selectedFiles.add(filename);
         } else {
-          selectedFiles.delete(filename);
+          this.selectedFiles.delete(filename);
         }
-        toggleDeleteButton(selectedFiles.size > 0);
-      });
+        this.toggleDeleteButton(this.selectedFiles.size > 0);
+      }.bind(this));
     });
   }
 
-  function toggleDeleteButton(enabled) {
-    if (deleteBtn) {
-      deleteBtn.disabled = !enabled;
+  toggleDeleteButton(enabled) {
+    if (this.deleteBtn) {
+      this.deleteBtn.disabled = !enabled;
     }
   }
 
-  function toggleSelectAllButton(enabled) {
-    if (selectAllBtn) {
-      selectAllBtn.disabled = !enabled;
+  toggleSelectAllButton(enabled) {
+    if (this.selectAllBtn) {
+      this.selectAllBtn.disabled = !enabled;
     }
   }
 
   // File preview
-  function showPreview(file) {
-    if (!file || !previewContainer || !previewFilename || !previewFilesize || !previewDate) return;
+  showPreview(file) {
+    if (!file || !this.previewContainer || !this.previewFilename || !this.previewFilesize || !this.previewDate) return;
     
-    previewFilename.textContent = file.name || 'Unnamed file';
-    previewFilesize.textContent = formatFileSize(file.size);
-    previewDate.textContent = formatDate(file.date);
+    this.previewFilename.textContent = file.name || 'Unnamed file';
+    this.previewFilesize.textContent = formatFileSize(file.size);
+    this.previewDate.textContent = formatDate(file.date);
     
-    previewContainer.innerHTML = '';
+    this.previewContainer.innerHTML = '';
     
     if (ALLOWED_IMAGE_TYPES.includes(file.type)) {
       const img = document.createElement('img');
@@ -326,7 +317,7 @@
           window.App.Alerts.show('Could not load preview image', 'warning');
         }
       };
-      previewContainer.appendChild(img);
+      this.previewContainer.appendChild(img);
     } else if (ALLOWED_VIDEO_TYPES.includes(file.type)) {
       const video = document.createElement('video');
       video.controls = true;
@@ -337,22 +328,22 @@
       source.src = `/api/media/${file.name}`;
       source.type = file.mimetype || `video/${file.type}`;
       video.appendChild(source);
-      previewContainer.appendChild(video);
+      this.previewContainer.appendChild(video);
     }
     
-    if (previewModal) {
-      previewModal.style.display = 'block';
+    if (this.previewModal) {
+      this.previewModal.style.display = 'block';
       document.body.style.overflow = 'hidden';
     }
   }
 
-  function closePreview() {
-    if (previewModal) {
-      previewModal.style.display = 'none';
+  closePreview() {
+    if (this.previewModal) {
+      this.previewModal.style.display = 'none';
       document.body.style.overflow = 'auto';
       
       // Pause any playing video
-      const video = previewContainer?.querySelector('video');
+      const video = this.previewContainer?.querySelector('video');
       if (video) {
         video.pause();
       }
@@ -360,7 +351,7 @@
   }
 
   // Select all files
-  function selectAllFiles() {
+  selectAllFiles() {
     const checkboxes = document.querySelectorAll('.file-checkbox');
     if (!checkboxes.length) return;
     
@@ -372,16 +363,16 @@
       checkbox.dispatchEvent(event);
     });
     
-    if (selectAllBtn) {
-      selectAllBtn.innerHTML = allSelected ? 
+    if (this.selectAllBtn) {
+      this.selectAllBtn.innerHTML = allSelected ? 
         '<i class="fas fa-check-square"></i> Select All' : 
         '<i class="fas fa-times"></i> Deselect All';
     }
   }
 
   // Handle file upload
-  async function uploadMedia() {
-    if (!fileInput?.files || fileInput.files.length === 0) {
+  async uploadMedia() {
+    if (!this.fileInput?.files || this.fileInput.files.length === 0) {
       if (window.App?.Alerts?.show) {
         window.App.Alerts.show('Please select files to upload', 'warning');
       }
@@ -398,8 +389,8 @@
     
     let validFilesCount = 0;
     // Filter and validate files
-    Array.from(fileInput.files).forEach(file => {
-      if (isValidFile(file)) {
+    Array.from(this.fileInput.files).forEach(file => {
+      if (this.isValidFile(file)) {
         formData.append('files', file);
         validFilesCount++;
       } else {
@@ -415,7 +406,7 @@
     }
 
     try {
-      setButtonLoading(uploadBtn, true);
+      this.setButtonLoading(this.uploadBtn, true);
       
       const response = await fetch('/api/media/upload', {
         method: 'POST',
@@ -434,33 +425,33 @@
       if (window.App?.Alerts?.show) {
         window.App.Alerts.show(`Uploaded ${result.files?.length || 0} file(s) successfully`, 'success');
       }
-      if (fileInput) fileInput.value = '';
-      await loadMediaFiles();
+      if (this.fileInput) this.fileInput.value = '';
+      await this.loadMediaFiles();
     } catch (error) {
       console.error('Upload error:', error);
       if (window.App?.Alerts?.show) {
         window.App.Alerts.show(`Upload failed: ${error.message}`, 'error');
       }
     } finally {
-      setButtonLoading(uploadBtn, false);
+      this.setButtonLoading(this.uploadBtn, false);
     }
   }
 
   // Handle file deletion
-  async function deleteSelectedMedia() {
-    if (selectedFiles.size === 0) {
+  async deleteSelectedMedia() {
+    if (this.selectedFiles.size === 0) {
       if (window.App?.Alerts?.show) {
         window.App.Alerts.show('Please select files to delete', 'warning');
       }
       return;
     }
 
-    if (!confirm(`Delete ${selectedFiles.size} selected file(s)? This cannot be undone.`)) {
+    if (!confirm(`Delete ${this.selectedFiles.size} selected file(s)? This cannot be undone.`)) {
       return;
     }
 
     try {
-      setButtonLoading(deleteBtn, true);
+      this.setButtonLoading(this.deleteBtn, true);
       
       const response = await fetch('/api/media/files', {
         method: 'POST',
@@ -469,7 +460,7 @@
             'X-CSRFToken': document.querySelector('input[name="csrf_token"]')?.value
         },
         body: JSON.stringify({
-            files: Array.from(selectedFiles),
+            files: Array.from(this.selectedFiles),
             csrf_token: document.querySelector('input[name="csrf_token"]')?.value
         })
       });
@@ -480,21 +471,21 @@
       }
 
       if (window.App?.Alerts?.show) {
-        window.App.Alerts.show(`Deleted ${selectedFiles.size} file(s) successfully`, 'success');
+        window.App.Alerts.show(`Deleted ${this.selectedFiles.size} file(s) successfully`, 'success');
       }
-      selectedFiles.clear();
-      await loadMediaFiles();
+      this.selectedFiles.clear();
+      await this.loadMediaFiles();
     } catch (error) {
       console.error('Delete error:', error);
       if (window.App?.Alerts?.show) {
         window.App.Alerts.show(`Delete failed: ${error.message}`, 'error');
       }
     } finally {
-      setButtonLoading(deleteBtn, false);
+      this.setButtonLoading(this.deleteBtn, false);
     }
   }
 
-  function setButtonLoading(button, isLoading) {
+  setButtonLoading(button, isLoading) {
     if (!button) return;
     
     if (isLoading) {
@@ -511,58 +502,66 @@
   }
 
   // Initialize event listeners
-  function initEventListeners() {
-    if (uploadBtn) {
-      uploadBtn.addEventListener('click', uploadMedia);
+  initEventListeners() {
+    if (this.uploadBtn) {
+      this.uploadBtn.addEventListener('click', this.uploadMedia.bind(this));
     }
     
-    if (deleteBtn) {
-      deleteBtn.addEventListener('click', deleteSelectedMedia);
+    if (this.deleteBtn) {
+      this.deleteBtn.addEventListener('click', this.deleteSelectedMedia.bind(this));
     }
 
-    if (selectAllBtn) {
-      selectAllBtn.addEventListener('click', selectAllFiles);
+    if (this.selectAllBtn) {
+      this.selectAllBtn.addEventListener('click', this.selectAllFiles.bind(this));
     }
 
-    if (searchInput) {
-      searchInput.addEventListener('input', () => renderGallery(currentFiles));
+    if (this.searchInput) {
+      this.searchInput.addEventListener('input', () => this.renderGallery(this.currentFiles));
     }
 
-    if (sortSelect) {
-      sortSelect.addEventListener('change', () => renderGallery(currentFiles));
+    if (this.sortSelect) {
+      this.sortSelect.addEventListener('change', () => this.renderGallery(this.currentFiles));
     }
 
-    if (groupSelect) {
-      groupSelect.addEventListener('change', () => renderGallery(currentFiles));
+    if (this.groupSelect) {
+      this.groupSelect.addEventListener('change', () => this.renderGallery(this.currentFiles));
     }
 
-    if (closeModal) {
-      closeModal.addEventListener('click', closePreview);
+    if (this.closeModal) {
+      this.closeModal.addEventListener('click', this.closePreview.bind(this));
     }
 
     // Close modal when clicking outside
     window.addEventListener('click', (e) => {
-      if (e.target === previewModal) {
-        closePreview();
+      if (e.target === this.previewModal) {
+        this.closePreview();
       }
     });
 
     // Close modal with ESC key
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && previewModal.style.display === 'block') {
-        closePreview();
+      if (e.key === 'Escape' && this.previewModal.style.display === 'block') {
+        this.closePreview();
       }
     });
 
     // Reload files when page gains focus
     window.addEventListener('visibilitychange', () => {
-      if (!document.hidden) loadMediaFiles();
+      if (!document.hidden) this.loadMediaFiles();
     });
 
     // Initial load
-    loadMediaFiles();
+    this.loadMediaFiles();
   }
+}
 
-  // Initialize the gallery
-  initEventListeners();
-})();
+// Initialize the gallery when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+  const mediaGallery = new MediaGallery();
+  
+  // For backward compatibility with other modules
+  window.App = window.App || {};
+  window.App.MediaGallery = mediaGallery;
+});
+
+export default MediaGallery;
