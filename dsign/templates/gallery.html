@@ -60,9 +60,74 @@
     </div>
   </div>
 </div>
-
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/gallery.js') }}"></script>
+<script type="module">
+  import { MediaGallery } from '{{ url_for('static', filename='js/gallery.js') }}';
+
+  document.addEventListener('DOMContentLoaded', () => {
+    // Configuration object for the gallery
+    const galleryConfig = {
+      container: '#media-gallery',
+      searchInput: '#search-input',
+      sortSelect: '#sort-select',
+      groupSelect: '#group-select',
+      selectAllBtn: '#select-all',
+      deleteSelectedBtn: '#delete-selected',
+      uploadForm: '#upload-form',
+      fileUploadInput: '#file-upload',
+      uploadBtn: '#upload-btn',
+      previewModal: '#preview-modal',
+      previewContainer: '#preview-container',
+      closeModalBtn: '.close-modal',
+      filenameElement: '#preview-filename',
+      filesizeElement: '#preview-filesize',
+      dateElement: '#preview-date'
+    };
+
+    // Initialize gallery with error handling
+    const initializeGallery = () => {
+      try {
+        const gallery = new MediaGallery(galleryConfig);
+        
+        // Make gallery instance available globally if needed
+        window.mediaGallery = gallery;
+        
+        console.log('MediaGallery initialized successfully');
+      } catch (error) {
+        console.error('Failed to initialize MediaGallery:', error);
+        
+        // Show error notification if App is available
+        if (window.App?.alerts) {
+          window.App.alerts.showError(
+            'Gallery Error', 
+            'Failed to initialize media gallery. Please try again later.'
+          );
+        }
+      }
+    };
+
+    // Initialize when App is ready or fallback
+    if (window.App) {
+      window.App.onReady(initializeGallery);
+    } else {
+      // Fallback initialization
+      const appReadyCheck = setInterval(() => {
+        if (window.App) {
+          clearInterval(appReadyCheck);
+          window.App.onReady(initializeGallery);
+        }
+      }, 100);
+
+      // Additional fallback in case App never loads
+      setTimeout(() => {
+        if (!window.App) {
+          clearInterval(appReadyCheck);
+          initializeGallery();
+        }
+      }, 2000);
+    }
+  });
+</script>
 {% endblock %}
