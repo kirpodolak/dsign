@@ -1,4 +1,4 @@
-import { showAlert, showError } from './js/utils/alerts.js';
+import { showAlert, showError } from './utils/alerts.js';
 
 document.addEventListener('DOMContentLoaded', function() {
     const form = document.getElementById('login-form');
