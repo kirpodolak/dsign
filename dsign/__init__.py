@@ -65,8 +65,8 @@ def create_app(config_class=config) -> Flask:
 
         # Регистрация auth blueprint
         from .routes.auth_routes import auth_bp
-        app.register_blueprint(auth_bp, url_prefix='/auth')
-        app.logger.info("Auth blueprint registered at /auth")
+        app.register_blueprint(auth_bp, url_prefix='/api/auth')
+        app.logger.info("Auth blueprint registered at /api/auth")
 
         app.logger.info("Extensions initialized successfully")
 
