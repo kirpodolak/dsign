@@ -55,7 +55,7 @@ class AppCore {
             await this.initializer.init();
 
             // Check authentication state
-            const isLoginPage = window.location.pathname.includes('/auth/login');
+            const isLoginPage = window.location.pathname.includes('/api/auth/login');
             const token = getToken();
             
             if (!token && !isLoginPage) {
@@ -216,10 +216,10 @@ class AuthService {
         
         // Prevent redirect loops
         const currentPath = window.location.pathname;
-        if (!currentPath.includes('/auth/login')) {
+        if (!currentPath.includes('/api/auth/login')) {
             this.logger.warn('Redirecting to login');
             const redirectUrl = encodeURIComponent(currentPath + window.location.search);
-            window.location.href = `/auth/login?redirect=${redirectUrl}`;
+            window.location.href = `/api/auth/login?redirect=${redirectUrl}`;
         }
     }
 
