@@ -123,26 +123,30 @@ export class SocketManager {
      */
     async getSocketToken() {
         try {
-            // Use AuthService if available
-            if (typeof window !== 'undefined' && window.App?.Auth?.getSocketToken) {
+            // Try using AuthService first
+            if (window.App?.Auth?.getSocketToken) {
                 const { token } = await window.App.Auth.getSocketToken();
+                if (!token) throw new Error('No token received');
                 return token;
             }
-            
-            // Fallback to direct API call
-            const response = await fetch('/auth/socket-token', {
+        
+            // Fallback to direct fetch
+            const response = await fetch('/api/auth/socket-token', {
                 credentials: 'include'
             });
-            
+        
             if (!response.ok) {
-                throw new Error('Failed to get socket token');
+                throw new Error(`HTTP ${response.status}`);
             }
-            
+        
             const data = await response.json();
+            if (!data.token) {
+                throw new Error('No token in response');
+            }
             return data.token;
         } catch (error) {
             console.error('[Socket] Token fetch error:', error);
-            return null;
+            throw error;
         }
     }
 
