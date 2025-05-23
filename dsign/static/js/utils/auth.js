@@ -155,7 +155,7 @@ export class AuthService {
     handleUnauthorized() {
         if (typeof window === 'undefined') return;
         
-        if (window.location.pathname.startsWith('/auth/login')) {
+        if (window.location.pathname.startsWith('/api/auth/login')) {
             this.logger?.debug('Already on login page, skipping redirect');
             return;
         }
@@ -167,7 +167,7 @@ export class AuthService {
             const redirect = encodeURIComponent(
                 window.location.pathname + window.location.search
             );
-            window.location.href = `/auth/login?redirect=${redirect}`;
+            window.location.href = `/api/auth/login?redirect=${redirect}`;
         }, 100);
     }
 
@@ -244,7 +244,7 @@ if (typeof window !== 'undefined') {
     
     // Initialize auth check handlers when DOM is ready
     document.addEventListener('DOMContentLoaded', () => {
-        if (!window.location.pathname.includes('/auth/login')) {
+        if (!window.location.pathname.includes('/api/auth/login')) {
             setInterval(() => {
                 window.App.Auth.checkAuth().catch(error => {
                     window.App.Logger?.error('Periodic auth check failed', error);
