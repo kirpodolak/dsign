@@ -1,7 +1,6 @@
 import { showAlert, showError } from './utils/alerts.js';
 import { toggleButtonState } from './utils/helpers.js';
 import { fetchAPI, getCSRFToken } from './utils/api.js';
-import { io } from '/static/js/utils/socket.io.esm.min.js';
 
 // Application configuration
 const CONFIG = {
