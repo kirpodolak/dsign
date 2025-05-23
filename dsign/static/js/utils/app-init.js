@@ -1,9 +1,9 @@
 import { showAlert, showError } from './alerts.js';
 import { getToken, getCookie, deleteCookie } from './helpers.js';
-import AuthService from './auth.js';
-import SocketManager from './sockets.js';
+import { AuthService } from './auth.js';
+import { SocketManager } from './sockets.js';
 import PlayerControls from './player-controls.js';
-import AppLogger from './logging.js';
+import { AppLogger } from './logging.js';
 
 class AppInitializer {
     constructor() {
