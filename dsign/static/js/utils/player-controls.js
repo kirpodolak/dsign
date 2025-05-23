@@ -1,3 +1,7 @@
+import { showAlert, showError } from './alerts.js';
+import { getToken, getCookie, deleteCookie } from './helpers.js';
+import { fetchAPI } from './api.js';
+
 export class PlayerControls {
     constructor({ API, Alerts, Helpers }) {
         this.currentUserId = null;
