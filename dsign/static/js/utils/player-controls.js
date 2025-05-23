@@ -1,5 +1,3 @@
-import Swal from 'sweetalert2';
-
 export class PlayerControls {
     constructor({ API, Alerts, Helpers }) {
         this.currentUserId = null;
