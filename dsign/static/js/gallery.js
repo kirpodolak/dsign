@@ -75,7 +75,7 @@ export class MediaGallery {
       });
 
       if (response.redirected) {
-        window.location.href = '/auth/login';
+        window.location.href = '/api/auth/login';
         return;
       }
 
