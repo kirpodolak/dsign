@@ -3,13 +3,12 @@
  * Handles application bootstrap, authentication, and core services
  */
 
-import { io } from 'socket.io-client';
 import Swal from 'sweetalert2';
-import AppInitializer from './app-init.js';
+import AppInitializer from './utils//app-init.js';
 
 // Import other utils as needed
-import { getToken, clearToken, setCachedData, getCachedData } from './helpers.js';
-import AppLogger from './logging.js';
+import { getToken, clearToken, setCachedData, getCachedData } from './utils/helpers.js';
+import { AppLogger } from './utils/logging.js';
 
 class AppCore {
     constructor() {
