@@ -4,6 +4,7 @@ import { AuthService } from './auth.js';
 import { SocketManager } from './sockets.js';
 import PlayerControls from './player-controls.js';
 import { AppLogger } from './logging.js';
+import { fetchAPI } from './api.js';
 
 class AppInitializer {
     constructor() {
@@ -15,7 +16,13 @@ class AppInitializer {
         this.logger = new AppLogger('AppInitializer');
         this.authService = new AuthService();
         this.socketManager = new SocketManager();
-        this.playerControls = new PlayerControls();
+        this.playerControls = new PlayerControls({
+            API: { fetch: fetchAPI },
+            Alerts: { showAlert, showError },
+            Helpers: {
+                toggleButtonState: this.toggleButtonState.bind(this)
+            }
+        });
     }
 
     async init() {
@@ -291,6 +298,16 @@ class AppInitializer {
                 setTimeout(() => this.initWebSocket(), delay);
             } else if (error.message.includes('auth')) {
                 this.handleAuthError(error);
+            }
+        }
+    }
+
+    toggleButtonState(button, loading) {
+        if (button) {
+            button.disabled = loading;
+            const spinner = button.querySelector('.spinner');
+            if (spinner) {
+                spinner.style.display = loading ? 'inline-block' : 'none';
             }
         }
     }
