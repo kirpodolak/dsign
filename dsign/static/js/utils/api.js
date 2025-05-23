@@ -123,7 +123,7 @@ function getAuthToken() {
 }
 
 export {
-    fetchAPI as default,
+    fetchAPI,
     getCSRFToken,
     setAuthToken,
     getAuthToken
