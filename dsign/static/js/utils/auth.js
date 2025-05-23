@@ -205,11 +205,9 @@ export class AuthService {
      */
     async getSocketToken() {
         try {
-            // Use dynamic import for API if not available globally
-            const api = typeof window !== 'undefined' && window.App?.API 
-                ? window.App.API 
-                : await import('./api.js');
-
+            // Use the global API if available, otherwise import directly
+            const api = window.App?.API || (await import('./api.js'));
+        
             const response = await api.fetch('/auth/socket-token', {
                 credentials: 'include',
                 headers: {
@@ -217,27 +215,16 @@ export class AuthService {
                     'X-Requested-With': 'XMLHttpRequest'
                 }
             });
-            
+        
             if (!response.ok) {
-                if (response.status === 401) {
-                    throw new Error('Authentication required');
-                }
-                if (response.status === 404) {
-                    throw new Error('Endpoint not found');
-                }
                 throw new Error(`HTTP ${response.status}`);
             }
-            
-            const contentType = response.headers.get('content-type');
-            if (!contentType?.includes('application/json')) {
-                throw new Error('Invalid response format');
-            }
-            
+        
             const data = await response.json();
             if (!data?.token) {
                 throw new Error('Invalid token response');
             }
-            
+        
             return {
                 token: data.token,
                 expiresIn: data.expires_in || 300,
@@ -246,9 +233,9 @@ export class AuthService {
         } catch (error) {
             this.logger?.error('Socket token fetch failed', error);
             throw new Error(`Failed to get socket token: ${error.message}`);
+            }
         }
     }
-}
 
 // Initialize and export service for global access
 if (typeof window !== 'undefined') {
