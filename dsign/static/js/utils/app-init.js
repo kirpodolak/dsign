@@ -74,12 +74,12 @@ class AppInitializer {
     }
 
     preventRedirectLoops() {
-        const isLoginPage = window.location.pathname.includes('/auth/login');
+        const isLoginPage = window.location.pathname.includes('/api/auth/login');
         const hasRedirectLoop = window.location.search.includes('redirect=%2Fauth%2Flogin');
         
         if (isLoginPage && hasRedirectLoop) {
             this.logger.warn('Redirect loop detected, resetting to login');
-            window.location.href = '/auth/login';
+            window.location.href = '/api/auth/login';
             return true;
         }
         return false;
@@ -99,7 +99,7 @@ class AppInitializer {
                          localStorage.getItem('authToken') || 
                          getCookie('authToken');
             
-            const isLoginPage = window.location.pathname.includes('/auth/login');
+            const isLoginPage = window.location.pathname.includes('/api/auth/login');
             
             if (!token && !isLoginPage) {
                 this.logger.warn('No token found, redirecting to login');
@@ -107,7 +107,7 @@ class AppInitializer {
                 const redirectUrl = encodeURIComponent(
                     window.location.pathname + window.location.search
                 );
-                window.location.href = `/auth/login?redirect=${redirectUrl}`;
+                window.location.href = `/api/auth/login?redirect=${redirectUrl}`;
                 return false;
             }
 
@@ -353,7 +353,7 @@ class AppInitializer {
                 timer: 5000,
                 onClose: () => {
                     const redirectUrl = encodeURIComponent(window.location.pathname);
-                    window.location.href = `/auth/login?redirect=${redirectUrl}`;
+                    window.location.href = `/api/auth/login?redirect=${redirectUrl}`;
                 }
             }
         );
