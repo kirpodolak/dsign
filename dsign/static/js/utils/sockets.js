@@ -96,20 +96,18 @@ export class SocketManager {
         try {
             console.debug('[Socket] Starting connection with token check');
             
-            clearTimeout(this.connectionTimeout);
-            this.connectionTimeout = setTimeout(() => {
-                if (!this.connectionEstablished) {
-                    this.onError(new Error('Connection timeout'));
-                    this.handleRetry();
-                }
-            }, CONFIG.CONNECTION_TIMEOUT);
+            // Wait for API service to be available
+            await this.waitForAPI();
             
-            const token = await this.getSocketToken();
+            // Wait for base token to be available
+            const token = await window.App.Auth.waitForToken();
             if (!token) {
                 throw new Error('No valid authentication token available');
             }
             
-            this.init();
+            // Get fresh socket token
+            const socketToken = await this.getSocketToken();
+            this.init(socketToken);
         } catch (error) {
             console.error('[Socket] Initialization error:', error);
             this.handleRetry(error);
@@ -123,24 +121,31 @@ export class SocketManager {
      */
     async getSocketToken() {
         try {
-            // Try using AuthService first
-            if (window.App?.Auth?.getSocketToken) {
-                const { token } = await window.App.Auth.getSocketToken();
-                if (!token) throw new Error('No token received');
-                return token;
+            // First check if we have a base auth token
+            const authToken = window.App?.Auth?.getToken?.() || 
+                            localStorage.getItem('authToken');
+            
+            if (!authToken) {
+                throw new Error('No base authentication token available');
             }
-        
-            // Fallback to direct fetch
-            const response = await fetch('/api/auth/socket-token', {
-                credentials: 'include'
+
+            const response = await window.App.API.fetch('/auth/socket-token', {
+                headers: {
+                    'Authorization': `Bearer ${authToken}`
+                }
             });
-        
+
             if (!response.ok) {
+                // If unauthorized, try refreshing token
+                if (response.status === 401) {
+                    await window.App.Auth.refreshToken();
+                    return this.getSocketToken(); // Retry with new token
+                }
                 throw new Error(`HTTP ${response.status}`);
             }
-        
+
             const data = await response.json();
-            if (!data.token) {
+            if (!data?.token) {
                 throw new Error('No token in response');
             }
             return data.token;
@@ -149,6 +154,23 @@ export class SocketManager {
             throw error;
         }
     }
+	
+    async waitForAPI(maxAttempts = 5, delay = 500) {
+        let attempts = 0;
+        return new Promise((resolve, reject) => {
+            const check = () => {
+                attempts++;
+                if (window.App?.API?.fetch) {
+                    resolve();
+                } else if (attempts >= maxAttempts) {
+                    reject(new Error('API service not available'));
+                } else {
+                    setTimeout(check, delay);
+                }
+            };
+            check();
+        });
+    }	
 
     /**
      * Validate token structure
