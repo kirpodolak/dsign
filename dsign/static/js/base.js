@@ -3,10 +3,7 @@
  * Handles application bootstrap, authentication, and core services
  */
 
-import Swal from 'sweetalert2';
-import AppInitializer from './utils//app-init.js';
-
-// Import other utils as needed
+import { AppInitializer } from './utils/app-init.js';
 import { getToken, clearToken, setCachedData, getCachedData } from './utils/helpers.js';
 import { AppLogger } from './utils/logging.js';
 
@@ -25,10 +22,10 @@ class AppCore {
         this.state = {
             navigationInProgress: false,
             authChecked: false,
-            socketInitialized: false
+            socketInitialized: false,
+            socketConnected: false
         };
         this.logger = new AppLogger('AppCore');
-        this.initializer = AppInitializer;
     }
 
     onReady(callback) {
@@ -45,18 +42,35 @@ class AppCore {
 
     handleError(message, error) {
         this.logger.error(message, error);
+        if (this.alerts) {
+            this.alerts.showError('Error', message, error);
+        }
     }
 
     async initialize() {
         this.logger.info('Starting application initialization');
 
         try {
-            // Delegate initialization to AppInitializer
+            // Initialize core services first
+            this.api = new APIService();
+            this.auth = new AuthService();
+            this.alerts = new AlertSystem();
+            
+            // Wait for essential services to be ready
+            await this.waitForDependencies();
+
+            // Initialize AppInitializer
+            this.initializer = new AppInitializer({
+                api: this.api,
+                auth: this.auth,
+                alerts: this.alerts
+            });
+            
             await this.initializer.init();
 
             // Check authentication state
             const isLoginPage = window.location.pathname.includes('/api/auth/login');
-            const token = getToken();
+            const token = await this.auth.waitForToken().catch(() => null);
             
             if (!token && !isLoginPage) {
                 this.logger.warn('No token - redirecting to login');
@@ -85,15 +99,8 @@ class AppCore {
             this.logger.info('App core initialized');
             
             // Execute ready callbacks
-            this.onReadyCallbacks.forEach(cb => {
-                try {
-                    if (typeof cb === 'function') cb();
-                } catch (error) {
-                    this.handleError('Ready callback error:', error);
-                }
-            });
+            this.executeReadyCallbacks();
             
-            this.onReadyCallbacks = [];
         } catch (error) {
             this.logger.error('App initialization failed:', error);
             if (this.alerts) {
@@ -106,11 +113,41 @@ class AppCore {
         }
     }
 
+    async waitForDependencies() {
+        const maxAttempts = 10;
+        const delay = 500;
+        
+        for (let i = 0; i < maxAttempts; i++) {
+            if (window.App?.API && window.App?.Auth) {
+                return;
+            }
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        throw new Error('Dependencies not available');
+    }
+
+    executeReadyCallbacks() {
+        this.onReadyCallbacks.forEach(cb => {
+            try {
+                if (typeof cb === 'function') cb();
+            } catch (error) {
+                this.handleError('Ready callback error:', error);
+            }
+        });
+        this.onReadyCallbacks = [];
+    }
+
     async initializeWebSockets() {
         if (this.state.socketInitialized) return;
         
         try {
-            // Check authentication first
+            // Verify token is available and valid
+            const token = await this.auth.waitForToken();
+            if (!token) {
+                this.logger.warn('WebSocket init aborted - no token available');
+                return;
+            }
+
             const isAuth = await this.auth.checkAuth();
             if (!isAuth) {
                 this.logger.warn('WebSocket init aborted - not authenticated');
@@ -119,12 +156,21 @@ class AppCore {
 
             this.logger.debug('Initializing WebSocket connection');
             
-            // Get fresh socket token
-            const { token, socketUrl } = await this.auth.getSocketToken();
+            // Get fresh socket token with retry logic
+            let socketToken;
+            try {
+                const result = await this.auth.getSocketToken();
+                socketToken = result.token;
+            } catch (error) {
+                this.logger.error('Failed to get socket token:', error);
+                await this.auth.refreshToken();
+                const result = await this.auth.getSocketToken();
+                socketToken = result.token;
+            }
             
             // Initialize socket connection
-            const socket = io(socketUrl || this.config.socketEndpoint, {
-                auth: { token },
+            const socket = io(this.config.socketEndpoint, {
+                auth: { token: socketToken },
                 reconnection: true,
                 reconnectionAttempts: this.config.maxSocketRetries,
                 reconnectionDelay: this.config.socketReconnectDelay,
@@ -136,24 +182,9 @@ class AppCore {
             window.appSocket = socket;
             this.state.socketInitialized = true;
 
-            // Event handlers
-            socket.on('connect', () => {
-                this.logger.info('WebSocket connected');
-                this.state.socketConnected = true;
-            });
-
-            socket.on('disconnect', (reason) => {
-                this.logger.warn('WebSocket disconnected:', reason);
-                this.state.socketConnected = false;
-            });
-
-            socket.on('connect_error', (error) => {
-                this.logger.error('WebSocket connection error:', error);
-                if (error.message.includes('auth') || error.message.includes('token')) {
-                    this.auth.handleUnauthorized();
-                }
-            });
-
+            // Setup event handlers
+            this.setupSocketHandlers(socket);
+            
             // Expose socket interface
             this.sockets = {
                 connect: () => socket.connect(),
@@ -169,10 +200,35 @@ class AppCore {
             };
 
         } catch (error) {
-            this.logger.error('WebSocket initialization failed:', error);
+            this.handleSocketError(error);
+        }
+    }
+
+    setupSocketHandlers(socket) {
+        socket.on('connect', () => {
+            this.logger.info('WebSocket connected');
+            this.state.socketConnected = true;
+        });
+
+        socket.on('disconnect', (reason) => {
+            this.logger.warn('WebSocket disconnected:', reason);
+            this.state.socketConnected = false;
+        });
+
+        socket.on('connect_error', (error) => {
+            this.logger.error('WebSocket connection error:', error);
             if (error.message.includes('auth') || error.message.includes('token')) {
                 this.auth.handleUnauthorized();
             }
+        });
+    }
+
+    handleSocketError(error) {
+        this.logger.error('WebSocket initialization failed:', error);
+        if (error.message.includes('auth') || error.message.includes('token')) {
+            this.auth.handleUnauthorized();
+        } else {
+            setTimeout(() => this.initializeWebSockets(), 5000);
         }
     }
 }
@@ -184,10 +240,10 @@ class AuthService {
 
     async checkAuth() {
         try {
-            const token = getToken();
+            const token = await this.waitForToken();
             if (!token) return false;
             
-            const response = await fetch('/auth/api/check-auth', {
+            const response = await window.App.API.fetch('/auth/api/check-auth', {
                 method: 'GET',
                 headers: {
                     'Authorization': `Bearer ${token}`
@@ -202,24 +258,103 @@ class AuthService {
         }
     }
 
+    async refreshToken() {
+        try {
+            const response = await window.App.API.fetch('/auth/refresh-token', {
+                method: 'POST',
+                credentials: 'include'
+            });
+            
+            if (!response.ok) throw new Error('Token refresh failed');
+            
+            const { token } = await response.json();
+            this.setToken(token);
+            return true;
+        } catch (error) {
+            this.logger.error('Token refresh failed:', error);
+            this.clearAuth();
+            throw error;
+        }
+    }
+
     handleUnauthorized() {
         if (window.App?.state?.navigationInProgress) return;
         
         window.App.state.navigationInProgress = true;
         clearToken();
         
-        // Disconnect socket if exists
         if (window.appSocket) {
             window.appSocket.disconnect();
             delete window.appSocket;
         }
         
-        // Prevent redirect loops
         const currentPath = window.location.pathname;
         if (!currentPath.includes('/api/auth/login')) {
             this.logger.warn('Redirecting to login');
             const redirectUrl = encodeURIComponent(currentPath + window.location.search);
             window.location.href = `/api/auth/login?redirect=${redirectUrl}`;
+        }
+    }
+
+    setToken(token) {
+        try {
+            window.App = window.App || {};
+            window.App.token = token;
+            
+            if (typeof localStorage !== 'undefined') {
+                localStorage.setItem('authToken', token);
+            }
+            
+            if (typeof document !== 'undefined') {
+                document.cookie = `authToken=${token}; path=/; max-age=${3600*24*7}; Secure; SameSite=Lax`;
+            }
+        } catch (e) {
+            this.logger.error('Failed to save auth token', e);
+        }
+    }
+
+    clearAuth() {
+        try {
+            window.App = window.App || {};
+            delete window.App.token;
+            
+            if (typeof localStorage !== 'undefined') {
+                localStorage.removeItem('authToken');
+            }
+            
+            if (typeof document !== 'undefined') {
+                document.cookie = 'authToken=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+            }
+        } catch (e) {
+            this.logger.error('Failed to clear auth token', e);
+        }
+    }
+
+    async getSocketToken() {
+        try {
+            const token = await this.waitForToken();
+            const response = await window.App.API.fetch('/auth/socket-token', {
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+            
+            if (!response.ok) {
+                if (response.status === 401) {
+                    await this.refreshToken();
+                    return this.getSocketToken();
+                }
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+            if (!data?.token) {
+                throw new Error('No token in response');
+            }
+            return data;
+        } catch (error) {
+            this.logger.error('Failed to get socket token:', error);
+            throw error;
         }
     }
 
@@ -229,7 +364,9 @@ class AuthService {
         return new Promise((resolve, reject) => {
             const checkToken = () => {
                 attempts++;
-                const token = getToken();
+                const token = window.App?.token || 
+                             localStorage.getItem('authToken') || 
+                             getCookie('authToken');
                 
                 if (token) {
                     resolve(token);
@@ -243,19 +380,6 @@ class AuthService {
             checkToken();
         });
     }
-
-    async getSocketToken() {
-        try {
-            const response = await fetch('/auth/socket-token');
-            if (!response.ok) {
-                throw new Error('Failed to get socket token');
-            }
-            return await response.json();
-        } catch (error) {
-            this.logger.error('Failed to get socket token:', error);
-            throw error;
-        }
-    }
 }
 
 class AlertSystem {
@@ -266,7 +390,6 @@ class AlertSystem {
     showAlert(type, title, message, options = {}) {
         this.logger.info(`Alert: ${title}`, { type, message });
         
-        // Dispatch event for UI components
         const event = new CustomEvent('app-alert', {
             detail: { type, title, message, ...options }
         });
@@ -304,7 +427,7 @@ class APIService {
                 ...options.headers
             };
 
-            const token = getToken();
+            const token = await window.App.auth.waitForToken().catch(() => null);
             if (token) {
                 headers['Authorization'] = `Bearer ${token}`;
             }
