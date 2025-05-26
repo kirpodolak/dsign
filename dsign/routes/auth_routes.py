@@ -15,7 +15,7 @@ from ..services.logger import setup_logger
 logger = setup_logger('auth.routes')
 
 # Создаем Blueprint с уникальным именем
-auth_bp = Blueprint('auth', __name__, template_folder='templates')
+auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
 # Security configurations
 MAX_LOGIN_ATTEMPTS = 10
