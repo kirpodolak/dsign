@@ -10,12 +10,14 @@ class AppInitializer {
     constructor() {
         this.retryCount = 0;
         this.maxRetryCount = 3;
-        this.retryDelay = 2000;
-        this.debugMode = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+        this.initialRetryDelay = 2000;
+        this.debugMode = window.location.hostname === 'localhost' || 
+                        window.location.hostname === '127.0.0.1' ||
+                        window.location.search.includes('debug=true');
 
         this.logger = new AppLogger('AppInitializer');
         this.authService = new AuthService();
-        this.socketManager = new SocketManager();
+        this.socketManager = null;
         this.playerControls = new PlayerControls({
             API: { fetch: fetchAPI },
             Alerts: { showAlert, showError },
@@ -23,40 +25,63 @@ class AppInitializer {
                 toggleButtonState: this.toggleButtonState.bind(this)
             }
         });
+
+        this.initPromise = null;
     }
 
     async init() {
-        try {
-            // Initialize global state first
-            this.initGlobalState();
-
-            // Prevent redirect loops before any auth checks
-            if (this.preventRedirectLoops()) {
-                return;
-            }
-
-            // Check authentication
-            const isAuthenticated = await this.checkAuth();
-            if (!isAuthenticated) {
-                return;
-            }
-
-            // Setup core components
-            await Promise.all([
-                this.setupLoader(),
-                this.setupAlerts(),
-                this.setupErrorHandling(),
-                this.setupAuthMonitoring(),
-                this.initWebSocket()
-            ]);
-
-            // Initialize other modules
-            this.initModules();
-
-        } catch (error) {
-            this.logger.error('Initialization error:', error);
-            this.showFatalError('Application initialization failed');
+        // Ensure initialization only happens once
+        if (this.initPromise) {
+            return this.initPromise;
         }
+
+        this.initPromise = (async () => {
+            try {
+                this.logger.debug('Starting application initialization');
+                
+                // Initialize global state first
+                this.initGlobalState();
+
+                // Prevent redirect loops before any auth checks
+                if (this.preventRedirectLoops()) {
+                    return;
+                }
+
+                // Initialize socket manager after global state
+                this.socketManager = new SocketManager({
+                    authService: this.authService,
+                    logger: this.logger
+                });
+
+                // Check authentication
+                const isAuthenticated = await this.checkAuth();
+                if (!isAuthenticated) {
+                    return;
+                }
+
+                // Setup core components
+                await Promise.all([
+                    this.setupLoader(),
+                    this.setupAlerts(),
+                    this.setupErrorHandling(),
+                    this.setupAuthMonitoring()
+                ]);
+
+                // Initialize WebSocket if authenticated
+                await this.initWebSocket();
+
+                // Initialize other modules
+                this.initModules();
+
+                this.logger.debug('Application initialization completed');
+            } catch (error) {
+                this.logger.error('Initialization error:', error);
+                this.showFatalError('Application initialization failed');
+                throw error;
+            }
+        })();
+
+        return this.initPromise;
     }
 
     initGlobalState() {
@@ -64,8 +89,9 @@ class AppInitializer {
         window.App.state = window.App.state || {
             navigationInProgress: false,
             socketConnected: false,
-            initialized: true,
-            lastAuthCheck: null
+            initialized: false,
+            lastAuthCheck: null,
+            retryDelays: [2000, 5000, 10000] // Progressive delays for retries
         };
 
         if (this.debugMode) {
@@ -75,55 +101,38 @@ class AppInitializer {
 
     preventRedirectLoops() {
         const isLoginPage = window.location.pathname.includes('/api/auth/login');
-        const hasRedirectLoop = window.location.search.includes('redirect=%2Fauth%2Flogin');
+        const hasRedirectLoop = window.location.search.includes('redirect_loop=true');
         
         if (isLoginPage && hasRedirectLoop) {
             this.logger.warn('Redirect loop detected, resetting to login');
-            window.location.href = '/api/auth/login';
+            window.location.href = '/api/auth/login?clear=true';
             return true;
         }
+        
+        // Clear any redirect flags if present
+        if (window.location.search.includes('clear=true')) {
+            const cleanUrl = window.location.pathname;
+            window.history.replaceState({}, document.title, cleanUrl);
+        }
+        
         return false;
     }
 
     async checkAuth() {
         try {
-            if (window.App.state?.navigationInProgress) {
-                if (this.debugMode) {
-                    this.logger.debug('Navigation already in progress');
-                }
+            // Skip auth check on login page
+            if (window.location.pathname.includes('/api/auth/login')) {
+                return true;
+            }
+
+            const isAuthenticated = await this.authService.checkAuth();
+            
+            if (!isAuthenticated) {
+                this.handleAuthError(new Error('Not authenticated'));
                 return false;
             }
 
-            // Get token from storage
-            const token = getToken() || 
-                         localStorage.getItem('authToken') || 
-                         getCookie('authToken');
-            
-            const isLoginPage = window.location.pathname.includes('/api/auth/login');
-            
-            if (!token && !isLoginPage) {
-                this.logger.warn('No token found, redirecting to login');
-                window.App.state.navigationInProgress = true;
-                const redirectUrl = encodeURIComponent(
-                    window.location.pathname + window.location.search
-                );
-                window.location.href = `/api/auth/login?redirect=${redirectUrl}`;
-                return false;
-            }
-
-            // Verify token with server if not on login page
-            if (!isLoginPage) {
-                const isValid = await this.authService.verifyToken(token);
-                if (!isValid) {
-                    this.handleAuthError(new Error('Invalid token'));
-                    return false;
-                }
-
-                window.App.state.lastAuthCheck = Date.now();
-            }
-            
             return true;
-
         } catch (error) {
             this.logger.error('Auth check error:', error);
             this.handleAuthError(error);
@@ -131,50 +140,40 @@ class AppInitializer {
         }
     }
 
-    handleRateLimitError() {
-        const alertMessage = 'Too many requests. Please wait before trying again.';
-        
-        showError('Rate Limit Exceeded', alertMessage, { timer: 5000 });
-        
-        const retryDelay = Math.min(
-            Math.pow(2, this.retryCount) * 1000,
-            30000
-        );
-        
-        setTimeout(() => {
-            this.retryCount++;
-            this.checkAuth();
-        }, retryDelay);
-    }
-
     async setupLoader() {
         return new Promise((resolve) => {
-            setTimeout(() => {
-                const loader = document.getElementById('page-loader');
-                if (loader) {
-                    loader.style.opacity = '0';
-                    setTimeout(() => {
-                        loader.style.display = 'none';
-                        document.dispatchEvent(new CustomEvent('app-ready', {
-                            detail: {
-                                authenticated: !!localStorage.getItem('authToken'),
-                                timestamp: Date.now()
-                            }
-                        }));
-                        resolve();
-                    }, 300);
-                } else {
+            const loader = document.getElementById('page-loader');
+            if (!loader) {
+                resolve();
+                return;
+            }
+
+            const fadeOut = () => {
+                loader.style.transition = 'opacity 300ms ease-out';
+                loader.style.opacity = '0';
+                
+                setTimeout(() => {
+                    loader.style.display = 'none';
+                    document.dispatchEvent(new CustomEvent('app-ready', {
+                        detail: {
+                            authenticated: this.authService.getToken() !== null,
+                            timestamp: Date.now()
+                        }
+                    }));
                     resolve();
-                }
-            }, 500);
+                }, 300);
+            };
+
+            // Start fade out after minimum display time
+            setTimeout(fadeOut, 500);
         });
     }
 
     setupAlerts() {
         if (typeof Swal === 'undefined') {
-            this.logger.warn('SweetAlert2 not available, using console fallback');
+            this.logger.warn('SweetAlert2 not available, using fallback');
             window.showAlert = (type, title, message) => {
-                this.logger.log(`[${type}] ${title}: ${message}`);
+                console[type === 'error' ? 'error' : 'log'](`[${type}] ${title}: ${message}`);
             };
             return;
         }
@@ -182,17 +181,16 @@ class AppInitializer {
         document.addEventListener('app-alert', (event) => {
             try {
                 const { type, title, message, options } = event.detail;
-                const defaultOptions = {
+                Swal.fire({
                     icon: type || 'info',
                     title: title || 'Notification',
                     text: message,
-                    toast: true,
-                    position: 'top-end',
-                    showConfirmButton: false,
-                    timer: 3000
-                };
-
-                Swal.fire({ ...defaultOptions, ...options });
+                    toast: options?.toast !== false,
+                    position: options?.position || 'top-end',
+                    showConfirmButton: options?.showConfirmButton || false,
+                    timer: options?.timer || 3000,
+                    ...options
+                });
             } catch (e) {
                 this.logger.error('Alert error:', e);
             }
@@ -206,6 +204,7 @@ class AppInitializer {
     }
 
     setupErrorHandling() {
+        // Global error handler
         window.addEventListener('error', (event) => {
             this.logger.error('Global Error:', event.error);
             
@@ -221,22 +220,24 @@ class AppInitializer {
             );
         });
 
+        // Unhandled promise rejections
         window.addEventListener('unhandledrejection', (event) => {
-            this.logger.error('Unhandled Rejection:', event.reason);
+            const error = event.reason;
+            this.logger.error('Unhandled Rejection:', error);
             
-            if (event.reason?.status === 401) {
+            if (error?.status === 401) {
                 this.handleAuthError(new Error('Session expired'));
                 return;
             }
             
-            if (event.reason?.status === 429) {
+            if (error?.status === 429) {
                 this.handleRateLimitError();
                 return;
             }
             
             showError(
                 'Async Error',
-                event.reason?.message || 'An async operation failed'
+                error?.message || 'An async operation failed'
             );
         });
 
@@ -250,71 +251,86 @@ class AppInitializer {
     }
 
     setupAuthMonitoring() {
-        setInterval(() => {
-            this.checkAuthStatus().catch(error => {
+        // Periodic auth checks
+        this.authCheckInterval = setInterval(() => {
+            this.checkAuth().catch(error => {
                 this.logger.warn('Auth monitoring error:', error);
             });
-        }, 300000); // 5 minutes
+        }, 5 * 60 * 1000); // 5 minutes
 
+        // Check auth when tab becomes visible
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
-                this.checkAuthStatus().catch(error => {
+                this.checkAuth().catch(error => {
                     this.logger.warn('Visibility change auth check error:', error);
                 });
             }
         });
     }
 
-    async checkAuthStatus() {
-        try {
-            const token = localStorage.getItem('authToken') || getCookie('authToken');
-            if (!token) {
-                this.handleAuthError(new Error('No token found'));
-                return;
-            }
-
-            const isValid = await this.authService.verifyToken(token);
-            if (!isValid) {
-                this.handleAuthError(new Error('Session expired'));
-            }
-
-            window.App.state.lastAuthCheck = Date.now();
-        } catch (error) {
-            this.logger.warn('Auth check failed:', error);
-        }
-    }
-
     async initWebSocket() {
         try {
+            if (!this.socketManager) {
+                throw new Error('SocketManager not initialized');
+            }
+
             await this.socketManager.connect();
             window.App.state.socketConnected = true;
+            this.retryCount = 0; // Reset retry counter on success
         } catch (error) {
             this.logger.error('Socket initialization failed:', error);
             
-            if (this.retryCount < this.maxRetryCount && !error.message.includes('auth')) {
-                const delay = this.retryDelay * Math.pow(2, this.retryCount);
+            if (this.retryCount < this.maxRetryCount) {
+                const delay = window.App.state.retryDelays[this.retryCount] || this.initialRetryDelay;
                 this.retryCount++;
+                
                 this.logger.warn(`Retrying WebSocket connection in ${delay}ms (attempt ${this.retryCount}/${this.maxRetryCount})`);
-                setTimeout(() => this.initWebSocket(), delay);
-            } else if (error.message.includes('auth')) {
+                
+                return new Promise(resolve => {
+                    setTimeout(() => {
+                        this.initWebSocket().then(resolve);
+                    }, delay);
+                });
+            }
+            
+            if (this.isAuthError(error)) {
                 this.handleAuthError(error);
             }
         }
     }
 
+    handleRateLimitError() {
+        const retryAfter = 60; // seconds
+        showError(
+            'Too Many Requests',
+            `Please wait ${retryAfter} seconds before trying again`,
+            { timer: 5000 }
+        );
+    }
+
     toggleButtonState(button, loading) {
-        if (button) {
-            button.disabled = loading;
-            const spinner = button.querySelector('.spinner');
-            if (spinner) {
-                spinner.style.display = loading ? 'inline-block' : 'none';
-            }
+        if (!button) return;
+        
+        button.disabled = loading;
+        const spinner = button.querySelector('.spinner');
+        if (spinner) {
+            spinner.style.display = loading ? 'inline-block' : 'none';
+        }
+        
+        const buttonText = button.querySelector('.button-text');
+        if (buttonText) {
+            buttonText.style.visibility = loading ? 'hidden' : 'visible';
         }
     }
 
     initModules() {
         document.addEventListener('app-ready', () => {
-            this.playerControls.init();
+            try {
+                this.playerControls.init();
+                document.dispatchEvent(new Event('app-modules-ready'));
+            } catch (error) {
+                this.logger.error('Module initialization error:', error);
+            }
         });
     }
 
@@ -325,6 +341,10 @@ class AppInitializer {
                 'You are currently offline. Some features may not work.',
                 { timer: false }
             );
+            
+            if (this.socketManager) {
+                this.socketManager.disconnect();
+            }
         });
 
         window.addEventListener('online', () => {
@@ -333,50 +353,99 @@ class AppInitializer {
                 'Connection Restored',
                 'You are back online'
             );
+            
+            if (!window.App.state.socketConnected && this.socketManager) {
+                this.initWebSocket();
+            }
         });
     }
 
     handleAuthError(error) {
-        this.logger.error('Auth Error:', error);
+        this.logger.warn('Handling auth error:', error);
         
-        localStorage.removeItem('authToken');
-        deleteCookie('authToken');
+        // Clear auth data
+        this.authService.clearAuth();
         
-        if (window.appSocket) {
-            window.appSocket.disconnect();
+        // Disconnect sockets
+        if (this.socketManager) {
+            this.socketManager.disconnect();
         }
-
-        showError(
-            'Session Expired',
-            'Your session has expired. Please log in again.',
-            {
-                timer: 5000,
-                onClose: () => {
-                    const redirectUrl = encodeURIComponent(window.location.pathname);
-                    window.location.href = `/api/auth/login?redirect=${redirectUrl}`;
-                }
-            }
-        );
+        
+        // Redirect to login if not already there
+        if (!window.location.pathname.includes('/api/auth/login')) {
+            const redirectUrl = encodeURIComponent(window.location.pathname + window.location.search);
+            window.location.href = `/api/auth/login?redirect=${redirectUrl}`;
+        }
     }
 
     showFatalError(message) {
-        const errorDiv = document.createElement('div');
-        errorDiv.style.cssText = `
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            background: #ff5252;
-            color: white;
-            padding: 1rem;
-            z-index: 9999;
-            text-align: center;
-        `;
-        errorDiv.textContent = `Fatal Error: ${message}`;
-        document.body.prepend(errorDiv);
+        try {
+            const errorContainer = document.createElement('div');
+            errorContainer.id = 'fatal-error-container';
+            errorContainer.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                background: #dc3545;
+                color: white;
+                padding: 15px;
+                z-index: 99999;
+                text-align: center;
+                font-family: sans-serif;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            `;
+            
+            const errorMessage = document.createElement('div');
+            errorMessage.textContent = `Fatal Error: ${message}`;
+            errorMessage.style.marginBottom = '10px';
+            errorMessage.style.fontWeight = 'bold';
+            
+            const reloadButton = document.createElement('button');
+            reloadButton.textContent = 'Reload Page';
+            reloadButton.style.cssText = `
+                background: white;
+                color: #dc3545;
+                border: none;
+                padding: 5px 15px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-weight: bold;
+            `;
+            reloadButton.onclick = () => window.location.reload();
+            
+            errorContainer.appendChild(errorMessage);
+            errorContainer.appendChild(reloadButton);
+            
+            document.body.prepend(errorContainer);
+        } catch (e) {
+            console.error('Failed to display fatal error:', e);
+        }
+    }
+
+    cleanup() {
+        if (this.authCheckInterval) {
+            clearInterval(this.authCheckInterval);
+        }
+        
+        if (this.socketManager) {
+            this.socketManager.disconnect();
+        }
+        
+        window.removeEventListener('online', this.handleOnline);
+        window.removeEventListener('offline', this.handleOffline);
     }
 }
 
-// Экспортируем singleton экземпляр
+// Initialize and export singleton instance
 const appInitializer = new AppInitializer();
-export default appInitializer;
+
+// Export for testing purposes
+export { AppInitializer };
+
+// Initialize when DOM is ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => appInitializer.init());
+} else {
+    appInitializer.init();
+}
