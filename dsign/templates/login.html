@@ -7,7 +7,7 @@
 {% block content %}
 <div class="login-container">
     <h2>Login</h2>
-    <form id="login-form" method="POST" action="{{ url_for('/auth/login') }}">
+    <form id="login-form" method="POST" action="{{ url_for('auth.login') }}">
         {{ form.hidden_tag() }}
         <input type="hidden" name="next" value="{{ request.args.get('next', '') }}">
 
