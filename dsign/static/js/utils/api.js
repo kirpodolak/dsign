@@ -81,6 +81,14 @@ async function fetchAPI(endpoint, options = {}) {
             const error = new Error(errorData.message || `HTTP error! status: ${response.status}`);
             error.status = response.status;
             error.data = errorData;
+            
+            // Special handling for auth errors
+            if (error.status === 401) {
+                if (typeof window !== 'undefined' && window.App?.Auth?.handleUnauthorized) {
+                    window.App.Auth.handleUnauthorized();
+                }
+            }
+            
             throw error;
         }
 
@@ -112,6 +120,10 @@ function getCSRFToken() {
  */
 function setAuthToken(token) {
     authToken = token;
+    if (typeof window !== 'undefined') {
+        window.App = window.App || {};
+        window.App.token = token; // For global access if needed
+    }
 }
 
 /**
@@ -122,20 +134,45 @@ function getAuthToken() {
     return authToken;
 }
 
+// Create unified API object
+const API = {
+    fetch: fetchAPI,
+    getCSRFToken,
+    setAuthToken,
+    getAuthToken,
+    
+    // Additional helper methods
+    get: (endpoint, query = {}) => fetchAPI(endpoint, { method: 'GET', query }),
+    post: (endpoint, body = {}, options = {}) => fetchAPI(endpoint, { 
+        method: 'POST', 
+        body, 
+        ...options 
+    }),
+    put: (endpoint, body = {}, options = {}) => fetchAPI(endpoint, { 
+        method: 'PUT', 
+        body, 
+        ...options 
+    }),
+    delete: (endpoint, options = {}) => fetchAPI(endpoint, { 
+        method: 'DELETE', 
+        ...options 
+    })
+};
+
+// Export both named exports and unified API object
 export {
     fetchAPI,
     getCSRFToken,
     setAuthToken,
-    getAuthToken
+    getAuthToken,
+    API as default
 };
 
-// Maintain global accessibility for backward compatibility
+// Maintain global accessibility
 if (typeof window !== 'undefined') {
     window.App = window.App || {};
-    window.App.API = {
-        fetch: fetchAPI,
-        getCSRFToken,
-        setAuthToken,
-        getAuthToken
-    };
+    window.App.API = API;
+    
+    // For legacy support if needed
+    window.App.fetchAPI = fetchAPI;
 }
