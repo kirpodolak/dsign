@@ -135,18 +135,20 @@ def rate_limited(f):
 @rate_limited
 def login():
     try:
+        # Redirect if already authenticated
         if current_user.is_authenticated:
+            next_url = request.args.get('next') or url_for('main.index')
             if request.is_json:
                 return jsonify({
                     'success': True,
-                    'redirect': url_for('main.index'),
+                    'redirect': next_url,
                     'user': {
                         'id': current_user.id,
                         'username': current_user.username,
                         'is_admin': current_user.is_admin
                     }
                 })
-            return redirect(url_for('main.index'))
+            return redirect(next_url)
             
         form = LoginForm()
         
@@ -171,7 +173,7 @@ def login():
                     flash('Invalid username or password', 'error')
                     return redirect(url_for('auth_bp.login'))
                 
-                # Upgrade legacy password hashes
+                # Password upgrade for legacy users
                 if hasattr(user, 'needs_password_upgrade') and user.needs_password_upgrade():
                     try:
                         user.password = generate_password_hash(form.password.data)
@@ -186,7 +188,7 @@ def login():
                             'stack_trace': traceback.format_exc()
                         })
 
-                # Generate tokens
+                # Authentication tokens
                 auth_token = generate_jwt_token(user.id)
                 remember = form.remember.data if hasattr(form, 'remember') else False
                 
@@ -209,33 +211,33 @@ def login():
                     }
                 }
 
-                # Prepare response
+                # Response handling
                 if request.is_json:
                     response = jsonify(response_data)
                     response.headers.add('X-CSRF-Token', generate_csrf_token())
                 else:
                     response = redirect(response_data['redirect'])
                 
-                # Set secure cookies
+                # Secure cookie settings
                 response.set_cookie(
                     'authToken',
                     value=auth_token,
                     httponly=True,
                     secure=current_app.config.get('SESSION_COOKIE_SECURE', True),
                     samesite='Lax',
-                    max_age=3600 * 24 * 7 if remember else None,
+                    max_age=3600*24*7 if remember else None,
                     domain=current_app.config.get('SESSION_COOKIE_DOMAIN'),
                     path='/'
                 )
                 
-                # Clear failed attempts on successful login
+                # Clear rate limiting
                 key = f"{request.remote_addr}-{user.username}"
                 if key in rate_limit_data:
                     del rate_limit_data[key]
                 
                 return response
             
-            # Form validation failed
+            # Form validation errors
             if request.is_json:
                 return jsonify({
                     'success': False,
@@ -243,14 +245,14 @@ def login():
                     'errors': form.errors
                 }), 400
         
-        # GET request or form validation failed for non-JSON
+        # GET request handling
         if request.is_json:
             return jsonify({
                 'success': False,
                 'error': 'Method not allowed'
             }), 405
             
-        return render_template('login.html', form=form)
+        return render_template('auth/login.html', form=form)
         
     except Exception as e:
         logger.error("Login system error", extra={
@@ -592,3 +594,13 @@ def reset_limits():
             'success': False,
             'error': 'Failed to reset limits'
         }), 500
+        
+@api_bp.route('/auth/status')
+def auth_status():
+    if not current_user.is_authenticated:
+        return jsonify({'authenticated': False}), 401
+    
+    return jsonify({
+        'authenticated': True,
+        'user': current_user.to_dict()
+    })
