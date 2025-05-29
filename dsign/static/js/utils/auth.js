@@ -4,14 +4,35 @@
  */
 
 /**
+ * Helper function to get cookie value
+ * @param {string} name Cookie name
+ * @returns {string|null} Cookie value or null if not found
+ */
+function getCookie(name) {
+    if (typeof document === 'undefined') return null;
+    
+    const value = `; ${document.cookie}`;
+    const parts = value.split(`; ${name}=`);
+    if (parts.length === 2) return parts.pop().split(';').shift();
+    return null;
+}
+
+/**
  * Service for handling authentication, tokens and authorization state
  */
 export class AuthService {
     constructor() {
-        // Initialize logger (will be set properly when App is available)
-        this.logger = typeof window !== 'undefined' ? window.App?.Logger : null;
+        // Initialize logger
+        this.logger = typeof window !== 'undefined' && window.App?.logger 
+            ? window.App.logger 
+            : console;
+        
         this.tokenKey = 'auth_token';
         this.authStatusKey = 'auth_status';
+        this.loginEndpoint = '/api/auth/login';
+        this.checkAuthEndpoint = '/auth/api/check-auth';
+        this.refreshTokenEndpoint = '/auth/refresh-token';
+        this.socketTokenEndpoint = '/auth/socket-token';
     }
 
     /**
@@ -21,27 +42,22 @@ export class AuthService {
      */
     async checkAuth() {
         try {
-            this.logger?.debug('Checking authentication status');
+            this.logger.debug('Checking authentication status');
             
             const token = this.getToken();
             if (!token) {
-                this.logger?.debug('No token found');
+                this.logger.debug('No token found');
                 this.clearAuth();
                 return false;
             }
             
             if (!this.isTokenValid(token)) {
-                this.logger?.warn('Invalid token format or expired');
+                this.logger.warn('Invalid token format or expired');
                 this.clearAuth();
                 return false;
             }
 
-            // Use dynamic import for API if not available globally
-            const api = typeof window !== 'undefined' && window.App?.API 
-                ? window.App.API 
-                : await import('./api.js');
-
-            const response = await api.fetch('/auth/api/check-auth');
+            const response = await window.App.API.fetch(this.checkAuthEndpoint);
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
@@ -49,47 +65,82 @@ export class AuthService {
             const data = await response.json();
             
             if (data?.authenticated && data?.token_valid) {
-                this.logger?.debug('User authenticated');
+                this.logger.debug('User authenticated');
                 return true;
             }
             
-            this.logger?.debug('User not authenticated');
+            this.logger.debug('User not authenticated');
             this.clearAuth();
             return false;
         } catch (error) {
-            this.logger?.error('Authentication check failed', error);
+            this.logger.error('Authentication check failed', error);
             this.clearAuth();
             return false;
         }
     }
 
     /**
-     * Get token from localStorage
+     * Refresh authentication token
+     * @async
+     * @returns {Promise<boolean>} True if token was refreshed successfully
+     * @throws {Error} If token refresh failed
+     */
+    async refreshToken() {
+        try {
+            const response = await window.App.API.fetch(this.refreshTokenEndpoint, {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Authorization': `Bearer ${this.getToken()}`
+                }
+            });
+            
+            if (!response.ok) throw new Error('Token refresh failed');
+            
+            const { token } = await response.json();
+            this.setToken(token);
+            return true;
+        } catch (error) {
+            this.logger.error('Token refresh failed:', error);
+            this.clearAuth();
+            throw error;
+        }
+    }
+
+    /**
+     * Get token from storage
      * @returns {string|null} Token or null if not found
      */
     getToken() {
         try {
-            return typeof localStorage !== 'undefined' 
-                ? localStorage.getItem(this.tokenKey) 
-                : null;
+            return window.App?.token || 
+                   localStorage.getItem(this.tokenKey) || 
+                   getCookie(this.tokenKey);
         } catch (e) {
-            this.logger?.error('Failed to get auth token', e);
+            this.logger.error('Failed to get auth token', e);
             return null;
         }
     }
 
     /**
-     * Save token to localStorage
+     * Save token to storage
      * @param {string} token JWT token
      */
     setToken(token) {
         try {
+            window.App = window.App || {};
+            window.App.token = token;
+            
             if (typeof localStorage !== 'undefined') {
                 localStorage.setItem(this.tokenKey, token);
-                this.logger?.debug('Token saved to storage');
+            }
+            
+            // Set cookie if in browser context
+            if (typeof document !== 'undefined') {
+                document.cookie = `${this.tokenKey}=${token}; path=/; max-age=${3600*24*7}; Secure; SameSite=Lax`;
             }
         } catch (e) {
-            this.logger?.error('Failed to save auth token', e);
+            this.logger.error('Failed to save auth token', e);
         }
     }
 
@@ -97,15 +148,26 @@ export class AuthService {
      * Clear authentication data
      */
     clearAuth() {
-        this.logger?.debug('Clearing authentication data');
-        
-        if (typeof localStorage !== 'undefined') {
-            localStorage.removeItem(this.tokenKey);
-        }
+        try {
+            this.logger.debug('Clearing authentication data');
+            
+            window.App = window.App || {};
+            delete window.App.token;
+            
+            if (typeof localStorage !== 'undefined') {
+                localStorage.removeItem(this.tokenKey);
+            }
 
-        if (typeof window !== 'undefined') {
-            window.App?.Helpers?.setCachedData?.(this.authStatusKey, { value: false });
-            window.App?.Sockets?.disconnect?.();
+            if (typeof document !== 'undefined') {
+                document.cookie = `${this.tokenKey}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+            }
+
+            if (typeof window !== 'undefined') {
+                window.App?.Helpers?.setCachedData?.(this.authStatusKey, { value: false });
+                window.App?.Sockets?.disconnect?.();
+            }
+        } catch (e) {
+            this.logger.error('Failed to clear auth token', e);
         }
     }
 
@@ -115,7 +177,7 @@ export class AuthService {
      * @returns {boolean} True if token is valid
      */
     isTokenValid(token) {
-        if (!token || token.split('.').length !== 3) {
+        if (!token || typeof token !== 'string' || token.split('.').length !== 3) {
             return false;
         }
 
@@ -123,7 +185,8 @@ export class AuthService {
             const payload = JSON.parse(atob(token.split('.')[1]));
             const isExpired = payload.exp * 1000 < Date.now();
             return !isExpired;
-        } catch {
+        } catch (e) {
+            this.logger.warn('Token validation failed:', e);
             return false;
         }
     }
@@ -135,7 +198,7 @@ export class AuthService {
     handleLoginSuccess(response) {
         if (response?.token) {
             this.setToken(response.token);
-            this.logger?.info('User logged in successfully');
+            this.logger.info('User logged in successfully');
             
             if (typeof window !== 'undefined' && 
                 window.App?.Sockets && 
@@ -145,7 +208,7 @@ export class AuthService {
                 }, 300);
             }
         } else {
-            this.logger?.warn('Login response missing token');
+            this.logger.warn('Login response missing token');
         }
     }
 
@@ -153,42 +216,35 @@ export class AuthService {
      * Handle unauthorized access
      */
     handleUnauthorized() {
-        if (typeof window === 'undefined') return;
-        
-        if (window.location.pathname.startsWith('/api/auth/login')) {
-            this.logger?.debug('Already on login page, skipping redirect');
+        if (window.location.pathname.startsWith('/auth/login')) {
             return;
         }
-        
-        this.logger?.warn('Handling unauthorized access');
-        this.clearAuth();
-        
-        setTimeout(() => {
-            const redirect = encodeURIComponent(
-                window.location.pathname + window.location.search
-            );
-            window.location.href = `/api/auth/login?redirect=${redirect}`;
-        }, 100);
+
+        const redirectPath = encodeURIComponent(window.location.pathname + window.location.search);
+        window.location.href = `/auth/login?next=${redirectPath}`;
     }
 
     /**
      * Wait for valid token to appear
-     * @param {number} [maxAttempts=5] Maximum attempts
+     * @param {number} [maxAttempts=10] Maximum attempts
      * @param {number} [delay=1000] Delay between attempts (ms)
-     * @returns {Promise<string|null>} Token or null if not found
+     * @returns {Promise<string>} Valid token
+     * @throws {Error} If token not available after max attempts
      */
-    waitForToken(maxAttempts = 5, delay = 1000) {
-        return new Promise((resolve) => {
+    waitForToken(maxAttempts = 10, delay = 1000) {
+        return new Promise((resolve, reject) => {
             let attempt = 0;
             
             const checkToken = () => {
                 attempt++;
                 const token = this.getToken();
                 
-                if (this.isTokenValid(token) || attempt >= maxAttempts) {
-                    resolve(token || null);
+                if (token && this.isTokenValid(token)) {
+                    resolve(token);
+                } else if (attempt >= maxAttempts) {
+                    reject(new Error('Token not available'));
                 } else {
-                    this.logger?.debug(`Waiting for token (attempt ${attempt}/${maxAttempts})`);
+                    this.logger.debug(`Waiting for token (attempt ${attempt}/${maxAttempts})`);
                     setTimeout(checkToken, delay);
                 }
             };
@@ -205,14 +261,9 @@ export class AuthService {
      */
     async getSocketToken() {
         try {
-            // Use the global API if available, otherwise import directly
-            const api = window.App?.API || (await import('./api.js'));
-        
-            const response = await api.fetch('/auth/socket-token', {
-                credentials: 'include',
+            const response = await window.App.API.fetch(this.socketTokenEndpoint, {
                 headers: {
-                    'Accept': 'application/json',
-                    'X-Requested-With': 'XMLHttpRequest'
+                    'Authorization': `Bearer ${this.getToken()}`
                 }
             });
         
@@ -231,11 +282,11 @@ export class AuthService {
                 socketUrl: data.socket_url || '/socket.io'
             };
         } catch (error) {
-            this.logger?.error('Socket token fetch failed', error);
+            this.logger.error('Socket token fetch failed', error);
             throw new Error(`Failed to get socket token: ${error.message}`);
-            }
         }
     }
+}
 
 // Initialize and export service for global access
 if (typeof window !== 'undefined') {
@@ -247,7 +298,7 @@ if (typeof window !== 'undefined') {
         if (!window.location.pathname.includes('/api/auth/login')) {
             setInterval(() => {
                 window.App.Auth.checkAuth().catch(error => {
-                    window.App.Logger?.error('Periodic auth check failed', error);
+                    window.App.logger?.error('Periodic auth check failed', error);
                 });
             }, window.App.config?.authCheckInterval || 60000);
         }
