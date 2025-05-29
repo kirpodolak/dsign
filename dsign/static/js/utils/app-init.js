@@ -120,22 +120,19 @@ class AppInitializer {
 
     async checkAuth() {
         try {
-            // Skip auth check on login page
-            if (window.location.pathname.includes('/api/auth/login')) {
-                return true;
-            }
-
-            const isAuthenticated = await this.authService.checkAuth();
-            
-            if (!isAuthenticated) {
-                this.handleAuthError(new Error('Not authenticated'));
+            const response = await fetch('/api/auth/status', {
+                credentials: 'include'
+            });
+        
+            if (response.status === 401) {
+                this.authService.handleUnauthorized();
                 return false;
             }
-
-            return true;
+        
+            const data = await response.json();
+            return data.authenticated;
         } catch (error) {
-            this.logger.error('Auth check error:', error);
-            this.handleAuthError(error);
+            console.error('Auth check failed:', error);
             return false;
         }
     }
