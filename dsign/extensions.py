@@ -79,7 +79,7 @@ def init_extensions(app) -> Dict[str, Any]:
 
 def _configure_auth(app) -> None:
     """Настройка системы аутентификации"""
-    login_manager.login_view = 'auth.login'
+    login_manager.login_view = 'api.auth.login'
     login_manager.login_message = 'Please log in to access this page.'
     login_manager.init_app(app)
     
