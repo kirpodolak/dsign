@@ -24,35 +24,46 @@ function formatDate(timestamp) {
 }
 
 // Constants
-const ALLOWED_IMAGE_TYPES = ['jpg', 'jpeg', 'png', 'gif'];
-const ALLOWED_VIDEO_TYPES = ['mp4', 'webm', 'ogg'];
+const ALLOWED_IMAGE_TYPES = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+const ALLOWED_VIDEO_TYPES = ['mp4', 'webm', 'ogg', 'mov'];
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 const PLACEHOLDER_IMAGE = '/static/images/placeholder.jpg';
 
-export class MediaGallery {
-  constructor() {
-    // DOM Elements
-    this.mediaGallery = document.getElementById('media-gallery');
-    this.uploadForm = document.getElementById('upload-form');
-    this.fileInput = document.getElementById('file-upload');
-    this.uploadBtn = document.getElementById('upload-btn');
-    this.deleteBtn = document.getElementById('delete-selected');
-    this.selectAllBtn = document.getElementById('select-all');
-    this.searchInput = document.getElementById('search-input');
-    this.sortSelect = document.getElementById('sort-select');
-    this.groupSelect = document.getElementById('group-select');
-    this.previewModal = document.getElementById('preview-modal');
-    this.closeModal = document.querySelector('.close-modal');
-    this.previewContainer = document.getElementById('preview-container');
-    this.previewFilename = document.getElementById('preview-filename');
-    this.previewFilesize = document.getElementById('preview-filesize');
-    this.previewDate = document.getElementById('preview-date');
+// Configuration
+const GALLERY_CONFIG = {
+  container: '#media-gallery',
+  searchInput: '#search-input',
+  sortSelect: '#sort-select',
+  groupSelect: '#group-select',
+  selectAllBtn: '#select-all',
+  deleteSelectedBtn: '#delete-selected',
+  uploadForm: '#upload-form',
+  fileUploadInput: '#file-upload',
+  uploadBtn: '#upload-btn',
+  previewModal: '#preview-modal',
+  previewContainer: '#preview-container',
+  closeModalBtn: '.close-modal',
+  filenameElement: '#preview-filename',
+  filesizeElement: '#preview-filesize',
+  dateElement: '#preview-date'
+};
 
-    // State
+class MediaGallery {
+  constructor(config = GALLERY_CONFIG) {
+    this.config = config;
+    this.elements = {};
     this.currentFiles = [];
     this.selectedFiles = new Set();
-
+    
+    this.initElements();
     this.initEventListeners();
+    this.loadMediaFiles();
+  }
+
+  initElements() {
+    for (const [key, selector] of Object.entries(this.config)) {
+      this.elements[key] = document.querySelector(selector);
+    }
   }
 
   isValidFile(file) {
@@ -63,7 +74,6 @@ export class MediaGallery {
            file.size <= MAX_FILE_SIZE;
   }
 
-  // Load media files from server
   async loadMediaFiles() {
     try {
       const playlist_id = new URLSearchParams(window.location.search).get('playlist_id') || 'all';
@@ -109,21 +119,18 @@ export class MediaGallery {
     }
   }
 
-  // Filter and sort files
   processFiles(files) {
     if (!Array.isArray(files)) return [];
     
-    // Filter by search
     let filtered = [...files];
-    if (this.searchInput?.value) {
-      const searchTerm = this.searchInput.value.toLowerCase().trim();
+    if (this.elements.searchInput?.value) {
+      const searchTerm = this.elements.searchInput.value.toLowerCase().trim();
       filtered = filtered.filter(file => 
         file.name?.toLowerCase().includes(searchTerm)
       );
     }
 
-    // Sort
-    const sortValue = this.sortSelect?.value;
+    const sortValue = this.elements.sortSelect?.value;
     filtered.sort((a, b) => {
       switch (sortValue) {
         case 'name-asc': return a.name?.localeCompare(b.name);
@@ -138,10 +145,9 @@ export class MediaGallery {
     return filtered;
   }
 
-  // Group files
   groupFiles(files) {
     if (!Array.isArray(files)) return [];
-    const groupValue = this.groupSelect?.value;
+    const groupValue = this.elements.groupSelect?.value;
     if (groupValue === 'none') return files;
 
     const groups = {};
@@ -165,14 +171,13 @@ export class MediaGallery {
     return groups;
   }
 
-  // Render media gallery
   renderGallery(files) {
-    if (!this.mediaGallery) return;
+    if (!this.elements.container) return;
     
-    this.mediaGallery.innerHTML = '';
+    this.elements.container.innerHTML = '';
     
     if (!Array.isArray(files) || files.length === 0) {
-      this.mediaGallery.innerHTML = '<p class="empty-message">No media files found.</p>';
+      this.elements.container.innerHTML = '<p class="empty-message">No media files found.</p>';
       this.toggleDeleteButton(false);
       this.toggleSelectAllButton(false);
       return;
@@ -184,12 +189,11 @@ export class MediaGallery {
     if (Array.isArray(groupedFiles)) {
       this.renderFiles(groupedFiles);
     } else {
-      // Render grouped files
       Object.entries(groupedFiles).forEach(([groupName, groupFiles]) => {
         const groupHeader = document.createElement('div');
         groupHeader.className = 'group-header';
         groupHeader.textContent = groupName;
-        this.mediaGallery.appendChild(groupHeader);
+        this.elements.container.appendChild(groupHeader);
         this.renderFiles(groupFiles);
       });
     }
@@ -208,7 +212,6 @@ export class MediaGallery {
       item.classList.add('file-item');
       item.dataset.filename = file.name;
 
-      // Checkbox
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
       checkbox.className = 'file-checkbox';
@@ -222,7 +225,6 @@ export class MediaGallery {
       checkboxLabel.className = 'custom-checkbox-label';
       item.appendChild(checkboxLabel);
 
-      // Media preview
       const previewContainer = document.createElement('div');
       
       if (ALLOWED_IMAGE_TYPES.includes(file.type)) {
@@ -247,7 +249,6 @@ export class MediaGallery {
         previewContainer.appendChild(icon);
       }
 
-      // Click handler for preview
       previewContainer.addEventListener('click', (e) => {
         if (e.target?.tagName !== 'INPUT' && e.target?.tagName !== 'LABEL') {
           this.showPreview({
@@ -259,16 +260,14 @@ export class MediaGallery {
 
       item.appendChild(previewContainer);
 
-      // Filename
       const fileNameDiv = document.createElement('div');
       fileNameDiv.classList.add('file-name');
       fileNameDiv.textContent = file.name;
       item.appendChild(fileNameDiv);
 
-      this.mediaGallery.appendChild(item);
+      this.elements.container.appendChild(item);
     });
 
-    // Add event listeners to checkboxes
     document.querySelectorAll('.file-checkbox').forEach(checkbox => {
       checkbox.addEventListener('change', function() {
         const filename = this.dataset.filename;
@@ -283,26 +282,27 @@ export class MediaGallery {
   }
 
   toggleDeleteButton(enabled) {
-    if (this.deleteBtn) {
-      this.deleteBtn.disabled = !enabled;
+    if (this.elements.deleteSelectedBtn) {
+      this.elements.deleteSelectedBtn.disabled = !enabled;
     }
   }
 
   toggleSelectAllButton(enabled) {
-    if (this.selectAllBtn) {
-      this.selectAllBtn.disabled = !enabled;
+    if (this.elements.selectAllBtn) {
+      this.elements.selectAllBtn.disabled = !enabled;
     }
   }
 
-  // File preview
   showPreview(file) {
-    if (!file || !this.previewContainer || !this.previewFilename || !this.previewFilesize || !this.previewDate) return;
+    if (!file || !this.elements.previewContainer || 
+        !this.elements.filenameElement || !this.elements.filesizeElement || 
+        !this.elements.dateElement) return;
     
-    this.previewFilename.textContent = file.name || 'Unnamed file';
-    this.previewFilesize.textContent = formatFileSize(file.size);
-    this.previewDate.textContent = formatDate(file.date);
+    this.elements.filenameElement.textContent = file.name || 'Unnamed file';
+    this.elements.filesizeElement.textContent = formatFileSize(file.size);
+    this.elements.dateElement.textContent = formatDate(file.date);
     
-    this.previewContainer.innerHTML = '';
+    this.elements.previewContainer.innerHTML = '';
     
     if (ALLOWED_IMAGE_TYPES.includes(file.type)) {
       const img = document.createElement('img');
@@ -317,7 +317,7 @@ export class MediaGallery {
           window.App.Alerts.show('Could not load preview image', 'warning');
         }
       };
-      this.previewContainer.appendChild(img);
+      this.elements.previewContainer.appendChild(img);
     } else if (ALLOWED_VIDEO_TYPES.includes(file.type)) {
       const video = document.createElement('video');
       video.controls = true;
@@ -328,29 +328,27 @@ export class MediaGallery {
       source.src = `/api/media/${file.name}`;
       source.type = file.mimetype || `video/${file.type}`;
       video.appendChild(source);
-      this.previewContainer.appendChild(video);
+      this.elements.previewContainer.appendChild(video);
     }
     
-    if (this.previewModal) {
-      this.previewModal.style.display = 'block';
+    if (this.elements.previewModal) {
+      this.elements.previewModal.style.display = 'block';
       document.body.style.overflow = 'hidden';
     }
   }
 
   closePreview() {
-    if (this.previewModal) {
-      this.previewModal.style.display = 'none';
+    if (this.elements.previewModal) {
+      this.elements.previewModal.style.display = 'none';
       document.body.style.overflow = 'auto';
       
-      // Pause any playing video
-      const video = this.previewContainer?.querySelector('video');
+      const video = this.elements.previewContainer?.querySelector('video');
       if (video) {
         video.pause();
       }
     }
   }
 
-  // Select all files
   selectAllFiles() {
     const checkboxes = document.querySelectorAll('.file-checkbox');
     if (!checkboxes.length) return;
@@ -363,16 +361,15 @@ export class MediaGallery {
       checkbox.dispatchEvent(event);
     });
     
-    if (this.selectAllBtn) {
-      this.selectAllBtn.innerHTML = allSelected ? 
+    if (this.elements.selectAllBtn) {
+      this.elements.selectAllBtn.innerHTML = allSelected ? 
         '<i class="fas fa-check-square"></i> Select All' : 
         '<i class="fas fa-times"></i> Deselect All';
     }
   }
 
-  // Handle file upload
   async uploadMedia() {
-    if (!this.fileInput?.files || this.fileInput.files.length === 0) {
+    if (!this.elements.fileUploadInput?.files || this.elements.fileUploadInput.files.length === 0) {
       if (window.App?.Alerts?.show) {
         window.App.Alerts.show('Please select files to upload', 'warning');
       }
@@ -382,14 +379,12 @@ export class MediaGallery {
     const formData = new FormData();
     const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
     
-    // Add CSRF token
     if (csrfToken) {
         formData.append('csrf_token', csrfToken);
     }
     
     let validFilesCount = 0;
-    // Filter and validate files
-    Array.from(this.fileInput.files).forEach(file => {
+    Array.from(this.elements.fileUploadInput.files).forEach(file => {
       if (this.isValidFile(file)) {
         formData.append('files', file);
         validFilesCount++;
@@ -406,7 +401,7 @@ export class MediaGallery {
     }
 
     try {
-      this.setButtonLoading(this.uploadBtn, true);
+      this.setButtonLoading(this.elements.uploadBtn, true);
       
       const response = await fetch('/api/media/upload', {
         method: 'POST',
@@ -425,7 +420,7 @@ export class MediaGallery {
       if (window.App?.Alerts?.show) {
         window.App.Alerts.show(`Uploaded ${result.files?.length || 0} file(s) successfully`, 'success');
       }
-      if (this.fileInput) this.fileInput.value = '';
+      if (this.elements.fileUploadInput) this.elements.fileUploadInput.value = '';
       await this.loadMediaFiles();
     } catch (error) {
       console.error('Upload error:', error);
@@ -433,11 +428,10 @@ export class MediaGallery {
         window.App.Alerts.show(`Upload failed: ${error.message}`, 'error');
       }
     } finally {
-      this.setButtonLoading(this.uploadBtn, false);
+      this.setButtonLoading(this.elements.uploadBtn, false);
     }
   }
 
-  // Handle file deletion
   async deleteSelectedMedia() {
     if (this.selectedFiles.size === 0) {
       if (window.App?.Alerts?.show) {
@@ -451,7 +445,7 @@ export class MediaGallery {
     }
 
     try {
-      this.setButtonLoading(this.deleteBtn, true);
+      this.setButtonLoading(this.elements.deleteSelectedBtn, true);
       
       const response = await fetch('/api/media/files', {
         method: 'POST',
@@ -481,7 +475,7 @@ export class MediaGallery {
         window.App.Alerts.show(`Delete failed: ${error.message}`, 'error');
       }
     } finally {
-      this.setButtonLoading(this.deleteBtn, false);
+      this.setButtonLoading(this.elements.deleteSelectedBtn, false);
     }
   }
 
@@ -501,67 +495,95 @@ export class MediaGallery {
     }
   }
 
-  // Initialize event listeners
   initEventListeners() {
-    if (this.uploadBtn) {
-      this.uploadBtn.addEventListener('click', this.uploadMedia.bind(this));
+    if (this.elements.uploadBtn) {
+      this.elements.uploadBtn.addEventListener('click', this.uploadMedia.bind(this));
     }
     
-    if (this.deleteBtn) {
-      this.deleteBtn.addEventListener('click', this.deleteSelectedMedia.bind(this));
+    if (this.elements.deleteSelectedBtn) {
+      this.elements.deleteSelectedBtn.addEventListener('click', this.deleteSelectedMedia.bind(this));
     }
 
-    if (this.selectAllBtn) {
-      this.selectAllBtn.addEventListener('click', this.selectAllFiles.bind(this));
+    if (this.elements.selectAllBtn) {
+      this.elements.selectAllBtn.addEventListener('click', this.selectAllFiles.bind(this));
     }
 
-    if (this.searchInput) {
-      this.searchInput.addEventListener('input', () => this.renderGallery(this.currentFiles));
+    if (this.elements.searchInput) {
+      this.elements.searchInput.addEventListener('input', () => this.renderGallery(this.currentFiles));
     }
 
-    if (this.sortSelect) {
-      this.sortSelect.addEventListener('change', () => this.renderGallery(this.currentFiles));
+    if (this.elements.sortSelect) {
+      this.elements.sortSelect.addEventListener('change', () => this.renderGallery(this.currentFiles));
     }
 
-    if (this.groupSelect) {
-      this.groupSelect.addEventListener('change', () => this.renderGallery(this.currentFiles));
+    if (this.elements.groupSelect) {
+      this.elements.groupSelect.addEventListener('change', () => this.renderGallery(this.currentFiles));
     }
 
-    if (this.closeModal) {
-      this.closeModal.addEventListener('click', this.closePreview.bind(this));
+    if (this.elements.closeModalBtn) {
+      this.elements.closeModalBtn.addEventListener('click', this.closePreview.bind(this));
     }
 
-    // Close modal when clicking outside
     window.addEventListener('click', (e) => {
-      if (e.target === this.previewModal) {
+      if (e.target === this.elements.previewModal) {
         this.closePreview();
       }
     });
 
-    // Close modal with ESC key
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.previewModal.style.display === 'block') {
+      if (e.key === 'Escape' && this.elements.previewModal.style.display === 'block') {
         this.closePreview();
       }
     });
 
-    // Reload files when page gains focus
     window.addEventListener('visibilitychange', () => {
       if (!document.hidden) this.loadMediaFiles();
     });
-
-    // Initial load
-    this.loadMediaFiles();
   }
 }
 
-// Initialize the gallery when DOM is ready
-document.addEventListener('DOMContentLoaded', () => {
-  const mediaGallery = new MediaGallery();
-  
-  // For backward compatibility with other modules
-  window.App = window.App || {};
-  window.App.MediaGallery = mediaGallery;
-});
+// Initialize the gallery
+function initializeGallery() {
+  try {
+    const gallery = new MediaGallery();
+    window.App = window.App || {};
+    window.App.MediaGallery = gallery;
+    console.log('MediaGallery initialized successfully');
+    return gallery;
+  } catch (error) {
+    console.error('Failed to initialize MediaGallery:', error);
+    if (window.App?.Alerts?.show) {
+      window.App.Alerts.show(
+        'Gallery Error', 
+        'Failed to initialize media gallery. Please try again later.',
+        'error'
+      );
+    }
+    return null;
+  }
+}
 
-export default MediaGallery;
+// Smart initialization handler
+function initGalleryWhenReady() {
+  // First try standard DOM ready check
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    initializeGallery();
+  } 
+  // Fallback to DOMContentLoaded
+  else {
+    document.addEventListener('DOMContentLoaded', initializeGallery);
+  }
+}
+
+// Main entry point
+(function() {
+  // Check if App.onReady exists
+  if (window.App && typeof window.App.onReady === 'function') {
+    window.App.onReady(initializeGallery);
+  } else {
+    // Use standard initialization
+    initGalleryWhenReady();
+  }
+})();
+
+export { MediaGallery, initializeGallery };
