@@ -3,17 +3,18 @@ import os
 import shutil
 import subprocess
 import traceback
+import time
 from pathlib import Path 
 from flask import jsonify, request, send_from_directory, abort, current_app, send_file
-from flask_login import login_required
+from flask_login import login_required, current_user, login_user, logout_user
 from flask_wtf.csrf import validate_csrf
 from werkzeug.utils import secure_filename
-from dsign.models import PlaybackProfile, PlaylistProfileAssignment, Playlist, db
+from dsign.models import PlaybackProfile, PlaylistProfileAssignment, Playlist, User, db
 from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
 from PIL import Image
 from dsign.config.config import THUMBNAIL_FOLDER, THUMBNAIL_URL
 from dsign.services import ThumbnailService
-
+from .extensions import bcrypt
 
 thumbnail_lock = Lock()
 
