@@ -2,20 +2,7 @@
  * Authentication service module
  * @module AuthService
  */
-
-/**
- * Helper function to get cookie value
- * @param {string} name Cookie name
- * @returns {string|null} Cookie value or null if not found
- */
-function getCookie(name) {
-    if (typeof document === 'undefined') return null;
-    
-    const value = `; ${document.cookie}`;
-    const parts = value.split(`; ${name}=`);
-    if (parts.length === 2) return parts.pop().split(';').shift();
-    return null;
-}
+import { getCookie } from './helpers.js';
 
 /**
  * Service for handling authentication, tokens and authorization state
@@ -30,9 +17,9 @@ export class AuthService {
         this.tokenKey = 'auth_token';
         this.authStatusKey = 'auth_status';
         this.loginEndpoint = '/api/auth/login';
-        this.checkAuthEndpoint = '/auth/api/check-auth';
-        this.refreshTokenEndpoint = '/auth/refresh-token';
-        this.socketTokenEndpoint = '/auth/socket-token';
+        this.checkAuthEndpoint = '/api/auth/check-auth';
+        this.refreshTokenEndpoint = '/api/auth/refresh-token';
+        this.socketTokenEndpoint = '/api/auth/socket-token';
     }
 
     /**
@@ -221,7 +208,7 @@ export class AuthService {
         }
 
         const redirectPath = encodeURIComponent(window.location.pathname + window.location.search);
-        window.location.href = `/auth/login?next=${redirectPath}`;
+        window.location.href = `/api/auth/login?next=${redirectPath}`;
     }
 
     /**
