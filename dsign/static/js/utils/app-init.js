@@ -102,37 +102,42 @@ class AppInitializer {
     preventRedirectLoops() {
         const isLoginPage = window.location.pathname.includes('/api/auth/login');
         const hasRedirectLoop = window.location.search.includes('redirect_loop=true');
-        
-        if (isLoginPage && hasRedirectLoop) {
-            this.logger.warn('Redirect loop detected, resetting to login');
-            window.location.href = '/api/auth/login?clear=true';
-            return true;
+    
+        if (isLoginPage) {
+            // Clear any existing next parameters to break the loop
+            if (window.location.search.includes('next=')) {
+                window.location.href = '/api/auth/login?clear=true';
+                return true;
+            }
+            if (hasRedirectLoop) {
+                window.location.href = '/api/auth/login?clear=true';
+                return true;
+            }
         }
-        
-        // Clear any redirect flags if present
-        if (window.location.search.includes('clear=true')) {
-            const cleanUrl = window.location.pathname;
-            window.history.replaceState({}, document.title, cleanUrl);
-        }
-        
         return false;
     }
 
     async checkAuth() {
         try {
             const response = await fetch('/api/auth/status', {
-                credentials: 'include'
+                credentials: 'include',
+                headers: {
+                    'Accept': 'application/json'
+                }
             });
-        
-            if (response.status === 401) {
-                this.authService.handleUnauthorized();
-                return false;
+    
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
             }
         
             const data = await response.json();
             return data.authenticated;
         } catch (error) {
             console.error('Auth check failed:', error);
+            // Only redirect if not already on login page
+            if (!window.location.pathname.includes('/api/auth/login')) {
+                window.location.href = '/api/auth/login';
+            }
             return false;
         }
     }
@@ -267,32 +272,25 @@ class AppInitializer {
 
     async initWebSocket() {
         try {
-            if (!this.socketManager) {
-                throw new Error('SocketManager not initialized');
+            const token = await this.authService.waitForToken();
+            if (!token) {
+                throw new Error('No valid token available');
             }
-
+        
+            this.socketManager = new SocketManager({
+                token,
+                authService: this.authService,
+                logger: this.logger
+            });
+        
             await this.socketManager.connect();
-            window.App.state.socketConnected = true;
-            this.retryCount = 0; // Reset retry counter on success
         } catch (error) {
-            this.logger.error('Socket initialization failed:', error);
-            
-            if (this.retryCount < this.maxRetryCount) {
-                const delay = window.App.state.retryDelays[this.retryCount] || this.initialRetryDelay;
-                this.retryCount++;
-                
-                this.logger.warn(`Retrying WebSocket connection in ${delay}ms (attempt ${this.retryCount}/${this.maxRetryCount})`);
-                
-                return new Promise(resolve => {
-                    setTimeout(() => {
-                        this.initWebSocket().then(resolve);
-                    }, delay);
-                });
+            this.logger.error('WebSocket initialization failed:', error);
+            // Don't retry if it's an auth error
+            if (error.message.includes('auth') || error.message.includes('token')) {
+                return;
             }
-            
-            if (this.isAuthError(error)) {
-                this.handleAuthError(error);
-            }
+            // Retry logic here...
         }
     }
 
