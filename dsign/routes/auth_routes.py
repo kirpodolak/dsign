@@ -171,7 +171,7 @@ def login():
                             'error': 'Invalid credentials'
                         }), 401
                     flash('Invalid username or password', 'error')
-                    return redirect(url_for('auth_bp.login'))
+                    return redirect(url_for('auth.login'))
                 
                 # Password upgrade for legacy users
                 if hasattr(user, 'needs_password_upgrade') and user.needs_password_upgrade():
@@ -266,7 +266,7 @@ def login():
                 'error': 'System error'
             }), 500
         flash('System error during authentication', 'error')
-        return redirect(url_for('auth_bp.login'))
+        return redirect(url_for('auth.login'))
 
 @auth_bp.route('/logout')
 @login_required
@@ -275,7 +275,7 @@ def logout():
         username = current_user.username if current_user.is_authenticated else 'unknown'
         logout_user()
         
-        response = redirect(url_for('auth_bp.login'))
+        response = redirect(url_for('auth.login'))
         response.delete_cookie('authToken')
         if 'SESSION_COOKIE_NAME' in current_app.config:
             response.delete_cookie(current_app.config['SESSION_COOKIE_NAME'])
@@ -292,9 +292,9 @@ def logout():
             'error': str(e),
             'stack_trace': traceback.format_exc()
         })
-        return redirect(url_for('auth_bp.login'))
+        return redirect(url_for('auth.login'))
 
-@auth_bp.route('/api/check-auth')
+@auth_bp.route('/check-auth')
 def check_auth():
     """Enhanced authentication status endpoint with token validation"""
     try:
@@ -366,7 +366,7 @@ def get_socket_token():
             return jsonify({
                 'success': False,
                 'error': 'Not authenticated',
-                'login_url': url_for('auth_bp.login')
+                'login_url': url_for('auth.login')
             }), 401
 
         # Generate token with additional security claims
@@ -418,14 +418,14 @@ def check_socket_auth():
             return jsonify({
                 'can_connect': False,
                 'auth_required': True,
-                'login_url': url_for('auth_bp.login')
+                'login_url': url_for('auth.login')
             }), 200
             
         return jsonify({
             'can_connect': True,
             'auth_required': False,
             'user_id': current_user.id,
-            'socket_token_url': url_for('auth_bp.get_socket_token')
+            'socket_token_url': url_for('auth.get_socket_token')
         }), 200
     except Exception as e:
         logger.error("Socket auth check failed", extra={
@@ -434,10 +434,10 @@ def check_socket_auth():
         })
         return jsonify({
             'can_connect': False,
-            'error': str(e)
+            'error': str(e) 
         }), 500
 
-@auth_bp.route('/api/verify-token', methods=['POST'])
+@auth_bp.route('/verify-token', methods=['POST'])
 def verify_token():
     """Token verification endpoint for frontend validation"""
     try:
@@ -464,7 +464,7 @@ def verify_token():
         })
         return jsonify({'valid': False}), 200
 
-@auth_bp.route('/api/users/<username>')
+@auth_bp.route('/users/<username>')
 @login_required
 def get_user_info(username):
     """Secure user information endpoint with permission checks"""
@@ -514,7 +514,7 @@ def get_user_info(username):
             'error': 'Failed to retrieve user information'
         }), 500
 
-@auth_bp.route('/api/refresh-token', methods=['POST'])
+@auth_bp.route('/refresh-token', methods=['POST'])
 @login_required
 def refresh_token():
     """Secure token refresh with old token validation"""
@@ -594,13 +594,18 @@ def reset_limits():
             'success': False,
             'error': 'Failed to reset limits'
         }), 500
-        
-@api_bp.route('/auth/status')
+
+@auth_bp.route('/status')
 def auth_status():
+    """Authentication status endpoint"""
     if not current_user.is_authenticated:
         return jsonify({'authenticated': False}), 401
     
     return jsonify({
         'authenticated': True,
-        'user': current_user.to_dict()
+        'user': {
+            'id': current_user.id,
+            'username': current_user.username,
+            'is_admin': current_user.is_admin
+        }
     })
