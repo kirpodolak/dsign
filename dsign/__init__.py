@@ -121,7 +121,8 @@ def create_app(config_class: Config = config) -> Flask:
         return app
 
     except Exception as e:
-        app.logger.critical(f"Application initialization failed: {str(e)}", exc_info=True)
+        app.logger.critical(f"Application initialization failed: {str(e)}")
+        app.logger.exception(e)  # This will log the full traceback
         raise RuntimeError(f"Application startup failed: {str(e)}") from e
 
 def _configure_playback_service(app: Flask) -> None:
@@ -179,7 +180,8 @@ def _fallback_to_idle_logo(app: Flask) -> None:
     try:
         app.playback_service.display_idle_logo()
     except Exception as e:
-        app.logger.critical(f"Failed to fallback to idle logo: {str(e)}", exc_info=True)
+        app.logger.critical(f"Application initialization failed: {str(e)}")
+        app.logger.exception(e)  # This will log the full traceback
 
 def register_error_handlers(app: Flask) -> None:
     """Регистрация обработчиков ошибок"""
