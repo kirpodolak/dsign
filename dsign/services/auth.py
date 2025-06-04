@@ -1,13 +1,13 @@
 from flask_login import LoginManager
 import jwt
 from datetime import datetime, timedelta
-from flask import current_app, request
+from flask import current_app, request, jsonify
 from .logger import setup_logger
 
 login_manager = LoginManager()
 
 class AuthService:
-    def __init__(self, secret_key, , logger=None):
+    def __init__(self, secret_key, logger=None):
         """
         Инициализация сервиса аутентификации
         :param secret_key: Секретный ключ для JWT
@@ -18,24 +18,31 @@ class AuthService:
         self.max_attempts = 5
         self.lock_time = timedelta(minutes=15)
         self.token_expiration = timedelta(days=1)
+        self.socket_token_expiration = timedelta(minutes=30)  # Для WebSocket токенов
 
-    def generate_token(self, user_id):
+    def generate_token(self, user_id, socket_token=False):
         """
         Генерация JWT токена
         :param user_id: ID пользователя
+        :param socket_token: Флаг для генерации токена WebSocket
         :return: Сгенерированный токен
         """
         try:
+            expiration = self.socket_token_expiration if socket_token else self.token_expiration
+            
             payload = {
                 'user_id': user_id,
-                'exp': datetime.utcnow() + self.token_expiration,
+                'exp': datetime.utcnow() + expiration,
                 'iat': datetime.utcnow(),
-                'iss': current_app.config.get('JWT_ISSUER', 'dsign-auth')
+                'iss': current_app.config.get('JWT_ISSUER', 'dsign-auth'),
+                'type': 'socket' if socket_token else 'standard'
             }
+            
             token = jwt.encode(payload, self.secret_key, algorithm='HS256')
             
             self.logger.info('Token generated', {
                 'user_id': user_id,
+                'token_type': payload['type'],
                 'token_exp': payload['exp'].isoformat()
             })
             return token
@@ -47,10 +54,11 @@ class AuthService:
             })
             raise RuntimeError("Token generation failed") from e
 
-    def verify_token(self, token):
+    def verify_token(self, token, socket_token=False):
         """
         Верификация JWT токена
         :param token: Токен для проверки
+        :param socket_token: Проверять как WebSocket токен
         :return: Декодированный payload или None
         """
         try:
@@ -61,8 +69,13 @@ class AuthService:
                 options={'verify_exp': True}
             )
             
+            # Проверка типа токена, если указан
+            if socket_token and payload.get('type') != 'socket':
+                raise jwt.InvalidTokenError('Not a WebSocket token')
+            
             self.logger.debug('Token verified', {
                 'user_id': payload['user_id'],
+                'token_type': payload.get('type', 'unknown'),
                 'expires': datetime.fromtimestamp(payload['exp']).isoformat()
             })
             return payload
@@ -152,6 +165,25 @@ class AuthService:
                 'previous_attempts': self.login_attempts[username]['attempts']
             })
             del self.login_attempts[username]
+
+    def get_current_user_status(self, user_id):
+        """
+        Получение текущего статуса пользователя
+        :param user_id: ID пользователя
+        :return: Словарь с информацией о статусе
+        """
+        from ..models import User
+        user = User.query.get(user_id)
+        if not user:
+            return None
+            
+        return {
+            'authenticated': True,
+            'user_id': user.id,
+            'username': user.username,
+            'roles': [role.name for role in user.roles],
+            'timestamp': datetime.utcnow().isoformat()
+        }
 
 @login_manager.user_loader
 def load_user(user_id):
