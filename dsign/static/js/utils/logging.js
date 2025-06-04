@@ -12,26 +12,32 @@ export class AppLogger {
      * @param {string} [moduleName='App'] - Name of the module for log prefixing
      */
     constructor(moduleName = 'App') {
-        // Optional App framework check (can be removed if using pure modules)
-        if (typeof window !== 'undefined' && !window.App) {
-            console.warn('AppLogger: window.App not initialized - falling back to console only');
-        }
-        
         this.moduleName = moduleName;
-        this.enableServerLogging = true;
         this.debugEnabled = (typeof window !== 'undefined' && window.App?.config?.debug) || false;
+        this.logToServer = (typeof window !== 'undefined' && window.App?.config?.logToServer) || false;
     }
 
     /**
-     * Check if server logging is available
+     * Send log to server
      * @private
-     * @returns {boolean} True if server logging is enabled and sockets are available
+     * @param {object} logData - Log data to send
      */
-    _canSendToServer() {
-        return this.enableServerLogging && 
-               typeof window !== 'undefined' &&
-               window.App?.Sockets?.isConnected && 
-               typeof window.App.Sockets.emit === 'function';
+    _sendToServer(logData) {
+        if (!this.logToServer || !window.App?.API?.fetch) return;
+
+        try {
+            window.App.API.fetch('/api/logs', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(logData)
+            }).catch(() => {
+                // Silent fail if logging fails
+            });
+        } catch (e) {
+            // Silent fail if logging fails
+        }
     }
 
     /**
@@ -42,26 +48,17 @@ export class AppLogger {
      */
     error(message, error = null, context = null) {
         const fullMessage = `${this.moduleName}: ${message}`;
-        const errorData = {
+        const logData = {
             message: fullMessage,
             stack: error?.stack,
             context,
             level: 'error',
-            url: typeof window !== 'undefined' ? window.location.href : null,
+            module: this.moduleName,
             timestamp: new Date().toISOString()
         };
-        
-        // Always log to console
+
         console.error(fullMessage, error || '', context || '');
-        
-        // Optional server logging
-        if (this._canSendToServer()) {
-            try {
-                window.App.Sockets.emit('client_error', errorData);
-            } catch (e) {
-                console.error('Failed to send error to server:', e);
-            }
-        }
+        this._sendToServer(logData);
     }
 
     /**
@@ -71,9 +68,18 @@ export class AppLogger {
      */
     debug(message, data = null) {
         if (!this.debugEnabled) return;
-        
+
         const fullMessage = `${this.moduleName}: ${message}`;
+        const logData = {
+            message: fullMessage,
+            data,
+            level: 'debug',
+            module: this.moduleName,
+            timestamp: new Date().toISOString()
+        };
+
         console.debug(fullMessage, data || '');
+        this._sendToServer(logData);
     }
 
     /**
@@ -83,7 +89,16 @@ export class AppLogger {
      */
     info(message, data = null) {
         const fullMessage = `${this.moduleName}: ${message}`;
+        const logData = {
+            message: fullMessage,
+            data,
+            level: 'info',
+            module: this.moduleName,
+            timestamp: new Date().toISOString()
+        };
+
         console.info(fullMessage, data || '');
+        this._sendToServer(logData);
     }
 
     /**
@@ -93,11 +108,20 @@ export class AppLogger {
      */
     warn(message, data = null) {
         const fullMessage = `${this.moduleName}: ${message}`;
+        const logData = {
+            message: fullMessage,
+            data,
+            level: 'warn',
+            module: this.moduleName,
+            timestamp: new Date().toISOString()
+        };
+
         console.warn(fullMessage, data || '');
+        this._sendToServer(logData);
     }
 }
 
-// Optional global export for backward compatibility
+// Initialize global logger instance if in browser context
 if (typeof window !== 'undefined') {
     window.App = window.App || {};
     window.App.Logger = window.App.Logger || new AppLogger('Core');
