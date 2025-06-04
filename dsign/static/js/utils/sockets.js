@@ -33,6 +33,7 @@ export class SocketManager {
     constructor(options = {}) {
         // Connection state
         this.socket = null;
+        this.authSocket = null; // Dedicated socket for auth status updates
         this.isConnected = false;
         this.isAuthenticated = false;
         this.connectionEstablished = false;
@@ -40,6 +41,7 @@ export class SocketManager {
         // Reconnection settings
         this.reconnectAttempts = 0;
         this.reconnectDelay = options.reconnectDelay || CONFIG.INITIAL_RETRY_DELAY;
+        this.maxReconnectAttempts = CONFIG.MAX_RETRIES;
         
         // Event management
         this.pendingEvents = [];
@@ -60,8 +62,60 @@ export class SocketManager {
         this.onTokenRefresh = options.onTokenRefresh || this.defaultTokenRefreshHandler;
         this.onReconnect = options.onReconnect || null;
         
-        // Initialize connection
+        // Initialize connections
         this.initWithTokenCheck();
+        this.initAuthSocket();
+    }
+
+    /**
+     * Initialize authentication status WebSocket
+     * @private
+     */
+    initAuthSocket() {
+        if (typeof io === 'undefined') {
+            console.error('[Socket] Socket.IO library not loaded');
+            return;
+        }
+
+        try {
+            this.authSocket = io('/auth', {
+                reconnection: true,
+                reconnectionAttempts: CONFIG.MAX_RETRIES,
+                reconnectionDelay: this.reconnectDelay,
+                transports: ['websocket'],
+                upgrade: false
+            });
+
+            // Setup auth socket event handlers
+            this.authSocket.on('connect', () => {
+                console.debug('[AuthSocket] Connected');
+            });
+
+            this.authSocket.on('disconnect', (reason) => {
+                console.log('[AuthSocket] Disconnected:', reason);
+            });
+
+            this.authSocket.on('connect_error', (error) => {
+                console.error('[AuthSocket] Connection error:', error);
+            });
+
+            this.authSocket.on('auth_update', (data) => {
+                console.debug('[AuthSocket] Received auth update:', data);
+                if (typeof window !== 'undefined' && window.App?.Auth?.updateAuthStatus) {
+                    window.App.Auth.updateAuthStatus(data?.authenticated ?? false);
+                }
+            });
+
+            this.authSocket.on('auth_status_response', (data) => {
+                console.debug('[AuthSocket] Received auth status:', data);
+                if (typeof window !== 'undefined' && window.App?.Auth?.updateAuthStatus) {
+                    window.App.Auth.updateAuthStatus(data?.authenticated ?? false);
+                }
+            });
+
+        } catch (error) {
+            console.error('[AuthSocket] Initialization error:', error);
+        }
     }
 
     /**
@@ -94,13 +148,17 @@ export class SocketManager {
      */
     async initWithTokenCheck() {
         try {
+            if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+                throw new Error('Max reconnect attempts reached');
+            }
+
             console.debug('[Socket] Starting connection with token check');
             
             // Wait for API service to be available
             await this.waitForAPI();
             
             // Wait for base token to be available
-            const token = await window.App.Auth.waitForToken();
+            const token = await window.App.Auth.waitForToken(3, 1500);
             if (!token) {
                 throw new Error('No valid authentication token available');
             }
@@ -154,7 +212,7 @@ export class SocketManager {
             throw error;
         }
     }
-	
+    
     async waitForAPI(maxAttempts = 5, delay = 500) {
         let attempts = 0;
         return new Promise((resolve, reject) => {
@@ -170,7 +228,7 @@ export class SocketManager {
             };
             check();
         });
-    }	
+    }    
 
     /**
      * Validate token structure
@@ -262,7 +320,7 @@ export class SocketManager {
      * Initialize socket connection
      * @private
      */
-    init() {
+    init(token) {
         try {
             console.debug('[Socket] Initializing connection...');
             
@@ -274,31 +332,12 @@ export class SocketManager {
 
             this.socket = io({
                 reconnection: true,
-                reconnectionAttempts: CONFIG.MAX_RETRIES,
+                reconnectionAttempts: this.maxReconnectAttempts,
                 reconnectionDelay: this.reconnectDelay,
                 transports: ['websocket'],
                 upgrade: false,
                 timeout: CONFIG.CONNECTION_TIMEOUT,
-                auth: (cb) => {
-                    try {
-                        this.getSocketToken().then(token => {
-                            if (!token) {
-                                throw new Error('No authentication token available');
-                            }
-                            
-                            cb({ 
-                                token,
-                                userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : ''
-                            });
-                        }).catch(error => {
-                            this.onError(new Error(`Authentication error: ${error.message}`));
-                            cb({ error: error.message });
-                        });
-                    } catch (authError) {
-                        this.onError(new Error(`Authentication error: ${authError.message}`));
-                        cb({ error: authError.message });
-                    }
-                }
+                auth: { token }
             });
 
             this.setupEventHandlers();
@@ -453,7 +492,7 @@ export class SocketManager {
             );
         } else {
             console.log(`[Socket] Retrying in ${Math.round(this.reconnectDelay/1000)} sec...`);
-            setTimeout(() => this.init(), this.reconnectDelay);
+            setTimeout(() => this.initWithTokenCheck(), this.reconnectDelay);
         }
     }
 
@@ -511,6 +550,26 @@ export class SocketManager {
     }
 
     /**
+     * Request authentication status
+     * @returns {Promise<boolean>} Promise that resolves with authentication status
+     */
+    requestAuthStatus() {
+        return new Promise((resolve) => {
+            if (!this.isConnected) {
+                console.debug('[Socket] Not connected, cannot request auth status');
+                resolve(false);
+                return;
+            }
+
+            this.socket.emit('request_auth_status', {}, (response) => {
+                const isAuthenticated = response?.authenticated ?? false;
+                console.debug('[Socket] Received auth status:', isAuthenticated);
+                resolve(isAuthenticated);
+            });
+        });
+    }
+
+    /**
      * Process pending events
      * @private
      */
@@ -561,6 +620,12 @@ export class SocketManager {
             this.socket.off();
             this.socket.disconnect();
             this.socket = null;
+        }
+        
+        if (this.authSocket) {
+            this.authSocket.off();
+            this.authSocket.disconnect();
+            this.authSocket = null;
         }
         
         this.isConnected = false;
