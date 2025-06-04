@@ -66,6 +66,7 @@ class SocketService:
         self.socketio.on_event('get_server_version', self.handle_get_version)
         self.socketio.on_event('get_playback_state', self.handle_get_playback_state)
         self.socketio.on_event('get_playlist_state', self.handle_get_playlist_state)
+        self.socketio.on_event('request_auth_status', self.handle_auth_status_request)
 
     def start_activity_checker(self):
         """Запуск фоновой проверки активности клиентов"""
@@ -110,30 +111,83 @@ class SocketService:
         client_ip = request.remote_addr
         token = request.args.get('token')
         
-        with self.clients_lock:
-            self.connected_clients[request.sid] = {
-                'authenticated': False,
-                'connect_time': datetime.utcnow(),
-                'last_activity': datetime.utcnow(),
-                'ip_address': client_ip,
-                'reconnect_attempts': 0,
-                'token': token
-            }
+        client_data = {
+            'authenticated': False,
+            'connect_time': datetime.utcnow(),
+            'last_activity': datetime.utcnow(),
+            'ip_address': client_ip,
+            'reconnect_attempts': 0,
+            'token': token
+        }
         
-        self.logger.info('New client connection', {
+        with self.clients_lock:
+            self.connected_clients[request.sid] = client_data
+        
+        self.logger.debug('New client connection', {
             'ip': client_ip,
             'sid': request.sid
         })
 
+        # Отправляем текущий статус сразу после подключения
+        self.socketio.emit('auth_status_response', {
+            'authenticated': False,
+            'timestamp': datetime.utcnow().isoformat()
+        }, room=request.sid)
+
         if token:
             try:
-                decoded = self.verify_socket_token(token)
                 self.handle_authentication({'token': token})
             except Exception as e:
-                self.logger.warning('Invalid token on connect', {
+                self.logger.debug('Invalid token on connect', {
                     'error': str(e),
                     'sid': request.sid
                 })
+
+    def handle_auth_status_request(self, data: Dict, sid: Optional[str] = None):
+        """Обработчик запроса статуса аутентификации"""
+        if not self.socketio:
+            return
+
+        sid = sid or request.sid
+        with self.clients_lock:
+            client = self.connected_clients.get(sid)
+            if client:
+                authenticated = client.get('authenticated', False)
+                user_id = client.get('user_id')
+                
+                self.socketio.emit('auth_status_response', {
+                    'authenticated': authenticated,
+                    'user_id': user_id,
+                    'timestamp': datetime.utcnow().isoformat()
+                }, room=sid)
+                
+                self.logger.debug('Auth status sent', {
+                    'sid': sid,
+                    'authenticated': authenticated
+                })
+
+    def broadcast_auth_status(self, user_id: Optional[int] = None):
+        """Широковещательная рассылка об изменении статуса аутентификации"""
+        if not self.socketio:
+            return
+
+        with self.clients_lock:
+            if user_id:
+                # Отправляем только конкретному пользователю
+                target_sids = [sid for sid, client in self.connected_clients.items() 
+                              if client.get('user_id') == user_id]
+            else:
+                # Отправляем всем аутентифицированным клиентам
+                target_sids = [sid for sid, client in self.connected_clients.items() 
+                              if client.get('authenticated')]
+
+        for sid in target_sids:
+            self.handle_auth_status_request({}, sid=sid)
+
+        self.logger.debug('Broadcast auth status', {
+            'user_id': user_id,
+            'recipients': len(target_sids)
+        })
 
     def handle_disconnect(self):
         """Обработчик отключения клиента"""
@@ -212,6 +266,9 @@ class SocketService:
                 'success': True,
                 'version': self.server_version
             }, room=sid)
+            
+            # Отправляем обновленный статус после аутентификации
+            self.handle_auth_status_request({}, sid=sid)
             
         except Exception as e:
             self.logger.error('Authentication failed', {
