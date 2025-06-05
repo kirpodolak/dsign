@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from threading import Thread
 from typing import Dict, Any
+from flask_socketio import SocketIO
 
 from dsign.config.config import Config, config
 from dsign.services import init_services
@@ -60,7 +61,19 @@ def create_app(config_class: Config = config) -> Flask:
 
         # 2. Инициализация расширений
         app.logger.info("Initializing extensions...")
-        from .extensions import init_extensions, db, socketio
+        from .extensions import init_extensions, db
+        
+        # Инициализация Socket.IO перед другими расширениями
+        socketio = SocketIO(
+            app,
+            async_mode='threading',
+            cors_allowed_origins="*",
+            ping_timeout=30,
+            ping_interval=25,
+            engineio_logger=True,
+            logger=True
+        )
+        
         init_extensions(app)
         csrf = CSRFProtect(app)
         app.logger.info("Extensions initialized successfully")
@@ -78,7 +91,7 @@ def create_app(config_class: Config = config) -> Flask:
                     'DEFAULT_LOGO': config_class.DEFAULT_LOGO
                 },
                 db=db,
-                socketio=socketio,
+                socketio=socketio,  # Передаем сконфигурированный socketio
                 logger=app.logger
             )
             
@@ -118,11 +131,11 @@ def create_app(config_class: Config = config) -> Flask:
         app.logger.info("Error handlers registered")
 
         app.logger.info("Application initialization completed successfully")
-        return app
+        return app  # Возвращаем и app, и socketio
 
     except Exception as e:
         app.logger.critical(f"Application initialization failed: {str(e)}")
-        app.logger.exception(e)  # This will log the full traceback
+        app.logger.error(f"SocketIO initialization failed: {str(e)}", exc_info=True)
         raise RuntimeError(f"Application startup failed: {str(e)}") from e
 
 def _configure_playback_service(app: Flask) -> None:
@@ -181,7 +194,7 @@ def _fallback_to_idle_logo(app: Flask) -> None:
         app.playback_service.display_idle_logo()
     except Exception as e:
         app.logger.critical(f"Application initialization failed: {str(e)}")
-        app.logger.exception(e)  # This will log the full traceback
+        app.logger.error(f"SocketIO initialization failed: {str(e)}", exc_info=True)
 
 def register_error_handlers(app: Flask) -> None:
     """Регистрация обработчиков ошибок"""
