@@ -50,10 +50,18 @@
 
     <!-- Main app initialization -->
     <script type="module">
-        import App from '/static/js/base.js';
+        // Initialize global App object
+        window.App = window.App || {};
         
-        // Initialize when DOM is ready
+        // Import and initialize modules
+        import App from '/static/js/base.js';
+        import initializeSocketManager from '/static/js/sockets.js';
+        
         document.addEventListener('DOMContentLoaded', () => {
+            // Initialize socket manager
+            window.App.Sockets = initializeSocketManager();
+            
+            // Initialize main app
             App.initialize();
         });
     </script>
