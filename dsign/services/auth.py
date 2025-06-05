@@ -13,40 +13,58 @@ class AuthService:
         :param secret_key: Секретный ключ для JWT
         """
         self.secret_key = secret_key
-        self.logger = setup_logger('AuthService')
+        self.logger = logger or setup_logger('AuthService')
         self.login_attempts = {}
         self.max_attempts = 5
         self.lock_time = timedelta(minutes=15)
-        self.token_expiration = timedelta(days=1)
-        self.socket_token_expiration = timedelta(minutes=30)  # Для WebSocket токенов
+        self.token_expiration = timedelta(hours=24)  # 24 часа для стандартных токенов
+        self.socket_token_expiration = timedelta(minutes=30)  # 30 минут для WebSocket токенов
+        self.token_refresh_threshold = timedelta(minutes=5)  # Порог для обновления токена
 
-    def generate_token(self, user_id, socket_token=False):
+    def generate_token(self, user_id, socket_token=False, refresh_token=False):
         """
-        Генерация JWT токена
+        Улучшенная генерация JWT токенов
         :param user_id: ID пользователя
         :param socket_token: Флаг для генерации токена WebSocket
+        :param refresh_token: Флаг для генерации refresh-токена
         :return: Сгенерированный токен
         """
         try:
-            expiration = self.socket_token_expiration if socket_token else self.token_expiration
-            
+            if refresh_token:
+                expiration = timedelta(days=7)  # 7 дней для refresh-токена
+                token_type = 'refresh'
+            elif socket_token:
+                expiration = self.socket_token_expiration
+                token_type = 'socket'
+            else:
+                expiration = self.token_expiration
+                token_type = 'access'
+
             payload = {
                 'user_id': user_id,
                 'exp': datetime.utcnow() + expiration,
                 'iat': datetime.utcnow(),
                 'iss': current_app.config.get('JWT_ISSUER', 'dsign-auth'),
-                'type': 'socket' if socket_token else 'standard'
+                'type': token_type,
+                'aud': 'socket-client' if socket_token else 'web-client'
             }
-            
+
+            # Добавляем роли для пользователя
+            from ..models import User
+            user = User.query.get(user_id)
+            if user:
+                payload['roles'] = [role.name for role in user.roles] if hasattr(user, 'roles') else []
+                payload['is_admin'] = getattr(user, 'is_admin', False)
+
             token = jwt.encode(payload, self.secret_key, algorithm='HS256')
-            
+
             self.logger.info('Token generated', {
                 'user_id': user_id,
-                'token_type': payload['type'],
-                'token_exp': payload['exp'].isoformat()
+                'token_type': token_type,
+                'expires': payload['exp'].isoformat()
             })
             return token
-            
+
         except Exception as e:
             self.logger.error('Token generation failed', {
                 'error': str(e),
@@ -54,35 +72,46 @@ class AuthService:
             })
             raise RuntimeError("Token generation failed") from e
 
-    def verify_token(self, token, socket_token=False):
+    def verify_token(self, token, socket_token=False, refresh_token=False):
         """
-        Верификация JWT токена
+        Улучшенная верификация JWT токена
         :param token: Токен для проверки
         :param socket_token: Проверять как WebSocket токен
+        :param refresh_token: Проверять как refresh-токен
         :return: Декодированный payload или None
         """
         try:
             payload = jwt.decode(
-                token, 
-                self.secret_key, 
+                token,
+                self.secret_key,
                 algorithms=['HS256'],
-                options={'verify_exp': True}
+                options={'verify_exp': True},
+                audience='socket-client' if socket_token else 'web-client'
             )
-            
-            # Проверка типа токена, если указан
+
+            # Проверка типа токена
             if socket_token and payload.get('type') != 'socket':
                 raise jwt.InvalidTokenError('Not a WebSocket token')
-            
+            if refresh_token and payload.get('type') != 'refresh':
+                raise jwt.InvalidTokenError('Not a refresh token')
+            if not (socket_token or refresh_token) and payload.get('type') != 'access':
+                raise jwt.InvalidTokenError('Not an access token')
+
+            # Проверка срока действия
+            expires_at = datetime.fromtimestamp(payload['exp'])
+            time_remaining = expires_at - datetime.utcnow()
+
             self.logger.debug('Token verified', {
                 'user_id': payload['user_id'],
                 'token_type': payload.get('type', 'unknown'),
-                'expires': datetime.fromtimestamp(payload['exp']).isoformat()
+                'expires': expires_at.isoformat(),
+                'time_remaining': str(time_remaining)
             })
             return payload
-            
+
         except jwt.ExpiredSignatureError:
             self.logger.warning('Token expired', {
-                'token': token[:10] + '...'  # Логируем только часть токена
+                'token': token[:10] + '...'
             })
             return None
         except jwt.InvalidTokenError as e:
@@ -97,6 +126,24 @@ class AuthService:
                 'stack': True
             })
             return None
+
+    def should_refresh_token(self, token):
+        """
+        Проверка, нужно ли обновить токен
+        :param token: Токен для проверки
+        :return: True если нужно обновить
+        """
+        try:
+            payload = jwt.decode(
+                token,
+                self.secret_key,
+                algorithms=['HS256'],
+                options={'verify_exp': False}  # Не проверяем expiration
+            )
+            expires_at = datetime.fromtimestamp(payload['exp'])
+            return (expires_at - datetime.utcnow()) < self.token_refresh_threshold
+        except Exception:
+            return True
 
     def check_login_attempts(self, username):
         """
@@ -181,9 +228,20 @@ class AuthService:
             'authenticated': True,
             'user_id': user.id,
             'username': user.username,
-            'roles': [role.name for role in user.roles],
+            'roles': [role.name for role in user.roles] if hasattr(user, 'roles') else [],
+            'is_admin': getattr(user, 'is_admin', False),
             'timestamp': datetime.utcnow().isoformat()
         }
+
+    def create_tokens(self, user_id):
+        """
+        Создание пары access и refresh токенов
+        :param user_id: ID пользователя
+        :return: Кортеж (access_token, refresh_token)
+        """
+        access_token = self.generate_token(user_id)
+        refresh_token = self.generate_token(user_id, refresh_token=True)
+        return access_token, refresh_token
 
 @login_manager.user_loader
 def load_user(user_id):
