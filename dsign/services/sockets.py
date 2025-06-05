@@ -11,10 +11,14 @@ class SocketService:
     def __init__(self, socketio: Optional[SocketIO] = None, db_session=None, app=None, logger=None):
         """
         Инициализация сервиса сокетов
-        :param socketio: Экземпляр SocketIO (опционально)
+        :param socketio: Экземпляр SocketIO (обязательно)
         :param db_session: Сессия базы данных
         :param app: Экземпляр Flask приложения
+        :param logger: Логгер
         """
+        if socketio is None:
+            raise ValueError("SocketIO instance is required")
+            
         self.socketio = socketio
         self.db = db_session
         self.app = app or current_app._get_current_object() if current_app else None
@@ -33,29 +37,17 @@ class SocketService:
             'ping_interval': 25  # seconds to match frontend
         }
 
-        if socketio:
-            self.register_handlers()
-            self.start_activity_checker()
-            self.start_version_broadcaster()
-
-    def init_app(self, app, socketio: Optional[SocketIO] = None):
-        """Инициализация с Flask приложением"""
-        self.app = app
-        if socketio:
-            self.socketio = socketio
-        elif not self.socketio:
-            self.socketio = SocketIO(app, async_mode='eventlet')
-        
         self.register_handlers()
         self.start_activity_checker()
         self.start_version_broadcaster()
+
+    def init_app(self, app):
+        """Инициализация с Flask приложением (для обратной совместимости)"""
+        self.app = app
         self.logger.info("SocketService initialized with Flask app")
 
     def register_handlers(self):
         """Регистрация всех обработчиков событий"""
-        if not self.socketio:
-            raise RuntimeError("SocketIO not initialized")
-            
         self.socketio.on_event('connect', self.handle_connect)
         self.socketio.on_event('disconnect', self.handle_disconnect)
         self.socketio.on_event('authenticate', self.handle_authentication)
@@ -70,9 +62,6 @@ class SocketService:
 
     def start_activity_checker(self):
         """Запуск фоновой проверки активности клиентов"""
-        if not self.socketio:
-            raise RuntimeError("SocketIO not initialized")
-
         def activity_check():
             while True:
                 self.socketio.sleep(self.activity_check_interval)
@@ -85,9 +74,6 @@ class SocketService:
 
     def start_version_broadcaster(self):
         """Периодическая рассылка версии сервера"""
-        if not self.socketio:
-            raise RuntimeError("SocketIO not initialized")
-
         def broadcast_version():
             while True:
                 self.socketio.sleep(300)  # Каждые 5 минут
@@ -105,9 +91,6 @@ class SocketService:
 
     def handle_connect(self):
         """Обработчик подключения клиента"""
-        if not self.socketio:
-            return
-
         client_ip = request.remote_addr
         token = request.args.get('token')
         
@@ -145,9 +128,6 @@ class SocketService:
 
     def handle_auth_status_request(self, data: Dict, sid: Optional[str] = None):
         """Обработчик запроса статуса аутентификации"""
-        if not self.socketio:
-            return
-
         sid = sid or request.sid
         with self.clients_lock:
             client = self.connected_clients.get(sid)
@@ -168,9 +148,6 @@ class SocketService:
 
     def broadcast_auth_status(self, user_id: Optional[int] = None):
         """Широковещательная рассылка об изменении статуса аутентификации"""
-        if not self.socketio:
-            return
-
         with self.clients_lock:
             if user_id:
                 # Отправляем только конкретному пользователю
@@ -224,17 +201,11 @@ class SocketService:
 
     def handle_get_version(self):
         """Обработчик запроса версии сервера"""
-        if not self.socketio:
-            return
-
         sid = request.sid
         self.socketio.emit('server_version', self.server_version, room=sid)
 
     def handle_authentication(self, data: Dict):
         """Обработчик аутентификации WebSocket"""
-        if not self.socketio or not self.db:
-            return
-
         sid = request.sid
         try:
             token = self.verify_socket_token(data.get('token'))
@@ -296,9 +267,6 @@ class SocketService:
 
     def cleanup_client(self, sid: str):
         """Очистка ресурсов клиента"""
-        if not self.socketio:
-            return
-
         with self.clients_lock:
             if sid in self.connected_clients:
                 client_info = self.connected_clients[sid]
@@ -312,9 +280,6 @@ class SocketService:
 
     def check_activity(self):
         """Проверка активности клиентов"""
-        if not self.socketio:
-            return
-
         now = datetime.utcnow()
         inactive_clients = []
 
@@ -351,9 +316,6 @@ class SocketService:
 
     def handle_get_playback_state(self, data: Dict):
         """Обработчик запроса состояния воспроизведения"""
-        if not self.socketio or not self.db:
-            return
-
         sid = request.sid
         if not self.is_authenticated(sid):
             self.logger.warning('Unauthorized playback state request', {'sid': sid})
@@ -378,9 +340,6 @@ class SocketService:
 
     def handle_get_playlist_state(self, data: Dict):
         """Обработчик запроса состояния плейлиста"""
-        if not self.socketio or not self.db:
-            return
-
         sid = request.sid
         if not self.is_authenticated(sid):
             self.logger.warning('Unauthorized playlist state request', {'sid': sid})
@@ -406,9 +365,6 @@ class SocketService:
 
     def emit_playlist_update(self, playlist_id: Optional[int] = None):
         """Отправка обновления плейлиста"""
-        if not self.socketio or not self.db:
-            return
-
         from ..models import Playlist, PlaylistProfileAssignment, PlaybackProfile
 
         data: Dict[str, Any] = {'active_playlist': None}
@@ -464,9 +420,6 @@ class SocketService:
 
     def handle_profiles_request(self, data: Dict):
         """Отправка списка профилей клиенту"""
-        if not self.socketio or not self.db:
-            return
-
         sid = request.sid
         if not self.is_authenticated(sid):
             self.logger.warning('Unauthorized profiles request', {'sid': sid})
@@ -496,9 +449,6 @@ class SocketService:
 
     def handle_apply_profile(self, data: Dict):
         """Применение профиля настроек"""
-        if not self.socketio or not self.db:
-            return
-
         sid = request.sid
         if not self.is_authenticated(sid):
             self.logger.warning('Unauthorized profile apply attempt', {'sid': sid})
