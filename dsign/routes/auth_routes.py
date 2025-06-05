@@ -20,8 +20,8 @@ auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 # Security configurations
 MAX_LOGIN_ATTEMPTS = 10
 LOGIN_TIMEOUT = 180  # 3 minutes in seconds
-TOKEN_EXPIRATION = 60  # 1 hour in minutes
-SOCKET_TOKEN_EXPIRATION = 5  # 5 minutes in minutes
+TOKEN_EXPIRATION = 1440  # 1 hour in minutes
+SOCKET_TOKEN_EXPIRATION = 30  # 5 minutes in minutes
 
 # Rate limiting storage with thread lock
 rate_limit_data = {}
