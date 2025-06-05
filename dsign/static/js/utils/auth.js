@@ -69,7 +69,7 @@ export class AuthService {
             }
 
             // WebSocket fallback
-            return this.checkAuthViaWebSocket();
+            return await this.checkAuthViaWebSocket();
         } catch (error) {
             this.logger.error('Authentication check failed', error);
             this.clearAuth();
@@ -78,21 +78,31 @@ export class AuthService {
     }
 
     async checkAuthViaWebSocket() {
-        if (!window.App?.Sockets?.isConnected?.()) {
-            return false;
-        }
+        return new Promise((resolve, reject) => {
+            if (!window.App?.Sockets?.isConnected?.()) {
+                reject(new Error('Socket not connected'));
+                return;
+            }
 
-        return new Promise((resolve) => {
             const timeout = setTimeout(() => {
-                resolve(false);
+                reject(new Error('Socket authentication check timed out'));
             }, 3000);
 
-            window.App.Sockets.emit('request_auth_status', {}, (response) => {
+            try {
+                window.App.Sockets.emit('request_auth_status', {}, (response) => {
+                    clearTimeout(timeout);
+                    if (response?.error) {
+                        reject(new Error(response.error));
+                        return;
+                    }
+                    const isAuthenticated = response?.authenticated ?? false;
+                    this.updateAuthStatus(isAuthenticated);
+                    resolve(isAuthenticated);
+                });
+            } catch (error) {
                 clearTimeout(timeout);
-                const isAuthenticated = response?.authenticated ?? false;
-                this.updateAuthStatus(isAuthenticated);
-                resolve(isAuthenticated);
-            });
+                reject(new Error(`WebSocket error: ${error.message}`));
+            }
         });
     }
 
