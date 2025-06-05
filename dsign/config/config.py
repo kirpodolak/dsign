@@ -67,7 +67,10 @@ class Config:
     # Настройки CORS
     CORS_SUPPORTS_CREDENTIALS = True
     SOCKETIO_CORS_ALLOWED_ORIGINS = "*"
-    
+    SOCKETIO_PING_TIMEOUT = 30
+    SOCKETIO_PING_INTERVAL = 25
+    SOCKETIO_ASYNC_MODE = 'gevent'
+
     # Режим отладки
     DEBUG = os.getenv("FLASK_ENV", "production").lower() == "development"
 
