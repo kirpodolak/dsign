@@ -1,629 +1,542 @@
-// Utility functions that can be shared across modules
-export function showAlert(message, type = 'info') {
-    const alert = document.createElement('div');
-    alert.className = `alert alert-${type}`;
-    alert.textContent = message;
-    alert.style.cssText = `
-        position: fixed;
-        top: 20px;
-        right: 20px;
-        padding: 12px 20px;
-        border-radius: 4px;
-        background-color: ${getAlertColor(type)};
-        color: white;
-        z-index: 1000;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        animation: fadeIn 0.3s ease-out;
-    `;
+/**
+ * WebSocket Manager Module
+ * @module SocketManager
+ * @description Enhanced WebSocket manager with improved auth handling
+ */
 
-    document.body.appendChild(alert);
+const CONFIG = {
+    MAX_RETRIES: 5,
+    INITIAL_RETRY_DELAY: 2000,
+    MAX_RETRY_DELAY: 60000,
+    PING_INTERVAL: 25000,
+    AUTH_TIMEOUT: 30000,
+    TOKEN_CHECK_INTERVAL: 1000,
+    TOKEN_MAX_ATTEMPTS: 30,
+    MAX_EVENT_QUEUE: 50,
+    CONNECTION_TIMEOUT: 10000,
+    SERVER_CHECK_INTERVAL: 5000,
+    SERVER_CHECK_TIMEOUT: 2000
+};
 
-    setTimeout(() => {
-        alert.style.opacity = '0';
-        setTimeout(() => alert.remove(), 300);
-    }, 3000);
-}
-
-function getAlertColor(type) {
-    switch (type) {
-        case 'success': return '#28a745';
-        case 'error': return '#dc3545';
-        case 'warning': return '#ffc107';
-        default: return '#17a2b8';
-    }
-}
-
-export function getCSRFToken() {
-    return document.querySelector('meta[name="csrf-token"]')?.content || '';
-}
-
-// Main Settings Module
-export class SettingsManager {
-    constructor() {
-        this.elements = {
-            idleProfileSelect: document.getElementById('idle-profile-select'),
-            applyIdleBtn: document.getElementById('apply-idle-profile'),
-            playlistSelect: document.getElementById('playlist-select'),
-            profileSelect: document.getElementById('playlist-profile-select'),
-            assignBtn: document.getElementById('assign-profile'),
-            profileNameInput: document.getElementById('profile-name'),
-            profileTypeSelect: document.getElementById('profile-type'),
-            saveProfileBtn: document.getElementById('save-profile'),
-            settingsEditor: document.getElementById('profile-settings-editor'),
-            currentSettingsPanel: document.getElementById('current-settings-panel'),
-            mpvSettingsForm: document.getElementById('mpv-settings-form'),
-            profilesGrid: document.getElementById('profiles-grid'),
-            playlistAssignments: document.getElementById('playlist-assignments'),
-            currentSettingsDisplay: document.getElementById('current-settings-display'),
-            currentProfileIndicator: document.getElementById('current-profile-indicator')
+export class SocketManager {
+    constructor(options = {}) {
+        // Connection state
+        this.socket = null;
+        this.authSocket = null;
+        this.isConnected = false;
+        this.isAuthenticated = false;
+        
+        // Reconnection settings
+        this.reconnectAttempts = 0;
+        this.reconnectDelay = options.reconnectDelay || CONFIG.INITIAL_RETRY_DELAY;
+        this.maxReconnectAttempts = CONFIG.MAX_RETRIES;
+        
+        // Event management
+        this.pendingEvents = [];
+        this.eventHandlers = new Map();
+        
+        // Timers
+        this.pingInterval = null;
+        this.authTimeout = null;
+        this.connectionTimeout = null;
+        this.tokenRefreshTimer = null;
+        this.serverCheckTimer = null;
+        
+        // Dependencies
+        this.authService = options.authService || {
+            waitForToken: async () => {
+                if (typeof window !== 'undefined' && window.App?.Auth?.getToken) {
+                    return window.App.Auth.getToken();
+                }
+                return localStorage?.getItem('authToken');
+            },
+            updateAuthStatus: (status) => {
+                if (typeof window !== 'undefined' && window.App?.Auth?.updateAuthStatus) {
+                    window.App.Auth.updateAuthStatus(status);
+                }
+            },
+            checkAuth: async () => {
+                if (typeof window !== 'undefined' && window.App?.Auth?.checkAuth) {
+                    return window.App.Auth.checkAuth();
+                }
+                return false;
+            }
         };
-
-        this.state = {
-            currentProfile: null,
-            currentSettings: {},
-            profiles: [],
-            playlists: [],
-            assignments: {},
-            settingsSchema: {}
+        
+        this.logger = options.logger || {
+            debug: console.debug.bind(console),
+            log: console.log.bind(console),
+            warn: console.warn.bind(console),
+            error: console.error.bind(console)
         };
+        
+        // Callbacks
+        this.onError = options.onError || ((error) => this.defaultErrorHandler(error));
+        this.onTokenRefresh = options.onTokenRefresh || ((token) => this.defaultTokenRefreshHandler(token));
+        this.onReconnect = options.onReconnect || null;
 
-        this.init();
+        // Initialize connections
+        this._initWithTokenCheck();
     }
 
-    async init() {
-        try {
-            if (!this.elements.idleProfileSelect || !this.elements.profileSelect) {
-                throw new Error('Required DOM elements not found');
-            }
-
-            const [profiles, playlists, assignments] = await Promise.all([
-                this.loadProfiles().catch(e => {
-                    console.error('Profile load error:', e);
-                    return [];
-                }),
-                this.loadPlaylists().catch(e => {
-                    console.error('Playlist load error:', e);
-                    return [];
-                }),
-                this.loadAssignments().catch(e => {
-                    console.error('Assignment load error:', e);
-                    return {};
-                })
-            ]);
-
-            this.state.profiles = Array.isArray(profiles) ? profiles : [];
-            this.state.playlists = Array.isArray(playlists) ? playlists : [];
-            this.state.assignments = assignments && typeof assignments === 'object' ? assignments : {};
-
-            this.renderProfileSelects();
-            this.renderPlaylistAssignments();
-
-            await Promise.all([
-                this.loadCurrentSettings(),
-                this.loadSettingsSchema()
-            ]);
-
-            this.renderCurrentSettings();
-            this.renderSettingsForm();
-            this.renderProfileGrid();
-            this.setupEventListeners();
-
-        } catch (error) {
-            console.error('Initialization error:', error);
-            showAlert('Failed to initialize settings. Please try again.', 'error');
+    defaultErrorHandler = (error) => {
+        this.logger.error('[Socket] Error:', error);
+        if (typeof window !== 'undefined' && window.App?.Alerts?.showError) {
+            window.App.Alerts.showError('Connection Error', error.message);
         }
     }
 
-    // Data loading methods
-    async loadProfiles() {
-        try {
-            const response = await fetch('/api/profiles');
-            if (!response.ok) throw new Error('Failed to load profiles');
-            
-            const data = await response.json();
-            if (data.success) {
-                this.state.profiles = Array.isArray(data.profiles) ? data.profiles : [];
-                return this.state.profiles;
-            } else {
-                throw new Error(data.error || 'Invalid profiles data');
-            }
-        } catch (error) {
-            console.error('Error loading profiles:', error);
-            showAlert('Failed to load profiles. ' + error.message, 'error');
-            this.state.profiles = [];
-            return [];
+    defaultTokenRefreshHandler = (newToken) => {
+        this.logger.debug('[Socket] Token refreshed');
+        if (typeof window !== 'undefined' && window.App?.Helpers?.setToken) {
+            window.App.Helpers.setToken(newToken);
+        } else if (typeof localStorage !== 'undefined') {
+            localStorage.setItem('authToken', newToken);
         }
     }
 
-    async loadPlaylists() {
+    _checkServerAvailability = async () => {
         try {
-            const response = await fetch('/api/playlists');
-            if (!response.ok) throw new Error('Failed to load playlists');
-            
-            const data = await response.json();
-            if (data.success) {
-                this.state.playlists = Array.isArray(data.playlists) ? data.playlists : [];
-                return this.state.playlists;
-            } else {
-                throw new Error(data.error || 'Invalid playlists data');
-            }
-        } catch (error) {
-            console.error('Error loading playlists:', error);
-            showAlert('Failed to load playlists. ' + error.message, 'error');
-            this.state.playlists = [];
-            return [];
-        }
-    }
-
-    async loadAssignments() {
-        try {
-            const response = await fetch('/api/profiles/assignments');
-            if (!response.ok) throw new Error('Failed to load assignments');
-            
-            const data = await response.json();
-            if (data.success) {
-                this.state.assignments = data.assignments && typeof data.assignments === 'object' 
-                    ? data.assignments 
-                    : {};
-                return this.state.assignments;
-            } else {
-                throw new Error(data.error || 'Invalid assignments data');
-            }
-        } catch (error) {
-            console.error('Error loading assignments:', error);
-            showAlert('Failed to load profile assignments', 'error');
-            this.state.assignments = {};
-            return {};
-        }
-    }
-
-    async loadCurrentSettings() {
-        try {
-            const response = await fetch('/api/settings/current');
-            if (!response.ok) throw new Error('Failed to load current settings');
-            
-            const data = await response.json();
-            if (data.success) {
-                this.state.currentSettings = data.settings && typeof data.settings === 'object' 
-                    ? data.settings 
-                    : {};
-                this.state.currentProfile = data.profile || null;
-                return { settings: this.state.currentSettings, profile: this.state.currentProfile };
-            } else {
-                throw new Error(data.error || 'Invalid settings data');
-            }
-        } catch (error) {
-            console.error('Error loading current settings:', error);
-            showAlert('Failed to load current settings', 'error');
-            this.state.currentSettings = {};
-            this.state.currentProfile = null;
-            return { settings: {}, profile: null };
-        }
-    }
-
-    async loadSettingsSchema() {
-        try {
-            const response = await fetch('/api/settings/schema');
-            if (!response.ok) throw new Error('Failed to load settings schema');
-            
-            const data = await response.json();
-            if (data.success) {
-                this.state.settingsSchema = data.schema && typeof data.schema === 'object' 
-                    ? data.schema 
-                    : {};
-                return this.state.settingsSchema;
-            } else {
-                throw new Error(data.error || 'Invalid schema data');
-            }
-        } catch (error) {
-            console.error('Error loading settings schema:', error);
-            showAlert('Failed to load settings schema', 'error');
-            this.state.settingsSchema = {};
-            return {};
-        }
-    }
-
-    // Rendering methods
-    renderProfileSelects() {
-        if (!this.elements.idleProfileSelect || !this.elements.profileSelect) return;
-
-        this.elements.idleProfileSelect.innerHTML = '<option value="">Default</option>';
-        this.elements.profileSelect.innerHTML = '<option value="">Default</option>';
-
-        this.state.profiles
-            .filter(profile => profile && profile.profile_type === 'idle')
-            .forEach(profile => {
-                const option = document.createElement('option');
-                option.value = profile.id;
-                option.textContent = profile.name;
-                this.elements.idleProfileSelect.appendChild(option);
+            const response = await fetch('/api/settings/current', {
+                method: 'GET',
+                signal: AbortSignal.timeout(CONFIG.SERVER_CHECK_TIMEOUT)
             });
-
-        this.state.profiles
-            .filter(profile => profile && profile.profile_type === 'playlist')
-            .forEach(profile => {
-                const option = document.createElement('option');
-                option.value = profile.id;
-                option.textContent = profile.name;
-                this.elements.profileSelect.appendChild(option);
-            });
-    }
-
-    renderProfileGrid() {
-        if (!this.elements.profilesGrid) return;
-        
-        this.elements.profilesGrid.innerHTML = '';
-        
-        this.state.profiles.forEach(profile => {
-            if (!profile) return;
-            
-            const card = document.createElement('div');
-            card.className = 'profile-card';
-            card.innerHTML = `
-                <div class="profile-header">
-                    <span class="profile-name">${profile.name}</span>
-                    <span class="profile-type">${profile.profile_type}</span>
-                </div>
-                <div class="profile-actions">
-                    <button class="btn-edit" data-id="${profile.id}">✏️</button>
-                    <button class="btn-delete" data-id="${profile.id}">🗑️</button>
-                </div>
-            `;
-            this.elements.profilesGrid.appendChild(card);
-        });
-    }
-
-    renderPlaylistAssignments() {
-        if (!this.elements.playlistAssignments) return;
-        
-        this.elements.playlistAssignments.innerHTML = '';
-        
-        this.state.playlists.forEach(playlist => {
-            if (!playlist) return;
-            
-            const row = document.createElement('div');
-            row.className = 'assignment-row';
-            row.innerHTML = `
-                <span class="playlist-name">${playlist.name}</span>
-                <select class="profile-select" data-playlist-id="${playlist.id}">
-                    <option value="">Default</option>
-                    ${this.state.profiles
-                        .filter(p => p && p.profile_type === 'playlist')
-                        .map(p => `<option value="${p.id}" 
-                            ${this.state.assignments[playlist.id] === p.id ? 'selected' : ''}>
-                            ${p.name}
-                        </option>`)
-                        .join('')}
-                </select>
-                <button class="btn-save" data-playlist-id="${playlist.id}">Save</button>
-            `;
-            this.elements.playlistAssignments.appendChild(row);
-        });
-    }
-
-    renderCurrentSettings() {
-        if (!this.elements.currentSettingsDisplay || !this.elements.currentProfileIndicator) return;
-
-        if (this.state.currentProfile) {
-            this.elements.currentProfileIndicator.innerHTML = `
-                <p>Current Profile: <strong>${this.state.currentProfile.name}</strong></p>
-                <p>Type: <strong>${this.state.currentProfile.profile_type}</strong></p>
-            `;
-        } else {
-            this.elements.currentProfileIndicator.innerHTML = '<p>Using default settings</p>';
+            return response.ok;
+        } catch (error) {
+            this.logger.debug('[Socket] Server check failed:', error);
+            return false;
         }
-
-        this.elements.currentSettingsDisplay.innerHTML = `
-            <div><strong>Resolution:</strong> ${this.state.currentSettings.resolution || 'N/A'}</div>
-            <div><strong>Aspect Ratio:</strong> ${this.state.currentSettings.aspect_ratio || 'N/A'}</div>
-            <div><strong>Rotation:</strong> ${this.state.currentSettings.rotation || '0'}°</div>
-            <div><strong>Overscan:</strong> ${this.state.currentSettings.overscan ? 'On' : 'Off'}</div>
-            <div><strong>Volume:</strong> ${this.state.currentSettings.volume || '100'}%</div>
-            <div><strong>Mute:</strong> ${this.state.currentSettings.mute ? 'On' : 'Off'}</div>
-        `;
     }
 
-    renderSettingsForm() {
-        if (!this.elements.settingsEditor) return;
-
-        this.elements.settingsEditor.innerHTML = '';
-
-        if (!this.state.settingsSchema || Object.keys(this.state.settingsSchema).length === 0) {
-            this.elements.settingsEditor.innerHTML = '<p class="text-muted">No settings schema available</p>';
+    _initAuthSocket = () => {
+        if (typeof io === 'undefined') {
+            this.logger.error('[Socket] Socket.IO library not loaded');
             return;
         }
 
-        for (const [key, setting] of Object.entries(this.state.settingsSchema)) {
-            if (!setting || typeof setting !== 'object') continue;
-
-            const wrapper = document.createElement('div');
-            wrapper.className = 'form-group';
-
-            const label = document.createElement('label');
-            label.textContent = setting.label || key;
-            label.htmlFor = `setting-${key}`;
-            wrapper.appendChild(label);
-
-            let input;
-            const currentValue = this.state.currentSettings[key] ?? setting.default;
-
-            switch (setting.type) {
-                case 'select':
-                    input = document.createElement('select');
-                    if (Array.isArray(setting.options)) {
-                        setting.options.forEach(opt => {
-                            const option = document.createElement('option');
-                            option.value = opt;
-                            option.textContent = opt;
-                            option.selected = opt === currentValue;
-                            input.appendChild(option);
-                        });
-                    }
-                    break;
-
-                case 'boolean':
-                    input = document.createElement('input');
-                    input.type = 'checkbox';
-                    input.checked = Boolean(currentValue);
-                    break;
-
-                case 'range':
-                    input = document.createElement('input');
-                    input.type = 'range';
-                    input.min = setting.min || 0;
-                    input.max = setting.max || 100;
-                    input.step = setting.step || 1;
-                    input.value = currentValue;
-
-                    const valueLabel = document.createElement('span');
-                    valueLabel.className = 'range-value';
-                    valueLabel.textContent = currentValue;
-                    input.addEventListener('input', () => {
-                        valueLabel.textContent = input.value;
-                    });
-                    wrapper.appendChild(valueLabel);
-                    break;
-
-                default:
-                    input = document.createElement('input');
-                    input.type = 'text';
-                    input.value = currentValue || '';
-            }
-
-            input.id = `setting-${key}`;
-            input.dataset.settingKey = key;
-            wrapper.appendChild(input);
-            this.elements.settingsEditor.appendChild(wrapper);
+        if (this.authSocket) {
+            this.authSocket.disconnect();
         }
-    }
 
-    // Event handlers
-    setupEventListeners() {
-        this.elements.applyIdleBtn?.addEventListener('click', () => this.handleApplyIdleProfile());
-        this.elements.assignBtn?.addEventListener('click', () => this.handleAssignProfile());
-        this.elements.saveProfileBtn?.addEventListener('click', () => this.handleSaveProfile());
-        this.elements.mpvSettingsForm?.addEventListener('submit', (e) => this.handleMpvSettingsSubmit(e));
+        this.authSocket = io('/auth', {
+            reconnection: true,
+            reconnectionAttempts: CONFIG.MAX_RETRIES,
+            reconnectionDelay: this.reconnectDelay,
+            reconnectionDelayMax: 10000,
+            randomizationFactor: 0.5,
+            transports: ['websocket'],
+            upgrade: false,
+            forceNew: true,
+            timeout: CONFIG.CONNECTION_TIMEOUT
+        });
 
-        document.addEventListener('click', (e) => {
-            if (e.target.classList.contains('btn-save')) {
-                this.handleSaveAssignment(e);
+        this.authSocket.on('connect', () => {
+            this.logger.debug('[AuthSocket] Connected');
+            this._checkAuthViaWebSocket();
+        });
+
+        this.authSocket.on('disconnect', (reason) => {
+            this.logger.log('[AuthSocket] Disconnected:', reason);
+            if (reason === 'io server disconnect') {
+                setTimeout(() => this._initAuthSocket(), 5000);
             }
-            
-            if (e.target.classList.contains('btn-edit')) {
-                this.handleEditProfile(e);
+        });
+
+        this.authSocket.on('connect_error', (error) => {
+            this.logger.error('[AuthSocket] Connection error:', error);
+            setTimeout(() => this._initAuthSocket(), 5000);
+        });
+
+        this.authSocket.on('auth_update', (data) => {
+            this.logger.debug('[AuthSocket] Received auth update:', data);
+            this.authService.updateAuthStatus(data?.authenticated ?? false);
+            if (data?.authenticated) {
+                this._initWithTokenCheck();
             }
-            
-            if (e.target.classList.contains('btn-delete')) {
-                this.handleDeleteProfile(e);
+        });
+
+        this.authSocket.on('auth_status_response', (data) => {
+            this.logger.debug('[AuthSocket] Received auth status:', data);
+            this.authService.updateAuthStatus(data?.authenticated ?? false);
+            if (data?.authenticated) {
+                this._initWithTokenCheck();
             }
         });
     }
 
-    async handleApplyIdleProfile() {
-        const profileId = this.elements.idleProfileSelect?.value;
-        if (!profileId) return;
-
+    _initWithTokenCheck = async () => {
         try {
-            const response = await fetch(`/api/profiles/apply/${profileId}`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': getCSRFToken()
+            if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+                throw new Error('Max reconnect attempts reached');
+            }
+
+            this.logger.debug('[Socket] Starting connection with token check');
+
+            // Check server availability first
+            if (!(await this._checkServerAvailability())) {
+                this.logger.debug('[Socket] Server not available, delaying connection attempt');
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                return this._handleRetry(new Error('Server not available'));
+            }
+
+            // Get token with retry logic
+            let token;
+            let attempts = 0;
+            
+            while (attempts < CONFIG.TOKEN_MAX_ATTEMPTS) {
+                try {
+                    token = await this.authService.waitForToken();
+                    if (token) break;
+                } catch (error) {
+                    this.logger.debug(`[Socket] Token check attempt ${attempts + 1} failed:`, error);
                 }
-            });
-            
-            const result = await response.json();
-            if (result.success) {
-                showAlert('Idle profile applied successfully', 'success');
-                await this.loadCurrentSettings();
-                this.renderCurrentSettings();
-            } else {
-                throw new Error(result.error || 'Failed to apply profile');
+                
+                attempts++;
+                if (attempts < CONFIG.TOKEN_MAX_ATTEMPTS) {
+                    await new Promise(resolve => setTimeout(resolve, CONFIG.TOKEN_CHECK_INTERVAL));
+                }
             }
+
+            if (!token) {
+                this.logger.debug('[Socket] No token available, initializing auth socket');
+                this._initAuthSocket();
+                throw new Error('No valid token available');
+            }
+
+            // Verify authentication status
+            if (!(await this.authService.checkAuth())) {
+                this.logger.debug('[Socket] User not authenticated, initializing auth socket');
+                this._initAuthSocket();
+                throw new Error('User not authenticated');
+            }
+
+            this._init(token);
         } catch (error) {
-            console.error('Error applying profile:', error);
-            showAlert(error.message, 'error');
+            this.logger.error('[Socket] Initialization error:', error);
+            this._handleRetry(error);
         }
     }
 
-    async handleAssignProfile() {
-        const playlistId = this.elements.playlistSelect?.value;
-        const profileId = this.elements.profileSelect?.value || null;
-
-        if (!playlistId) {
-            return showAlert('Please select a playlist', 'warning');
-        }
-
+    _init = (token) => {
         try {
-            const response = await fetch('/api/profiles/assign', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': getCSRFToken()
-                },
-                body: JSON.stringify({ playlist_id: playlistId, profile_id: profileId })
-            });
+            this.logger.debug('[Socket] Initializing connection...');
             
-            const result = await response.json();
-            if (result.success) {
-                showAlert('Profile assigned successfully', 'success');
-                await this.loadAssignments();
-                this.renderPlaylistAssignments();
-            } else {
-                throw new Error(result.error || 'Failed to assign profile');
+            if (typeof io === 'undefined') {
+                throw new Error('Socket.IO library not loaded');
             }
+
+            this.cleanup();
+
+            this.socket = io({
+                reconnection: true,
+                reconnectionAttempts: this.maxReconnectAttempts,
+                reconnectionDelay: this.reconnectDelay,
+                reconnectionDelayMax: CONFIG.MAX_RETRY_DELAY,
+                randomizationFactor: 0.5,
+                transports: ['websocket'],
+                upgrade: false,
+                timeout: CONFIG.CONNECTION_TIMEOUT,
+                auth: { token },
+                secure: window.location.protocol === 'https:'
+            });
+
+            this._setupEventHandlers();
         } catch (error) {
-            console.error('Error assigning profile:', error);
-            showAlert(error.message, 'error');
+            this.logger.error('[Socket] Initialization error:', error);
+            this._handleRetry(error);
         }
     }
 
-    async handleSaveAssignment(e) {
-        const playlistId = e.target.dataset.playlistId;
-        const select = document.querySelector(`.profile-select[data-playlist-id="${playlistId}"]`);
-        const profileId = select?.value;
-
-        try {
-            const response = await fetch('/api/profiles/assign', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': getCSRFToken()
-                },
-                body: JSON.stringify({ playlist_id: playlistId, profile_id: profileId })
-            });
+    _setupEventHandlers = () => {
+        this.socket.on('connect', () => {
+            this.logger.debug('[Socket] Connected');
+            this.isConnected = true;
+            this.reconnectAttempts = 0;
+            this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
             
-            const result = await response.json();
-            if (result.success) {
-                showAlert('Assignment saved successfully', 'success');
-                await this.loadAssignments();
-            } else {
-                throw new Error(result.error || 'Failed to save assignment');
+            this._processPendingEvents();
+            this._startPingInterval();
+            
+            if (this.onReconnect) {
+                this.onReconnect(this.reconnectAttempts);
             }
-        } catch (error) {
-            console.error('Error saving assignment:', error);
-            showAlert(error.message, 'error');
-        }
+        });
+
+        this.socket.on('disconnect', (reason) => {
+            this.logger.log('[Socket] Disconnected:', reason);
+            this.isConnected = false;
+            this._handleDisconnect(reason);
+        });
+
+        this.socket.on('connect_error', (error) => {
+            this.logger.error('[Socket] Connection error:', error);
+            this.isConnected = false;
+            this._handleError(error);
+        });
+
+        this.socket.on('error', (error) => {
+            this.logger.error('[Socket] Error:', error);
+            this._handleError(error);
+        });
+
+        this.socket.on('authenticated', () => {
+            this.logger.debug('[Socket] Authenticated');
+            this.isAuthenticated = true;
+            if (this.authTimeout) {
+                clearTimeout(this.authTimeout);
+                this.authTimeout = null;
+            }
+        });
+
+        this.socket.on('unauthorized', (error) => {
+            this.logger.error('[Socket] Unauthorized:', error);
+            this.isAuthenticated = false;
+            this._initAuthSocket();
+            this._handleError(new Error('Authentication failed'));
+        });
+
+        this.socket.on('token_refresh', (newToken) => {
+            this.logger.debug('[Socket] Received token refresh');
+            this.onTokenRefresh(newToken);
+        });
+
+        this.socket.onAny((event, ...args) => {
+            const handlers = this.eventHandlers.get(event);
+            if (handlers) {
+                handlers.forEach(handler => handler(...args));
+            }
+        });
     }
 
-    async handleSaveProfile() {
-        const name = this.elements.profileNameInput?.value.trim();
-        const type = this.elements.profileTypeSelect?.value;
-
-        if (!name) {
-            return showAlert('Please enter profile name', 'warning');
-        }
-
-        try {
-            const settings = this.collectSettingsFromForm();
-            const response = await fetch('/api/profiles', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': getCSRFToken()
-                },
-                body: JSON.stringify({ name, type, settings })
-            });
-            
-            const result = await response.json();
-            if (result.success) {
-                showAlert('Profile saved successfully', 'success');
-                this.elements.profileNameInput.value = '';
-                await this.loadProfiles();
-                this.renderProfileSelects();
-                this.renderProfileGrid();
-            } else {
-                throw new Error(result.error || 'Failed to save profile');
-            }
-        } catch (error) {
-            console.error('Error saving profile:', error);
-            showAlert(error.message, 'error');
-        }
-    }
-
-    async handleEditProfile(e) {
-        const profileId = e.target.dataset.id;
-        const profile = this.state.profiles.find(p => p && p.id == profileId);
+    _handleError = (error) => {
+        this.logger.error('[Socket] Connection error:', error);
+        this.reconnectAttempts++;
         
-        if (profile) {
-            this.elements.profileNameInput.value = profile.name;
-            this.elements.profileTypeSelect.value = profile.profile_type;
-            showAlert(`Editing profile: ${profile.name}`, 'info');
+        this.reconnectDelay = Math.min(
+            Math.max(this.reconnectDelay * 2, CONFIG.INITIAL_RETRY_DELAY) + Math.random() * 2000,
+            CONFIG.MAX_RETRY_DELAY
+        );
+        
+        if (this.reconnectAttempts >= CONFIG.MAX_RETRIES) {
+            this._showAlert(
+                'error', 
+                'Connection Error', 
+                'Real-time updates disabled. Please check your network connection.'
+            );
+            setTimeout(() => {
+                this.reconnectAttempts = 0;
+                this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
+            }, 120000);
+        } else {
+            this.logger.log(`[Socket] Will retry in ${Math.round(this.reconnectDelay/1000)} sec...`);
+            setTimeout(() => {
+                this._initWithTokenCheck();
+            }, this.reconnectDelay);
         }
     }
 
-    async handleDeleteProfile(e) {
-        const profileId = e.target.dataset.id;
-        if (!confirm('Are you sure you want to delete this profile?')) return;
-
-        try {
-            const response = await fetch(`/api/profiles/${profileId}`, {
-                method: 'DELETE',
-                headers: {
-                    'X-CSRFToken': getCSRFToken()
-                }
-            });
-            
-            const result = await response.json();
-            if (result.success) {
-                showAlert('Profile deleted successfully', 'success');
-                await this.loadProfiles();
-                this.renderProfileSelects();
-                this.renderProfileGrid();
-            } else {
-                throw new Error(result.error || 'Failed to delete profile');
-            }
-        } catch (error) {
-            console.error('Error deleting profile:', error);
-            showAlert(error.message, 'error');
+    _handleDisconnect = (reason) => {
+        this.logger.log('[Socket] Disconnected:', reason);
+        this.isConnected = false;
+        
+        if (reason === 'io server disconnect') {
+            this.logger.warn('[Socket] Server forced disconnect, will attempt reconnection');
+            setTimeout(() => this._initWithTokenCheck(), 5000);
+        } else {
+            this._handleRetry(new Error(reason));
+        }
+        
+        if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+            this.pingInterval = null;
         }
     }
 
-    async handleMpvSettingsSubmit(e) {
-        e.preventDefault();
-        try {
-            const formData = new FormData(this.elements.mpvSettingsForm);
-            const settings = Object.fromEntries(formData.entries());
-            
-            const response = await fetch('/api/settings/update', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': getCSRFToken()
-                },
-                body: JSON.stringify(settings)
-            });
-            
-            const result = await response.json();
-            if (result.success) {
-                showAlert('Settings updated successfully', 'success');
-                await this.loadCurrentSettings();
-                this.renderCurrentSettings();
-            } else {
-                throw new Error(result.error || 'Failed to update settings');
+    _handleRetry = (error) => {
+        this.logger.error('[Socket] Connection error:', error);
+        this.reconnectAttempts++;
+        
+        this.reconnectDelay = Math.min(
+            Math.max(this.reconnectDelay * 2, CONFIG.INITIAL_RETRY_DELAY) + Math.random() * 2000,
+            CONFIG.MAX_RETRY_DELAY
+        );
+        
+        if (this.reconnectAttempts >= CONFIG.MAX_RETRIES) {
+            this.logger.error('[Socket] Max retry attempts reached');
+            if (typeof window !== 'undefined' && window.App?.Alerts?.showError) {
+                window.App.Alerts.showError(
+                    'Connection Error', 
+                    'Real-time updates disabled. Please check your network connection.'
+                );
             }
-        } catch (error) {
-            console.error('Error updating settings:', error);
-            showAlert(error.message, 'error');
+            setTimeout(() => {
+                this.reconnectAttempts = 0;
+                this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
+            }, 120000);
+        } else {
+            this.logger.debug(`[Socket] Will retry in ${Math.round(this.reconnectDelay/1000)} sec...`);
+            setTimeout(() => {
+                this._initWithTokenCheck();
+            }, this.reconnectDelay);
         }
     }
 
-    collectSettingsFromForm() {
-        const settings = {};
-        const inputs = this.elements.settingsEditor?.querySelectorAll('[data-setting-key]') || [];
-
-        inputs.forEach(input => {
-            const key = input.dataset.settingKey;
-            if (key) {
-                settings[key] = input.type === 'checkbox' ? input.checked : input.value;
+    _startPingInterval = () => {
+        if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+        }
+        
+        this.pingInterval = setInterval(() => {
+            if (this.socket && this.isConnected) {
+                this.socket.emit('ping', { timestamp: Date.now() });
             }
-        });
+        }, CONFIG.PING_INTERVAL);
+    }
 
-        return settings;
+    _processPendingEvents = () => {
+        while (this.pendingEvents.length > 0 && this.isConnected) {
+            const event = this.pendingEvents.shift();
+            this.emit(event.name, ...event.args);
+        }
+    }
+
+    _checkAuthViaWebSocket = () => {
+        if (this.authSocket && this.authSocket.connected) {
+            this.authSocket.emit('auth_status');
+        }
+    }
+
+    cleanup = () => {
+        if (this.socket) {
+            this.socket.disconnect();
+            this.socket = null;
+        }
+        if (this.authSocket) {
+            this.authSocket.disconnect();
+            this.authSocket = null;
+        }
+        
+        if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+            this.pingInterval = null;
+        }
+        
+        if (this.authTimeout) {
+            clearTimeout(this.authTimeout);
+            this.authTimeout = null;
+        }
+        
+        if (this.connectionTimeout) {
+            clearTimeout(this.connectionTimeout);
+            this.connectionTimeout = null;
+        }
+        
+        if (this.tokenRefreshTimer) {
+            clearTimeout(this.tokenRefreshTimer);
+            this.tokenRefreshTimer = null;
+        }
+        
+        if (this.serverCheckTimer) {
+            clearTimeout(this.serverCheckTimer);
+            this.serverCheckTimer = null;
+        }
+        
+        this.isConnected = false;
+        this.isAuthenticated = false;
+    }
+
+    emit = (event, ...args) => {
+        if (this.socket && this.isConnected) {
+            this.socket.emit(event, ...args);
+        } else {
+            if (this.pendingEvents.length >= CONFIG.MAX_EVENT_QUEUE) {
+                this.pendingEvents.shift();
+            }
+            this.pendingEvents.push({ name: event, args });
+            this.logger.debug(`[Socket] Queued event (${event}), waiting for connection`);
+        }
+    }
+
+    on = (event, handler) => {
+        if (!this.eventHandlers.has(event)) {
+            this.eventHandlers.set(event, new Set());
+        }
+        this.eventHandlers.get(event).add(handler);
+        
+        if (this.socket && this.isConnected) {
+            this.socket.on(event, handler);
+        }
+    }
+
+    off = (event, handler) => {
+        if (this.eventHandlers.has(event)) {
+            const handlers = this.eventHandlers.get(event);
+            handlers.delete(handler);
+            
+            if (handlers.size === 0) {
+                this.eventHandlers.delete(event);
+            }
+        }
+        
+        if (this.socket && this.isConnected) {
+            this.socket.off(event, handler);
+        }
+    }
+
+    disconnect = () => {
+        this.cleanup();
+    }
+
+    _showAlert = (type, title, message) => {
+        this.logger.log(`[Socket] Alert: ${title} - ${message}`);
+        if (typeof window !== 'undefined' && window.App?.Alerts?.showAlert) {
+            window.App.Alerts.showAlert(type, title, message);
+        }
     }
 }
 
-// Initialize when DOM is ready
-document.addEventListener('DOMContentLoaded', () => {
-    new SettingsManager();
-});
+let socketManagerInstance = null;
+
+export function initializeSocketManager(options = {}) {
+    if (!socketManagerInstance) {
+        try {
+            socketManagerInstance = new SocketManager({
+                onError: (error) => {
+                    console.error('[Socket] Global error handler:', error);
+                    if (typeof window !== 'undefined' && window.App?.Alerts?.showError) {
+                        window.App.Alerts.showError('Socket Error', error.message);
+                    }
+                },
+                onTokenRefresh: (newToken) => {
+                    console.debug('[Socket] Updating token from refresh');
+                    if (typeof window !== 'undefined' && window.App?.Helpers?.setToken) {
+                        window.App.Helpers.setToken(newToken);
+                    }
+                },
+                onReconnect: (attempt) => {
+                    console.debug(`[Socket] Reconnect attempt ${attempt}`);
+                },
+                ...options
+            });
+        } catch (error) {
+            console.error('Failed to initialize SocketManager:', error);
+            throw error;
+        }
+    }
+    return socketManagerInstance;
+}
+
+if (typeof window !== 'undefined') {
+    window.App = window.App || {};
+    try {
+        window.App.Sockets = window.App.Sockets || initializeSocketManager();
+    } catch (error) {
+        console.error('Failed to initialize global App.Sockets:', error);
+        window.App.Sockets = {
+            emit: () => console.warn('SocketManager not initialized'),
+            disconnect: () => {},
+            on: () => console.warn('SocketManager not initialized'),
+            off: () => console.warn('SocketManager not initialized')
+        };
+    }
+}
