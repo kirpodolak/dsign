@@ -50,19 +50,24 @@
 
     <!-- Main app initialization -->
     <script type="module">
-        // Initialize global App object
+        import '/static/js/utils/app-init.js';
+        
+        // Fallback initialization if app-init fails
         window.App = window.App || {};
+        window.App.Alerts = window.App.Alerts || {
+            showError: (title, message) => {
+                console.error(`${title}: ${message}`);
+                alert(`${title}: ${message}`);
+            }
+        };
         
-        // Import and initialize modules
-        import App from '/static/js/base.js';
-        import initializeSocketManager from '/static/js/sockets.js';
-        
-        document.addEventListener('DOMContentLoaded', () => {
-            // Initialize socket manager
-            window.App.Sockets = initializeSocketManager();
-            
-            // Initialize main app
-            App.initialize();
+        // Error handling for module loading
+        window.addEventListener('error', (event) => {
+            console.error('Application loading error:', event.error);
+            window.App.Alerts.showError(
+                'Load Error', 
+                'Failed to initialize application. Please refresh the page.'
+            );
         });
     </script>
     
