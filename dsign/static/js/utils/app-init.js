@@ -27,6 +27,7 @@ class AppInitializer {
         });
 
         this.initPromise = null;
+        this.socketInitialized = false;
     }
 
     async init() {
@@ -47,17 +48,8 @@ class AppInitializer {
                     return;
                 }
 
-                // Initialize socket manager after global state
-                this.socketManager = new SocketManager({
-                    authService: this.authService,
-                    logger: this.logger
-                });
-
-                // Check authentication
-                const isAuthenticated = await this.checkAuth();
-                if (!isAuthenticated) {
-                    return;
-                }
+                // Initialize auth service first
+                await this.authService.checkAuth();
 
                 // Setup core components
                 await Promise.all([
@@ -67,13 +59,14 @@ class AppInitializer {
                     this.setupAuthMonitoring()
                 ]);
 
-                // Initialize WebSocket if authenticated
+                // Initialize WebSocket connection
                 await this.initWebSocket();
 
                 // Initialize other modules
                 this.initModules();
 
                 this.logger.debug('Application initialization completed');
+                window.App.state.initialized = true;
             } catch (error) {
                 this.logger.error('Initialization error:', error);
                 this.showFatalError('Application initialization failed');
@@ -115,31 +108,6 @@ class AppInitializer {
             }
         }
         return false;
-    }
-
-    async checkAuth() {
-        try {
-            const response = await fetch('/api/auth/status', {
-                credentials: 'include',
-                headers: {
-                    'Accept': 'application/json'
-                }
-            });
-    
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
-            }
-        
-            const data = await response.json();
-            return data.authenticated;
-        } catch (error) {
-            console.error('Auth check failed:', error);
-            // Only redirect if not already on login page
-            if (!window.location.pathname.includes('/api/auth/login')) {
-                window.location.href = '/api/auth/login';
-            }
-            return false;
-        }
     }
 
     async setupLoader() {
@@ -253,44 +221,54 @@ class AppInitializer {
     }
 
     setupAuthMonitoring() {
-        // Periodic auth checks
-        this.authCheckInterval = setInterval(() => {
-            this.checkAuth().catch(error => {
-                this.logger.warn('Auth monitoring error:', error);
-            });
-        }, 5 * 60 * 1000); // 5 minutes
+        // Start auth status checker
+        this.authService.startAuthStatusChecker();
 
         // Check auth when tab becomes visible
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
-                this.checkAuth().catch(error => {
+                this.authService.checkAuth().catch(error => {
                     this.logger.warn('Visibility change auth check error:', error);
                 });
             }
         });
+
+        // Listen for auth status changes
+        if (typeof window !== 'undefined') {
+            window.App.trigger = window.App.trigger || function(event, data) {
+                document.dispatchEvent(new CustomEvent(event, { detail: data }));
+            };
+
+            document.addEventListener('auth:status_changed', (event) => {
+                const isAuthenticated = event.detail;
+                this.logger.debug(`Auth status changed: ${isAuthenticated}`);
+                
+                if (isAuthenticated && !this.socketInitialized) {
+                    this.initWebSocket().catch(error => {
+                        this.logger.error('WebSocket init after auth change failed:', error);
+                    });
+                }
+            });
+        }
     }
 
     async initWebSocket() {
         try {
-            const token = await this.authService.waitForToken();
-            if (!token) {
-                throw new Error('No valid token available');
-            }
+            // Динамическое определение URL
+            const socketUrl = window.location.origin.replace(/^http/, 'ws');
         
+            const { token } = await this.authService.getSocketToken();
             this.socketManager = new SocketManager({
-                token,
-                authService: this.authService,
-                logger: this.logger
+                endpoint: socketUrl,  // Передаем динамический URL
+                token: token,
+                onError: (error) => {
+                    console.error('Socket error:', error);
+                }
             });
         
             await this.socketManager.connect();
         } catch (error) {
-            this.logger.error('WebSocket initialization failed:', error);
-            // Don't retry if it's an auth error
-            if (error.message.includes('auth') || error.message.includes('token')) {
-                return;
-            }
-            // Retry logic here...
+            console.error('WebSocket init failed:', error);
         }
     }
 
@@ -339,6 +317,7 @@ class AppInitializer {
             
             if (this.socketManager) {
                 this.socketManager.disconnect();
+                window.App.state.socketConnected = false;
             }
         });
 
@@ -349,8 +328,10 @@ class AppInitializer {
                 'You are back online'
             );
             
-            if (!window.App.state.socketConnected && this.socketManager) {
-                this.initWebSocket();
+            if (!window.App.state.socketConnected && this.authService.status) {
+                this.initWebSocket().catch(error => {
+                    this.logger.error('WebSocket reinit after online failed:', error);
+                });
             }
         });
     }
@@ -364,6 +345,8 @@ class AppInitializer {
         // Disconnect sockets
         if (this.socketManager) {
             this.socketManager.disconnect();
+            this.socketInitialized = false;
+            window.App.state.socketConnected = false;
         }
         
         // Redirect to login if not already there
@@ -419,12 +402,10 @@ class AppInitializer {
     }
 
     cleanup() {
-        if (this.authCheckInterval) {
-            clearInterval(this.authCheckInterval);
-        }
-        
         if (this.socketManager) {
             this.socketManager.disconnect();
+            this.socketInitialized = false;
+            window.App.state.socketConnected = false;
         }
         
         window.removeEventListener('online', this.handleOnline);
