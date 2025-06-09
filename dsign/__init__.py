@@ -66,12 +66,12 @@ def create_app(config_class: Config = config) -> Flask:
         # Инициализация Socket.IO перед другими расширениями
         socketio = SocketIO(
             app,
-            async_mode='threading',
-            cors_allowed_origins="*",
-            ping_timeout=30,
-            ping_interval=25,
-            engineio_logger=True,
-            logger=True
+            async_mode=config.SOCKETIO_ASYNC_MODE,
+            cors_allowed_origins=config.SOCKETIO_CORS_ALLOWED_ORIGINS,
+            logger=config.SOCKETIO_LOGGER,
+            engineio_logger=config.SOCKETIO_ENGINEIO_LOGGER,
+            cors_credentials=config.SOCKETIO_CORS_CREDENTIALS,
+            http_compression=config.SOCKETIO_HTTP_COMPRESSION
         )
         
         init_extensions(app)
