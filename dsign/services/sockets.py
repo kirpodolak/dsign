@@ -1,11 +1,95 @@
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
-from flask_socketio import SocketIO, disconnect
+from flask_socketio import SocketIO, disconnect, Namespace
 from flask import request, current_app
 import jwt
 from .logger import ServiceLogger
 from threading import Lock
 import time
+
+class AuthNamespace(Namespace):
+    """
+    Специальный namespace для обработки аутентификации
+    """
+    def __init__(self, namespace, socket_service):
+        super().__init__(namespace)
+        self.socket_service = socket_service
+        self.logger = socket_service.logger
+
+    def on_connect(self):
+        """Обработчик подключения к namespace /auth"""
+        self.logger.debug('New auth namespace connection', {
+            'sid': request.sid,
+            'ip': request.remote_addr
+        })
+        
+        # Отправляем клиенту подтверждение готовности
+        self.emit('auth_ready', {
+            'version': self.socket_service.server_version,
+            'timestamp': datetime.utcnow().isoformat()
+        })
+
+    def on_authenticate(self, data):
+        """Обработчик аутентификации в namespace /auth"""
+        try:
+            token = data.get('token')
+            if not token:
+                raise ValueError('Token is required')
+            
+            # Верифицируем токен
+            decoded = self.socket_service.verify_socket_token(token)
+            user_id = decoded['user_id']
+            
+            # Обновляем статус клиента
+            with self.socket_service.clients_lock:
+                if request.sid in self.socket_service.connected_clients:
+                    self.socket_service.connected_clients[request.sid].update({
+                        'user_id': user_id,
+                        'authenticated': True,
+                        'last_activity': datetime.utcnow()
+                    })
+                else:
+                    self.logger.warning('Client not found during auth namespace auth', 
+                                      {'sid': request.sid})
+                    disconnect(request.sid)
+                    return
+            
+            self.logger.info('User authenticated via auth namespace', {
+                'user_id': user_id,
+                'sid': request.sid
+            })
+            
+            self.emit('authentication_result', {
+                'success': True,
+                'version': self.socket_service.server_version,
+                'timestamp': datetime.utcnow().isoformat()
+            })
+            
+        except Exception as e:
+            error_msg = str(e)
+            if isinstance(e, jwt.ExpiredSignatureError):
+                error_msg = 'Token expired'
+            elif isinstance(e, jwt.InvalidTokenError):
+                error_msg = 'Invalid token'
+                
+            self.logger.error('Auth namespace authentication failed', {
+                'error': error_msg,
+                'sid': request.sid
+            })
+            
+            self.emit('authentication_result', {
+                'success': False,
+                'error': error_msg,
+                'timestamp': datetime.utcnow().isoformat()
+            })
+            
+            if 'token' in str(e).lower() or 'auth' in str(e).lower():
+                self.emit('auth_error', {
+                    'message': error_msg,
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+                
+            disconnect(request.sid)
 
 class SocketService:
     def __init__(self, socketio: Optional[SocketIO] = None, db_session=None, app=None, logger=None):
@@ -37,6 +121,9 @@ class SocketService:
             'ping_interval': 25  # seconds to match frontend
         }
 
+        # Регистрируем кастомный namespace для аутентификации
+        self.socketio.on_namespace(AuthNamespace('/auth', self))
+        
         self.register_handlers()
         self.start_activity_checker()
         self.start_version_broadcaster()
@@ -47,7 +134,7 @@ class SocketService:
         self.logger.info("SocketService initialized with Flask app")
 
     def register_handlers(self):
-        """Регистрация всех обработчиков событий"""
+        """Регистрация всех обработчиков событий для основного namespace"""
         self.socketio.on_event('connect', self.handle_connect)
         self.socketio.on_event('disconnect', self.handle_disconnect)
         self.socketio.on_event('authenticate', self.handle_authentication)
@@ -83,48 +170,49 @@ class SocketService:
                                      if self.is_authenticated(sid)]
                     
                     for sid in active_sids:
-                        self.socketio.emit('server_version', self.server_version, room=sid)
+                        self.socketio.emit('server_version', {
+                            'version': self.server_version,
+                            'timestamp': datetime.utcnow().isoformat()
+                        }, room=sid)
                 except Exception as e:
                     self.logger.error('Version broadcast failed', {'error': str(e)})
 
         self.socketio.start_background_task(broadcast_version)
 
     def handle_connect(self):
-        """Обработчик подключения клиента"""
+        """Более гибкий обработчик подключений"""
         client_ip = request.remote_addr
         token = request.args.get('token')
+    
+        # Логируем подключение, но не блокируем по IP
+        self.logger.debug(f'New connection from IP: {client_ip}')
+    
+        # Основная проверка - только токен
+        if not token:
+            self.logger.warning('No token provided')
+            self.socketio.emit('auth_required', {
+                'message': 'Authentication token required',
+                'timestamp': datetime.utcnow().isoformat()
+            }, room=request.sid)
+            return
+    
+        try:
+            decoded = self.verify_socket_token(token)
+            user_id = decoded['user_id']
         
-        client_data = {
-            'authenticated': False,
-            'connect_time': datetime.utcnow(),
-            'last_activity': datetime.utcnow(),
-            'ip_address': client_ip,
-            'reconnect_attempts': 0,
-            'token': token
-        }
+            with self.clients_lock:
+                self.connected_clients[request.sid] = {
+                    'user_id': user_id,
+                    'ip_address': client_ip,
+                    'authenticated': True,
+                    'last_activity': datetime.utcnow()
+                }
         
-        with self.clients_lock:
-            self.connected_clients[request.sid] = client_data
+            self.logger.info(f'User {user_id} authenticated from IP: {client_ip}')
         
-        self.logger.debug('New client connection', {
-            'ip': client_ip,
-            'sid': request.sid
-        })
-
-        # Отправляем текущий статус сразу после подключения
-        self.socketio.emit('auth_status_response', {
-            'authenticated': False,
-            'timestamp': datetime.utcnow().isoformat()
-        }, room=request.sid)
-
-        if token:
-            try:
-                self.handle_authentication({'token': token})
-            except Exception as e:
-                self.logger.debug('Invalid token on connect', {
-                    'error': str(e),
-                    'sid': request.sid
-                })
+        except Exception as e:
+            self.logger.error(f'Authentication failed for IP {client_ip}: {str(e)}')
+            disconnect(request.sid)
 
     def handle_auth_status_request(self, data: Dict, sid: Optional[str] = None):
         """Обработчик запроса статуса аутентификации"""
@@ -169,7 +257,10 @@ class SocketService:
     def handle_disconnect(self):
         """Обработчик отключения клиента"""
         sid = request.sid
-        self.logger.info('Client disconnected', {'sid': sid})
+        self.logger.info('Client disconnected', {
+            'sid': sid,
+            'namespace': request.namespace
+        })
         self.cleanup_client(sid)
 
     def handle_ping(self, data=None):
@@ -180,8 +271,14 @@ class SocketService:
                 self.connected_clients[sid]['last_activity'] = datetime.utcnow()
                 self.logger.debug('Ping received', {'sid': sid})
                 if data and isinstance(data, dict) and data.get('echo'):
-                    return {'pong': data['echo']}
-        return 'pong'
+                    return {
+                        'pong': data['echo'],
+                        'timestamp': datetime.utcnow().isoformat()
+                    }
+        return {
+            'pong': 'ok',
+            'timestamp': datetime.utcnow().isoformat()
+        }
 
     def handle_heartbeat(self, data: Dict):
         """Обработчик heartbeat сообщения"""
@@ -195,17 +292,26 @@ class SocketService:
                 
                 if timestamp:
                     latency = int((time.time() * 1000) - timestamp)
-                    return {'latency': latency}
+                    return {
+                        'latency': latency,
+                        'timestamp': datetime.utcnow().isoformat()
+                    }
         
-        return {'error': 'Invalid heartbeat'}
+        return {
+            'error': 'Invalid heartbeat',
+            'timestamp': datetime.utcnow().isoformat()
+        }
 
     def handle_get_version(self):
         """Обработчик запроса версии сервера"""
         sid = request.sid
-        self.socketio.emit('server_version', self.server_version, room=sid)
+        self.socketio.emit('server_version', {
+            'version': self.server_version,
+            'timestamp': datetime.utcnow().isoformat()
+        }, room=sid)
 
     def handle_authentication(self, data: Dict):
-        """Обработчик аутентификации WebSocket"""
+        """Обработчик аутентификации WebSocket в основном namespace"""
         sid = request.sid
         try:
             token = self.verify_socket_token(data.get('token'))
@@ -235,7 +341,8 @@ class SocketService:
             
             self.socketio.emit('authentication_result', {
                 'success': True,
-                'version': self.server_version
+                'version': self.server_version,
+                'timestamp': datetime.utcnow().isoformat()
             }, room=sid)
             
             # Отправляем обновленный статус после аутентификации
@@ -255,12 +362,14 @@ class SocketService:
                 
             self.socketio.emit('authentication_result', {
                 'success': False,
-                'error': error_msg
+                'error': error_msg,
+                'timestamp': datetime.utcnow().isoformat()
             }, room=sid)
             
             if 'token' in str(e).lower() or 'auth' in str(e).lower():
                 self.socketio.emit('auth_error', {
-                    'message': error_msg
+                    'message': error_msg,
+                    'timestamp': datetime.utcnow().isoformat()
                 }, room=sid)
                 
             self.cleanup_client(sid)
@@ -273,7 +382,8 @@ class SocketService:
                 user_id = client_info.get('user_id', 'unknown')
                 self.logger.info('Cleaning up client resources', {
                     'sid': sid,
-                    'user_id': user_id
+                    'user_id': user_id,
+                    'namespace': client_info.get('namespace', '/')
                 })
                 del self.connected_clients[sid]
                 disconnect(sid)
@@ -291,18 +401,24 @@ class SocketService:
                     connect_time = (now - client['connect_time']).seconds
                     if connect_time > self.socket_auth_timeout:
                         inactive_clients.append(sid)
-                        self.logger.warning('Authentication timeout', {'sid': sid})
+                        self.logger.warning('Authentication timeout', {
+                            'sid': sid,
+                            'namespace': client.get('namespace', '/')
+                        })
                         self.socketio.emit('auth_timeout', {
-                            'message': 'Authentication timeout'
+                            'message': 'Authentication timeout',
+                            'timestamp': datetime.utcnow().isoformat()
                         }, room=sid)
                 elif last_active > 60:
                     inactive_clients.append(sid)
                     self.logger.warning('Client inactive', {
                         'sid': sid,
-                        'inactive_seconds': last_active
+                        'inactive_seconds': last_active,
+                        'namespace': client.get('namespace', '/')
                     })
                     self.socketio.emit('inactivity_timeout', {
-                        'message': 'Disconnected due to inactivity'
+                        'message': 'Disconnected due to inactivity',
+                        'timestamp': datetime.utcnow().isoformat()
                     }, room=sid)
 
         for sid in inactive_clients:
@@ -504,7 +620,9 @@ class SocketService:
 
         payload = {
             'user_id': user_id,
-            'exp': datetime.utcnow() + timedelta(minutes=30)
+            'exp': datetime.utcnow() + timedelta(minutes=30),
+            'aud': 'socket-client',
+            'iss': 'media-server'
         }
         return jwt.encode(payload, self.app.config['SECRET_KEY'], algorithm='HS256')
 
@@ -521,7 +639,9 @@ class SocketService:
                 token, 
                 self.app.config['SECRET_KEY'], 
                 algorithms=['HS256'],
-                options={'verify_exp': True}
+                options={'verify_exp': True},
+                audience='socket-client',
+                issuer='media-server'
             )
             
             if not decoded.get('user_id'):
