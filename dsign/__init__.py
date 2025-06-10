@@ -59,22 +59,14 @@ def create_app(config_class: Config = config) -> Flask:
             raise RuntimeError("MPV service is not running")
         app.logger.info("MPV service is active and ready")
 
-        # 2. Инициализация расширений
+        # 2. Инициализация расширений (включая SocketIO)
         app.logger.info("Initializing extensions...")
-        from .extensions import init_extensions, db
+        from .extensions import init_extensions
         
-        # Инициализация Socket.IO перед другими расширениями
-        socketio = SocketIO(
-            app,
-            async_mode=config.SOCKETIO_ASYNC_MODE,
-            cors_allowed_origins=config.SOCKETIO_CORS_ALLOWED_ORIGINS,
-            logger=config.SOCKETIO_LOGGER,
-            engineio_logger=config.SOCKETIO_ENGINEIO_LOGGER,
-            cors_credentials=config.SOCKETIO_CORS_CREDENTIALS,
-            http_compression=config.SOCKETIO_HTTP_COMPRESSION
-        )
+        # Инициализируем все расширения, включая SocketIO
+        extensions = init_extensions(app)
+        socketio = extensions['socketio']  # Получаем экземпляр SocketIO из extensions
         
-        init_extensions(app)
         csrf = CSRFProtect(app)
         app.logger.info("Extensions initialized successfully")
 
@@ -82,16 +74,9 @@ def create_app(config_class: Config = config) -> Flask:
         app.logger.info("Initializing services...")
         with app.app_context():
             services = init_services(
-                config={
-                    'UPLOAD_FOLDER': config_class.UPLOAD_FOLDER,
-                    'SECRET_KEY': config_class.SECRET_KEY,
-                    'SETTINGS_FILE': config_class.SETTINGS_FILE,
-                    'THUMBNAIL_FOLDER': config_class.THUMBNAIL_FOLDER,
-                    'THUMBNAIL_URL': config_class.THUMBNAIL_URL,
-                    'DEFAULT_LOGO': config_class.DEFAULT_LOGO
-                },
-                db=db,
-                socketio=socketio,  # Передаем сконфигурированный socketio
+                config=app.config,
+                db=extensions['db'],
+                socketio=socketio,  # Используем единый экземпляр SocketIO
                 logger=app.logger
             )
             
@@ -131,11 +116,10 @@ def create_app(config_class: Config = config) -> Flask:
         app.logger.info("Error handlers registered")
 
         app.logger.info("Application initialization completed successfully")
-        return app  # Возвращаем и app, и socketio
+        return app
 
     except Exception as e:
-        app.logger.critical(f"Application initialization failed: {str(e)}")
-        app.logger.error(f"SocketIO initialization failed: {str(e)}", exc_info=True)
+        app.logger.critical(f"Application initialization failed: {str(e)}", exc_info=True)
         raise RuntimeError(f"Application startup failed: {str(e)}") from e
 
 def _configure_playback_service(app: Flask) -> None:
