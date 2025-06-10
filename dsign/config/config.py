@@ -1,13 +1,14 @@
 import os
 import socket
-from socket import gethostbyname, gethostname
+import netifaces
 from pathlib import Path
 from urllib.parse import urlparse
 
 class Config:
     def __init__(self):
-        # Получаем текущий IP
+        # Получаем текущий IP и все сетевые IP
         self.current_ip = self._get_local_ip()
+        self.all_network_ips = self._get_all_network_ips()
         self.port = 5000  # Порт приложения
         
         # Базовые пути
@@ -45,6 +46,8 @@ class Config:
         self.MAX_LOGO_SIZE = 2 * 1024 * 1024
         self.MAX_IMAGE_SIZE = 5 * 1024 * 1024
         self.MAX_VIDEO_SIZE = 100 * 1024 * 1024
+        self.MEDIA_STREAM_BUFFER_SIZE = 1024 * 1024  # 1MB буферизация
+        self.MEDIA_MAX_CONCURRENT_STREAMS = 3  # Лимит одновременных потоков
         
         # Настройки сессии
         self.SESSION_COOKIE_NAME = 'dsign_session'
@@ -62,20 +65,20 @@ class Config:
 
         # Настройки CORS origins
         self.CORS_ORIGINS = ["*"] if self.DEBUG else self._get_default_origins()
-        self.SOCKETIO_CORS_ALLOWED_ORIGINS = ["*"] if self.DEBUG else self._get_default_origins(ws=True)
+        self.SOCKETIO_CORS_ALLOWED_ORIGINS = "*"
         
-        # Настройки Socket.IO (исправленные)
+        # Настройки Socket.IO
         self.SOCKETIO_CORS_METHODS = ["GET", "POST", "OPTIONS"]
         self.SOCKETIO_CORS_HEADERS = ["Content-Type", "Authorization"]
         self.SOCKETIO_MAX_HTTP_BUFFER_SIZE = 100 * 1024 * 1024
-        self.SOCKETIO_PING_TIMEOUT = 30
-        self.SOCKETIO_PING_INTERVAL = 25
-        self.SOCKETIO_ASYNC_MODE = 'eventlet'  # Изменено на eventlet
-        self.SOCKETIO_LOGGER = True           # Включено для диагностики
+        self.SOCKETIO_PING_TIMEOUT = 300
+        self.SOCKETIO_PING_INTERVAL = 60
+        self.SOCKETIO_ASYNC_MODE = 'eventlet'
+        self.SOCKETIO_LOGGER = True
         self.SOCKETIO_ENGINEIO_LOGGER = True
         self.SOCKETIO_ALWAYS_CONNECT = True
-        self.SOCKETIO_CORS_CREDENTIALS = True  # Добавлено для поддержки credentials
-        self.SOCKETIO_HTTP_COMPRESSION = True  # Добавлено для сжатия
+        self.SOCKETIO_CORS_CREDENTIALS = True
+        self.SOCKETIO_HTTP_COMPRESSION = True
 
         # Настройки сессии Socket.IO
         self.SOCKETIO_COOKIE = 'dsign_socketio'
@@ -99,20 +102,42 @@ class Config:
         except:
             return "127.0.0.1"
     
+    def _get_all_network_ips(self):
+        """Получает все IP-адреса сетевых интерфейсов"""
+        ips = set()
+        try:
+            for interface in netifaces.interfaces():
+                addrs = netifaces.ifaddresses(interface)
+                if netifaces.AF_INET in addrs:
+                    for addr_info in addrs[netifaces.AF_INET]:
+                        ip = addr_info.get('addr')
+                        if ip and ip != '127.0.0.1':
+                            ips.add(ip)
+        except Exception as e:
+            print(f"Error getting network interfaces: {e}")
+        return list(ips) if ips else [self._get_local_ip()]
+
     def _get_default_origins(self, ws=False):
-        """Генерирует допустимые origins"""
+        """Генерирует допустимые origins на основе всех сетевых IP"""
         protocol = "ws" if ws else "http"
         base_origins = [
             f"{protocol}://localhost:{self.port}",
             f"{protocol}://127.0.0.1:{self.port}",
-            f"{protocol}://{self.current_ip}:{self.port}",
-            f"{protocol}://0.0.0.0:{self.port}"  # Добавлено для всех интерфейсов
+            f"{protocol}://0.0.0.0:{self.port}",
+            "*",  # Разрешить все origins (менее безопасно)
+            r"http://\d+\.\d+\.\d+\.\d+(:\d+)?",
+            r"https://\d+\.\d+\.\d+\.\d+(:\d+)?"
         ]
         
+        # Добавляем все обнаруженные IP-адреса
+        for ip in set([self.current_ip] + self.all_network_ips):
+            base_origins.append(f"{protocol}://{ip}:{self.port}")
+        
+        # Добавляем origins из переменных окружения
         extra_origins = os.getenv("EXTRA_CORS_ORIGINS", "").split(",")
         base_origins.extend([f"{protocol}://{x.strip()}:{self.port}" for x in extra_origins if x.strip()])
         
-        return base_origins
+        return list(set(base_origins))  # Удаляем дубликаты
 
 config = Config()
 
