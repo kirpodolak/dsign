@@ -254,19 +254,27 @@ class AppInitializer {
 
     async initWebSocket() {
         try {
-            // Динамическое определение URL
-            const socketUrl = window.location.origin.replace(/^http/, 'ws');
+            // 1. Получаем токен
+            const response = await fetch('/api/auth/socket-token');
+            const data = await response.json();
         
-            const { token } = await this.authService.getSocketToken();
-            this.socketManager = new SocketManager({
-                endpoint: socketUrl,  // Передаем динамический URL
-                token: token,
-                onError: (error) => {
-                    console.error('Socket error:', error);
-                }
+            // 2. Инициализируем подключение
+            this.socket = io({
+                transports: ["websocket"],
+                auth: { token: data.token },
+                reconnectionAttempts: 5,
+                timeout: 10000
             });
         
-            await this.socketManager.connect();
+            // 3. Обработчики событий
+            this.socket.on('connect', () => {
+                console.log('WebSocket connected');
+            });
+        
+            this.socket.on('disconnect', (reason) => {
+                console.log(`Disconnected: ${reason}`);
+            });
+        
         } catch (error) {
             console.error('WebSocket init failed:', error);
         }
