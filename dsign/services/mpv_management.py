@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .playback_constants import PlaybackConstants
 from .logger import ServiceLogger
+from dsign.extensions import socketio
 
 class MPVManager:
     def __init__(self, 
