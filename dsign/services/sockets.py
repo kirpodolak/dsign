@@ -148,8 +148,14 @@ class SocketService:
                     })
                     return False
 
-                # Проверка токена
-                decoded = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
+                # Проверка токена с полной верификацией claims
+                decoded = jwt.decode(
+                    token,
+                    current_app.config['SECRET_KEY'],
+                    algorithms=['HS256'],
+                    audience='socket-client',
+                    issuer='media-server'
+                )
                 
                 if decoded.get('purpose') != 'socket_connection':
                     raise ValueError('Invalid token purpose')
@@ -175,6 +181,18 @@ class SocketService:
             except jwt.ExpiredSignatureError:
                 emit('token_expired', {
                     'message': 'Token expired',
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+                return False
+            except jwt.InvalidAudienceError:
+                emit('auth_error', {
+                    'message': 'Invalid audience',
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+                return False
+            except jwt.InvalidIssuerError:
+                emit('auth_error', {
+                    'message': 'Invalid issuer',
                     'timestamp': datetime.utcnow().isoformat()
                 })
                 return False
@@ -691,6 +709,12 @@ class SocketService:
         except jwt.ExpiredSignatureError:
             current_app.logger.warning("Expired socket token")
             raise ValueError('Token expired')
+        except jwt.InvalidAudienceError:
+            current_app.logger.warning("Invalid audience in socket token")
+            raise ValueError('Invalid audience')
+        except jwt.InvalidIssuerError:
+            current_app.logger.warning("Invalid issuer in socket token")
+            raise ValueError('Invalid issuer')
         except jwt.InvalidTokenError as e:
             current_app.logger.error(f"Invalid token: {str(e)}")
             raise ValueError(f'Invalid token: {str(e)}')
