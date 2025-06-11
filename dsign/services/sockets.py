@@ -1,6 +1,6 @@
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
-from flask_socketio import SocketIO, disconnect, Namespace
+from flask_socketio import SocketIO, disconnect, Namespace, emit
 from flask import request, current_app
 import jwt
 from .logger import ServiceLogger
@@ -112,7 +112,7 @@ class SocketService:
         self.activity_check_interval = 15  # seconds
         self.socket_auth_timeout = 30  # 30 seconds timeout to match frontend
         self.server_version = "1.0.0"
-
+        
         # Конфигурация, соответствующая фронтенду
         self.config = {
             'max_retries': 5,
@@ -124,9 +124,70 @@ class SocketService:
         # Регистрируем кастомный namespace для аутентификации
         self.socketio.on_namespace(AuthNamespace('/auth', self))
         
+        self.setup_handlers()
         self.register_handlers()
         self.start_activity_checker()
         self.start_version_broadcaster()
+
+    def setup_handlers(self):
+        """Настройка обработчиков событий"""
+        @self.socketio.on('connect')
+        def handle_connect(auth=None):
+            """Обработчик подключения WebSocket"""
+            try:
+                token = (
+                    request.args.get('token') or 
+                    (auth.get('token') if auth else None) or
+                    request.headers.get('Authorization', '').replace('Bearer ', '')
+                )
+
+                if not token:
+                    emit('auth_required', {
+                        'message': 'Token required',
+                        'timestamp': datetime.utcnow().isoformat()
+                    })
+                    return False
+
+                # Проверка токена
+                decoded = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
+                
+                if decoded.get('purpose') != 'socket_connection':
+                    raise ValueError('Invalid token purpose')
+                
+                # Сохраняем информацию о клиенте
+                with self.clients_lock:
+                    self.connected_clients[request.sid] = {
+                        'user_id': decoded['user_id'],
+                        'connected_at': datetime.utcnow(),
+                        'last_activity': datetime.utcnow(),
+                        'authenticated': True,
+                        'namespace': request.namespace
+                    }
+                
+                self.logger.info('Client connected', {
+                    'sid': request.sid,
+                    'user_id': decoded['user_id'],
+                    'namespace': request.namespace
+                })
+                
+                return True
+
+            except jwt.ExpiredSignatureError:
+                emit('token_expired', {
+                    'message': 'Token expired',
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+                return False
+            except Exception as e:
+                self.logger.error(f'Auth error: {str(e)}', {
+                    'sid': request.sid,
+                    'error': str(e)
+                })
+                emit('auth_error', {
+                    'message': str(e),
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+                return False
 
     def init_app(self, app):
         """Инициализация с Flask приложением (для обратной совместимости)"""
@@ -135,7 +196,6 @@ class SocketService:
 
     def register_handlers(self):
         """Регистрация всех обработчиков событий для основного namespace"""
-        self.socketio.on_event('connect', self.handle_connect)
         self.socketio.on_event('disconnect', self.handle_disconnect)
         self.socketio.on_event('authenticate', self.handle_authentication)
         self.socketio.on_event('request_profiles', self.handle_profiles_request)
@@ -178,41 +238,6 @@ class SocketService:
                     self.logger.error('Version broadcast failed', {'error': str(e)})
 
         self.socketio.start_background_task(broadcast_version)
-
-    def handle_connect(self):
-        """Более гибкий обработчик подключений"""
-        client_ip = request.remote_addr
-        token = request.args.get('token')
-    
-        # Логируем подключение, но не блокируем по IP
-        self.logger.debug(f'New connection from IP: {client_ip}')
-    
-        # Основная проверка - только токен
-        if not token:
-            self.logger.warning('No token provided')
-            self.socketio.emit('auth_required', {
-                'message': 'Authentication token required',
-                'timestamp': datetime.utcnow().isoformat()
-            }, room=request.sid)
-            return
-    
-        try:
-            decoded = self.verify_socket_token(token)
-            user_id = decoded['user_id']
-        
-            with self.clients_lock:
-                self.connected_clients[request.sid] = {
-                    'user_id': user_id,
-                    'ip_address': client_ip,
-                    'authenticated': True,
-                    'last_activity': datetime.utcnow()
-                }
-        
-            self.logger.info(f'User {user_id} authenticated from IP: {client_ip}')
-        
-        except Exception as e:
-            self.logger.error(f'Authentication failed for IP {client_ip}: {str(e)}')
-            disconnect(request.sid)
 
     def handle_auth_status_request(self, data: Dict, sid: Optional[str] = None):
         """Обработчик запроса статуса аутентификации"""
@@ -613,45 +638,62 @@ class SocketService:
                 'timestamp': datetime.utcnow().isoformat()
             }, room=sid)
 
-    def generate_socket_token(self, user_id: int) -> str:
-        """Генерация JWT токена для WebSocket аутентификации"""
-        if not self.app:
-            raise RuntimeError("Flask application not initialized")
-
+    def generate_socket_token(self, user_id: int) -> Dict[str, str]:
+        """Генерация JWT токена для WebSocket"""
+        expires = datetime.utcnow() + timedelta(hours=1)
         payload = {
             'user_id': user_id,
-            'exp': datetime.utcnow() + timedelta(minutes=30),
+            'exp': expires,
+            'purpose': 'socket_connection',
+            'iss': 'media-server',
             'aud': 'socket-client',
-            'iss': 'media-server'
+            'iat': datetime.utcnow()
         }
-        return jwt.encode(payload, self.app.config['SECRET_KEY'], algorithm='HS256')
+        
+        token = jwt.encode(
+            payload,
+            current_app.config['SECRET_KEY'],
+            algorithm='HS256'
+        )
+
+        current_app.logger.info(f"Generated socket token for user {user_id}")
+        return {
+            'token': token,
+            'expires_in': 3600,
+            'expires_at': expires.isoformat()
+        }
 
     def verify_socket_token(self, token: str) -> Dict:
-        """Верификация JWT токена"""
-        if not self.app:
-            raise RuntimeError("Flask application not initialized")
-
+        """Верификация JWT токена с полной проверкой claims"""
         try:
             if not token:
                 raise ValueError('Empty token provided')
                 
             decoded = jwt.decode(
                 token, 
-                self.app.config['SECRET_KEY'], 
+                current_app.config['SECRET_KEY'], 
                 algorithms=['HS256'],
-                options={'verify_exp': True},
+                options={
+                    'verify_exp': True,
+                    'verify_aud': True,
+                    'verify_iss': True,
+                    'require': ['user_id', 'purpose']
+                },
                 audience='socket-client',
                 issuer='media-server'
             )
             
-            if not decoded.get('user_id'):
-                raise ValueError('Invalid token payload')
+            if decoded.get('purpose') != 'socket_connection':
+                raise ValueError('Invalid token purpose')
                 
             return decoded
             
         except jwt.ExpiredSignatureError:
+            current_app.logger.warning("Expired socket token")
             raise ValueError('Token expired')
         except jwt.InvalidTokenError as e:
+            current_app.logger.error(f"Invalid token: {str(e)}")
             raise ValueError(f'Invalid token: {str(e)}')
         except Exception as e:
+            current_app.logger.error(f"Token verification failed: {str(e)}")
             raise ValueError(f'Token verification failed: {str(e)}')
