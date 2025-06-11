@@ -79,6 +79,7 @@ class Config:
         self.SOCKETIO_ALWAYS_CONNECT = True
         self.SOCKETIO_CORS_CREDENTIALS = True
         self.SOCKETIO_HTTP_COMPRESSION = True
+        self. SOCKETIO_MESSAGE_QUEUE = 'redis://localhost:6379/0'
 
         # Настройки сессии Socket.IO
         self.SOCKETIO_COOKIE = 'dsign_socketio'
