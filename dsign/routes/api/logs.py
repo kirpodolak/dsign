@@ -1,8 +1,11 @@
-# В начале файла:
+from flask import Blueprint, request, jsonify
 from dsign.services.logger import setup_logger
+
+# Создаем Blueprint для логов
+logs_bp = Blueprint('logs', __name__)
 logger = setup_logger('LogAPI')
 
-@api.route('/api/logs', methods=['POST'])
+@logs_bp.route('/api/logs', methods=['POST'])
 def log_client_event():
     try:
         log_data = request.get_json()
