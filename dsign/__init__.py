@@ -183,7 +183,8 @@ def _fallback_to_idle_logo(app: Flask) -> None:
 def register_error_handlers(app: Flask) -> None:
     """Регистрация обработчиков ошибок"""
     from flask import jsonify, render_template, request
-
+    import traceback
+    
     def is_api_request() -> bool:
         return request.path.startswith(('/api/', '/auth/'))
 
@@ -233,7 +234,7 @@ def register_error_handlers(app: Flask) -> None:
 
     @app.errorhandler(500)
     def internal_error(error):
-        app.logger.error(f"Server Error: {str(error)}", exc_info=True)
+        app.logger.error(f"Server Error: {str(error)}\n{traceback.format_exc()}")
         if is_api_request():
             return jsonify({
                 "success": False,
