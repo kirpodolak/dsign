@@ -79,7 +79,13 @@ class Config:
         self.SOCKETIO_ALWAYS_CONNECT = True
         self.SOCKETIO_CORS_CREDENTIALS = True
         self.SOCKETIO_HTTP_COMPRESSION = True
-        self. SOCKETIO_MESSAGE_QUEUE = 'redis://localhost:6379/0'
+        self.SOCKETIO_MESSAGE_QUEUE = 'redis://localhost:6379/0'
+
+        # Настройки Socket_Token
+        self.SOCKET_TOKEN_SECRET = os.getenv("SECRET_KEY", "supersecretkey123")
+        self.SOCKET_TOKEN_ISSUER = 'media-server'
+        self.SOCKET_TOKEN_AUDIENCE = 'socket-client'
+        self.SOCKET_TOKEN_EXPIRE_MINUTES = 30
 
         # Настройки сессии Socket.IO
         self.SOCKETIO_COOKIE = 'dsign_socketio'
