@@ -358,37 +358,18 @@ def check_auth():
 @auth_bp.route('/socket-token')
 @login_required
 def get_socket_token():
-    """Генерация JWT токена для аутентификации WebSocket"""
     try:
-        # Получаем сервис с проверкой инициализации
-        socket_service = current_app.socket_service
-        if not isinstance(socket_service, SocketService):
-            raise RuntimeError("SocketService not properly initialized")
-
-        # Генерируем токен с полной спецификацией
-        token_data = socket_service.generate_socket_token(current_user.id)
-        
+        token = current_app.socket_service.generate_socket_token(current_user.id)
         return jsonify({
-            'status': 'success',
-            'token': token_data['token'],
-            'metadata': {
-                'user_id': current_user.id,
-                'expires_in': token_data['expires_in'],
-                'expires_at': token_data['expires_at'],
-                'token_type': 'JWT',
-                'purpose': 'socket_connection'
-            }
+            'success': True,
+            'token': token,
+            'expires_in': current_app.config['SOCKET_TOKEN_EXPIRE_MINUTES'] * 60
         })
-
     except Exception as e:
-        current_app.logger.error(
-            f"Token generation failed for user {getattr(current_user, 'id', 'anonymous')}",
-            exc_info=True
-        )
+        current_app.logger.error(f"Failed to generate socket token: {str(e)}")
         return jsonify({
-            'status': 'error',
-            'error': 'token_generation_failed',
-            'message': str(e)
+            'success': False,
+            'error': str(e)
         }), 500
 
 @auth_bp.route('/check-socket-auth')
