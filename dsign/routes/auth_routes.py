@@ -2,6 +2,7 @@ from flask import render_template, redirect, url_for, flash, request, jsonify, c
 from flask_login import login_user, logout_user, login_required, current_user
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash
+from flask_jwt_extended import jwt_required, get_jwt_identity
 import jwt
 import os
 import traceback
@@ -10,6 +11,7 @@ from ..forms import LoginForm
 from ..models import User
 from functools import wraps
 from ..services.logger import setup_logger
+from ..services.sockets import SocketService
 
 # Инициализация логгера
 logger = setup_logger('auth.routes')
@@ -356,58 +358,37 @@ def check_auth():
 @auth_bp.route('/socket-token')
 @login_required
 def get_socket_token():
-    """Secure WebSocket token generation with enhanced validation"""
+    """Генерация JWT токена для аутентификации WebSocket"""
     try:
-        if not current_user.is_authenticated:
-            logger.warning("Unauthorized socket token request", extra={
-                'ip': request.remote_addr,
-                'user_agent': request.user_agent.string
-            })
-            return jsonify({
-                'success': False,
-                'error': 'Not authenticated',
-                'login_url': url_for('auth.login')
-            }), 401
+        # Получаем сервис с проверкой инициализации
+        socket_service = current_app.socket_service
+        if not isinstance(socket_service, SocketService):
+            raise RuntimeError("SocketService not properly initialized")
 
-        # Generate token with additional security claims
-        payload = {
-            'sub': current_user.id,
-            'ip': request.remote_addr or 'unknown',
-            'user_agent': request.user_agent.string[:200],
-            'exp': datetime.utcnow() + timedelta(minutes=SOCKET_TOKEN_EXPIRATION),
-            'iss': current_app.config.get('JWT_ISSUER', 'digital-signage-socket'),
-            'aud': 'socket-client',
-            'jti': os.urandom(16).hex()
-        }
-        
-        token = jwt.encode(
-            payload,
-            current_app.config['SECRET_KEY'],
-            algorithm='HS256'
-        )
-        
-        logger.info("Socket token generated", extra={
-            'user_id': current_user.id,
-            'ip': request.remote_addr
-        })
+        # Генерируем токен с полной спецификацией
+        token_data = socket_service.generate_socket_token(current_user.id)
         
         return jsonify({
-            'success': True,
-            'token': token,
-            'expires_in': SOCKET_TOKEN_EXPIRATION * 60,
-            'expires_at': payload['exp'].isoformat(),
-            'socket_url': current_app.config.get('SOCKET_SERVER_URL', '/socket.io')
+            'status': 'success',
+            'token': token_data['token'],
+            'metadata': {
+                'user_id': current_user.id,
+                'expires_in': token_data['expires_in'],
+                'expires_at': token_data['expires_at'],
+                'token_type': 'JWT',
+                'purpose': 'socket_connection'
+            }
         })
+
     except Exception as e:
-        logger.error("Socket token generation failed", extra={
-            'user_id': current_user.id if current_user.is_authenticated else None,
-            'error': str(e),
-            'stack_trace': traceback.format_exc()
-        })
+        current_app.logger.error(
+            f"Token generation failed for user {getattr(current_user, 'id', 'anonymous')}",
+            exc_info=True
+        )
         return jsonify({
-            'success': False,
-            'error': 'Token generation failed',
-            'details': str(e)
+            'status': 'error',
+            'error': 'token_generation_failed',
+            'message': str(e)
         }), 500
 
 @auth_bp.route('/check-socket-auth')
