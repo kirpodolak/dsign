@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 from flask_socketio import SocketIO, disconnect, Namespace, emit
 from flask import request, current_app
 import jwt
+import traceback
+import json
 from .logger import ServiceLogger
 from threading import Lock
 import time
@@ -135,9 +137,10 @@ class SocketService:
         def handle_connect(auth=None):
             """Обработчик подключения WebSocket"""
             try:
+                # Получаем токен из разных источников
                 token = (
                     request.args.get('token') or 
-                    (auth.get('token') if auth else None) or
+                    (auth.get('token') if auth and isinstance(auth, dict) else None) or
                     request.headers.get('Authorization', '').replace('Bearer ', '')
                 )
 
@@ -148,11 +151,35 @@ class SocketService:
                     })
                     return False
 
-                # Проверка токена с полной верификацией claims
+                # Логирование для отладки
+                self.logger.debug('Token received', {
+                    'token_type': str(type(token)),
+                    'token_length': len(token) if token else 0
+                })
+
+                # Если токен пришел как объект (например, из auth)
+                if isinstance(token, dict):
+                    token = token.get('token', '')
+
+                # Конвертируем токен в строку если это bytes
+                if isinstance(token, bytes):
+                    token = token.decode('utf-8')
+
+                # Проверка что токен - непустая строка
+                if not isinstance(token, str) or not token.strip():
+                    raise ValueError('Empty or invalid token format')
+
+                # Проверка токена
                 decoded = jwt.decode(
                     token,
                     current_app.config['SECRET_KEY'],
                     algorithms=['HS256'],
+                    options={
+                        'verify_exp': True,
+                        'verify_aud': True,
+                        'verify_iss': True,
+                        'require': ['user_id', 'purpose']
+                    },
                     audience='socket-client',
                     issuer='media-server'
                 )
@@ -167,42 +194,63 @@ class SocketService:
                         'connected_at': datetime.utcnow(),
                         'last_activity': datetime.utcnow(),
                         'authenticated': True,
-                        'namespace': request.namespace
+                        'namespace': request.namespace,
+                        'ip': request.remote_addr
                     }
                 
                 self.logger.info('Client connected', {
                     'sid': request.sid,
                     'user_id': decoded['user_id'],
-                    'namespace': request.namespace
+                    'namespace': request.namespace,
+                    'ip': request.remote_addr
+                })
+                
+                emit('connection_ack', {
+                    'status': 'authenticated',
+                    'user_id': decoded['user_id'],
+                    'timestamp': datetime.utcnow().isoformat()
                 })
                 
                 return True
 
             except jwt.ExpiredSignatureError:
-                emit('token_expired', {
-                    'message': 'Token expired',
-                    'timestamp': datetime.utcnow().isoformat()
-                })
-                return False
-            except jwt.InvalidAudienceError:
-                emit('auth_error', {
-                    'message': 'Invalid audience',
-                    'timestamp': datetime.utcnow().isoformat()
-                })
-                return False
-            except jwt.InvalidIssuerError:
-                emit('auth_error', {
-                    'message': 'Invalid issuer',
-                    'timestamp': datetime.utcnow().isoformat()
-                })
-                return False
-            except Exception as e:
-                self.logger.error(f'Auth error: {str(e)}', {
+                error_msg = 'Token expired'
+                self.logger.warning('Connection rejected', {
+                    'reason': error_msg,
                     'sid': request.sid,
-                    'error': str(e)
+                    'ip': request.remote_addr
+                })
+                emit('token_expired', {
+                    'message': error_msg,
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+                return False
+                
+            except jwt.InvalidTokenError as e:
+                error_msg = f'Invalid token: {str(e)}'
+                self.logger.error('Connection rejected', {
+                    'reason': error_msg,
+                    'sid': request.sid,
+                    'ip': request.remote_addr,
+                    'error_type': type(e).__name__
                 })
                 emit('auth_error', {
-                    'message': str(e),
+                    'message': error_msg,
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+                return False
+                
+            except Exception as e:
+                error_msg = f'Connection error: {str(e)}'
+                self.logger.error('Connection failed', {
+                    'error': error_msg,
+                    'sid': request.sid,
+                    'ip': request.remote_addr,
+                    'error_type': type(e).__name__,
+                    'stack_trace': str(traceback.format_exc())  # Преобразуем в строку
+                })
+                emit('connection_error', {
+                    'message': error_msg,
                     'timestamp': datetime.utcnow().isoformat()
                 })
                 return False
@@ -682,14 +730,17 @@ class SocketService:
         }
 
     def verify_socket_token(self, token: str) -> Dict:
-        """Верификация JWT токена с полной проверкой claims"""
         try:
             if not token:
                 raise ValueError('Empty token provided')
-                
+            
+            # Конвертируем строку в bytes если необходимо
+            if isinstance(token, str):
+                token = token.encode('utf-8')
+            
             decoded = jwt.decode(
                 token, 
-                current_app.config['SECRET_KEY'], 
+                current_app.config['SECRET_KEY'],
                 algorithms=['HS256'],
                 options={
                     'verify_exp': True,
