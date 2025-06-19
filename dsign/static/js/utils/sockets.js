@@ -264,19 +264,29 @@ export class SocketManager {
             }
 
             this.cleanup();
-
-            this.socket = io({
+            
+			this.socket = io({
                 reconnection: true,
                 reconnectionAttempts: 5,
                 reconnectionDelay: 1000,
                 transports: ['websocket'],
-                auth: {
-                    token: token
+                auth: (cb) => {
+                    // Явно передаем строку токена, а не объект
+                    if (this.token && typeof this.token === 'object') {
+                        cb({ token: this.token.token }); // Если токен - объект, берем свойство token
+                    } else {
+                        cb({ token: String(this.token) }); // Иначе преобразуем в строку
+                    }
                 },
-                allowUpgrades: true,
-                rejectUnauthorized: false
+                timeout: 10000,
+                pingTimeout: 5000,
+                pingInterval: 25000,
+                upgrade: false,
+                rememberUpgrade: false,
+                rejectUnauthorized: false,
+                debug: true
             });
-
+			
             this._setupEventHandlers();
         } catch (error) {
             this.logger.error('[Socket] Initialization error:', error);
