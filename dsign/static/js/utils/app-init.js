@@ -254,30 +254,117 @@ class AppInitializer {
 
     async initWebSocket() {
         try {
-            // 1. Получаем токен
+            // 1. Получаем токен от сервера
             const response = await fetch('/api/auth/socket-token');
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            
             const data = await response.json();
-        
-            // 2. Инициализируем подключение
+            
+            // 2. Проверяем и нормализуем токен
+            let token;
+            if (data && typeof data.token === 'string') {
+                token = data.token;
+            } else if (data && data.token && typeof data.token.token === 'string') {
+                // Если токен вложен в объект (старый формат)
+                token = data.token.token;
+            } else {
+                throw new Error('Invalid token format received from server');
+            }
+
+            // 3. Инициализируем подключение
             this.socket = io({
                 transports: ["websocket"],
-                auth: { token: data.token },
+                auth: {
+                    token: token // передаем уже нормализованный токен
+                },
                 reconnectionAttempts: 5,
-                timeout: 10000
+                reconnectionDelay: 1000,
+                timeout: 10000,
+                pingTimeout: 5000,
+                pingInterval: 25000,
+                rejectUnauthorized: false, // Только для разработки!
+                // Добавляем query параметр для идентификации клиента
+                query: {
+                    clientType: 'browser',
+                    version: '1.0.0'
+                }
             });
-        
-            // 3. Обработчики событий
+
+            // 4. Настраиваем обработчики событий
             this.socket.on('connect', () => {
-                console.log('WebSocket connected');
+                console.log('WebSocket connected, ID:', this.socket.id);
+                // Отправляем событие инициализации
+                this.socket.emit('client_init', { 
+                    timestamp: Date.now(),
+                    userAgent: navigator.userAgent 
+                });
             });
-        
+
             this.socket.on('disconnect', (reason) => {
-                console.log(`Disconnected: ${reason}`);
+                console.log('WebSocket disconnected. Reason:', reason);
+                
+                // Автоматическое переподключение только для определенных ошибок
+                if (reason === 'io server disconnect' || reason === 'transport close') {
+                    setTimeout(() => this.initWebSocket(), 5000);
+                }
             });
-        
+
+            this.socket.on('connect_error', (err) => {
+                console.error('WebSocket connection error:', err.message);
+                
+                // Специальная обработка ошибки аутентификации
+                if (err.message.includes('auth') || err.message.includes('token')) {
+                    console.log('Attempting to refresh token...');
+                    setTimeout(() => this.initWebSocket(), 3000);
+                }
+            });
+
+            // Обработчик для ошибок аутентификации от сервера
+            this.socket.on('auth_error', (data) => {
+                console.error('Authentication failed:', data.message);
+                this.handleAuthError(data);
+            });
+
+            // Пинг-понг для проверки соединения
+            this.socket.on('ping', (cb) => {
+                cb(); // Ответ на пинг
+            });
+
         } catch (error) {
-            console.error('WebSocket init failed:', error);
+            console.error('WebSocket initialization failed:', error);
+            
+            // Экспоненциальная задержка для повторных попыток
+            const delay = Math.min(5000 * Math.pow(2, this.retryCount), 30000);
+            this.retryCount++;
+            
+            console.log(`Retrying in ${delay/1000} seconds...`);
+            setTimeout(() => this.initWebSocket(), delay);
         }
+    }
+
+    // Добавьте этот метод в класс
+    handleAuthError(errorData) {
+        console.error('Authentication error:', errorData);
+        
+        // 1. Пытаемся обновить токен
+        fetch('/api/auth/refresh-token')
+            .then(response => response.json())
+            .then(data => {
+                if (data.token) {
+                    console.log('Token refreshed, reconnecting...');
+                    this.initWebSocket();
+                } else {
+                    console.error('Failed to refresh token');
+                    // Перенаправляем на страницу логина
+                    window.location.href = '/login?reason=session_expired';
+                }
+            })
+            .catch(err => {
+                console.error('Token refresh failed:', err);
+                window.location.href = '/login?reason=auth_error';
+            });
     }
 
     handleRateLimitError() {
