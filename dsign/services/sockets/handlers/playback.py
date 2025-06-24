@@ -12,6 +12,7 @@ class PlaybackHandler:
     """
     def __init__(self, db_session, logger: Optional[ServiceLogger] = None):
         self.db = db_session
+        self.socket_service = socket_service
         self.logger = logger or ServiceLogger('PlaybackHandler')
         self.playback_lock = Lock()
 
