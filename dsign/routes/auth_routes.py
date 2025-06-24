@@ -11,7 +11,7 @@ from ..forms import LoginForm
 from ..models import User
 from functools import wraps
 from ..services.logger import setup_logger
-from ..services.sockets import SocketService
+from ..services.sockets.service import SocketService
 
 # Инициализация логгера
 logger = setup_logger('auth.routes')
