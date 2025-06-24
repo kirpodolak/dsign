@@ -5,6 +5,7 @@ from flask_socketio import SocketIO
 from flask import current_app
 import os
 import logging
+import traceback
 from typing import Dict, Any
 from dsign.config.config import Config, config
 from dsign.services.sockets.service import SocketService  # Добавлен новый импорт
