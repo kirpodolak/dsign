@@ -22,6 +22,11 @@ const CONFIG = {
 
 export class SocketManager {
     constructor(options = {}) {
+        // Validate required dependencies
+        if (typeof io === 'undefined') {
+            throw new Error('Socket.IO library is required');
+        }
+
         // Connection state
         this.endpoint = options.endpoint || 
                        window.location.origin.replace(/^http/, 'ws') || 
@@ -35,7 +40,7 @@ export class SocketManager {
         // Reconnection settings
         this.reconnectAttempts = 0;
         this.reconnectDelay = options.reconnectDelay || CONFIG.INITIAL_RETRY_DELAY;
-        this.maxReconnectAttempts = CONFIG.MAX_RETRIES;
+        this.maxReconnectAttempts = options.maxRetries || CONFIG.MAX_RETRIES;
         
         // Event management
         this.pendingEvents = [];
@@ -50,20 +55,40 @@ export class SocketManager {
         this.authRetryTimer = null;
         
         // Dependencies
-        this.authService = options.authService || {
+        this.authService = options.authService || this._createDefaultAuthService();
+        this.logger = options.logger || this._createDefaultLogger();
+        
+        // Callbacks
+        this.onError = options.onError || this.defaultErrorHandler;
+        this.onTokenRefresh = options.onTokenRefresh || this.defaultTokenRefreshHandler;
+        this.onReconnect = options.onReconnect || null;
+
+        // Initialize auth socket
+        this._initAuthSocket();
+
+        // Bind methods
+        this._handleRetry = this._handleRetry.bind(this);
+        this.connect = this.connect.bind(this);
+        this._init = this._init.bind(this);
+    }
+
+    _createDefaultAuthService() {
+        return {
             getSocketToken: async () => {
-                try {
-                    const response = await fetch('/api/auth/socket-token', {
-                        headers: {
-                            'Authorization': `Bearer ${this.getToken()}`
-                        }
-                    });
-                    if (!response.ok) throw new Error('Failed to get socket token');
-                    return await response.json();
-                } catch (error) {
-                    console.error('Socket token fetch failed:', error);
-                    throw error;
+                const response = await fetch('/api/auth/socket-token', {
+                    headers: {
+                        'Authorization': `Bearer ${this.getToken()}`
+                    }
+                });
+                
+                // Check for HTML response
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('text/html')) {
+                    throw new Error('Server returned HTML instead of JSON');
                 }
+                
+                if (!response.ok) throw new Error('Failed to get socket token');
+                return await response.json();
             },
             getToken: () => {
                 if (typeof window !== 'undefined' && window.App?.Auth?.getToken) {
@@ -77,32 +102,21 @@ export class SocketManager {
                 }
             },
             checkAuth: async () => {
-                try {
-                    if (typeof window !== 'undefined' && window.App?.Auth?.checkAuth) {
-                        return await window.App.Auth.checkAuth();
-                    }
-                    return false;
-                } catch (error) {
-                    console.error('Auth check failed:', error);
-                    return false;
+                if (typeof window !== 'undefined' && window.App?.Auth?.checkAuth) {
+                    return await window.App.Auth.checkAuth();
                 }
+                return false;
             }
         };
-        
-        this.logger = options.logger || {
+    }
+
+    _createDefaultLogger() {
+        return {
             debug: console.debug.bind(console),
             log: console.log.bind(console),
             warn: console.warn.bind(console),
             error: console.error.bind(console)
         };
-        
-        // Callbacks
-        this.onError = options.onError || ((error) => this.defaultErrorHandler(error));
-        this.onTokenRefresh = options.onTokenRefresh || ((token) => this.defaultTokenRefreshHandler(token));
-        this.onReconnect = options.onReconnect || null;
-
-        // Initialize auth socket first
-        this._initAuthSocket();
     }
 
     defaultErrorHandler = (error) => {
@@ -123,19 +137,35 @@ export class SocketManager {
 
     async connect() {
         try {
-            // Get JWT socket token from server
-            const response = await fetch('/api/auth/socket-token', {
-                headers: {
-                    'Authorization': `Bearer ${this.authService.getToken()}`
-                }
-            });
-            
-            if (!response.ok) throw new Error('Failed to get socket token');
-            
-            const { token } = await response.json();
-            this.token = token;
+            if (this.isConnected) {
+                this.logger.debug('[Socket] Already connected');
+                return;
+            }
 
-            // Initialize connection with token
+            // Get JWT socket token from server
+            let token;
+            try {
+                const result = await this.authService.getSocketToken();
+                token = result.token;
+            } catch (error) {
+                this.logger.error('[Socket] Failed to get socket token:', error);
+                
+                // Check for HTML response
+                if (error.message.includes('Server returned HTML')) {
+                    this._showAlert(
+                        'error',
+                        'Server Error',
+                        'Authentication service is unavailable. Please try again later.'
+                    );
+                    return;
+                }
+                
+                // Add delay before retry
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                throw error;
+            }
+
+            this.token = token;
             this._init(token);
             
         } catch (error) {
@@ -145,31 +175,37 @@ export class SocketManager {
         }
     }
 
-    _checkServerAvailability = async () => {
-        try {
-            const response = await fetch('/api/settings/current', {
-                method: 'GET',
-                signal: AbortSignal.timeout(CONFIG.SERVER_CHECK_TIMEOUT)
-            });
-            return response.ok;
-        } catch (error) {
-            this.logger.debug('[Socket] Server check failed:', error);
-            return false;
+    _initAuthSocket = () => {
+        this._clearAuthSocketTimers();
+
+        if (!this._isSocketIOLoaded()) {
+            this.logger.error('[Socket] Socket.IO library not loaded');
+            this._scheduleAuthSocketRetry();
+            return;
         }
+
+        this._setupAuthSocket();
     }
 
-    _initAuthSocket = () => {
+    _clearAuthSocketTimers() {
         if (this.authRetryTimer) {
             clearTimeout(this.authRetryTimer);
             this.authRetryTimer = null;
         }
+    }
 
-        if (typeof io === 'undefined') {
-            this.logger.error('[Socket] Socket.IO library not loaded');
-            this.authRetryTimer = setTimeout(() => this._initAuthSocket(), CONFIG.AUTH_RETRY_DELAY);
-            return;
-        }
+    _isSocketIOLoaded() {
+        return typeof io !== 'undefined';
+    }
 
+    _scheduleAuthSocketRetry() {
+        this.authRetryTimer = setTimeout(
+            () => this._initAuthSocket(), 
+            CONFIG.AUTH_RETRY_DELAY
+        );
+    }
+
+    _setupAuthSocket() {
         if (this.authSocket) {
             this.authSocket.disconnect();
         }
@@ -187,53 +223,64 @@ export class SocketManager {
                 timeout: CONFIG.CONNECTION_TIMEOUT
             });
 
-            this.authSocket.on('connect', () => {
-                this.logger.debug('[AuthSocket] Connected');
-            });
-
-            this.authSocket.on('auth_ready', () => {
-                this.logger.debug('[AuthSocket] Server ready');
-                this._checkAuthViaWebSocket();
-            });
-
-            this.authSocket.on('disconnect', (reason) => {
-                this.logger.log('[AuthSocket] Disconnected:', reason);
-                if (reason === 'io server disconnect') {
-                    this.authRetryTimer = setTimeout(() => this._initAuthSocket(), CONFIG.AUTH_RETRY_DELAY);
-                }
-            });
-
-            this.authSocket.on('connect_error', (error) => {
-                this.logger.error('[AuthSocket] Connection error:', error);
-                this.authRetryTimer = setTimeout(() => this._initAuthSocket(), CONFIG.AUTH_RETRY_DELAY);
-            });
-
-            this.authSocket.on('auth_status_response', (data) => {
-                this.logger.debug('[AuthSocket] Received auth status:', data);
-                this.authService.updateAuthStatus(data?.authenticated ?? false);
-                if (data?.authenticated) {
-                    this.connect(); // Use the new connect method
-                } else {
-                    this._handleAuthFailure('Not authenticated');
-                }
-            });
-
-            this.authSocket.on('authentication_result', (data) => {
-                if (data.success) {
-                    this.logger.debug('[AuthSocket] Authentication successful');
-                    this.connect(); // Use the new connect method
-                } else {
-                    this._handleAuthFailure(data.error || 'Authentication failed');
-                }
-            });
-
-            this.authSocket.on('auth_error', (error) => {
-                this._handleAuthFailure(error.message || 'Authentication error');
-            });
-
+            this._setupAuthSocketEventHandlers();
         } catch (error) {
             this.logger.error('[AuthSocket] Initialization error:', error);
-            this.authRetryTimer = setTimeout(() => this._initAuthSocket(), CONFIG.AUTH_RETRY_DELAY);
+            this._scheduleAuthSocketRetry();
+        }
+    }
+
+    _setupAuthSocketEventHandlers() {
+        this.authSocket.on('connect', () => {
+            this.logger.debug('[AuthSocket] Connected');
+        });
+
+        this.authSocket.on('auth_ready', () => {
+            this.logger.debug('[AuthSocket] Server ready');
+            this._checkAuthViaWebSocket();
+        });
+
+        this.authSocket.on('disconnect', (reason) => {
+            this.logger.log('[AuthSocket] Disconnected:', reason);
+            if (reason === 'io server disconnect') {
+                this._scheduleAuthSocketRetry();
+            }
+        });
+
+        this.authSocket.on('connect_error', (error) => {
+            this.logger.error('[AuthSocket] Connection error:', error);
+            this._scheduleAuthSocketRetry();
+        });
+
+        this.authSocket.on('auth_status_response', (data) => {
+            this._handleAuthStatusResponse(data);
+        });
+
+        this.authSocket.on('authentication_result', (data) => {
+            this._handleAuthenticationResult(data);
+        });
+
+        this.authSocket.on('auth_error', (error) => {
+            this._handleAuthFailure(error.message || 'Authentication error');
+        });
+    }
+
+    _handleAuthStatusResponse(data) {
+        this.logger.debug('[AuthSocket] Received auth status:', data);
+        this.authService.updateAuthStatus(data?.authenticated ?? false);
+        if (data?.authenticated) {
+            this.connect();
+        } else {
+            this._handleAuthFailure('Not authenticated');
+        }
+    }
+
+    _handleAuthenticationResult(data) {
+        if (data.success) {
+            this.logger.debug('[AuthSocket] Authentication successful');
+            this.connect();
+        } else {
+            this._handleAuthFailure(data.error || 'Authentication failed');
         }
     }
 
@@ -248,45 +295,35 @@ export class SocketManager {
         if (this.authSocket) {
             this.authSocket.disconnect();
         }
-        this.authRetryTimer = setTimeout(() => this._initAuthSocket(), CONFIG.AUTH_RETRY_DELAY);
+        this._scheduleAuthSocketRetry();
     }
 
     _init = (token) => {
         try {
             this.logger.debug('[Socket] Initializing connection...');
             
-            if (typeof io === 'undefined') {
-                throw new Error('Socket.IO library not loaded');
-            }
-
             if (!token) {
                 throw new Error('No token provided for WebSocket connection');
             }
 
             this.cleanup();
             
-			this.socket = io({
+            this.socket = io({
                 reconnection: true,
-                reconnectionAttempts: 5,
-                reconnectionDelay: 1000,
+                reconnectionAttempts: this.maxReconnectAttempts,
+                reconnectionDelay: this.reconnectDelay,
                 transports: ['websocket'],
                 auth: (cb) => {
-                    // Явно передаем строку токена, а не объект
-                    if (this.token && typeof this.token === 'object') {
-                        cb({ token: this.token.token }); // Если токен - объект, берем свойство token
-                    } else {
-                        cb({ token: String(this.token) }); // Иначе преобразуем в строку
-                    }
+                    cb({ token: this._getFormattedToken() });
                 },
-                timeout: 10000,
+                timeout: CONFIG.CONNECTION_TIMEOUT,
                 pingTimeout: 5000,
-                pingInterval: 25000,
+                pingInterval: CONFIG.PING_INTERVAL,
                 upgrade: false,
                 rememberUpgrade: false,
-                rejectUnauthorized: false,
-                debug: true
+                rejectUnauthorized: false
             });
-			
+            
             this._setupEventHandlers();
         } catch (error) {
             this.logger.error('[Socket] Initialization error:', error);
@@ -294,116 +331,43 @@ export class SocketManager {
         }
     }
 
-    _setupEventHandlers = () => {
-        this.socket.on('connect', () => {
-            this.logger.debug('[Socket] Connected');
-            this.isConnected = true;
-            this.reconnectAttempts = 0;
-            this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
-            
-            this._processPendingEvents();
-            this._startPingInterval();
-            
-            if (this.onReconnect) {
-                this.onReconnect(this.reconnectAttempts);
-            }
-        });
-
-        this.socket.on('disconnect', (reason) => {
-            this.logger.log('[Socket] Disconnected:', reason);
-            this.isConnected = false;
-            this._handleDisconnect(reason);
-        });
-
-        this.socket.on('connect_error', (error) => {
-            if (error.message === 'Authentication error') {
-                this._handleAuthFailure(error);
-            }
-            this.logger.error('[Socket] Connection error:', error);
-            this.isConnected = false;
-            this._handleError(error);
-        });
-
-        this.socket.on('error', (error) => {
-            this.logger.error('[Socket] Error:', error);
-            this._handleError(error);
-        });
-
-        this.socket.on('authenticated', () => {
-            this.logger.debug('[Socket] Authenticated');
-            this.isAuthenticated = true;
-            if (this.authTimeout) {
-                clearTimeout(this.authTimeout);
-                this.authTimeout = null;
-            }
-        });
-
-        this.socket.on('unauthorized', (error) => {
-            this.logger.error('[Socket] Unauthorized:', error);
-            this.isAuthenticated = false;
-            this._initAuthSocket();
-            this._handleError(new Error('Authentication failed'));
-        });
-
-        this.socket.on('token_expired', async () => {
-            this.logger.debug('[Socket] Token expired, reconnecting...');
-            try {
-                await this.connect();
-            } catch (err) {
-                this.logger.error('Reconnect failed:', err);
-            }
-        });
-
-        this.socket.on('token_refresh', (newToken) => {
-            this.logger.debug('[Socket] Received token refresh');
-            this.onTokenRefresh(newToken);
-        });
-
-        this.socket.onAny((event, ...args) => {
-            const handlers = this.eventHandlers.get(event);
-            if (handlers) {
-                handlers.forEach(handler => handler(...args));
-            }
-        });
+    _getFormattedToken() {
+        if (this.token && typeof this.token === 'object') {
+            return this.token.token;
+        }
+        return String(this.token);
     }
 
-    _handleError = (error) => {
-        this.logger.error('[Socket] Connection error:', error);
-        this.reconnectAttempts++;
+    _setupEventHandlers = () => {
+        this.socket.on('connect', () => this._handleConnect());
+        this.socket.on('disconnect', (reason) => this._handleDisconnect(reason));
+        this.socket.on('connect_error', (error) => this._handleConnectError(error));
+        this.socket.on('error', (error) => this._handleSocketError(error));
+        this.socket.on('authenticated', () => this._handleAuthenticated());
+        this.socket.on('unauthorized', (error) => this._handleUnauthorized(error));
+        this.socket.on('token_expired', () => this._handleTokenExpired());
+        this.socket.on('token_refresh', (newToken) => this._handleTokenRefresh(newToken));
+        this.socket.onAny((event, ...args) => this._handleCustomEvent(event, ...args));
+    }
+
+    _handleConnect() {
+        this.logger.debug('[Socket] Connected');
+        this.isConnected = true;
+        this.reconnectAttempts = 0;
+        this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
         
-        this.reconnectDelay = Math.min(
-            Math.max(this.reconnectDelay * 2, CONFIG.INITIAL_RETRY_DELAY) + Math.random() * 2000,
-            CONFIG.MAX_RETRY_DELAY
-        );
+        this._processPendingEvents();
+        this._startPingInterval();
         
-        if (this.reconnectAttempts >= CONFIG.MAX_RETRIES) {
-            this._showAlert(
-                'error', 
-                'Connection Error', 
-                'Real-time updates disabled. Please check your network connection.'
-            );
-            setTimeout(() => {
-                this.reconnectAttempts = 0;
-                this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
-            }, 120000);
-        } else {
-            this.logger.log(`[Socket] Will retry in ${Math.round(this.reconnectDelay/1000)} sec...`);
-            setTimeout(() => {
-                this.connect(); // Use the new connect method
-            }, this.reconnectDelay);
+        if (this.onReconnect) {
+            this.onReconnect(this.reconnectAttempts);
         }
     }
 
-    _handleDisconnect = (reason) => {
+    _handleDisconnect(reason) {
         this.logger.log('[Socket] Disconnected:', reason);
         this.isConnected = false;
-        
-        if (reason === 'io server disconnect') {
-            this.logger.warn('[Socket] Server forced disconnect, will attempt reconnection');
-            setTimeout(() => this.connect(), 5000); // Use the new connect method
-        } else {
-            this._handleRetry(new Error(reason));
-        }
+        this._handleDisconnectReason(reason);
         
         if (this.pingInterval) {
             clearInterval(this.pingInterval);
@@ -411,8 +375,72 @@ export class SocketManager {
         }
     }
 
-    _handleRetry = (error) => {
+    _handleDisconnectReason(reason) {
+        if (reason === 'io server disconnect') {
+            this.logger.warn('[Socket] Server forced disconnect, will attempt reconnection');
+            setTimeout(() => this.connect(), 5000);
+        } else {
+            this._handleRetry(new Error(reason));
+        }
+    }
+
+    _handleConnectError(error) {
+        if (error.message === 'Authentication error') {
+            this._handleAuthFailure(error);
+        }
         this.logger.error('[Socket] Connection error:', error);
+        this.isConnected = false;
+        this._handleError(error);
+    }
+
+    _handleSocketError(error) {
+        this.logger.error('[Socket] Error:', error);
+        this._handleError(error);
+    }
+
+    _handleAuthenticated() {
+        this.logger.debug('[Socket] Authenticated');
+        this.isAuthenticated = true;
+        this._clearAuthTimeout();
+    }
+
+    _clearAuthTimeout() {
+        if (this.authTimeout) {
+            clearTimeout(this.authTimeout);
+            this.authTimeout = null;
+        }
+    }
+
+    _handleUnauthorized(error) {
+        this.logger.error('[Socket] Unauthorized:', error);
+        this.isAuthenticated = false;
+        this._initAuthSocket();
+        this._handleError(new Error('Authentication failed'));
+    }
+
+    async _handleTokenExpired() {
+        this.logger.debug('[Socket] Token expired, reconnecting...');
+        try {
+            await this.connect();
+        } catch (err) {
+            this.logger.error('Reconnect failed:', err);
+        }
+    }
+
+    _handleTokenRefresh(newToken) {
+        this.logger.debug('[Socket] Received token refresh');
+        this.onTokenRefresh(newToken);
+    }
+
+    _handleCustomEvent(event, ...args) {
+        const handlers = this.eventHandlers.get(event);
+        if (handlers) {
+            handlers.forEach(handler => handler(...args));
+        }
+    }
+
+    _handleRetry(error) {
+        this.logger.error('[Socket] Handling retry for error:', error);
         this.reconnectAttempts++;
         
         this.reconnectDelay = Math.min(
@@ -420,36 +448,79 @@ export class SocketManager {
             CONFIG.MAX_RETRY_DELAY
         );
         
-        if (this.reconnectAttempts >= CONFIG.MAX_RETRIES) {
-            this.logger.error('[Socket] Max retry attempts reached');
-            if (typeof window !== 'undefined' && window.App?.Alerts?.showError) {
-                window.App.Alerts.showError(
-                    'Connection Error', 
-                    'Real-time updates disabled. Please check your network connection.'
-                );
-            }
-            setTimeout(() => {
-                this.reconnectAttempts = 0;
-                this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
-            }, 120000);
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            this._handleMaxRetriesReached();
         } else {
-            this.logger.debug(`[Socket] Will retry in ${Math.round(this.reconnectDelay/1000)} sec...`);
+            this.logger.log(`[Socket] Will retry in ${Math.round(this.reconnectDelay/1000)} sec...`);
             setTimeout(() => {
-                this.connect(); // Use the new connect method
+                this.connect();
             }, this.reconnectDelay);
         }
     }
 
-    _startPingInterval = () => {
-        if (this.pingInterval) {
-            clearInterval(this.pingInterval);
+    _handleError = (error) => {
+        this.logger.error('[Socket] Connection error:', error);
+        this._updateReconnectState();
+        
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            this._handleMaxRetriesReached();
+        } else {
+            this._scheduleReconnect();
         }
+    }
+
+    _updateReconnectState() {
+        this.reconnectAttempts++;
+        this.reconnectDelay = Math.min(
+            Math.max(this.reconnectDelay * 2, CONFIG.INITIAL_RETRY_DELAY) + Math.random() * 2000,
+            CONFIG.MAX_RETRY_DELAY
+        );
+    }
+
+    _handleMaxRetriesReached() {
+        this.logger.error('[Socket] Max retry attempts reached');
+        this._showConnectionErrorAlert();
+        this._resetRetryAfterDelay();
+    }
+
+    _showConnectionErrorAlert() {
+        if (typeof window !== 'undefined' && window.App?.Alerts?.showError) {
+            window.App.Alerts.showError(
+                'Connection Error', 
+                'Real-time updates disabled. Please check your network connection.'
+            );
+        }
+    }
+
+    _resetRetryAfterDelay() {
+        setTimeout(() => {
+            this.reconnectAttempts = 0;
+            this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
+        }, 120000);
+    }
+
+    _scheduleReconnect() {
+        this.logger.log(`[Socket] Will retry in ${Math.round(this.reconnectDelay/1000)} sec...`);
+        setTimeout(() => {
+            this.connect();
+        }, this.reconnectDelay);
+    }
+
+    _startPingInterval = () => {
+        this._clearPingInterval();
         
         this.pingInterval = setInterval(() => {
             if (this.socket && this.isConnected) {
                 this.socket.emit('ping', { timestamp: Date.now() });
             }
         }, CONFIG.PING_INTERVAL);
+    }
+
+    _clearPingInterval() {
+        if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+            this.pingInterval = null;
+        }
     }
 
     _processPendingEvents = () => {
@@ -466,6 +537,12 @@ export class SocketManager {
     }
 
     cleanup = () => {
+        this._disconnectSockets();
+        this._clearAllTimers();
+        this._resetConnectionState();
+    }
+
+    _disconnectSockets() {
         if (this.socket) {
             this.socket.disconnect();
             this.socket = null;
@@ -474,37 +551,27 @@ export class SocketManager {
             this.authSocket.disconnect();
             this.authSocket = null;
         }
+    }
+
+    _clearAllTimers() {
+        this._clearPingInterval();
         
-        if (this.pingInterval) {
-            clearInterval(this.pingInterval);
-            this.pingInterval = null;
-        }
+        const timers = [
+            this.authTimeout,
+            this.connectionTimeout,
+            this.tokenRefreshTimer,
+            this.serverCheckTimer,
+            this.authRetryTimer
+        ];
         
-        if (this.authTimeout) {
-            clearTimeout(this.authTimeout);
-            this.authTimeout = null;
-        }
-        
-        if (this.connectionTimeout) {
-            clearTimeout(this.connectionTimeout);
-            this.connectionTimeout = null;
-        }
-        
-        if (this.tokenRefreshTimer) {
-            clearTimeout(this.tokenRefreshTimer);
-            this.tokenRefreshTimer = null;
-        }
-        
-        if (this.serverCheckTimer) {
-            clearTimeout(this.serverCheckTimer);
-            this.serverCheckTimer = null;
-        }
-        
-        if (this.authRetryTimer) {
-            clearTimeout(this.authRetryTimer);
-            this.authRetryTimer = null;
-        }
-        
+        timers.forEach(timer => {
+            if (timer) {
+                clearTimeout(timer);
+            }
+        });
+    }
+
+    _resetConnectionState() {
         this.isConnected = false;
         this.isAuthenticated = false;
     }
@@ -513,12 +580,16 @@ export class SocketManager {
         if (this.socket && this.isConnected) {
             this.socket.emit(event, ...args);
         } else {
-            if (this.pendingEvents.length >= CONFIG.MAX_EVENT_QUEUE) {
-                this.pendingEvents.shift();
-            }
-            this.pendingEvents.push({ name: event, args });
-            this.logger.debug(`[Socket] Queued event (${event}), waiting for connection`);
+            this._queueEvent(event, args);
         }
+    }
+
+    _queueEvent(event, args) {
+        if (this.pendingEvents.length >= CONFIG.MAX_EVENT_QUEUE) {
+            this.pendingEvents.shift();
+        }
+        this.pendingEvents.push({ name: event, args });
+        this.logger.debug(`[Socket] Queued event (${event}), waiting for connection`);
     }
 
     on = (event, handler) => {
