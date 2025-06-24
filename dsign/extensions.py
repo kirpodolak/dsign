@@ -69,7 +69,7 @@ def init_extensions(app) -> Dict[str, Any]:
         }
         
     except Exception as e:
-        app.logger.critical(f"Extensions initialization failed: {str(e)}", exc_info=True)
+        app.logger.critical(f"Extensions initialization failed: {str(e)}", extra={'stack_trace': traceback.format_exc()})
         raise RuntimeError(f"Extensions initialization failed: {str(e)}")
 
 def _configure_auth(app) -> None:
