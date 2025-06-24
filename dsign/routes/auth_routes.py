@@ -356,21 +356,23 @@ def check_auth():
         }), 500
 
 @auth_bp.route('/socket-token')
-@login_required
 def get_socket_token():
     """
     Generate WebSocket token for authenticated users
     Returns:
         - 200: {success: true, token: string, expires_in: int, expires_at: isoformat}
-        - 401: If user is not authenticated (handled by @login_required)
+        - 401: If user is not authenticated (with JSON response)
+        - 503: If socket service not available
         - 500: On server error
     """
     try:
-        # Validate user and service availability
+        # Check authentication first
         if not current_user.is_authenticated:
             return jsonify({
                 'success': False,
-                'error': 'User not authenticated'
+                'error': 'Authentication required',
+                'auth_required': True,
+                'login_url': url_for('auth.login')
             }), 401
 
         if not hasattr(current_app, 'socket_service'):
@@ -380,7 +382,6 @@ def get_socket_token():
                 'error': 'Socket service not available'
             }), 503
 
-        # Generate token with expiration
         expires_minutes = current_app.config.get('SOCKET_TOKEN_EXPIRE_MINUTES', 30)
         expires_at = datetime.utcnow() + timedelta(minutes=expires_minutes)
         
@@ -397,7 +398,6 @@ def get_socket_token():
             'user_id': current_user.id
         })
         
-        # Explicitly set content type
         response.headers['Content-Type'] = 'application/json'
         return response
 
