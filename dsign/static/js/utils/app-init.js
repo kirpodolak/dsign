@@ -254,94 +254,152 @@ class AppInitializer {
 
     async initWebSocket() {
         try {
-            // 1. Получаем токен от сервера
-            const response = await fetch('/api/auth/socket-token');
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-            
-            const data = await response.json();
-            
-            // 2. Проверяем и нормализуем токен
-            let token;
-            if (data && typeof data.token === 'string') {
-                token = data.token;
-            } else if (data && data.token && typeof data.token.token === 'string') {
-                // Если токен вложен в объект (старый формат)
-                token = data.token.token;
-            } else {
-                throw new Error('Invalid token format received from server');
-            }
-
-            // 3. Инициализируем подключение
-            this.socket = io({
-                transports: ["websocket"],
-                auth: {
-                    token: token // передаем уже нормализованный токен
-                },
-                reconnectionAttempts: 5,
-                reconnectionDelay: 1000,
-                timeout: 10000,
-                pingTimeout: 5000,
-                pingInterval: 25000,
-                rejectUnauthorized: false, // Только для разработки!
-                // Добавляем query параметр для идентификации клиента
-                query: {
-                    clientType: 'browser',
-                    version: '1.0.0'
+            // 1. Получаем токен с обработкой ошибок и редиректов
+            const tokenResponse = await fetch('/api/auth/socket-token', {
+                credentials: 'include',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
                 }
             });
 
-            // 4. Настраиваем обработчики событий
+            // Обработка HTTP ошибок
+            if (!tokenResponse.ok) {
+                if (tokenResponse.status === 401) {
+                    // Перенаправляем на страницу логина при 401
+                    window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname)}`;
+                    return;
+                }
+                
+                // Парсим текст ошибки, если ответ не JSON
+                let errorText;
+                try {
+                    const errorData = await tokenResponse.json();
+                    errorText = errorData.error || errorData.message || 'Unknown error';
+                } catch {
+                    errorText = await tokenResponse.text();
+                }
+                throw new Error(`Token request failed: ${errorText}`);
+            }
+
+            // 2. Парсим и валидируем токен
+            const data = await tokenResponse.json();
+            if (!data?.token) {
+                throw new Error('Invalid token response format');
+            }
+
+            const token = typeof data.token === 'string' 
+                ? data.token 
+                : data.token?.token; // Поддержка старого формата
+
+            if (!token) {
+                throw new Error('Empty token received');
+            }
+
+            // 3. Инициализируем подключение с улучшенными параметрами
+            this.socket = io({
+                transports: ['websocket'], // Только WebSocket
+                upgrade: false,           // Отключаем upgrade polling
+                auth: { token },
+                reconnection: true,
+                reconnectionAttempts: Infinity, // Бесконечные попытки
+                reconnectionDelay: 1000,
+                reconnectionDelayMax: 30000,
+                randomizationFactor: 0.5,      // Случайный разброс 0.5-1.5 от задержки
+                timeout: 10000,
+                pingTimeout: 8000,
+                pingInterval: 25000,
+                query: {
+                    clientType: 'browser',
+                    version: '1.0.0',
+                    screen: `${window.screen.width}x${window.screen.height}`
+                }
+            });
+
+            // 4. Настройка обработчиков событий
             this.socket.on('connect', () => {
-                console.log('WebSocket connected, ID:', this.socket.id);
-                // Отправляем событие инициализации
-                this.socket.emit('client_init', { 
+                console.log('WebSocket connected. ID:', this.socket.id);
+                this.retryCount = 0; // Сбрасываем счетчик попыток
+                
+                // Отправляем инициализационные данные
+                this.socket.emit('client_init', {
                     timestamp: Date.now(),
-                    userAgent: navigator.userAgent 
+                    userAgent: navigator.userAgent,
+                    url: window.location.href
                 });
             });
 
             this.socket.on('disconnect', (reason) => {
-                console.log('WebSocket disconnected. Reason:', reason);
+                console.log('Disconnected:', reason);
                 
-                // Автоматическое переподключение только для определенных ошибок
-                if (reason === 'io server disconnect' || reason === 'transport close') {
-                    setTimeout(() => this.initWebSocket(), 5000);
+                // Автопереподключение только для определенных причин
+                const shouldReconnect = [
+                    'io server disconnect',
+                    'transport close',
+                    'ping timeout'
+                ].includes(reason);
+
+                if (shouldReconnect) {
+                    const delay = this.calculateReconnectDelay();
+                    console.log(`Reconnecting in ${delay}ms...`);
+                    setTimeout(() => this.initWebSocket(), delay);
                 }
             });
 
             this.socket.on('connect_error', (err) => {
-                console.error('WebSocket connection error:', err.message);
+                console.error('Connection error:', err.message);
                 
-                // Специальная обработка ошибки аутентификации
-                if (err.message.includes('auth') || err.message.includes('token')) {
-                    console.log('Attempting to refresh token...');
-                    setTimeout(() => this.initWebSocket(), 3000);
+                // Специальная обработка ошибок аутентификации
+                if (err.message.includes('auth') || 
+                    err.message.includes('401') || 
+                    err.message.includes('token')) {
+                    console.warn('Auth error - redirecting to login...');
+                    window.location.href = '/login';
+                    return;
                 }
+                
+                const delay = this.calculateReconnectDelay();
+                console.log(`Retrying in ${delay}ms...`);
+                setTimeout(() => this.initWebSocket(), delay);
             });
 
-            // Обработчик для ошибок аутентификации от сервера
+            // Обработчик для пользовательских ошибок аутентификации
             this.socket.on('auth_error', (data) => {
-                console.error('Authentication failed:', data.message);
+                console.error('Auth error:', data.message);
                 this.handleAuthError(data);
             });
 
-            // Пинг-понг для проверки соединения
-            this.socket.on('ping', (cb) => {
-                cb(); // Ответ на пинг
+            // Пинг-понг для поддержания соединения
+            this.socket.on('ping', () => {
+                this.socket.emit('pong');
             });
 
         } catch (error) {
-            console.error('WebSocket initialization failed:', error);
+            console.error('WebSocket init failed:', error);
             
-            // Экспоненциальная задержка для повторных попыток
-            const delay = Math.min(5000 * Math.pow(2, this.retryCount), 30000);
-            this.retryCount++;
-            
-            console.log(`Retrying in ${delay/1000} seconds...`);
+            const delay = this.calculateReconnectDelay();
+            console.log(`Retrying in ${delay}ms...`);
             setTimeout(() => this.initWebSocket(), delay);
         }
+    }
+
+    // Добавьте этот метод в класс
+    calculateReconnectDelay() {
+        this.retryCount = this.retryCount || 0;
+        const baseDelay = 1000;
+        const maxDelay = 30000;
+        
+        // Экспоненциальная задержка с ограничением
+        const delay = Math.min(
+            baseDelay * Math.pow(2, this.retryCount), 
+            maxDelay
+        );
+        
+        // Добавляем случайный разброс
+        const jitter = delay * 0.5 * Math.random();
+        this.retryCount++;
+        
+        return Math.min(delay + jitter, maxDelay);
     }
 
     // Добавьте этот метод в класс
