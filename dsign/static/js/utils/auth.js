@@ -108,9 +108,16 @@ export class AuthService {
             const response = await fetch(this.checkAuthEndpoint, {
                 credentials: 'include',
                 headers: {
-                    'Authorization': `Bearer ${this.getToken()}`
+                    'Authorization': `Bearer ${this.getToken()}`,
+                    'Accept': 'application/json'
                 }
             });
+            
+            // Handle 401 explicitly
+            if (response.status === 401) {
+                this.handleUnauthorized();
+                return { valid: false };
+            }
             
             if (!response.ok) {
                 return { valid: false };
@@ -491,7 +498,7 @@ export class AuthService {
 
         this.clearAuth();
         const redirectPath = encodeURIComponent(window.location.pathname + window.location.search);
-        window.location.href = `/api/auth/login?next=${redirectPath}`;
+        window.location.href = `/api/auth/login?next=${redirectPath}&clear=true`;
     }
 
     waitForToken(maxAttempts = 10, delay = 1000) {
@@ -523,6 +530,7 @@ export class AuthService {
             const currentOrigin = window.location.origin;
         
             const response = await fetch(this.socketTokenEndpoint, {
+                credentials: 'include',
                 headers: {
                     'Authorization': `Bearer ${this.getToken()}`,
                     'X-Requested-With': 'XMLHttpRequest',
@@ -530,6 +538,13 @@ export class AuthService {
                     'Accept': 'application/json'
                 }
             });
+        
+            // Handle 401 Unauthorized explicitly
+            if (response.status === 401) {
+                this.logger.warn('Socket token request unauthorized - redirecting to login');
+                this.handleUnauthorized();
+                return null;
+            }
         
             if (!response.ok) {
                 const contentType = response.headers.get('content-type');
@@ -550,6 +565,11 @@ export class AuthService {
         
             if (error.message.includes('Invalid response format')) {
                 throw new Error('Server returned HTML instead of JSON. Check server configuration.');
+            }
+        
+            // For 401 errors, we've already handled redirect in the response check
+            if (error.message.includes('401')) {
+                return null;
             }
         
             throw error;
