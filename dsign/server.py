@@ -3,6 +3,7 @@ from dsign.services.logger import setup_logger
 import logging
 from typing import NoReturn
 from dsign.extensions import socketio
+import traceback
 
 def configure_logging() -> None:
     """Настройка базового логгирования (только для startup)"""
@@ -45,7 +46,7 @@ def run_server() -> NoReturn:
             extra={
                 "error": str(e),
                 "type": type(e).__name__,
-                "traceback": logging.getTraceback()
+                "traceback": traceback.format_exc()
             }
         )
         raise RuntimeError("Server startup failed") from e
