@@ -358,19 +358,61 @@ def check_auth():
 @auth_bp.route('/socket-token')
 @login_required
 def get_socket_token():
+    """
+    Generate WebSocket token for authenticated users
+    Returns:
+        - 200: {success: true, token: string, expires_in: int, expires_at: isoformat}
+        - 401: If user is not authenticated (handled by @login_required)
+        - 500: On server error
+    """
     try:
-        token = current_app.socket_service.generate_socket_token(current_user.id)
-        return jsonify({
+        # Validate user and service availability
+        if not current_user.is_authenticated:
+            return jsonify({
+                'success': False,
+                'error': 'User not authenticated'
+            }), 401
+
+        if not hasattr(current_app, 'socket_service'):
+            logger.error("Socket service not available")
+            return jsonify({
+                'success': False,
+                'error': 'Socket service not available'
+            }), 503
+
+        # Generate token with expiration
+        expires_minutes = current_app.config.get('SOCKET_TOKEN_EXPIRE_MINUTES', 30)
+        expires_at = datetime.utcnow() + timedelta(minutes=expires_minutes)
+        
+        token = current_app.socket_service.generate_socket_token(
+            user_id=current_user.id,
+            expires_at=expires_at
+        )
+
+        response = jsonify({
             'success': True,
             'token': token,
-            'expires_in': current_app.config['SOCKET_TOKEN_EXPIRE_MINUTES'] * 60
+            'expires_in': expires_minutes * 60,
+            'expires_at': expires_at.isoformat(),
+            'user_id': current_user.id
         })
+        
+        # Explicitly set content type
+        response.headers['Content-Type'] = 'application/json'
+        return response
+
     except Exception as e:
-        current_app.logger.error(f"Failed to generate socket token: {str(e)}")
-        return jsonify({
+        logger.error(
+            f"Socket token generation failed for user {getattr(current_user, 'id', 'unknown')}",
+            exc_info=True
+        )
+        response = jsonify({
             'success': False,
-            'error': str(e)
-        }), 500
+            'error': 'Internal server error',
+            'details': str(e) if current_app.debug else None
+        })
+        response.headers['Content-Type'] = 'application/json'
+        return response, 500
 
 @auth_bp.route('/check-socket-auth')
 def check_socket_auth():
