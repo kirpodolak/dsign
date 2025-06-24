@@ -17,7 +17,10 @@ class AppInitializer {
 
         this.logger = new AppLogger('AppInitializer');
         this.authService = new AuthService();
-        this.socketManager = null;
+        this.socketManager = new SocketManager({
+            authService: this.authService,
+            logger: this.logger
+        });
         this.playerControls = new PlayerControls({
             API: { fetch: fetchAPI },
             Alerts: { showAlert, showError },
@@ -31,7 +34,6 @@ class AppInitializer {
     }
 
     async init() {
-        // Ensure initialization only happens once
         if (this.initPromise) {
             return this.initPromise;
         }
@@ -40,18 +42,14 @@ class AppInitializer {
             try {
                 this.logger.debug('Starting application initialization');
                 
-                // Initialize global state first
                 this.initGlobalState();
 
-                // Prevent redirect loops before any auth checks
                 if (this.preventRedirectLoops()) {
                     return;
                 }
 
-                // Initialize auth service first
                 await this.authService.checkAuth();
 
-                // Setup core components
                 await Promise.all([
                     this.setupLoader(),
                     this.setupAlerts(),
@@ -59,10 +57,7 @@ class AppInitializer {
                     this.setupAuthMonitoring()
                 ]);
 
-                // Initialize WebSocket connection
                 await this.initWebSocket();
-
-                // Initialize other modules
                 this.initModules();
 
                 this.logger.debug('Application initialization completed');
@@ -84,7 +79,7 @@ class AppInitializer {
             socketConnected: false,
             initialized: false,
             lastAuthCheck: null,
-            retryDelays: [2000, 5000, 10000] // Progressive delays for retries
+            retryDelays: [2000, 5000, 10000]
         };
 
         if (this.debugMode) {
@@ -97,7 +92,6 @@ class AppInitializer {
         const hasRedirectLoop = window.location.search.includes('redirect_loop=true');
     
         if (isLoginPage) {
-            // Clear any existing next parameters to break the loop
             if (window.location.search.includes('next=')) {
                 window.location.href = '/api/auth/login?clear=true';
                 return true;
@@ -134,7 +128,6 @@ class AppInitializer {
                 }, 300);
             };
 
-            // Start fade out after minimum display time
             setTimeout(fadeOut, 500);
         });
     }
@@ -174,7 +167,6 @@ class AppInitializer {
     }
 
     setupErrorHandling() {
-        // Global error handler
         window.addEventListener('error', (event) => {
             this.logger.error('Global Error:', event.error);
             
@@ -190,7 +182,6 @@ class AppInitializer {
             );
         });
 
-        // Unhandled promise rejections
         window.addEventListener('unhandledrejection', (event) => {
             const error = event.reason;
             this.logger.error('Unhandled Rejection:', error);
@@ -221,10 +212,8 @@ class AppInitializer {
     }
 
     setupAuthMonitoring() {
-        // Start auth status checker
         this.authService.startAuthStatusChecker();
 
-        // Check auth when tab becomes visible
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
                 this.authService.checkAuth().catch(error => {
@@ -233,7 +222,6 @@ class AppInitializer {
             }
         });
 
-        // Listen for auth status changes
         if (typeof window !== 'undefined') {
             window.App.trigger = window.App.trigger || function(event, data) {
                 document.dispatchEvent(new CustomEvent(event, { detail: data }));
@@ -254,179 +242,57 @@ class AppInitializer {
 
     async initWebSocket() {
         try {
-            // 1. Получаем токен с обработкой ошибок и редиректов
-            const tokenResponse = await fetch('/api/auth/socket-token', {
-                credentials: 'include',
-                headers: {
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json'
-                }
-            });
-
-            // Обработка HTTP ошибок
-            if (!tokenResponse.ok) {
-                if (tokenResponse.status === 401) {
-                    // Перенаправляем на страницу логина при 401
-                    window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname)}`;
-                    return;
-                }
-                
-                // Парсим текст ошибки, если ответ не JSON
-                let errorText;
-                try {
-                    const errorData = await tokenResponse.json();
-                    errorText = errorData.error || errorData.message || 'Unknown error';
-                } catch {
-                    errorText = await tokenResponse.text();
-                }
-                throw new Error(`Token request failed: ${errorText}`);
-            }
-
-            // 2. Парсим и валидируем токен
-            const data = await tokenResponse.json();
-            if (!data?.token) {
-                throw new Error('Invalid token response format');
-            }
-
-            const token = typeof data.token === 'string' 
-                ? data.token 
-                : data.token?.token; // Поддержка старого формата
-
-            if (!token) {
-                throw new Error('Empty token received');
-            }
-
-            // 3. Инициализируем подключение с улучшенными параметрами
-            this.socket = io({
-                transports: ['websocket'], // Только WebSocket
-                upgrade: false,           // Отключаем upgrade polling
-                auth: { token },
-                reconnection: true,
-                reconnectionAttempts: Infinity, // Бесконечные попытки
-                reconnectionDelay: 1000,
-                reconnectionDelayMax: 30000,
-                randomizationFactor: 0.5,      // Случайный разброс 0.5-1.5 от задержки
-                timeout: 10000,
-                pingTimeout: 8000,
-                pingInterval: 25000,
-                query: {
-                    clientType: 'browser',
-                    version: '1.0.0',
-                    screen: `${window.screen.width}x${window.screen.height}`
-                }
-            });
-
-            // 4. Настройка обработчиков событий
-            this.socket.on('connect', () => {
-                console.log('WebSocket connected. ID:', this.socket.id);
-                this.retryCount = 0; // Сбрасываем счетчик попыток
-                
-                // Отправляем инициализационные данные
-                this.socket.emit('client_init', {
-                    timestamp: Date.now(),
-                    userAgent: navigator.userAgent,
-                    url: window.location.href
-                });
-            });
-
-            this.socket.on('disconnect', (reason) => {
-                console.log('Disconnected:', reason);
-                
-                // Автопереподключение только для определенных причин
-                const shouldReconnect = [
-                    'io server disconnect',
-                    'transport close',
-                    'ping timeout'
-                ].includes(reason);
-
-                if (shouldReconnect) {
-                    const delay = this.calculateReconnectDelay();
-                    console.log(`Reconnecting in ${delay}ms...`);
-                    setTimeout(() => this.initWebSocket(), delay);
-                }
-            });
-
-            this.socket.on('connect_error', (err) => {
-                console.error('Connection error:', err.message);
-                
-                // Специальная обработка ошибок аутентификации
-                if (err.message.includes('auth') || 
-                    err.message.includes('401') || 
-                    err.message.includes('token')) {
-                    console.warn('Auth error - redirecting to login...');
-                    window.location.href = '/login';
-                    return;
-                }
-                
-                const delay = this.calculateReconnectDelay();
-                console.log(`Retrying in ${delay}ms...`);
-                setTimeout(() => this.initWebSocket(), delay);
-            });
-
-            // Обработчик для пользовательских ошибок аутентификации
-            this.socket.on('auth_error', (data) => {
-                console.error('Auth error:', data.message);
-                this.handleAuthError(data);
-            });
-
-            // Пинг-понг для поддержания соединения
-            this.socket.on('ping', () => {
-                this.socket.emit('pong');
-            });
-
+            await this.socketManager.connect();
+            this.socketInitialized = true;
+            window.App.state.socketConnected = true;
+            this.logger.debug('WebSocket initialized via SocketManager');
         } catch (error) {
-            console.error('WebSocket init failed:', error);
+            this.logger.error('WebSocket initialization failed:', error);
             
             const delay = this.calculateReconnectDelay();
-            console.log(`Retrying in ${delay}ms...`);
+            this.logger.debug(`Will retry in ${delay}ms...`);
             setTimeout(() => this.initWebSocket(), delay);
         }
     }
 
-    // Добавьте этот метод в класс
     calculateReconnectDelay() {
         this.retryCount = this.retryCount || 0;
         const baseDelay = 1000;
         const maxDelay = 30000;
         
-        // Экспоненциальная задержка с ограничением
         const delay = Math.min(
             baseDelay * Math.pow(2, this.retryCount), 
             maxDelay
         );
         
-        // Добавляем случайный разброс
         const jitter = delay * 0.5 * Math.random();
         this.retryCount++;
         
         return Math.min(delay + jitter, maxDelay);
     }
 
-    // Добавьте этот метод в класс
     handleAuthError(errorData) {
-        console.error('Authentication error:', errorData);
+        this.logger.error('Authentication error:', errorData);
         
-        // 1. Пытаемся обновить токен
         fetch('/api/auth/refresh-token')
             .then(response => response.json())
             .then(data => {
                 if (data.token) {
-                    console.log('Token refreshed, reconnecting...');
+                    this.logger.debug('Token refreshed, reconnecting...');
                     this.initWebSocket();
                 } else {
-                    console.error('Failed to refresh token');
-                    // Перенаправляем на страницу логина
+                    this.logger.error('Failed to refresh token');
                     window.location.href = '/login?reason=session_expired';
                 }
             })
             .catch(err => {
-                console.error('Token refresh failed:', err);
+                this.logger.error('Token refresh failed:', err);
                 window.location.href = '/login?reason=auth_error';
             });
     }
 
     handleRateLimitError() {
-        const retryAfter = 60; // seconds
+        const retryAfter = 60;
         showError(
             'Too Many Requests',
             `Please wait ${retryAfter} seconds before trying again`,
@@ -468,10 +334,8 @@ class AppInitializer {
                 { timer: false }
             );
             
-            if (this.socketManager) {
-                this.socketManager.disconnect();
-                window.App.state.socketConnected = false;
-            }
+            this.socketManager.disconnect();
+            window.App.state.socketConnected = false;
         });
 
         window.addEventListener('online', () => {
@@ -492,17 +356,12 @@ class AppInitializer {
     handleAuthError(error) {
         this.logger.warn('Handling auth error:', error);
         
-        // Clear auth data
         this.authService.clearAuth();
         
-        // Disconnect sockets
-        if (this.socketManager) {
-            this.socketManager.disconnect();
-            this.socketInitialized = false;
-            window.App.state.socketConnected = false;
-        }
+        this.socketManager.disconnect();
+        this.socketInitialized = false;
+        window.App.state.socketConnected = false;
         
-        // Redirect to login if not already there
         if (!window.location.pathname.includes('/api/auth/login')) {
             const redirectUrl = encodeURIComponent(window.location.pathname + window.location.search);
             window.location.href = `/api/auth/login?redirect=${redirectUrl}`;
@@ -555,24 +414,19 @@ class AppInitializer {
     }
 
     cleanup() {
-        if (this.socketManager) {
-            this.socketManager.disconnect();
-            this.socketInitialized = false;
-            window.App.state.socketConnected = false;
-        }
+        this.socketManager.disconnect();
+        this.socketInitialized = false;
+        window.App.state.socketConnected = false;
         
         window.removeEventListener('online', this.handleOnline);
         window.removeEventListener('offline', this.handleOffline);
     }
 }
 
-// Initialize and export singleton instance
 const appInitializer = new AppInitializer();
 
-// Export for testing purposes
 export { AppInitializer };
 
-// Initialize when DOM is ready
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => appInitializer.init());
 } else {
