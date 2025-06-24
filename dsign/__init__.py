@@ -12,6 +12,7 @@ from flask_socketio import SocketIO
 from dsign.config.config import Config, config
 from dsign.services import init_services
 from dsign.services.logger import ServiceLogger
+from dsign.extensions import socketio  # Добавлен импорт socketio
 
 def should_display_logo(db_session) -> bool:
     """Проверяет, нужно ли отображать логотип (нет активных плейлистов)"""
@@ -84,6 +85,11 @@ def create_app(config_class: Config = config) -> Flask:
             for name, service in services.items():
                 setattr(app, name, service)
                 app.logger.debug(f"Service attached: {name}")
+
+        # Инициализация SocketService с приложением
+        if hasattr(app, 'socket_service'):
+            app.socket_service.init_app(app)
+            app.logger.info("SocketService initialized with Flask app")
 
         # Проверка обязательных сервисов
         required_services = [
