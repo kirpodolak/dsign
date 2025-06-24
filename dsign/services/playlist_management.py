@@ -175,10 +175,5 @@ class PlaylistManager:
             self.logger.error(f"Failed to stop idle logo: {str(e)}")
             
     def restart_idle_logo(self) -> bool:
-        """Restart idle logo display"""
-        try:
-            self.stop_idle_logo()
-            return self._logo_manager.display_idle_logo()
-        except Exception as e:
-            self.logger.error(f"Failed to restart idle logo: {str(e)}")
-            return False
+        """Для обратной совместимости - вызывает основной метод без параметров"""
+        return self._logo_manager.restart_idle_logo()
