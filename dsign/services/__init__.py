@@ -18,7 +18,9 @@ from .playback_service import PlaybackService
 from .playlist_service import PlaylistService
 from .settings_service import SettingsService
 from .auth import AuthService
-from .sockets import SocketService
+from .sockets.service import SocketService
+from .sockets.connection import ConnectionService
+from .sockets.auth import SocketAuthService
 from .thumbnail_service import ThumbnailService
 
 class ServiceFactory:
@@ -217,18 +219,47 @@ class ServiceFactory:
             return None
 
     @staticmethod
-    def create_socket_service(socketio, db, logger=None) -> Optional[SocketService]:
+    def create_socket_service(socketio, db, logger=None, require_socketio: bool = True) -> Optional[SocketService]:
         """
         Создание сервиса WebSocket
         :param socketio: Экземпляр SocketIO
         :param db: Сессия базы данных
         :param logger: Логгер (опционально)
+        :param require_socketio: Вызывать исключение если socketio=None
         :return: Экземпляр SocketService или None при ошибке
+        :raises RuntimeError: Если require_socketio=True и socketio=None
         """
         logger = logger or setup_logger('SocketService')
+        
         try:
-            logger.info('Initializing SocketService')
-            return SocketService(socketio, db, logger)
+            # Проверка на дублирование инициализации
+            if hasattr(ServiceFactory, '_socket_service_instance'):
+                logger.warning('SocketService already initialized, returning existing instance')
+                return ServiceFactory._socket_service_instance
+            
+            # Обработка отсутствия socketio
+            if socketio is None:
+                if require_socketio:
+                    raise RuntimeError("SocketIO instance is required but was None")
+                logger.warning('SocketIO instance is None, SocketService will be disabled')
+                return None
+
+            logger.info('Initializing SocketService', {
+                'version': '1.0.0',
+                'socketio_version': getattr(socketio, '__version__', 'unknown')
+            })
+            
+            service = SocketService(socketio, db, logger)
+            ServiceFactory._socket_service_instance = service  # Сохраняем инстанс
+            
+            return service
+            
+        except ImportError as e:
+            logger.error('SocketService dependencies not installed', {
+                'error': str(e),
+                'required': ['flask_socketio>=5.3.4']
+            })
+            return None
         except Exception as e:
             logger.error('SocketService initialization failed', {
                 'error': str(e),
@@ -236,11 +267,13 @@ class ServiceFactory:
             })
             return None
 
+
 def init_services(
     config: Dict[str, Any], 
     db, 
     socketio=None, 
-    logger=None
+    logger=None,
+    require_socket: bool = True
 ) -> Dict[str, Any]:
     """Инициализация всех сервисов приложения с расширенной диагностикой"""
     logger = logger or setup_logger('ServiceManager')
@@ -451,21 +484,38 @@ def init_services(
                     'stack': traceback.format_exc()
                 })
 
-        # Инициализация SocketService если требуется
-        if socketio:
-            try:
-                socket_service = SocketService(socketio, db, logger)
-                services['socket_service'] = socket_service
-                logger.info("SocketService успешно инициализирован")
+        # Инициализация SocketService
+        try:
+            if socketio is not None:
+                socket_service = ServiceFactory.create_socket_service(
+                    socketio=socketio,
+                    db=db,
+                    logger=logger
+                )
                 
-                # Привязываем socketio к сервису
-                socket_service.socketio = socketio
-                logger.info("SocketIO привязан к SocketService")
-            except Exception as e:
-                logger.error("Ошибка инициализации SocketService", {
+                if socket_service:
+                    services['socket_service'] = socket_service
+                    logger.info("SocketService успешно инициализирован")
+                else:
+                    logger.warning("SocketService вернул None при инициализации")
+                    if require_socket:
+                        raise RuntimeError("SocketService initialization failed but is required")
+            elif require_socket:
+                raise RuntimeError("SocketIO instance is required but was None")
+            else:
+                logger.warning("SocketService пропущен (socketio=None)")
+                
+        except Exception as e:
+            if require_socket:
+                logger.critical("Ошибка инициализации обязательного SocketService", {
                     'error': str(e),
                     'stack': traceback.format_exc()
                 })
+                raise
+            logger.error("Ошибка инициализации SocketService", {
+                'error': str(e),
+                'stack': traceback.format_exc()
+            })
 
         logger.info("Все сервисы инициализированы", {
             'initialized': list(services.keys()),
@@ -494,7 +544,9 @@ __all__ = [
     'PlaylistService',
     'SettingsService',
     'AuthService',
-    'SocketService',
     'ThumbnailService',
-    'ServiceLogger'
+    'ServiceLogger',
+    'SocketService',
+    'ConnectionService', 
+    'SocketAuthService'
 ]
