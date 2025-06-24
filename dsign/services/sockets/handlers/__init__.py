@@ -7,6 +7,7 @@ from ...logger import ServiceLogger
 from .system import SystemHandlers, SystemNamespace
 from .playlist import PlaylistHandler
 from .playback import PlaybackHandler
+from .auth import AuthHandler
 
 class BaseHandler:
     """Base class for all socket handlers with common functionality"""
@@ -35,4 +36,4 @@ class BaseHandler:
         emit(event, data, room=sid)
         self.logger.debug(f"{event} sent", {'sid': sid, 'data_keys': list(data.keys())})
 
-__all__ = ['SystemHandlers', 'SystemNamespace', 'PlaylistHandler', 'PlaybackHandler']
+__all__ = ['SystemHandlers', 'SystemNamespace', 'PlaylistHandler', 'PlaybackHandler', 'AuthHandler']
