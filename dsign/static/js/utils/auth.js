@@ -104,22 +104,32 @@ export class AuthService {
     }
 
     async _checkAuthViaHTTP() {
-        const response = await fetch(this.checkAuthEndpoint, {
-            credentials: 'include',
-            headers: {
-                'Authorization': `Bearer ${this.getToken()}`
+        try {
+            const response = await fetch(this.checkAuthEndpoint, {
+                credentials: 'include',
+                headers: {
+                    'Authorization': `Bearer ${this.getToken()}`
+                }
+            });
+            
+            if (!response.ok) {
+                return { valid: false };
             }
-        });
-        
-        if (!response.ok) {
+            
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                throw new Error('Invalid response format');
+            }
+            
+            const data = await response.json();
+            return {
+                valid: true,
+                authenticated: data?.authenticated && data?.token_valid
+            };
+        } catch (error) {
+            this.logger.error('HTTP auth check failed:', error);
             return { valid: false };
         }
-        
-        const data = await response.json();
-        return {
-            valid: true,
-            authenticated: data?.authenticated && data?.token_valid
-        };
     }
 
     async checkAuthViaWebSocket() {
@@ -262,17 +272,31 @@ export class AuthService {
             method: 'POST',
             credentials: 'include',
             headers: {
-                'Authorization': `Bearer ${refreshToken}`
+                'Authorization': `Bearer ${refreshToken}`,
+                'Content-Type': 'application/json'
             }
         });
         
         if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
+            const errorData = await this._parseErrorResponse(response);
+            throw new Error(errorData.message || `HTTP ${response.status}`);
         }
         
-        const { token, refresh_token } = await response.json();
-        this._updateTokens(token, refresh_token);
+        const data = await response.json();
+        this._updateTokens(data.token, data.refresh_token);
         return true;
+    }
+
+    async _parseErrorResponse(response) {
+        try {
+            const contentType = response.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+                return await response.json();
+            }
+            return { message: await response.text() };
+        } catch (e) {
+            return { message: `HTTP ${response.status}` };
+        }
     }
 
     _updateTokens(token, refreshToken) {
@@ -503,26 +527,27 @@ export class AuthService {
                     'Authorization': `Bearer ${this.getToken()}`,
                     'X-Requested-With': 'XMLHttpRequest',
                     'Origin': currentOrigin,
-                    'Accept': 'application/json' // Явно указываем ожидаемый формат
+                    'Accept': 'application/json'
                 }
             });
         
             if (!response.ok) {
-                // Проверяем content-type перед парсингом
                 const contentType = response.headers.get('content-type');
                 if (!contentType || !contentType.includes('application/json')) {
                     const text = await response.text();
                     throw new Error(`Invalid response format: ${text.substring(0, 100)}`);
                 }
-                throw new Error(`HTTP ${response.status}`);
+                
+                const errorData = await response.json();
+                throw new Error(errorData.message || `HTTP ${response.status}`);
             }
         
             const data = await response.json();
+            localStorage.setItem(this.socketTokenKey, data.token);
             return this._formatSocketTokenResponse(data, currentOrigin);
         } catch (error) {
             this.logger.error('Socket token error:', error);
         
-            // Если получили HTML вместо JSON, вероятно проблема с сервером
             if (error.message.includes('Invalid response format')) {
                 throw new Error('Server returned HTML instead of JSON. Check server configuration.');
             }
