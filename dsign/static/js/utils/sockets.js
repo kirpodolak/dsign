@@ -1,7 +1,7 @@
 /**
  * WebSocket Manager Module
  * @module SocketManager
- * @description Enhanced WebSocket manager with robust JWT auth handling
+ * @description Enhanced WebSocket manager with robust JWT auth handling and Circuit Breaker pattern
  */
 
 const CONFIG = {
@@ -17,7 +17,9 @@ const CONFIG = {
     SERVER_CHECK_INTERVAL: 5000,
     SERVER_CHECK_TIMEOUT: 2000,
     AUTH_RETRY_DELAY: 5000,
-    SOCKET_TOKEN_EXPIRY_BUFFER: 300000 // 5 minutes buffer for token refresh
+    SOCKET_TOKEN_EXPIRY_BUFFER: 300000, // 5 minutes buffer for token refresh
+    CIRCUIT_BREAKER_THRESHOLD: 3,       // Max failures before opening circuit
+    CIRCUIT_BREAKER_TIMEOUT: 30000      // Time to wait before half-open state
 };
 
 export class SocketManager {
@@ -42,6 +44,15 @@ export class SocketManager {
         this.reconnectDelay = options.reconnectDelay || CONFIG.INITIAL_RETRY_DELAY;
         this.maxReconnectAttempts = options.maxRetries || CONFIG.MAX_RETRIES;
         
+        // Circuit Breaker state
+        this.circuitBreaker = {
+            isOpen: false,
+            failureCount: 0,
+            lastFailureTime: null,
+            threshold: options.circuitBreakerThreshold || CONFIG.CIRCUIT_BREAKER_THRESHOLD,
+            timeout: options.circuitBreakerTimeout || CONFIG.CIRCUIT_BREAKER_TIMEOUT
+        };
+        
         // Event management
         this.pendingEvents = [];
         this.eventHandlers = new Map();
@@ -53,6 +64,7 @@ export class SocketManager {
         this.tokenRefreshTimer = null;
         this.serverCheckTimer = null;
         this.authRetryTimer = null;
+        this.circuitBreakerTimer = null;
         
         // Dependencies
         this.authService = options.authService || this._createDefaultAuthService();
@@ -62,6 +74,8 @@ export class SocketManager {
         this.onError = options.onError || this.defaultErrorHandler;
         this.onTokenRefresh = options.onTokenRefresh || this.defaultTokenRefreshHandler;
         this.onReconnect = options.onReconnect || null;
+        this.onCircuitBreakerOpen = options.onCircuitBreakerOpen || null;
+        this.onCircuitBreakerClose = options.onCircuitBreakerClose || null;
 
         // Initialize auth socket
         this._initAuthSocket();
@@ -70,6 +84,7 @@ export class SocketManager {
         this._handleRetry = this._handleRetry.bind(this);
         this.connect = this.connect.bind(this);
         this._init = this._init.bind(this);
+        this._handleError = this._handleError.bind(this);
     }
 
     _createDefaultAuthService() {
@@ -136,6 +151,12 @@ export class SocketManager {
     }
 
     async connect() {
+        // Don't attempt if circuit is open
+        if (this.circuitBreaker.isOpen) {
+            this.logger.debug('[Socket] Connection blocked: circuit is open');
+            return;
+        }
+
         try {
             if (this.isConnected) {
                 this.logger.debug('[Socket] Already connected');
@@ -150,7 +171,6 @@ export class SocketManager {
             } catch (error) {
                 this.logger.error('[Socket] Failed to get socket token:', error);
                 
-                // Check for HTML response
                 if (error.message.includes('Server returned HTML')) {
                     this._showAlert(
                         'error',
@@ -160,13 +180,12 @@ export class SocketManager {
                     return;
                 }
                 
-                // Add delay before retry
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 throw error;
             }
 
             this.token = token;
-            this._init(token);
+            await this._init(token);
             
         } catch (error) {
             this.logger.error('Socket connection error:', error);
@@ -351,6 +370,9 @@ export class SocketManager {
     }
 
     _handleConnect() {
+        // Reset failure count on successful connection
+        this.circuitBreaker.failureCount = 0;
+        
         this.logger.debug('[Socket] Connected');
         this.isConnected = true;
         this.reconnectAttempts = 0;
@@ -439,7 +461,66 @@ export class SocketManager {
         }
     }
 
+    _shouldOpenCircuit() {
+        const { failureCount, threshold, lastFailureTime, timeout } = this.circuitBreaker;
+        return failureCount >= threshold && Date.now() - lastFailureTime < timeout;
+    }
+
+    _openCircuit() {
+        this.circuitBreaker.isOpen = true;
+        this.circuitBreaker.lastFailureTime = Date.now();
+        this.logger.error('[Circuit Breaker] Circuit opened due to repeated failures');
+        
+        if (this.onCircuitBreakerOpen) {
+            this.onCircuitBreakerOpen();
+        }
+
+        this._showAlert(
+            'error',
+            'Connection Error',
+            'Server is temporarily unavailable. Trying to reconnect...'
+        );
+
+        // Schedule circuit to half-open after timeout
+        this.circuitBreakerTimer = setTimeout(() => {
+            this._tryCloseCircuit();
+        }, this.circuitBreaker.timeout);
+    }
+
+    _tryCloseCircuit() {
+        this.circuitBreaker.isOpen = false;
+        this.circuitBreaker.failureCount = 0;
+        this.logger.log('[Circuit Breaker] Circuit reset to half-open state');
+        
+        if (this.onCircuitBreakerClose) {
+            this.onCircuitBreakerClose();
+        }
+
+        // Attempt to reconnect
+        this.connect().catch(err => {
+            this.logger.error('[Circuit Breaker] Half-open test failed:', err);
+            this._openCircuit();
+        });
+    }
+
     _handleRetry(error) {
+        // Update failure count
+        this.circuitBreaker.failureCount++;
+        this.circuitBreaker.lastFailureTime = Date.now();
+
+        // Check if circuit should be opened
+        if (this._shouldOpenCircuit() && !this.circuitBreaker.isOpen) {
+            this._openCircuit();
+            return;
+        }
+
+        // If circuit is open, don't attempt to reconnect
+        if (this.circuitBreaker.isOpen) {
+            this.logger.debug('[Socket] Connection blocked: circuit is open');
+            return;
+        }
+
+        // Standard retry logic
         this.logger.error('[Socket] Handling retry for error:', error);
         this.reconnectAttempts++;
         
@@ -561,7 +642,8 @@ export class SocketManager {
             this.connectionTimeout,
             this.tokenRefreshTimer,
             this.serverCheckTimer,
-            this.authRetryTimer
+            this.authRetryTimer,
+            this.circuitBreakerTimer
         ];
         
         timers.forEach(timer => {
