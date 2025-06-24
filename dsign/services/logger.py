@@ -68,7 +68,10 @@ class ServiceLogger:
     def error(self, msg: str, extra: Optional[Dict[str, Any]] = None):
         self.logger.error(self._format_message(msg, extra))
 
-    def critical(self, msg: str, extra: Optional[Dict[str, Any]] = None):
+    def critical(self, msg: str, extra: Optional[Dict[str, Any]] = None, exc_info=False):
+        if exc_info:
+            extra = extra or {}
+            extra['stack_trace'] = traceback.format_exc()
         self.logger.critical(self._format_message(msg, extra))
 
 def setup_logger(name: str, **kwargs) -> ServiceLogger:
