@@ -63,9 +63,9 @@ class PlaybackService:
     def display_idle_logo(self):
         return self.logo_manager.display_idle_logo()
         
-    def restart_idle_logo(self):
-        """Proxy to logo manager"""
-        return self.logo_manager.restart_idle_logo()
+    def restart_idle_logo(self, upload_folder=None, idle_logo=None):
+        """Прокси к logo_manager с передачей параметров"""
+        return self.logo_manager.restart_idle_logo(upload_folder, idle_logo)
         
     def _sanitize_extra_data(self, extra_data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Remove reserved keys from extra_data to prevent LogRecord conflicts"""
