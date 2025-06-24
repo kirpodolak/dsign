@@ -693,7 +693,7 @@ def init_api_routes(api_bp, services):
                 os.chmod(file_path, 0o644)
 
                 # Обновляем логотип в плеере
-                if not playback_service.restart_idle_logo(upload_folder, filename):
+                if not playback_service.restart_idle_logo(upload_folder=upload_folder, idle_logo=filename):
                     raise RuntimeError("Failed to update player")
 
                 # Успешное завершение
@@ -712,7 +712,7 @@ def init_api_routes(api_bp, services):
                     if os.path.exists(file_path):
                         os.unlink(file_path)
                     os.rename(backup_path, file_path)
-                    playback_service.restart_idle_logo(upload_folder, filename)
+                    playback_service.restart_idle_logo(upload_folder=upload_folder, idle_logo=filename)
 
                 current_app.logger.error(f"Logo upload failed: {str(e)}")
                 return jsonify({
