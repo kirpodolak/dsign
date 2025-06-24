@@ -13,17 +13,24 @@ export class AuthService {
             ? window.App.logger 
             : console;
         
+        // Token configuration
         this.tokenKey = 'auth_token';
         this.refreshTokenKey = 'refresh_token';
         this.socketTokenKey = 'socket_token';
         this.authStatusKey = 'auth_status';
+        
+        // API endpoints
         this.loginEndpoint = '/api/auth/login';
         this.checkAuthEndpoint = '/api/auth/check-auth';
         this.refreshTokenEndpoint = '/api/auth/refresh-token';
         this.socketTokenEndpoint = '/api/auth/socket-token';
+        
+        // Timers
         this.authStatusInterval = null;
         this.tokenRefreshInterval = null;
         this.socketTokenRefreshInterval = null;
+        
+        // State
         this.status = false;
         this.tokenCheckAttempts = 0;
         this.maxTokenCheckAttempts = 5;
@@ -35,43 +42,21 @@ export class AuthService {
         try {
             this.logger.debug('Checking authentication status');
             
-            // First check token validity
+            // Validate token presence and validity
             const token = this.getToken();
-            if (!token || !this.isTokenValid(token)) {
+            if (!this._isTokenValid(token)) {
                 this.logger.debug(token ? 'Token invalid' : 'No token found');
                 this.clearAuth();
                 return false;
             }
 
-            // Check if token needs refresh
-            if (this.shouldRefreshToken(token)) {
-                this.logger.debug('Token needs refresh, attempting...');
-                try {
-                    await this.refreshToken();
-                } catch (error) {
-                    this.logger.warn('Token refresh failed:', error);
-                    this.clearAuth();
-                    return false;
-                }
+            // Refresh token if needed
+            if (this._shouldRefreshToken(token)) {
+                await this._attemptTokenRefresh();
             }
 
-            // HTTP check with credentials
-            const response = await fetch(this.checkAuthEndpoint, {
-                credentials: 'include',
-                headers: {
-                    'Authorization': `Bearer ${this.getToken()}`
-                }
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                const isAuthenticated = data?.authenticated && data?.token_valid;
-                this.updateAuthStatus(isAuthenticated);
-                return isAuthenticated;
-            }
-
-            // WebSocket fallback
-            return await this.checkAuthViaWebSocket();
+            // Verify authentication status
+            return await this._verifyAuthStatus();
         } catch (error) {
             this.logger.error('Authentication check failed', error);
             this.clearAuth();
@@ -79,13 +64,70 @@ export class AuthService {
         }
     }
 
-    async checkAuthViaWebSocket() {
-        return new Promise((resolve, reject) => {
-            if (!window.App?.Sockets?.isConnected?.()) {
-                reject(new Error('Socket not connected'));
-                return;
+    _isTokenValid(token) {
+        if (!token) return false;
+        
+        try {
+            const payload = JSON.parse(atob(token.split('.')[1]));
+            return payload.exp * 1000 > Date.now();
+        } catch (e) {
+            this.logger.warn('Token validation failed:', e);
+            return false;
+        }
+    }
+
+    async _attemptTokenRefresh() {
+        this.logger.debug('Token needs refresh, attempting...');
+        try {
+            await this.refreshToken();
+        } catch (error) {
+            this.logger.warn('Token refresh failed:', error);
+            throw error;
+        }
+    }
+
+    async _verifyAuthStatus() {
+        try {
+            // Try HTTP check first
+            const httpCheck = await this._checkAuthViaHTTP();
+            if (httpCheck.valid) {
+                this.updateAuthStatus(httpCheck.authenticated);
+                return httpCheck.authenticated;
             }
 
+            // Fallback to WebSocket check
+            return await this.checkAuthViaWebSocket();
+        } catch (error) {
+            this.logger.error('Auth verification failed:', error);
+            throw error;
+        }
+    }
+
+    async _checkAuthViaHTTP() {
+        const response = await fetch(this.checkAuthEndpoint, {
+            credentials: 'include',
+            headers: {
+                'Authorization': `Bearer ${this.getToken()}`
+            }
+        });
+        
+        if (!response.ok) {
+            return { valid: false };
+        }
+        
+        const data = await response.json();
+        return {
+            valid: true,
+            authenticated: data?.authenticated && data?.token_valid
+        };
+    }
+
+    async checkAuthViaWebSocket() {
+        if (!window.App?.Sockets?.isConnected?.()) {
+            throw new Error('Socket not connected');
+        }
+
+        return new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
                 reject(new Error('Socket authentication check timed out'));
             }, 3000);
@@ -93,10 +135,12 @@ export class AuthService {
             try {
                 window.App.Sockets.emit('request_auth_status', {}, (response) => {
                     clearTimeout(timeout);
+                    
                     if (response?.error) {
                         reject(new Error(response.error));
                         return;
                     }
+                    
                     const isAuthenticated = response?.authenticated ?? false;
                     this.updateAuthStatus(isAuthenticated);
                     resolve(isAuthenticated);
@@ -109,103 +153,132 @@ export class AuthService {
     }
 
     startAuthStatusChecker() {
-        if (this.authStatusInterval) {
-            clearInterval(this.authStatusInterval);
-        }
-
+        this._clearAuthStatusChecker();
+        
         // Initial check
         this.checkAuth().catch(error => {
             this.logger.error('Initial auth check failed:', error);
         });
 
-        // Periodic checks with exponential backoff
+        // Periodic checks
         this.authStatusInterval = setInterval(() => {
             this.checkAuth().catch(error => {
                 this.logger.error('Periodic auth check failed:', error);
             });
         }, 30000);
 
-        // Start token refresh monitors
+        // Start monitoring
+        this._startTokenMonitors();
+    }
+
+    _clearAuthStatusChecker() {
+        if (this.authStatusInterval) {
+            clearInterval(this.authStatusInterval);
+            this.authStatusInterval = null;
+        }
+    }
+
+    _startTokenMonitors() {
         this.startTokenRefreshMonitor();
         this.startSocketTokenRefreshMonitor();
     }
 
     startTokenRefreshMonitor() {
-        if (this.tokenRefreshInterval) {
-            clearInterval(this.tokenRefreshInterval);
-        }
-
+        this._clearTokenRefreshMonitor();
+        
         this.tokenRefreshInterval = setInterval(() => {
             const token = this.getToken();
-            if (token && this.shouldRefreshToken(token)) {
+            if (token && this._shouldRefreshToken(token)) {
                 this.logger.debug('Automatically refreshing token...');
                 this.refreshToken().catch(error => {
                     this.logger.error('Auto token refresh failed:', error);
                 });
             }
-        }, 60000); // Check every minute
+        }, 60000);
+    }
+
+    _clearTokenRefreshMonitor() {
+        if (this.tokenRefreshInterval) {
+            clearInterval(this.tokenRefreshInterval);
+            this.tokenRefreshInterval = null;
+        }
     }
 
     startSocketTokenRefreshMonitor() {
-        if (this.socketTokenRefreshInterval) {
-            clearInterval(this.socketTokenRefreshInterval);
-        }
-
+        this._clearSocketTokenRefreshMonitor();
+        
         this.socketTokenRefreshInterval = setInterval(async () => {
             try {
                 const socketToken = localStorage.getItem(this.socketTokenKey);
-                if (socketToken && this.shouldRefreshSocketToken(socketToken)) {
+                if (socketToken && this._shouldRefreshSocketToken(socketToken)) {
                     this.logger.debug('Refreshing socket token...');
-                    await this.getSocketToken(true); // Force refresh
+                    await this.getSocketToken(true);
                 }
             } catch (error) {
                 this.logger.error('Socket token refresh check failed:', error);
             }
-        }, 30000); // Check every 30 seconds
+        }, 30000);
+    }
+
+    _clearSocketTokenRefreshMonitor() {
+        if (this.socketTokenRefreshInterval) {
+            clearInterval(this.socketTokenRefreshInterval);
+            this.socketTokenRefreshInterval = null;
+        }
     }
 
     updateAuthStatus(isAuthenticated) {
         if (this.status === isAuthenticated) return;
         
         this.status = isAuthenticated;
+        this._triggerAuthStatusChange(isAuthenticated);
+        this._handleSocketConnection(isAuthenticated);
+        this.logger.debug(`Auth status updated: ${isAuthenticated}`);
+    }
+
+    _triggerAuthStatusChange(isAuthenticated) {
         if (typeof window !== 'undefined') {
             window.App?.trigger?.('auth:status_changed', isAuthenticated);
+        }
+    }
+
+    _handleSocketConnection(isAuthenticated) {
+        if (typeof window !== 'undefined') {
             if (isAuthenticated) {
                 window.App?.Sockets?.connect?.();
             } else {
                 window.App?.Sockets?.disconnect?.();
             }
         }
-        this.logger.debug(`Auth status updated: ${isAuthenticated}`);
     }
 
     async refreshToken() {
-        try {
-            const refreshToken = this.getRefreshToken();
-            if (!refreshToken) throw new Error('No refresh token available');
+        const refreshToken = this.getRefreshToken();
+        if (!refreshToken) {
+            throw new Error('No refresh token available');
+        }
 
-            const response = await fetch(this.refreshTokenEndpoint, {
-                method: 'POST',
-                credentials: 'include',
-                headers: {
-                    'Authorization': `Bearer ${refreshToken}`
-                }
-            });
-            
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
+        const response = await fetch(this.refreshTokenEndpoint, {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+                'Authorization': `Bearer ${refreshToken}`
             }
-            
-            const { token, refresh_token } = await response.json();
-            this.setToken(token);
-            if (refresh_token) {
-                this.setRefreshToken(refresh_token);
-            }
-            return true;
-        } catch (error) {
-            this.logger.error('Token refresh failed:', error);
-            this.clearAuth();
-            throw error;
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const { token, refresh_token } = await response.json();
+        this._updateTokens(token, refresh_token);
+        return true;
+    }
+
+    _updateTokens(token, refreshToken) {
+        this.setToken(token);
+        if (refreshToken) {
+            this.setRefreshToken(refreshToken);
         }
     }
 
@@ -234,16 +307,12 @@ export class AuthService {
         if (!token) return;
 
         try {
+            // Update in-memory token
             window.App = window.App || {};
             window.App.token = token;
             
-            if (typeof localStorage !== 'undefined') {
-                localStorage.setItem(this.tokenKey, token);
-            }
-            
-            if (typeof document !== 'undefined') {
-                document.cookie = `${this.tokenKey}=${token}; path=/; max-age=${3600*24}; Secure; SameSite=Lax`;
-            }
+            // Persist to storage
+            this._persistToken(this.tokenKey, token, 3600*24);
         } catch (e) {
             this.logger.error('Failed to save auth token', e);
         }
@@ -253,15 +322,20 @@ export class AuthService {
         if (!token) return;
 
         try {
-            if (typeof localStorage !== 'undefined') {
-                localStorage.setItem(this.refreshTokenKey, token);
-            }
-            
-            if (typeof document !== 'undefined') {
-                document.cookie = `${this.refreshTokenKey}=${token}; path=/; max-age=${3600*24*7}; Secure; SameSite=Strict`;
-            }
+            this._persistToken(this.refreshTokenKey, token, 3600*24*7);
         } catch (e) {
             this.logger.error('Failed to save refresh token', e);
+        }
+    }
+
+    _persistToken(key, token, maxAge) {
+        if (typeof localStorage !== 'undefined') {
+            localStorage.setItem(key, token);
+        }
+        
+        if (typeof document !== 'undefined') {
+            const sameSite = key === this.refreshTokenKey ? 'Strict' : 'Lax';
+            document.cookie = `${key}=${token}; path=/; max-age=${maxAge}; Secure; SameSite=${sameSite}`;
         }
     }
 
@@ -269,56 +343,60 @@ export class AuthService {
         try {
             this.logger.debug('Clearing authentication data');
             
+            // Clear in-memory token
             window.App = window.App || {};
             delete window.App.token;
             
-            if (typeof localStorage !== 'undefined') {
-                localStorage.removeItem(this.tokenKey);
-                localStorage.removeItem(this.refreshTokenKey);
-                localStorage.removeItem(this.socketTokenKey);
-            }
-
-            if (typeof document !== 'undefined') {
-                const clearCookie = (name) => {
-                    document.cookie = `${name}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-                };
-                clearCookie(this.tokenKey);
-                clearCookie(this.refreshTokenKey);
-                clearCookie(this.socketTokenKey);
-            }
-
+            // Clear storage
+            this._clearStorage();
+            
+            // Update status
             this.updateAuthStatus(false);
             
-            if (typeof window !== 'undefined') {
-                window.App?.Helpers?.setCachedData?.(this.authStatusKey, { value: false });
-                window.App?.Sockets?.disconnect?.();
-            }
-
-            // Clear all intervals
-            if (this.authStatusInterval) clearInterval(this.authStatusInterval);
-            if (this.tokenRefreshInterval) clearInterval(this.tokenRefreshInterval);
-            if (this.socketTokenRefreshInterval) clearInterval(this.socketTokenRefreshInterval);
+            // Notify other components
+            this._notifyAuthCleared();
+            
+            // Cleanup timers
+            this._cleanupTimers();
         } catch (e) {
             this.logger.error('Failed to clear auth data', e);
         }
     }
 
-    isTokenValid(token) {
-        if (!token || typeof token !== 'string' || token.split('.').length !== 3) {
-            return false;
+    _clearStorage() {
+        // Clear localStorage
+        if (typeof localStorage !== 'undefined') {
+            localStorage.removeItem(this.tokenKey);
+            localStorage.removeItem(this.refreshTokenKey);
+            localStorage.removeItem(this.socketTokenKey);
         }
 
-        try {
-            const payload = JSON.parse(atob(token.split('.')[1]));
-            const isExpired = payload.exp * 1000 < Date.now();
-            return !isExpired;
-        } catch (e) {
-            this.logger.warn('Token validation failed:', e);
-            return false;
+        // Clear cookies
+        if (typeof document !== 'undefined') {
+            this._clearCookie(this.tokenKey);
+            this._clearCookie(this.refreshTokenKey);
+            this._clearCookie(this.socketTokenKey);
         }
     }
 
-    shouldRefreshToken(token) {
+    _clearCookie(name) {
+        document.cookie = `${name}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+    }
+
+    _notifyAuthCleared() {
+        if (typeof window !== 'undefined') {
+            window.App?.Helpers?.setCachedData?.(this.authStatusKey, { value: false });
+            window.App?.Sockets?.disconnect?.();
+        }
+    }
+
+    _cleanupTimers() {
+        if (this.authStatusInterval) clearInterval(this.authStatusInterval);
+        if (this.tokenRefreshInterval) clearInterval(this.tokenRefreshInterval);
+        if (this.socketTokenRefreshInterval) clearInterval(this.socketTokenRefreshInterval);
+    }
+
+    _shouldRefreshToken(token) {
         if (!token || typeof token !== 'string' || token.split('.').length !== 3) {
             return false;
         }
@@ -326,24 +404,22 @@ export class AuthService {
         try {
             const payload = JSON.parse(atob(token.split('.')[1]));
             const expiresAt = payload.exp * 1000;
-            const timeRemaining = expiresAt - Date.now();
-            return timeRemaining < this.tokenRefreshThreshold;
+            return (expiresAt - Date.now()) < this.tokenRefreshThreshold;
         } catch (e) {
             this.logger.warn('Token refresh check failed:', e);
             return false;
         }
     }
 
-    shouldRefreshSocketToken(token) {
+    _shouldRefreshSocketToken(token) {
         if (!token || typeof token !== 'string' || token.split('.').length !== 3) {
-            return true; // Force refresh if invalid
+            return true;
         }
 
         try {
             const payload = JSON.parse(atob(token.split('.')[1]));
             const expiresAt = payload.exp * 1000;
-            const timeRemaining = expiresAt - Date.now();
-            return timeRemaining < this.socketTokenRefreshThreshold;
+            return (expiresAt - Date.now()) < this.socketTokenRefreshThreshold;
         } catch (e) {
             this.logger.warn('Socket token refresh check failed:', e);
             return true;
@@ -351,28 +427,37 @@ export class AuthService {
     }
 
     handleLoginSuccess(response) {
-        if (response?.token) {
-            this.setToken(response.token);
-            if (response.refresh_token) {
-                this.setRefreshToken(response.refresh_token);
-            }
-            this.logger.info('User logged in successfully');
-            this.updateAuthStatus(true);
-            
-            // Initiate WebSocket connection
-            if (window.App?.Sockets && !window.App.Sockets.isConnected()) {
-                setTimeout(() => {
-                    window.App.Sockets.connect();
-                }, 300);
-            }
-
-            // Get initial socket token
-            this.getSocketToken().catch(error => {
-                this.logger.error('Initial socket token fetch failed:', error);
-            });
-        } else {
+        if (!response?.token) {
             this.logger.warn('Login response missing token');
+            return;
         }
+
+        this._processLoginResponse(response);
+        this._initSocketConnection();
+        this._getInitialSocketToken();
+    }
+
+    _processLoginResponse(response) {
+        this.setToken(response.token);
+        if (response.refresh_token) {
+            this.setRefreshToken(response.refresh_token);
+        }
+        this.logger.info('User logged in successfully');
+        this.updateAuthStatus(true);
+    }
+
+    _initSocketConnection() {
+        if (window.App?.Sockets && !window.App.Sockets.isConnected()) {
+            setTimeout(() => {
+                window.App.Sockets.connect();
+            }, 300);
+        }
+    }
+
+    _getInitialSocketToken() {
+        this.getSocketToken().catch(error => {
+            this.logger.error('Initial socket token fetch failed:', error);
+        });
     }
 
     handleUnauthorized() {
@@ -393,7 +478,7 @@ export class AuthService {
                 attempt++;
                 const token = this.getToken();
                 
-                if (token && this.isTokenValid(token)) {
+                if (token && this._isTokenValid(token)) {
                     this.tokenCheckAttempts = 0;
                     resolve(token);
                 } else if (attempt >= maxAttempts) {
@@ -411,31 +496,47 @@ export class AuthService {
 
     async getSocketToken(forceRefresh = false) {
         try {
-            // Получаем текущий URL для динамического определения origin
             const currentOrigin = window.location.origin;
-            const socketUrl = currentOrigin.replace(/^http/, 'ws');
         
-            // Запрос токена с текущим origin в headers
             const response = await fetch(this.socketTokenEndpoint, {
                 headers: {
                     'Authorization': `Bearer ${this.getToken()}`,
                     'X-Requested-With': 'XMLHttpRequest',
-                    'Origin': currentOrigin
+                    'Origin': currentOrigin,
+                    'Accept': 'application/json' // Явно указываем ожидаемый формат
                 }
             });
         
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            if (!response.ok) {
+                // Проверяем content-type перед парсингом
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    throw new Error(`Invalid response format: ${text.substring(0, 100)}`);
+                }
+                throw new Error(`HTTP ${response.status}`);
+            }
         
             const data = await response.json();
-            return {
-                token: data.token,
-                expiresIn: data.expires_in || 1800,
-                socketUrl: data.socket_url || socketUrl  // Динамический URL
-            };
+            return this._formatSocketTokenResponse(data, currentOrigin);
         } catch (error) {
-            console.error('Socket token error:', error);
+            this.logger.error('Socket token error:', error);
+        
+            // Если получили HTML вместо JSON, вероятно проблема с сервером
+            if (error.message.includes('Invalid response format')) {
+                throw new Error('Server returned HTML instead of JSON. Check server configuration.');
+            }
+        
             throw error;
         }
+    }
+
+    _formatSocketTokenResponse(data, currentOrigin) {
+        return {
+            token: data.token,
+            expiresIn: data.expires_in || 1800,
+            socketUrl: data.socket_url || currentOrigin.replace(/^http/, 'ws')
+        };
     }
 
     getTokenExpiry(token) {
@@ -445,7 +546,7 @@ export class AuthService {
             return Math.floor((expiresAt - Date.now()) / 1000);
         } catch (e) {
             this.logger.warn('Failed to parse token expiry', e);
-            return 300; // Default 5 minutes
+            return 300;
         }
     }
 }
