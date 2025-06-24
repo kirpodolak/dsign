@@ -10,7 +10,7 @@ class PlaybackHandler:
     """
     Handler for playback-related WebSocket events
     """
-    def __init__(self, db_session, logger: Optional[ServiceLogger] = None):
+    def __init__(self, db_session, socket_service=None, logger: Optional[ServiceLogger] = None):
         self.db = db_session
         self.socket_service = socket_service
         self.logger = logger or ServiceLogger('PlaybackHandler')
@@ -96,3 +96,56 @@ class PlaybackHandler:
         """
         # In a real implementation, this would check against an auth service
         return True  # Simplified for this example
+        
+    def handle_playback_command(self, data: Dict, sid: str):
+        """
+        Handle playback commands (play, pause, stop, seek, etc.)
+        :param data: Command data containing 'action' and optional parameters
+        :param sid: Session ID of the requesting client
+        """
+        if not self._check_authentication(sid):
+            self.logger.warning('Unauthorized playback command', {'sid': sid})
+            return False
+
+        try:
+            action = data.get('action')
+            if not action:
+                raise ValueError("No action specified in playback command")
+
+            with self.playback_lock:
+                # Process different playback commands
+                if action == 'play':
+                    # Implement play logic
+                    pass
+                elif action == 'pause':
+                    # Implement pause logic
+                    pass
+                elif action == 'stop':
+                    # Implement stop logic
+                    pass
+                elif action == 'seek':
+                    # Implement seek logic
+                    pass
+                else:
+                    raise ValueError(f"Unknown playback action: {action}")
+
+                # After processing command, emit updated state
+                self.emit_playback_update({
+                    'state': 'playing',  # Update with actual state
+                    'current_time': 0,   # Update with actual time
+                    'playlist_item_id': None  # Update if needed
+                })
+            
+                return True
+
+        except Exception as e:
+            self.logger.error('Failed to process playback command', {
+                'error': str(e),
+                'sid': sid,
+                'stack': True
+            })
+            emit('playback_error', {
+                'message': f'Failed to process command: {str(e)}',
+                'timestamp': datetime.utcnow().isoformat()
+            }, room=sid)
+            return False
