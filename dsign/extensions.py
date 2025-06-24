@@ -7,6 +7,7 @@ import os
 import logging
 from typing import Dict, Any
 from dsign.config.config import Config, config
+from dsign.services.sockets.service import SocketService  # Добавлен новый импорт
 
 # Инициализация экземпляров расширений
 db = SQLAlchemy()
@@ -37,16 +38,25 @@ def init_extensions(app) -> Dict[str, Any]:
             always_connect=True  # Важно для стабильности соединений
         )
         
-        # 3. Настройка аутентификации
+        # 3. Инициализация SocketService
+        socket_service = SocketService(
+            socketio=socketio,
+            db_session=db,
+            app=app,
+            logger=app.logger
+        )
+        app.socket_service = socket_service  # Прикрепляем к app
+        
+        # 4. Настройка аутентификации
         _configure_auth(app)
         
-        # 4. Создание рабочих директорий
+        # 5. Создание рабочих директорий
         _ensure_directories(app)
         
-        # 5. Установка обработчиков
+        # 6. Установка обработчиков
         app.teardown_appcontext(_shutdown_session)
         
-        # 6. Настройка кэширования
+        # 7. Настройка кэширования
         configure_static_cache(app)
         
         app.logger.info("Extensions initialized successfully")
@@ -54,7 +64,8 @@ def init_extensions(app) -> Dict[str, Any]:
             'db': db,
             'bcrypt': bcrypt,
             'login_manager': login_manager,
-            'socketio': socketio
+            'socketio': socketio,
+            'socket_service': socket_service  # Добавлен в возвращаемые расширения
         }
         
     except Exception as e:
@@ -115,4 +126,11 @@ def configure_static_cache(app):
             response.cache_control.public = True
         return response
 
-__all__ = ['db', 'bcrypt', 'login_manager', 'socketio', 'init_extensions']
+__all__ = [
+    'db', 
+    'bcrypt', 
+    'login_manager', 
+    'socketio', 
+    'init_extensions',
+    'SocketService'  # Добавлен в экспортируемые объекты
+]
