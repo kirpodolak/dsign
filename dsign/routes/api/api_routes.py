@@ -14,7 +14,7 @@ from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
 from PIL import Image
 from dsign.config.config import THUMBNAIL_FOLDER, THUMBNAIL_URL
 from dsign.services import ThumbnailService
-from .extensions import bcrypt
+from dsign.extensions import bcrypt
 
 thumbnail_lock = Lock()
 
