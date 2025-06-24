@@ -7,6 +7,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from typing import Optional, Dict, Any, Union
 import json
+import traceback
 from pathlib import Path
 from datetime import datetime
 from flask import Flask
