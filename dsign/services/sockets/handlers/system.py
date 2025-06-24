@@ -396,48 +396,151 @@ class SystemHandlers:
         }
 
     def verify_socket_token(self, token: str) -> Dict:
-        """Verify JWT token for socket connections"""
+        """
+        Verify JWT token for socket connections with enhanced security checks
+        
+        Args:
+            token: JWT token string to verify
+            
+        Returns:
+            Dict: Decoded token payload if valid
+            
+        Raises:
+            ValueError: With detailed error message for any validation failure
+            
+        Example:
+            >>> try:
+            ...     payload = verify_socket_token(token)
+            ... except ValueError as e:
+            ...     print(f"Token verification failed: {e}")
+        """
         try:
-            if not token:
-                raise ValueError('Empty token provided')
+            # Input validation
+            if not token or not isinstance(token, str):
+                raise ValueError('Invalid token format: must be non-empty string')
                 
-            if isinstance(token, str):
-                token = token.encode('utf-8')
-                
+            # Standardize token encoding
+            token_bytes = token.encode('utf-8') if isinstance(token, str) else token
+            
+            # Decode with strict validation
             decoded = jwt.decode(
-                token,
+                token_bytes,
                 current_app.config['SECRET_KEY'],
                 algorithms=['HS256'],
                 options={
                     'verify_exp': True,
                     'verify_aud': True,
                     'verify_iss': True,
-                    'require': ['user_id', 'purpose']
+                    'verify_signature': True,
+                    'require': ['user_id', 'purpose', 'exp', 'iat']
                 },
                 audience='socket-client',
-                issuer='media-server'
+                issuer='media-server',
+                leeway=30  # 30 seconds leeway for clock skew
             )
             
+            # Custom claims validation
             if decoded.get('purpose') != 'socket_connection':
                 raise ValueError('Invalid token purpose')
                 
-            return decoded
+            # Token freshness check (e.g., not older than 1 hour)
+            issued_at = decoded.get('iat')
+            if issued_at and (datetime.utcnow() - datetime.fromtimestamp(issued_at)) > timedelta(hours=1):
+                raise ValueError('Stale token')
+                
+            # Additional business logic checks
+            if not self._validate_user_access(decoded['user_id']):
+                raise ValueError('User access denied')
+                
+            return {
+                'user_id': decoded['user_id'],
+                'is_valid': True,
+                'issued_at': datetime.fromtimestamp(decoded['iat']).isoformat(),
+                'expires_at': datetime.fromtimestamp(decoded['exp']).isoformat()
+            }
             
         except jwt.ExpiredSignatureError:
-            self.logger.warning('Expired token encountered')
-            raise ValueError('Token expired')
+            self.logger.warning('Expired token encountered', extra={'token': token[:10] + '...'})
+            raise ValueError('Token has expired. Please renew your connection')
         except jwt.InvalidAudienceError:
-            self.logger.warning('Invalid token audience')
-            raise ValueError('Invalid audience')
+            self.logger.warning('Invalid token audience', extra={'expected': 'socket-client'})
+            raise ValueError('Invalid client type')
         except jwt.InvalidIssuerError:
-            self.logger.warning('Invalid token issuer')
-            raise ValueError('Invalid issuer')
+            self.logger.warning('Invalid token issuer', extra={'expected': 'media-server'})
+            raise ValueError('Invalid token source')
         except jwt.InvalidTokenError as e:
-            self.logger.error(f'Invalid token: {str(e)}')
-            raise ValueError(f'Invalid token: {str(e)}')
+            self.logger.error('Token validation failed', extra={
+                'error': str(e),
+                'token': token[:10] + '...'
+            })
+            raise ValueError('Security token invalid') from e
         except Exception as e:
-            self.logger.error(f'Token verification failed: {str(e)}')
-            raise ValueError(f'Token verification failed: {str(e)}')
+            self.logger.critical('Unexpected token verification error', extra={
+                'error': str(e),
+                'type': type(e).__name__,
+                'token': token[:10] + '...'
+            })
+            raise ValueError('Security system error') from e
+
+    def _validate_user_access(self, user_id: int) -> bool:
+        """
+        Validate if user has permission to establish socket connection
+        
+        Args:
+            user_id: Authenticated user ID from token
+            
+        Returns:
+            bool: True if access granted, False if denied
+            
+        Raises:
+            ValueError: If user doesn't exist or is not active
+        """
+        try:
+            from ..models import User  # Ленивый импорт для избежания циклических зависимостей
+            
+            # 1. Проверка существования пользователя
+            user = self.db.session.get(User, user_id)
+            if not user:
+                self.logger.warning(f"User not found", extra={'user_id': user_id})
+                return False
+                
+            # 2. Проверка активности аккаунта
+            if not user.is_active:
+                self.logger.warning(f"Inactive user attempt", extra={'user_id': user_id})
+                return False
+                
+            # 3. Проверка блокировки/бана
+            if user.is_blocked:
+                self.logger.warning(f"Blocked user attempt", extra={'user_id': user_id})
+                return False
+                
+            # 4. Проверка ролей/прав (пример)
+            required_roles = {'user', 'admin'}
+            if not set(user.roles) & required_roles:
+                self.logger.warning(f"Access denied - insufficient privileges", 
+                                  extra={'user_id': user_id, 'roles': user.roles})
+                return False
+                
+            # 5. Дополнительные кастомные проверки
+            if not self._check_connection_quota(user_id):
+                self.logger.warning(f"Connection quota exceeded", extra={'user_id': user_id})
+                return False
+                
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"User access validation failed: {str(e)}", 
+                             extra={'user_id': user_id, 'error': str(e)})
+            raise ValueError("Access validation error") from e
+
+    def _check_connection_quota(self, user_id: int) -> bool:
+        """Пример проверки лимита подключений"""
+        max_connections = 3
+        current_connections = len([
+            sid for sid, client in self.connected_clients.items() 
+            if client.get('user_id') == user_id
+        ])
+        return current_connections < max_connections
 
     def is_authenticated(self, sid: str) -> bool:
         """Check if client is authenticated"""
