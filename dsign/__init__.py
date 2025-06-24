@@ -4,6 +4,7 @@ from flask_wtf import CSRFProtect
 import logging
 import time
 import subprocess
+import traceback
 from pathlib import Path
 from threading import Thread
 from typing import Dict, Any
