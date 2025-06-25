@@ -27,16 +27,31 @@ class SocketAuthService:
     def verify_socket_token(self, token: str) -> Dict:
         """Верификация WebSocket токена"""
         try:
+            if not token:
+                raise ValueError("Empty token provided")
+            
+            # Добавляем проверку типа токена
+            if isinstance(token, dict):
+                token = token.get('token', '')
+            
             payload = self.auth_service.verify_token(
                 token=token,
                 socket_token=True
             )
+        
             if not payload:
+                self.logger.error('Token verification returned empty payload')
                 raise ValueError("Invalid socket token")
+            
+            # Добавляем проверку user_id
+            if 'user_id' not in payload:
+                raise ValueError("Token missing user_id")
+            
             return payload
         except Exception as e:
             self.logger.error('Socket token verification failed', {
                 'error': str(e),
+                'token_sample': str(token)[:10] + '...' if token else None,
                 'stack': True
             })
             raise
