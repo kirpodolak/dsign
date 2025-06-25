@@ -130,11 +130,24 @@ class SystemHandlers:
         @self.socket_service.socketio.on('connect')
         def handle_connect(auth=None):
             try:
+                self.logger.info('New connection attempt', {
+                    'sid': request.sid,
+                    'auth': auth,
+                    'headers': dict(request.headers),
+                    'ip': request.remote_addr
+                })
+                
                 token = self._extract_token(auth)
                 if not token:
+                    self.logger.warning('No token provided on connect')
                     return self._handle_missing_token()
                     
                 decoded = self.verify_socket_token(token)
+                
+                # Добавляем проверку активности пользователя
+                if not self._validate_user_access(decoded['user_id']):
+                    raise ValueError("User account is not active")
+                    
                 self._register_client(decoded)
                 
                 emit('connection_ack', {
@@ -149,6 +162,10 @@ class SystemHandlers:
             except jwt.InvalidTokenError as e:
                 return self._handle_token_error(f'Invalid token: {str(e)}', 'auth_error')
             except Exception as e:
+                self.logger.error('Connection failed', {
+                    'error': str(e),
+                    'stack_trace': traceback.format_exc()
+                })
                 return self._handle_connection_error(str(e))
 
     def _extract_token(self, auth) -> Optional[str]:
