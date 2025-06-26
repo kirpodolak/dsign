@@ -76,30 +76,13 @@ export class SocketManager {
         this.onReconnect = options.onReconnect || null;
         this.onCircuitBreakerOpen = options.onCircuitBreakerOpen || null;
         this.onCircuitBreakerClose = options.onCircuitBreakerClose || null;
+    }
 
-        // Initialize auth socket
-        this._initAuthSocket = this._initAuthSocket.bind(this);
-        this._handleRetry = this._handleRetry.bind(this);
-        this.connect = this.connect.bind(this);
-        this._init = this._init.bind(this);
-        this._handleError = this._handleError.bind(this);
-        this._handleAuthFailure = this._handleAuthFailure.bind(this);
-        this._handleConnect = this._handleConnect.bind(this);
-        this._handleDisconnect = this._handleDisconnect.bind(this);
-        this._handleConnectError = this._handleConnectError.bind(this);
-        this._handleSocketError = this._handleSocketError.bind(this);
-        this._handleAuthenticated = this._handleAuthenticated.bind(this);
-        this._handleUnauthorized = this._handleUnauthorized.bind(this);
-        this._handleTokenExpired = this._handleTokenExpired.bind(this);
-        this._handleTokenRefresh = this._handleTokenRefresh.bind(this);
-        this._handleCustomEvent = this._handleCustomEvent.bind(this);
-        this.cleanup = this.cleanup.bind(this);
-        this.emit = this.emit.bind(this);
-        this.on = this.on.bind(this);
-        this.off = this.off.bind(this);
-        this.disconnect = this.disconnect.bind(this);
-
-        // Initialize auth socket
+    initAfterAuth = () => {
+        if (!this.authService.getToken()) {
+            this.logger.debug('[Socket] Skipping init - no auth token');
+            return;
+        }
         this._initAuthSocket();
     }
 
@@ -271,7 +254,6 @@ export class SocketManager {
                 upgrade: false,
                 forceNew: true,
                 timeout: CONFIG.CONNECTION_TIMEOUT,
-                // Добавляем query параметры для отладки
                 query: {
                     'client_type': 'browser',
                     'version': '1.0'
@@ -280,7 +262,6 @@ export class SocketManager {
 
             this._setupAuthSocketEventHandlers();
             
-            // Добавляем обработку ошибок инициализации
             this.authSocket.on('connect_error', (error) => {
                 this.logger.error('[AuthSocket] Connection error:', error);
                 this._scheduleAuthSocketRetry();
@@ -298,7 +279,6 @@ export class SocketManager {
             return;
         }
 
-        // Устанавливаем новые обработчики
         this.authSocket.on('connect', () => {
             this.logger.debug('[AuthSocket] Connected');
         });
@@ -376,7 +356,6 @@ export class SocketManager {
 
             this.cleanup();
             
-            // Добавляем дополнительные параметры соединения
             this.socket = io({
                 reconnection: true,
                 reconnectionAttempts: this.maxReconnectAttempts,
@@ -394,13 +373,11 @@ export class SocketManager {
                 upgrade: false,
                 rememberUpgrade: false,
                 rejectUnauthorized: false,
-                // Добавляем forceNew для избежания проблем с повторными соединениями
                 forceNew: true
             });
             
             this._setupEventHandlers();
             
-            // Добавляем таймаут для установки соединения
             this.connectionTimeout = setTimeout(() => {
                 if (!this.isConnected) {
                     this.logger.warn('[Socket] Connection timeout');
@@ -427,7 +404,6 @@ export class SocketManager {
             return;
         }
 
-        // Устанавливаем новые обработчики
         this.socket.on('connect', this._handleConnect);
         this.socket.on('disconnect', this._handleDisconnect);
         this.socket.on('connect_error', this._handleConnectError);
@@ -439,8 +415,7 @@ export class SocketManager {
         this.socket.onAny(this._handleCustomEvent);
     };
 
-    _handleConnect() {
-        // Reset failure count on successful connection
+    _handleConnect = () => {
         this.circuitBreaker.failureCount = 0;
         
         this.logger.debug('[Socket] Connected');
@@ -456,7 +431,7 @@ export class SocketManager {
         }
     }
 
-    _handleDisconnect(reason) {
+    _handleDisconnect = (reason) => {
         this.logger.log('[Socket] Disconnected:', reason);
         this.isConnected = false;
         this._handleDisconnectReason(reason);
@@ -479,7 +454,6 @@ export class SocketManager {
     _handleConnectError = (error) => {
         this.logger.error('[Socket] Connection error:', error);
         
-        // Добавляем специфичную обработку для разных типов ошибок
         if (error.message.includes('Authentication error')) {
             this._handleAuthFailure(error);
         } else if (error.message.includes('timeout')) {
@@ -499,18 +473,17 @@ export class SocketManager {
         this.isConnected = false;
         this._handleError(error);
         
-        // Принудительно закрываем соединение, если оно есть
         if (this.socket) {
             this.socket.disconnect();
         }
     };
 
-    _handleSocketError(error) {
+    _handleSocketError = (error) => {
         this.logger.error('[Socket] Error:', error);
         this._handleError(error);
     }
 
-    _handleAuthenticated() {
+    _handleAuthenticated = () => {
         this.logger.debug('[Socket] Authenticated');
         this.isAuthenticated = true;
         this._clearAuthTimeout();
@@ -523,14 +496,14 @@ export class SocketManager {
         }
     }
 
-    _handleUnauthorized(error) {
+    _handleUnauthorized = (error) => {
         this.logger.error('[Socket] Unauthorized:', error);
         this.isAuthenticated = false;
         this._initAuthSocket();
         this._handleError(new Error('Authentication failed'));
     }
 
-    async _handleTokenExpired() {
+    _handleTokenExpired = async () => {
         this.logger.debug('[Socket] Token expired, reconnecting...');
         try {
             await this.connect();
@@ -539,12 +512,12 @@ export class SocketManager {
         }
     }
 
-    _handleTokenRefresh(newToken) {
+    _handleTokenRefresh = (newToken) => {
         this.logger.debug('[Socket] Received token refresh');
         this.onTokenRefresh(newToken);
     }
 
-    _handleCustomEvent(event, ...args) {
+    _handleCustomEvent = (event, ...args) => {
         const handlers = this.eventHandlers.get(event);
         if (handlers) {
             handlers.forEach(handler => handler(...args));
@@ -556,7 +529,7 @@ export class SocketManager {
         return failureCount >= threshold && Date.now() - lastFailureTime < timeout;
     }
 
-    _openCircuit() {
+    _openCircuit = () => {
         this.circuitBreaker.isOpen = true;
         this.circuitBreaker.lastFailureTime = Date.now();
         this.logger.error('[Circuit Breaker] Circuit opened due to repeated failures');
@@ -571,13 +544,12 @@ export class SocketManager {
             'Server is temporarily unavailable. Trying to reconnect...'
         );
 
-        // Schedule circuit to half-open after timeout
         this.circuitBreakerTimer = setTimeout(() => {
             this._tryCloseCircuit();
         }, this.circuitBreaker.timeout);
     }
 
-    _tryCloseCircuit() {
+    _tryCloseCircuit = () => {
         this.circuitBreaker.isOpen = false;
         this.circuitBreaker.failureCount = 0;
         this.logger.log('[Circuit Breaker] Circuit reset to half-open state');
@@ -586,7 +558,6 @@ export class SocketManager {
             this.onCircuitBreakerClose();
         }
 
-        // Attempt to reconnect
         this.connect().catch(err => {
             this.logger.error('[Circuit Breaker] Half-open test failed:', err);
             this._openCircuit();
@@ -594,27 +565,22 @@ export class SocketManager {
     }
 
     _handleRetry = (error) => {
-        // Update failure count
         this.circuitBreaker.failureCount++;
         this.circuitBreaker.lastFailureTime = Date.now();
 
-        // Check if circuit should be opened
         if (this._shouldOpenCircuit() && !this.circuitBreaker.isOpen) {
             this._openCircuit();
             return;
         }
 
-        // If circuit is open, don't attempt to reconnect
         if (this.circuitBreaker.isOpen) {
             this.logger.debug('[Socket] Connection blocked: circuit is open');
             return;
         }
 
-        // Standard retry logic
         this.logger.error('[Socket] Handling retry for error:', error);
         this.reconnectAttempts++;
         
-        // Добавляем экспоненциальную задержку с джиттером
         const jitter = Math.random() * 2000;
         this.reconnectDelay = Math.min(
             Math.pow(2, this.reconnectAttempts) * 1000 + jitter,
@@ -626,7 +592,6 @@ export class SocketManager {
         } else {
             this.logger.log(`[Socket] Will retry in ${Math.round(this.reconnectDelay/1000)} sec...`);
             setTimeout(() => {
-                // Перед повторной попыткой проверяем статус аутентификации
                 this.authService.checkAuth().then(authenticated => {
                     if (authenticated) {
                         this.connect();
@@ -782,7 +747,6 @@ let socketManagerInstance = null;
 export function initializeSocketManager(options = {}) {
     if (!socketManagerInstance) {
         try {
-            // Добавляем дефолтные обработчики ошибок
             const defaultOptions = {
                 onError: (error) => {
                     console.error('[Socket] Global error handler:', error);
@@ -806,7 +770,6 @@ export function initializeSocketManager(options = {}) {
         } catch (error) {
             console.error('Failed to initialize SocketManager:', error);
             
-            // Возвращаем заглушку, чтобы не ломать приложение
             return {
                 emit: () => console.warn('SocketManager not initialized'),
                 disconnect: () => {},
