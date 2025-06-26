@@ -57,7 +57,19 @@ class AppInitializer {
                     this.setupAuthMonitoring()
                 ]);
 
-                await this.initWebSocket();
+                document.addEventListener('auth:status_changed', (event) => {
+                    const isAuthenticated = event.detail;
+                    if (isAuthenticated && !this.socketInitialized) {
+                        this.initWebSocket().catch(error => {
+                            this.logger.error('WebSocket init after auth change failed:', error);
+                        });
+                    }
+                });
+
+                if (this.authService.getToken()) {
+                    await this.initWebSocket();
+                }
+
                 this.initModules();
 
                 this.logger.debug('Application initialization completed');
@@ -226,17 +238,6 @@ class AppInitializer {
             window.App.trigger = window.App.trigger || function(event, data) {
                 document.dispatchEvent(new CustomEvent(event, { detail: data }));
             };
-
-            document.addEventListener('auth:status_changed', (event) => {
-                const isAuthenticated = event.detail;
-                this.logger.debug(`Auth status changed: ${isAuthenticated}`);
-                
-                if (isAuthenticated && !this.socketInitialized) {
-                    this.initWebSocket().catch(error => {
-                        this.logger.error('WebSocket init after auth change failed:', error);
-                    });
-                }
-            });
         }
     }
 
@@ -351,21 +352,6 @@ class AppInitializer {
                 });
             }
         });
-    }
-
-    handleAuthError(error) {
-        this.logger.warn('Handling auth error:', error);
-        
-        this.authService.clearAuth();
-        
-        this.socketManager.disconnect();
-        this.socketInitialized = false;
-        window.App.state.socketConnected = false;
-        
-        if (!window.location.pathname.includes('/api/auth/login')) {
-            const redirectUrl = encodeURIComponent(window.location.pathname + window.location.search);
-            window.location.href = `/api/auth/login?redirect=${redirectUrl}`;
-        }
     }
 
     showFatalError(message) {
