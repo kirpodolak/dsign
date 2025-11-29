@@ -87,7 +87,15 @@ class PlaybackService:
         if extra:
             extra_data.update(extra)
         safe_extra = self._sanitize_extra_data(extra_data)
-        self.logger.error(message, exc_info=exc_info, extra=safe_extra)
+        
+        # Вместо передачи exc_info, логируем исключение отдельно если нужно
+        if exc_info:
+            self.logger.error(f"{message}", extra=safe_extra)
+            # Если нужно полное traceback, логируем его отдельно
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}", extra=safe_extra)
+        else:
+            self.logger.error(f"{message}", extra=safe_extra)
 
     def _log_info(self, message: str, extra: Optional[Dict[str, Any]] = None):
         """Унифицированный метод для информационных логов"""
@@ -95,7 +103,7 @@ class PlaybackService:
         if extra:
             extra_data.update(extra)
         safe_extra = self._sanitize_extra_data(extra_data)
-        self.logger.info(message, extra=safe_extra)
+        self.logger.info(f"{message}", extra=safe_extra)
 
     def _log_warning(self, message: str, extra: Optional[Dict[str, Any]] = None):
         """Унифицированный метод для предупреждений"""
@@ -103,7 +111,15 @@ class PlaybackService:
         if extra:
             extra_data.update(extra)
         safe_extra = self._sanitize_extra_data(extra_data)
-        self.logger.warning(message, extra=safe_extra)
+        self.logger.warning(f"{message}", extra=safe_extra)
+
+    def _log_debug(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        """Унифицированный метод для отладочных логов"""
+        extra_data = {'service_module': 'PlaybackService'}
+        if extra:
+            extra_data.update(extra)
+        safe_extra = self._sanitize_extra_data(extra_data)
+        self.logger.debug(f"{message}", extra=safe_extra)
 
     def _init_with_retry(self, max_attempts: int = 3, initial_delay: float = 2.0):
         """Optimized initialization with parallel checks and backoff"""
@@ -221,10 +237,24 @@ class PlaybackService:
         raise RuntimeError("Could not establish idle state")
 
     # Делегированные методы
-    def play(self, playlist_id: int) -> bool:
-        """Play specified playlist"""
+    def play(self, playlist_id: int, settings: Optional[Dict] = None) -> bool:
+        """Play specified playlist with optional settings"""
         try:
             start_time = time.time()
+            
+            # Если переданы настройки, применить их перед воспроизведением
+            if settings:
+                self._log_info(
+                    "Applying custom settings for playback", 
+                    extra={
+                        'playlist_id': playlist_id, 
+                        'action': 'apply_settings',
+                        'settings_count': len(settings)
+                    }
+                )
+                # Применяем настройки через mpv_manager
+                self._mpv_manager.update_settings(settings)
+            
             result = self._playlist_manager.play(playlist_id)
             self._log_info(
                 "Playing playlist", 
@@ -232,7 +262,8 @@ class PlaybackService:
                     'playlist_id': playlist_id, 
                     'action': 'play',
                     'duration_sec': round(time.time() - start_time, 3),
-                    'success': result
+                    'success': result,
+                    'has_custom_settings': bool(settings)
                 }
             )
             return result
