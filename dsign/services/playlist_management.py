@@ -21,7 +21,31 @@ class PlaylistManager:
 
     def play(self, playlist_id: int) -> bool:
         """Play playlist with profile support"""
-        from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
+        # Исправленные импорты - конкретные классы из модулей
+        try:
+            from ..models.playlist import Playlist
+            from ..models.playback_status import PlaybackStatus
+            from ..models.playlist_profile_assignment import PlaylistProfileAssignment
+            from ..models.playback_profile import PlaybackProfile
+        except ImportError:
+            # Альтернативные варианты импортов
+            try:
+                from dsign.models.playlist import Playlist
+                from dsign.models.playback_status import PlaybackStatus
+                from dsign.models.playlist_profile_assignment import PlaylistProfileAssignment
+                from dsign.models.playback_profile import PlaybackProfile
+            except ImportError:
+                # Фолбэк на общий импорт с конкретными классами
+                from ..models import (
+                    Playlist as PlaylistModel,
+                    PlaybackStatus as PlaybackStatusModel,
+                    PlaylistProfileAssignment as PlaylistProfileAssignmentModel,
+                    PlaybackProfile as PlaybackProfileModel
+                )
+                Playlist = PlaylistModel
+                PlaybackStatus = PlaybackStatusModel
+                PlaylistProfileAssignment = PlaylistProfileAssignmentModel
+                PlaybackProfile = PlaybackProfileModel
     
         try:
             # Get playlist and validate
@@ -59,22 +83,22 @@ class PlaylistManager:
                 playlist
             )
         
-            # Load playlist with retry logic - используем исправленный метод _send_command
+            # Load playlist with retry logic
             result = self._mpv_manager._send_command({
                 "command": ["loadlist", str(playlist_file), "replace"],
-                "request_id": int(time.time() * 1000)  # Добавляем целочисленный request_id
+                "request_id": int(time.time() * 1000)
             }, timeout=10.0)
         
             if not result or result.get("error") != "success":
                 raise RuntimeError("Failed to load playlist")
 
-            # Ensure looping is enabled - с целочисленным request_id
+            # Ensure looping is enabled
             self._mpv_manager._send_command({
                 "command": ["set_property", "loop-playlist", "inf"],
                 "request_id": int(time.time() * 1000)
             })
 
-            # Start playback - с целочисленным request_id
+            # Start playback
             self._mpv_manager._send_command({
                 "command": ["set_property", "pause", "no"],
                 "request_id": int(time.time() * 1000)
@@ -90,10 +114,20 @@ class PlaylistManager:
             return True
 
         except Exception as e:
-            self.logger.error(f"Playback error: {str(e)}", exc_info=True)
-            self.db_session.rollback()
+            self.logger.error(f"Playback error: {str(e)}")
+            try:
+                # Безопасный rollback
+                if hasattr(self.db_session, 'rollback'):
+                    self.db_session.rollback()
+            except Exception as rollback_error:
+                self.logger.error(f"Rollback failed: {str(rollback_error)}")
+            
             # Fall back to idle logo
-            self._logo_manager.display_idle_logo()
+            try:
+                self._logo_manager.display_idle_logo()
+            except Exception as logo_error:
+                self.logger.error(f"Failed to display idle logo: {str(logo_error)}")
+            
             raise RuntimeError(f"Failed to start playback: {str(e)}")
 
     def stop(self) -> bool:
@@ -101,12 +135,19 @@ class PlaylistManager:
         try:
             return self._logo_manager.display_idle_logo()
         except Exception as e:
-            self.logger.error(f"Stop error: {str(e)}", exc_info=True)
+            self.logger.error(f"Stop error: {str(e)}")
             return False
 
     def get_status(self) -> Dict:
         """Get current playback status"""
-        from ..models import PlaybackStatus
+        try:
+            from ..models.playback_status import PlaybackStatus
+        except ImportError:
+            try:
+                from dsign.models.playback_status import PlaybackStatus
+            except ImportError:
+                from ..models import PlaybackStatus as PlaybackStatusModel
+                PlaybackStatus = PlaybackStatusModel
         
         status = self.db_session.query(PlaybackStatus).first()
         return {
@@ -152,7 +193,7 @@ class PlaylistManager:
                 return False
                 
         except Exception as e:
-            self.logger.error(f"MPV restart failed: {str(e)}", exc_info=True)
+            self.logger.error(f"MPV restart failed: {str(e)}")
             return False
 
     def get_playback_info(self) -> Dict:
@@ -161,7 +202,6 @@ class PlaylistManager:
         for category, settings in self._mpv_manager._current_settings.items():
             info[category] = {}
             for setting in settings.keys():
-                # Добавляем целочисленный request_id для каждого запроса свойства
                 response = self._mpv_manager._send_command({
                     "command": ["get_property", setting],
                     "request_id": int(time.time() * 1000)
@@ -173,7 +213,6 @@ class PlaylistManager:
     def stop_idle_logo(self):
         """Stop idle logo display"""
         try:
-            # Добавляем целочисленный request_id для команды stop
             res = self._mpv_manager._send_command({
                 "command": ["stop"],
                 "request_id": int(time.time() * 1000)
