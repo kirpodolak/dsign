@@ -136,6 +136,10 @@ def _configure_playback_service(app: Flask) -> None:
     
     with app.app_context():
         try:
+            # Сначала убедимся что таблицы существуют
+            db.create_all()
+            
+            # Теперь безопасно запрашиваем статус
             playback_status = db.session.query(PlaybackStatus).first()
             app.logger.info("Database connection verified")
             
@@ -147,9 +151,22 @@ def _configure_playback_service(app: Flask) -> None:
                 _resume_playback(app, playback_status.playlist_id)
                 
         except Exception as db_error:
-            app.logger.error(f"Database/playback initialization failed: {str(db_error)}", exc_info=True)
-            _fallback_to_idle_logo(app)
-            raise RuntimeError("Initialization failed") from db_error
+            app.logger.error(f"Database/playback initialization failed: {str(db_error)}")
+            
+            # Попытка восстановления: создаем таблицы и начальный статус
+            try:
+                db.create_all()
+                new_status = PlaybackStatus(status='idle', playlist_id=None)
+                db.session.add(new_status)
+                db.session.commit()
+                app.logger.info("Recovery: Created tables and initial playback status")
+                _start_idle_logo(app)
+            except Exception as recovery_error:
+                app.logger.error(f"Recovery also failed: {str(recovery_error)}")
+                _fallback_to_idle_logo(app)
+            
+            # Не падаем полностью, продолжаем с idle режимом
+            app.logger.warning("Continuing in idle mode despite initialization issues")
 
 def _start_idle_logo(app: Flask) -> None:
     """Запуск логотипа в режиме ожидания"""
