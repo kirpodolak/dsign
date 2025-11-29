@@ -17,14 +17,11 @@ get_resolution() {
         fbset | grep -oP "'\K\d+x\d+"
         return
     fi
-    if [ -n "$DISPLAY" ] && command -v xrandr &> /dev/null; then
-        xrandr | grep -oP 'current \K\d+ x \d+' | tr -d ' '
-        return
-    fi
-    echo "1024x600"
+    echo "1024x768"  # Дефолтное для Raspberry Pi
 }
 
 RESOLUTION=$(get_resolution)
+echo "Resolution: $RESOLUTION"
 
 # Проверка ffmpeg
 if ! command -v ffmpeg &> /dev/null; then
@@ -32,36 +29,66 @@ if ! command -v ffmpeg &> /dev/null; then
     exit 1
 fi
 
+# Проверка socat
+if ! command -v socat &> /dev/null; then
+    echo "Warning: socat is not installed, MPV screenshots disabled" >&2
+fi
+
 # Функция: скриншот через MPV (если доступен)
 screenshot_with_mpv() {
-    echo '{"command": ["screenshot-to-file", "'"$OUTPUT_DIR/$OUTPUT_FILE"'", "video"]}' | socat - "$MPV_SOCKET"
-    return $?
-}
-
-# Проверка наличия сокета и активности MPV
-if [ -S "$MPV_SOCKET" ]; then
-    STATUS=$(echo '{"command": ["get_property", "playback-time"]}' | socat - "$MPV_SOCKET")
-    if echo "$STATUS" | grep -q '"error":"success"'; then
-        mkdir -p "$OUTPUT_DIR"
-        if screenshot_with_mpv; then
-            echo "Screenshot taken from MPV."
-            exit 0
+    if command -v socat &> /dev/null && [ -S "$MPV_SOCKET" ]; then
+        echo '{"command": ["screenshot-to-file", "'"$OUTPUT_DIR/$OUTPUT_FILE"'", "video"]}' | socat - "$MPV_SOCKET" 2>/dev/null
+        if [ $? -eq 0 ]; then
+            return 0
         fi
     fi
+    return 1
+}
+
+# Создаем директорию если не существует
+mkdir -p "$OUTPUT_DIR"
+
+# Пытаемся сделать скриншот через MPV
+if screenshot_with_mpv; then
+    echo "Screenshot taken from MPV."
+    exit 0
 fi
 
 # Fallback: скриншот через framebuffer
-mkdir -p "$OUTPUT_DIR"
-sudo cat "$FB_DEV" > "$OUTPUT_DIR/screen.raw"
-
-ffmpeg \
-    -f rawvideo \
-    -pixel_format rgb565le \
-    -video_size "$RESOLUTION" \
-    -i "$OUTPUT_DIR/screen.raw" \
-    -frames:v 1 \
-    "$OUTPUT_DIR/$OUTPUT_FILE" \
-    -y
-
-rm "$OUTPUT_DIR/screen.raw"
-echo "Screenshot taken from framebuffer."
+echo "Using framebuffer fallback..."
+if [ -c "$FB_DEV" ]; then
+    # Создаем временный файл
+    TEMP_RAW=$(mktemp)
+    
+    # Копируем framebuffer (без sudo если возможно)
+    if [ -r "$FB_DEV" ]; then
+        cat "$FB_DEV" > "$TEMP_RAW" 2>/dev/null
+    else
+        sudo cat "$FB_DEV" > "$TEMP_RAW" 2>/dev/null
+    fi
+    
+    # Конвертируем в JPEG с правильными параметрами
+    ffmpeg \
+        -f rawvideo \
+        -pixel_format rgb565le \
+        -video_size "$RESOLUTION" \
+        -i "$TEMP_RAW" \
+        -pix_fmt yuvj420p \
+        -frames:v 1 \
+        "$OUTPUT_DIR/$OUTPUT_FILE" \
+        -y 2>/dev/null
+    
+    # Удаляем временный файл
+    rm -f "$TEMP_RAW"
+    
+    if [ -f "$OUTPUT_DIR/$OUTPUT_FILE" ]; then
+        echo "Screenshot taken from framebuffer."
+        exit 0
+    else
+        echo "Framebuffer capture failed."
+        exit 1
+    fi
+else
+    echo "Framebuffer device not found: $FB_DEV"
+    exit 1
+fi
