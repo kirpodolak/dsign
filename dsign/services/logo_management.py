@@ -72,18 +72,21 @@ class LogoManager:
         return logo_path
 
 
-    def _send_ipc_command(self, command: Dict, timeout: float = 2.0) -> bool:
-        """Safe IPC command sending with retries and timeout"""
+    def _send_ipc_command(self, command: Dict, timeout: float = 2.0) -> Optional[Dict]:
+        """Safe IPC command sending with retries and timeout - возвращает response или None"""
         for attempt in range(3):
             try:
-                response = self._mpv_manager._send_command(command)
-                if response and response.get('error') == 'success':
-                    return True
-                time.sleep(0.1 * (attempt + 1))
+                # Добавляем целочисленный request_id
+                command_with_id = command.copy()
+                command_with_id["request_id"] = int(time.time() * 1000)
+                
+                response = self._mpv_manager._send_command(command_with_id)
+                # Возвращаем полный response, а не булево значение
+                return response
             except Exception as e:
                 self.logger.warning(f"IPC attempt {attempt + 1} failed: {command} - {str(e)}")
                 time.sleep(0.2)
-        return False
+        return None
 
     def _validate_logo_file(self) -> Path:
         """Validate logo file with improved error handling"""
@@ -201,13 +204,14 @@ class LogoManager:
             # 1. Получаем текущие метаданные файла
             initial_stat = os.stat(logo_path)
             
-            # 2. Отправляем команду замены
+            # 2. Отправляем команду замены с целочисленным request_id
             cmd = {
                 "command": ["loadfile", str(logo_path), "replace"],
-                "request_id": f"logo_update_{time.time()}"
+                "request_id": int(time.time() * 1000)  # Целое число
             }
             response = self._send_ipc_command(cmd, timeout=2.0)
             
+            # Исправляем проверку ответа - response теперь объект или None
             if not response or response.get("error") != "success":
                 raise RuntimeError("MPV не подтвердил обновление логотипа")
             
