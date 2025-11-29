@@ -248,7 +248,9 @@ class MPVManager:
     def _send_command(self, command: Dict[str, Any], timeout: float = 5.0) -> Optional[Dict[str, Any]]:
         """Отправка команды с трейсингом"""
         command_name = command.get("command", ["unknown"])[0]
-        request_id = f"cmd_{time.time():.0f}"
+        # Используем целочисленный request_id
+        request_id = int(time.time() * 1000)
+        
         start_time = time.time()
         
         self._log_operation(
@@ -285,26 +287,47 @@ class MPVManager:
                             continue
                         s.connect(self.mpv_socket)
                     
-                    cmd_str = json.dumps(command) + '\n'
+                    # Добавляем request_id в команду
+                    command_with_id = command.copy()
+                    command_with_id["request_id"] = request_id
+                    
+                    cmd_str = json.dumps(command_with_id) + '\n'
                     s.sendall(cmd_str.encode())
                     
-                    response = s.recv(4096)
-                    if response:
-                        result = json.loads(response.decode())
-                        self._log_operation(
-                            "MPVCommand",
-                            "completed",
-                            {
-                                "command": command_name,
-                                "request_id": request_id,
-                                "response": result,
-                                "duration_sec": round(time.time() - start_time, 3),
-                                "attempt": attempt + 1
-                            }
-                        )
-                        return result
+                    # Читаем все данные до конца
+                    response_data = b""
+                    while True:
+                        chunk = s.recv(4096)
+                        if not chunk:
+                            break
+                        response_data += chunk
+                        # Пытаемся разобрать JSON после каждого чанка
+                        try:
+                            # Ищем первый полный JSON объект
+                            decoded = response_data.decode('utf-8')
+                            lines = decoded.strip().split('\n')
+                            for line in lines:
+                                if line.strip():
+                                    result = json.loads(line.strip())
+                                    # Проверяем, что это ответ на нашу команду
+                                    if result.get("request_id") == request_id:
+                                        self._log_operation(
+                                            "MPVCommand",
+                                            "completed",
+                                            {
+                                                "command": command_name,
+                                                "request_id": request_id,
+                                                "response": result,
+                                                "duration_sec": round(time.time() - start_time, 3),
+                                                "attempt": attempt + 1
+                                            }
+                                        )
+                                        return result
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            # Продолжаем читать если JSON неполный
+                            continue
                     
-                    raise TimeoutError("No response from MPV")
+                    raise TimeoutError("No valid JSON response from MPV")
                     
             except Exception as e:
                 self.logger.warning(
