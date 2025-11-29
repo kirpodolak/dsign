@@ -1,4 +1,6 @@
 import os
+import json
+import time
 from typing import Dict, Optional
 from pathlib import Path
 
@@ -19,7 +21,7 @@ class PlaylistManager:
 
     def play(self, playlist_id: int) -> bool:
         """Play playlist with profile support"""
-        from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment
+        from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
     
         try:
             # Get playlist and validate
@@ -57,22 +59,25 @@ class PlaylistManager:
                 playlist
             )
         
-            # Load playlist with retry logic
+            # Load playlist with retry logic - используем исправленный метод _send_command
             result = self._mpv_manager._send_command({
-                "command": ["loadlist", str(playlist_file), "replace"]
+                "command": ["loadlist", str(playlist_file), "replace"],
+                "request_id": int(time.time() * 1000)  # Добавляем целочисленный request_id
             }, timeout=10.0)
         
             if not result or result.get("error") != "success":
                 raise RuntimeError("Failed to load playlist")
 
-            # Ensure looping is enabled
+            # Ensure looping is enabled - с целочисленным request_id
             self._mpv_manager._send_command({
-                "command": ["set_property", "loop-playlist", "inf"]
+                "command": ["set_property", "loop-playlist", "inf"],
+                "request_id": int(time.time() * 1000)
             })
 
-            # Start playback
+            # Start playback - с целочисленным request_id
             self._mpv_manager._send_command({
-                "command": ["set_property", "pause", "no"]
+                "command": ["set_property", "pause", "no"],
+                "request_id": int(time.time() * 1000)
             })
 
             # Notify clients
@@ -156,8 +161,10 @@ class PlaylistManager:
         for category, settings in self._mpv_manager._current_settings.items():
             info[category] = {}
             for setting in settings.keys():
+                # Добавляем целочисленный request_id для каждого запроса свойства
                 response = self._mpv_manager._send_command({
-                    "command": ["get_property", setting]
+                    "command": ["get_property", setting],
+                    "request_id": int(time.time() * 1000)
                 })
                 if response and 'data' in response:
                     info[category][setting] = response['data']
@@ -166,7 +173,11 @@ class PlaylistManager:
     def stop_idle_logo(self):
         """Stop idle logo display"""
         try:
-            res = self._mpv_manager._send_command({"command": ["stop"]})
+            # Добавляем целочисленный request_id для команды stop
+            res = self._mpv_manager._send_command({
+                "command": ["stop"],
+                "request_id": int(time.time() * 1000)
+            })
             if res is not None:
                 self.logger.info("Idle logo stopped")
             else:
