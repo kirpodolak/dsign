@@ -297,15 +297,28 @@ class PlaylistService:
                     m3u_content += f"#EXTVLCOPT:run-time={file.duration}\n"
                 m3u_content += f"{base_url}{media_url}{file.file_name}\n"
         
+            # Создаем безопасное имя
             safe_name = re.sub(r'[\\/*?:"<>|]', "_", playlist.name)
-            filename = f"{safe_name}.m3u"
-            filepath = os.path.join(export_dir, filename)
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
             
-            with open(filepath, 'w', encoding='utf-8') as f:
+            # Сохраняем два файла:
+            # 1. По имени плейлиста (для пользователя)
+            filename_by_name = f"{safe_name}.m3u"
+            filepath_by_name = os.path.join(export_dir, filename_by_name)
+            
+            # 2. По ID (для программы)
+            filename_by_id = f"playlist_{playlist.id}.m3u"
+            filepath_by_id = os.path.join(export_dir, filename_by_id)
+            
+            os.makedirs(os.path.dirname(filepath_by_name), exist_ok=True)
+            
+            # Сохраняем оба файла
+            with open(filepath_by_name, 'w', encoding='utf-8') as f:
+                f.write(m3u_content)
+            
+            with open(filepath_by_id, 'w', encoding='utf-8') as f:
                 f.write(m3u_content)
 
-            # Удаляем старый файл если изменилось имя
+            # Удаляем старые файлы если изменилось имя
             if old_name and old_name != playlist.name:
                 old_safe_name = re.sub(r'[\\/*?:"<>|]', "_", old_name)
                 old_filepath = os.path.join(export_dir, f"{old_safe_name}.m3u")
@@ -320,7 +333,8 @@ class PlaylistService:
 
             self._log_info('M3U playlist generated', {
                 'playlist_id': playlist.id,
-                'filepath': filepath
+                'filepath_by_name': filepath_by_name,
+                'filepath_by_id': filepath_by_id
             })
             return True
             
