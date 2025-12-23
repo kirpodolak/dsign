@@ -4,6 +4,7 @@ import time
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Union, Any
+from pathlib import Path
 from flask import current_app
 from sqlalchemy import func, text
 from ..models import Playlist, PlaylistFiles
@@ -20,7 +21,14 @@ class PlaylistService:
         extra_data = {'module': 'PlaylistService'}
         if extra:
             extra_data.update(extra)
-        self.logger.error(message, exc_info=exc_info, extra=extra_data)
+    
+        # Вместо передачи exc_info, добавляем traceback в extra если нужно
+        if exc_info:
+            import traceback
+            if extra_data.get('traceback') is None:
+                extra_data['traceback'] = traceback.format_exc()
+    
+        self.logger.error(message, extra=extra_data)
 
     def _log_info(self, message: str, extra: Optional[Dict[str, Any]] = None):
         """Унифицированный метод для информационных логов"""
@@ -272,19 +280,23 @@ class PlaylistService:
             raise RuntimeError(f"Failed to update playlist {playlist_id}") from e
 
     def _generate_m3u_for_playlist(self, playlist, old_name=None):
-        """Генерация M3U файла для плейлиста"""
+        """Генерация M3U файла для плейлиста в формате MPV"""
         try:
             config = current_app.config
-            media_url = config['MEDIA_URL']
             export_dir = config['M3U_EXPORT_DIR']
-            base_url = config.get('MEDIA_BASE_URL', 'http://localhost').rstrip('/')
+            
+            # Получаем путь к медиафайлам
+            media_root = config.get('MEDIA_ROOT', '/var/lib/dsign/media')
             
             m3u_content = "#EXTM3U\n"
             for file in sorted(playlist.files, key=lambda x: x.order):
                 if not file.file_name:
                     continue
                 
-                file_path = os.path.join(config['MEDIA_ROOT'], file.file_name)
+                # Полный путь к локальному файлу
+                file_path = os.path.join(media_root, file.file_name)
+                
+                # Проверяем существование файла
                 if not os.path.exists(file_path):
                     self._log_warning('Media file not found', {
                         'file_path': file_path,
@@ -292,16 +304,23 @@ class PlaylistService:
                     })
                     continue
                 
+                # Для изображений добавляем информацию о длительности в правильном формате
                 file_ext = file.file_name.lower().split('.')[-1]
-                if file.duration and file_ext in ['jpg', 'jpeg', 'png']:
-                    m3u_content += f"#EXTVLCOPT:run-time={file.duration}\n"
-                m3u_content += f"{base_url}{media_url}{file.file_name}\n"
+                duration = file.duration or 10  # По умолчанию 10 секунд
+                
+                if file_ext in ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp']:
+                    # Для MPV используем параметр duration в URL-like формате
+                    # MPV понимает формат: file.jpg?duration=10
+                    m3u_content += f"{file_path}?duration={duration}\n"
+                else:
+                    # Для видео файлов просто путь
+                    m3u_content += f"{file_path}\n"
         
             # Создаем безопасное имя
             safe_name = re.sub(r'[\\/*?:"<>|]', "_", playlist.name)
             
             # Сохраняем два файла:
-            # 1. По имени плейлиста (для пользователя)
+            # 1. По имени плейлиста
             filename_by_name = f"{safe_name}.m3u"
             filepath_by_name = os.path.join(export_dir, filename_by_name)
             
@@ -331,10 +350,11 @@ class PlaylistService:
                             'error': str(e)
                         })
 
-            self._log_info('M3U playlist generated', {
+            self._log_info('M3U playlist generated for MPV', {
                 'playlist_id': playlist.id,
                 'filepath_by_name': filepath_by_name,
-                'filepath_by_id': filepath_by_id
+                'filepath_by_id': filepath_by_id,
+                'format': 'MPV-compatible with local paths'
             })
             return True
             
@@ -549,3 +569,53 @@ class PlaylistService:
                 'error': str(e)
             })
             return False
+            
+    def find_playlist_file(self, playlist_id: int, export_dir: Path) -> Optional[Path]:
+        """Находит файл плейлиста по ID"""
+        try:
+            self._log_debug('Поиск файла плейлиста', {
+                'playlist_id': playlist_id,
+                'export_dir': str(export_dir)
+            })
+        
+            # Сначала ищем по ID
+            playlist_file = export_dir / f"playlist_{playlist_id}.m3u"
+            if playlist_file.exists():
+                self._log_debug('Файл найден по ID', {
+                    'file_path': str(playlist_file)
+                })
+                return playlist_file
+        
+            # Если не нашли, ищем все .m3u файлы
+            m3u_files = list(export_dir.glob("*.m3u"))
+            self._log_debug('Найдены M3U файлы', {
+                'file_count': len(m3u_files)
+            })
+        
+            for file in m3u_files:
+                if file.stem.endswith(f"_{playlist_id}"):
+                    self._log_debug('Файл найден по суффиксу', {
+                        'file_path': str(file)
+                    })
+                    return file
+        
+            # Пробуем поискать без префикса
+            for file in m3u_files:
+                if str(playlist_id) in file.stem:
+                    self._log_debug('Файл найден по ID в имени', {
+                        'file_path': str(file)
+                    })
+                    return file
+        
+            self._log_warning('Файл плейлиста не найден', {
+                'playlist_id': playlist_id,
+                'export_dir': str(export_dir)
+            })
+            return None
+        
+        except Exception as e:
+            self._log_error('Ошибка поиска файла плейлиста', {
+                'playlist_id': playlist_id,
+                'error': str(e)
+            })
+            return None
