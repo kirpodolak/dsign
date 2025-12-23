@@ -2,82 +2,226 @@ import os
 import json
 import time
 import subprocess
-from typing import Dict, Optional
+import re
+from typing import Dict, Optional, List, Any
 from pathlib import Path
+from datetime import datetime
 
 from .playback_constants import PlaybackConstants
 from .playback_utils import PlaybackUtils
+from .m3u_manager import M3UManager
+from .playlist_service import PlaylistService
 
 
 class PlaylistManager:
     def __init__(self, logger, socketio, upload_folder, db_session, mpv_manager, logo_manager):
         self.logger = logger
         self.socketio = socketio
-        self.upload_folder = Path(upload_folder)  # Это /var/lib/dsign/media
+        self.upload_folder = Path(upload_folder)
         self.db_session = db_session
         self._mpv_manager = mpv_manager
         self._logo_manager = logo_manager
         self._last_playback_state = {}
-        self.tmp_dir = self.upload_folder / 'tmp'
-        self.tmp_dir.mkdir(exist_ok=True)
         
-        # Получаем путь к папке M3U из конфигурации
+        # Пути из конфигурации
         try:
             from flask import current_app
-            self.m3u_export_dir = Path(current_app.config.get('M3U_EXPORT_DIR', '/home/dsign/dsign/static/playlists'))
-            # Получаем путь к медиафайлам
-            self.media_root = Path(current_app.config.get('MEDIA_ROOT', '/var/lib/dsign/media'))
+            self.config = current_app.config
         except:
-            # По умолчанию, если нет доступа к конфигу
-            self.m3u_export_dir = Path('/home/dsign/dsign/static/playlists')
-            self.media_root = Path('/var/lib/dsign/media')
+            from .. import config
+            self.config = config.config
+        
+        # Пути к файлам и скриптам
+        self.tmp_dir = self.upload_folder / 'tmp'
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Путь к Lua скрипту слайд-шоу (используем путь из конфига)
+        self.scripts_dir = Path(self.config.get('SCRIPTS_DIR', '/home/dsign/dsign/static/scripts'))
+        self.lua_script_path = self.scripts_dir / 'slideshow.lua'
+        self.scripts_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Сохраняем Lua скрипт если его нет
+        self._ensure_lua_script()
+        
+        # Пути к конфигурации из конфига
+        self.m3u_export_dir = Path(self.config.get('M3U_EXPORT_DIR', '/home/dsign/dsign/static/playlists'))
+        self.media_root = Path(self.config.get('MEDIA_ROOT', '/var/lib/dsign/media'))
+        self.use_slideshow = self.config.get('USE_SLIDESHOW', True)
         
         # Создаем папки если не существуют
         self.m3u_export_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Инициализируем менеджеры
+        self.m3u_manager = M3UManager(
+            logger=logger,
+            media_root=self.media_root,
+            upload_folder=self.upload_folder
+        )
+        
+        # Инициализируем сервис плейлистов
+        self.playlist_service = PlaylistService(db_session, logger)
+        
         self.logger.info(f"Папка с M3U плейлистами: {self.m3u_export_dir.absolute()}")
         self.logger.info(f"Папка с медиафайлами: {self.media_root.absolute()}")
+        self.logger.info(f"Lua скрипт слайд-шоу: {self.lua_script_path.absolute()}")
+        self.logger.info(f"Использовать слайд-шоу: {self.use_slideshow}")
         
-    def play(self, playlist_id: int) -> bool:
-        """Воспроизведение плейлиста по ID"""
+    def _ensure_lua_script(self):
+        """Проверяет и обновляет Lua скрипт при необходимости"""
+        source_script = Path('/dsign/static/scripts/slideshow.lua')
+        target_script = self.lua_script_path
+    
+        # Если целевого скрипта нет, создаем его
+        if not target_script.exists():
+            return self._copy_or_link_script(source_script, target_script)
+    
+        # Если скрипт есть, проверяем его актуальность
         try:
-            self.logger.info(f"Запуск воспроизведения плейлиста ID: {playlist_id}")
+            # Сравниваем даты модификации
+            source_mtime = source_script.stat().st_mtime if source_script.exists() else 0
+            target_mtime = target_script.stat().st_mtime
+        
+            # Если исходный скрипт новее, обновляем
+            if source_mtime > target_mtime + 1:  # +1 секунда для погрешности
+                self.logger.info(f"Обнаружена новая версия Lua скрипта")
+                return self._copy_or_link_script(source_script, target_script, force=True)
+            else:
+                self.logger.debug(f"Lua скрипт актуален: {target_script}")
+                return True
             
-            # Ищем файл плейлиста
-            playlist_file = self._find_playlist_file(playlist_id)
+        except Exception as e:
+            self.logger.warning(f"Ошибка проверки скрипта: {e}")
+            return True  # Продолжаем с существующим скриптом
+
+    def _copy_or_link_script(self, source_script: Path, target_script: Path, force: bool = False) -> bool:
+        """Копирует или создает ссылку на Lua скрипт"""
+        try:
+            if not source_script.exists():
+                self.logger.error(f"Исходный Lua скрипт не найден: {source_script}")
+                return False
+            
+            if target_script.exists() and force:
+                target_script.unlink()
+            
+            # Копируем файл
+            import shutil
+            shutil.copy2(source_script, target_script)
+            
+            self.logger.info(f"Lua скрипт {'обновлен' if force else 'создан'}: {target_script}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка копирования Lua скрипта: {e}")
+            return False
+
+    def _extract_playlist_name(self, playlist_file: Path, playlist_id: int) -> str:
+        """Извлекает имя плейлиста из файла или базы данных"""
+        try:
+            # Сначала пробуем получить имя из базы данных
+            try:
+                from ..models import Playlist
+                playlist = self.db_session.query(Playlist).get(playlist_id)
+                if playlist and playlist.name:
+                    return playlist.name
+            except:
+                pass
+            
+            # Если не удалось, берем имя из файла
+            name = playlist_file.stem
+            if name.startswith('playlist_'):
+                name = name[9:]  # Убираем префикс 'playlist_'
+            return name
+            
+        except Exception as e:
+            self.logger.warning(f"Не удалось извлечь имя плейлиста: {e}")
+            return f"Плейлист {playlist_id}"
+
+    def _log_available_playlists(self):
+        """Логирует доступные M3U файлы"""
+        try:
+            m3u_files = list(self.m3u_export_dir.glob("*.m3u"))
+            if m3u_files:
+                self.logger.info(f"Доступные M3U файлы в {self.m3u_export_dir}:")
+                for file in m3u_files:
+                    self.logger.info(f"  - {file.name}")
+            else:
+                self.logger.warning(f"Нет M3U файлов в {self.m3u_export_dir}")
+        except Exception as e:
+            self.logger.warning(f"Не удалось получить список M3U файлов: {e}")
+
+    def play(self, playlist_id: int) -> bool:
+        """Запуск слайд-шоу плейлиста"""
+        try:
+            self.logger.info(f"Запуск слайд-шоу плейлиста ID: {playlist_id}")
+            
+            # Используем playlist_service для поиска файла
+            playlist_file = self.playlist_service.find_playlist_file(
+                playlist_id, 
+                self.m3u_export_dir
+            )
+            
             if not playlist_file:
-                # Выводим список доступных файлов для отладки
                 self._log_available_playlists()
                 raise ValueError(f"Файл плейлиста {playlist_id} не найден")
                 
             self.logger.info(f"Найден файл плейлиста: {playlist_file}")
             
-            # Проверяем существование файла
             if not playlist_file.exists():
                 raise ValueError(f"Файл не существует: {playlist_file}")
-                
-            # Создаем абсолютный путь к файлу
-            playlist_path = str(playlist_file.absolute())
             
-            self.logger.info(f"Абсолютный путь к плейлисту: {playlist_path}")
+            # Используем m3u_manager для обработки формата
+            fixed_playlist_path = self.m3u_manager.ensure_proper_m3u_format(playlist_file)
             
-            # ЛОГИРУЕМ И ИСПРАВЛЯЕМ СОДЕРЖИМОЕ M3U ФАЙЛА
-            fixed_playlist_path = self._fix_m3u_paths(playlist_file)
-            
-            # Пытаемся получить имя плейлиста
+            # Получаем имя плейлиста
             playlist_name = self._extract_playlist_name(playlist_file, playlist_id)
-            self.logger.info(f"Запускается плейлист: {playlist_name} (ID: {playlist_id})")
             
-            # Обновляем статус воспроизведения
+            self.logger.info(f"Запуск слайд-шоу: {playlist_name} (файл: {fixed_playlist_path})")
+            
+            # Обновляем статус в БД
             try:
                 self._update_playback_status(playlist_id, 'playing')
             except Exception as e:
                 self.logger.warning(f"Не удалось обновить статус в БД: {e}")
             
-            # Останавливаем текущее воспроизведение (логотип)
+            # Останавливаем логотип и ждем немного
             self._logo_manager.display_idle_logo()
-            time.sleep(0.1)  # Небольшая задержка для стабильности
+            time.sleep(0.5)  # Даем время для остановки логотипа
             
-            # Загружаем ИСПРАВЛЕННЫЙ плейлист
+            # Останавливаем любые текущие воспроизведения
+            self._stop_current_playback()
+            time.sleep(0.2)
+            
+            # Используем mpv_manager для настройки
+            self._mpv_manager.configure_for_slideshow()
+            
+            # Загружаем Lua скрипт если включено
+            if self.use_slideshow:
+                self._load_lua_script()
+            else:
+                self.logger.warning("Слайд-шоу отключено в конфигурации")
+            
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем состояние MPV перед загрузкой
+            core_idle_result = self._mpv_manager._send_command({
+                "command": ["get_property", "core-idle"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
+            
+            core_idle = True
+            if core_idle_result and core_idle_result.get("error") == "success":
+                core_idle = core_idle_result.get("data", True)
+                self.logger.info(f"Состояние MPV перед загрузкой: core-idle={core_idle}")
+            
+            # Если MPV в idle режиме, нужно сначала загрузить что-то чтобы "разбудить" его
+            if core_idle:
+                self.logger.info("MPV в idle режиме, будим его...")
+                # Загружаем пустой файл чтобы выйти из idle режима
+                self._mpv_manager._send_command({
+                    "command": ["loadfile", "/dev/null", "replace"],
+                    "request_id": int(time.time() * 1000)
+                }, timeout=5.0)
+                time.sleep(0.5)
+            
+            # Загружаем плейлист
             result = self._mpv_manager._send_command({
                 "command": ["loadlist", fixed_playlist_path, "replace"],
                 "request_id": int(time.time() * 1000)
@@ -86,125 +230,333 @@ class PlaylistManager:
             self.logger.info(f"Результат загрузки плейлиста: {result}")
             
             if not result or result.get("error") != "success":
-                raise RuntimeError(f"Не удалось загрузить плейлист: {result}")
+                self.logger.error(f"Ошибка загрузки плейлиста: {result}")
+                raise RuntimeError(f"Не удалось загрузить плейлист")
             
-            # Включаем зацикливание
-            self._mpv_manager._send_command({
-                "command": ["set_property", "loop-playlist", "inf"],
-                "request_id": int(time.time() * 1000)
-            })
+            # Ждем немного чтобы плейлист загрузился
+            time.sleep(0.5)
             
-            # Запускаем воспроизведение
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильная последовательность запуска
+            # 1. Убеждаемся, что не на паузе
             self._mpv_manager._send_command({
                 "command": ["set_property", "pause", "no"],
                 "request_id": int(time.time() * 1000)
-            })
+            }, timeout=2.0)
+            
+            # 2. Переходим к первому элементу (индекс 0)
+            self._mpv_manager._send_command({
+                "command": ["playlist-play-index", "0"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
+            
+            # 3. Принудительно снимаем с паузы еще раз
+            self._mpv_manager._send_command({
+                "command": ["set_property", "pause", "no"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
+            
+            self.logger.info("Принудительный старт воспроизведения")
+            
+            # Получаем информацию о плейлисте
+            playlist_info = self._get_playlist_info()
+            
+            # Дополнительная проверка через 0.5 секунды
+            time.sleep(0.5)
+            
+            # Проверяем текущую позицию в плейлисте
+            position_result = self._mpv_manager._send_command({
+                "command": ["get_property", "playlist-pos"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
+            
+            if position_result and position_result.get("error") == "success":
+                position = position_result.get("data", -1)
+                if position >= 0:
+                    self.logger.info(f"Воспроизведение началось, позиция в плейлисте: {position}")
+                else:
+                    self.logger.warning(f"Воспроизведение не началось, позиция: {position}")
+                    
+                    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Альтернативный метод для idle режима
+                    # Загружаем первый файл напрямую
+                    try:
+                        # Получаем список файлов из плейлиста
+                        playlist_result = self._mpv_manager._send_command({
+                            "command": ["get_property", "playlist"],
+                            "request_id": int(time.time() * 1000)
+                        }, timeout=2.0)
+                        
+                        if playlist_result and playlist_result.get("error") == "success":
+                            playlist_data = playlist_result.get("data", [])
+                            if playlist_data and len(playlist_data) > 0:
+                                first_file = playlist_data[0].get("filename")
+                                if first_file:
+                                    self.logger.info(f"Загружаем первый файл напрямую: {first_file}")
+                                    
+                                    # Останавливаем текущее
+                                    self._mpv_manager._send_command({
+                                        "command": ["stop"],
+                                        "request_id": int(time.time() * 1000)
+                                    }, timeout=2.0)
+                                    time.sleep(0.2)
+                                    
+                                    # Загружаем файл напрямую
+                                    self._mpv_manager._send_command({
+                                        "command": ["loadfile", first_file, "replace"],
+                                        "request_id": int(time.time() * 1000)
+                                    }, timeout=5.0)
+                                    time.sleep(0.2)
+                                    
+                                    # Снимаем с паузы
+                                    self._mpv_manager._send_command({
+                                        "command": ["set_property", "pause", "no"],
+                                        "request_id": int(time.time() * 1000)
+                                    }, timeout=2.0)
+                    except Exception as e:
+                        self.logger.warning(f"Не удалось загрузить первый файл напрямую: {e}")
             
             # Уведомляем клиентов
             self.socketio.emit('playback_state', {
                 'status': 'playing',
                 'playlist_id': playlist_id,
-                'playlist_name': playlist_name
+                'playlist_name': playlist_name,
+                'type': 'slideshow',
+                'info': playlist_info
             })
             
             # Получаем отладочную информацию
             time.sleep(0.5)
             debug_info = self.get_mpv_debug_info()
-            self.logger.info(f"Отладочная информация после запуска: {debug_info}")
+            self.logger.info(f"Отладочная информация: {debug_info}")
             
-            self.logger.info(f"Плейлист '{playlist_name}' (ID: {playlist_id}) успешно запущен")
+            # Проверяем, что воспроизведение действительно началось
+            playback_status = self._check_playback_status()
+            if not playback_status.get('playing', False):
+                self.logger.warning("Воспроизведение может не начаться автоматически, пробуем принудительно")
+                self._force_playback_start()
+            
+            self.logger.info(f"Слайд-шоу '{playlist_name}' успешно запущено")
             return True
             
         except Exception as e:
-            self.logger.error(f"Ошибка воспроизведения: {str(e)}")
+            self.logger.error(f"Ошибка запуска слайд-шоу: {str(e)}")
             
-            # Обновляем статус на ошибку
             try:
                 self._update_playback_status(None, 'error')
             except:
                 pass
             
-            # Возвращаемся к логотипу
             try:
                 self._logo_manager.display_idle_logo()
                 self.logger.info("Возврат к логотипу успешен")
             except Exception as logo_error:
                 self.logger.error(f"Не удалось показать логотип: {str(logo_error)}")
             
-            raise RuntimeError(f"Не удалось запустить воспроизведение: {str(e)}")
-    
-    def _fix_m3u_paths(self, m3u_file: Path) -> str:
-        """Исправление путей в M3U файле (замена URL на локальные пути)"""
+            raise RuntimeError(f"Не удалось запустить слайд-шоу: {str(e)}")
+
+    def _check_playback_status(self) -> Dict[str, bool]:
+        """Проверяет статус воспроизведения"""
         try:
-            with open(m3u_file, 'r', encoding='utf-8') as f:
-                content = f.read()
+            status = {
+                'playing': False,
+                'paused': False,
+                'idle': True
+            }
             
-            self.logger.info(f"Исходное содержимое M3U:\n{content}")
+            # Проверяем core-idle
+            result = self._mpv_manager._send_command({
+                "command": ["get_property", "core-idle"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
             
-            # Заменяем http://localhost/media/ на локальные пути
-            import re
-            fixed_content = re.sub(
-                r'http://localhost/media/([^/\s]+\.(?:jpg|jpeg|png|mp4|avi|mov|mkv))',
-                lambda m: str(self.media_root / m.group(1)),
-                content
-            )
+            if result and result.get("error") == "success":
+                status['idle'] = result.get("data", True)
             
-            # Если ничего не изменилось, пытаемся другие паттерны
-            if fixed_content == content:
-                fixed_content = re.sub(
-                    r'http://[^/]+/media/([^/\s]+\.(?:jpg|jpeg|png|mp4|avi|mov|mkv))',
-                    lambda m: str(self.media_root / m.group(1)),
-                    content
-                )
+            # Проверяем паузу
+            result = self._mpv_manager._send_command({
+                "command": ["get_property", "pause"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
             
-            # Создаем временный файл с исправленными путями
-            temp_file = self.tmp_dir / f"fixed_{m3u_file.name}"
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                f.write(fixed_content)
+            if result and result.get("error") == "success":
+                status['paused'] = result.get("data", False)
             
-            self.logger.info(f"Исправленное содержимое M3U:\n{fixed_content}")
+            status['playing'] = not status['idle'] and not status['paused']
             
-            # Проверяем существование файлов
-            lines = fixed_content.split('\n')
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    if os.path.exists(line):
-                        self.logger.info(f"Файл существует: {line}")
-                    else:
-                        self.logger.warning(f"Файл НЕ существует: {line}")
-            
-            return str(temp_file.absolute())
+            return status
             
         except Exception as e:
-            self.logger.error(f"Ошибка исправления M3U файла: {str(e)}")
-            # Если не удалось исправить, используем оригинальный файл
-            return str(m3u_file.absolute())
-    
-    def _extract_playlist_name(self, playlist_file: Path, playlist_id: int) -> str:
-        """Извлечение имени плейлиста из файла или БД"""
-        # Сначала пробуем из имени файла
-        filename = playlist_file.stem
-        
-        # Если имя файла содержит ID, убираем его для красивого отображения
-        import re
-        name_without_id = re.sub(rf'playlist_{playlist_id}|list_{playlist_id}|pl_{playlist_id}', '', filename, flags=re.IGNORECASE)
-        name_without_id = name_without_id.strip(' _-')
-        
-        if name_without_id:
-            return name_without_id
-        
-        # Пробуем получить из БД
+            self.logger.warning(f"Ошибка проверки статуса воспроизведения: {e}")
+            return {'playing': False, 'paused': False, 'idle': True}
+
+    def _force_playback_start(self):
+        """Принудительно запускает воспроизведение"""
         try:
-            from ..models import Playlist
-            playlist = self.db_session.query(Playlist).get(playlist_id)
-            if playlist:
-                return playlist.name
-        except:
-            pass
-        
-        # Если ничего не получилось, возвращаем имя файла
-        return filename
+            # Снимаем с паузы
+            self._mpv_manager._send_command({
+                "command": ["set_property", "pause", "no"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
+            
+            # Команда idle no
+            self._mpv_manager._send_command({
+                "command": ["idle", "no"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
+            
+            # Перезапускаем воспроизведение с позиции 0
+            self._mpv_manager._send_command({
+                "command": ["seek", "0", "absolute"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
+            
+            self.logger.info("Воспроизведение принудительно запущено")
+            
+        except Exception as e:
+            self.logger.warning(f"Не удалось принудительно запустить воспроизведение: {e}")
+
+    def _wake_up_mpv_from_idle(self):
+        """Выводит MPV из idle режима"""
+        try:
+            # Проверяем состояние
+            result = self._mpv_manager._send_command({
+                "command": ["get_property", "core-idle"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
+            
+            if result and result.get("error") == "success":
+                is_idle = result.get("data", True)
+                if is_idle:
+                    self.logger.info("MPV в idle режиме, пробуем разбудить...")
+                    
+                    # Способ 1: Загрузить пустой файл
+                    self._mpv_manager._send_command({
+                        "command": ["loadfile", "/dev/null", "replace"],
+                        "request_id": int(time.time() * 1000)
+                    }, timeout=5.0)
+                    
+                    # Способ 2: Команда idle
+                    self._mpv_manager._send_command({
+                        "command": ["idle", "no"],
+                        "request_id": int(time.time() * 1000)
+                    }, timeout=2.0)
+                    
+                    time.sleep(0.3)
+                    
+                    # Проверяем снова
+                    result = self._mpv_manager._send_command({
+                        "command": ["get_property", "core-idle"],
+                        "request_id": int(time.time() * 1000)
+                    }, timeout=2.0)
+                    
+                    if result and result.get("error") == "success":
+                        is_idle = result.get("data", True)
+                        self.logger.info(f"После пробуждения: core-idle={is_idle}")
+                    
+                    return not is_idle
+            
+            return True
+            
+        except Exception as e:
+            self.logger.warning(f"Ошибка при пробуждении MPV: {e}")
+            return False
+   
+    def _stop_current_playback(self):
+        """Останавливает текущее воспроизведение"""
+        try:
+            # Останавливаем MPV
+            self._mpv_manager._send_command({
+                "command": ["stop"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
+            self.logger.info("Текущее воспроизведение остановлено")
+        except Exception as e:
+            self.logger.warning(f"Не удалось остановить воспроизведение: {e}")
+    
+    def _load_lua_script(self):
+        """Загрузка Lua скрипта в MPV"""
+        try:
+            # Сначала проверяем, есть ли уже загруженные скрипты
+            result = self._mpv_manager._send_command({
+                "command": ["script-message", "check-slideshow"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
+            
+            # Если скрипт уже загружен, не грузим снова
+            if result and result.get("error") == "success":
+                self.logger.info("Lua скрипт слайд-шоу уже загружен")
+                return True
+            
+            # Загружаем скрипт
+            result = self._mpv_manager._send_command({
+                "command": ["load-script", str(self.lua_script_path.absolute())],
+                "request_id": int(time.time() * 1000)
+            }, timeout=5.0)
+            
+            if result and result.get("error") == "success":
+                self.logger.info("Lua скрипт слайд-шоу успешно загружен")
+                return True
+            else:
+                self.logger.warning(f"Не удалось загрузить Lua скрипт: {result}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Ошибка загрузки Lua скрипта: {str(e)}")
+            return False
+   
+    def _get_playlist_info(self) -> Dict:
+        """Получает информацию о текущем плейлисте"""
+        try:
+            result = self._mpv_manager._send_command({
+                "command": ["get_property", "playlist-count"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
+            
+            count = 0
+            if result and result.get("error") == "success":
+                count = result.get("data", 0)
+            
+            return {
+                'playlist_count': count,
+                'status': 'loaded'
+            }
+            
+        except Exception as e:
+            self.logger.warning(f"Ошибка получения информации о плейлисте: {e}")
+            return {'playlist_count': 0, 'status': 'unknown'}
+    
+    def _ensure_playback_started(self):
+        """Убеждается, что воспроизведение началось"""
+        try:
+            # Проверяем idle состояние
+            result = self._mpv_manager._send_command({
+                "command": ["get_property", "core-idle"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
+            
+            if result and result.get("error") == "success":
+                is_idle = result.get("data", True)
+                if is_idle:
+                    self.logger.warning("MPV в idle состоянии, пытаемся запустить")
+                    self._wake_up_mpv_from_idle()
+            
+            # Проверяем паузу
+            result = self._mpv_manager._send_command({
+                "command": ["get_property", "pause"],
+                "request_id": int(time.time() * 1000)
+            }, timeout=2.0)
+            
+            if result and result.get("error") == "success":
+                is_paused = result.get("data", True)
+                if is_paused:
+                    # Снимаем с паузы
+                    self._mpv_manager._send_command({
+                        "command": ["set_property", "pause", "no"],
+                        "request_id": int(time.time() * 1000)
+                    }, timeout=2.0)
+                    self.logger.info("Воспроизведение принудительно запущено")
+            
+        except Exception as e:
+            self.logger.warning(f"Ошибка проверки состояния воспроизведения: {e}")
     
     def _update_playback_status(self, playlist_id: Optional[int], status: str):
         """Обновление статуса воспроизведения в БД"""
@@ -219,81 +571,6 @@ class PlaylistManager:
         except Exception as e:
             self.logger.debug(f"Не удалось обновить статус в БД: {e}")
     
-    def _log_available_playlists(self):
-        """Логирование доступных файлов плейлистов"""
-        try:
-            self.logger.info("Поиск доступных файлов плейлистов...")
-            
-            if not self.m3u_export_dir.exists():
-                self.logger.warning(f"Папка M3U не существует: {self.m3u_export_dir}")
-                return
-            
-            m3u_files = list(self.m3u_export_dir.glob("*.m3u"))
-            
-            if m3u_files:
-                self.logger.info(f"Найдено {len(m3u_files)} файлов плейлистов:")
-                for file_path in m3u_files:
-                    self.logger.info(f"  - {file_path.name}")
-                    # Показываем первые 3 строки каждого файла
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            lines = [next(f).strip() for _ in range(3) if f]
-                            self.logger.info(f"    Начало: {lines}")
-                    except:
-                        pass
-            else:
-                self.logger.warning("Не найдено ни одного .m3u файла")
-                
-        except Exception as e:
-            self.logger.error(f"Ошибка поиска файлов плейлистов: {str(e)}")
-    
-    def _find_playlist_file(self, playlist_id: int) -> Optional[Path]:
-        """Поиск файла плейлиста по ID"""
-        try:
-            self.logger.info(f"Поиск файла плейлиста для ID: {playlist_id}")
-            
-            possible_names = [
-                f"playlist_{playlist_id}.m3u",
-                f"list_{playlist_id}.m3u",
-                f"pl_{playlist_id}.m3u",
-                f"{playlist_id}.m3u",
-                f"playlist_{playlist_id}.M3U",
-                f"Playlist_{playlist_id}.m3u"
-            ]
-            
-            # Сначала ищем по точным совпадениям
-            for name in possible_names:
-                file_path = self.m3u_export_dir / name
-                if file_path.exists():
-                    self.logger.info(f"Найден файл по точному совпадению: {file_path}")
-                    return file_path
-            
-            # Если не нашли, ищем файлы содержащие ID в имени
-            import re
-            for file_path in self.m3u_export_dir.glob("*.m3u"):
-                filename = file_path.stem
-                
-                if str(playlist_id) in filename:
-                    patterns = [
-                        rf'playlist_{playlist_id}(?!\d)',
-                        rf'list_{playlist_id}(?!\d)',
-                        rf'pl_{playlist_id}(?!\d)',
-                        rf'^{playlist_id}(?!\d)',
-                        rf'_{playlist_id}(?!\d)'
-                    ]
-                    
-                    for pattern in patterns:
-                        if re.search(pattern, filename, re.IGNORECASE):
-                            self.logger.info(f"Найден файл с ID в имени: {file_path}")
-                            return file_path
-            
-            self.logger.warning(f"Файл плейлиста для ID {playlist_id} не найден")
-            return None
-            
-        except Exception as e:
-            self.logger.error(f"Ошибка поиска файла плейлиста: {str(e)}")
-            return None
-
     def get_mpv_debug_info(self) -> Dict:
         """Получение отладочной информации от MPV"""
         try:
@@ -306,18 +583,22 @@ class PlaylistManager:
                 ("playlist-count", "playlist_count"),
                 ("time-pos", "time_position"),
                 ("duration", "duration"),
-                ("core-idle", "core_idle")
+                ("core-idle", "core_idle"),
+                ("vo", "video_output"),
+                ("ao", "audio_output")
             ]
             
             for prop, key in props:
-                response = self._mpv_manager._send_command({
-                    "command": ["get_property", prop],
-                    "request_id": int(time.time() * 1000)
-                })
-                if response and 'data' in response:
-                    info[key] = response['data']
+                try:
+                    response = self._mpv_manager._send_command({
+                        "command": ["get_property", prop],
+                        "request_id": int(time.time() * 1000)
+                    }, timeout=2.0)
+                    if response and 'data' in response:
+                        info[key] = response['data']
+                except:
+                    continue
             
-            self.logger.info(f"Отладочная информация MPV: {info}")
             return info
             
         except Exception as e:
@@ -332,6 +613,15 @@ class PlaylistManager:
             # Обновляем статус
             try:
                 self._update_playback_status(None, 'idle')
+            except:
+                pass
+            
+            # Останавливаем MPV
+            try:
+                self._mpv_manager._send_command({
+                    "command": ["stop"],
+                    "request_id": int(time.time() * 1000)
+                }, timeout=2.0)
             except:
                 pass
             
@@ -513,24 +803,6 @@ class PlaylistManager:
             
             if not jpg_files:
                 self.logger.error(f"Не найдены jpg файлы в {self.media_root}")
-                # Пробуем найти в других местах
-                possible_dirs = [
-                    self.media_root,
-                    Path('/home/dsign/dsign/static/media'),
-                    Path('/var/lib/dsign/media'),
-                    Path('/tmp')
-                ]
-                
-                for dir_path in possible_dirs:
-                    if dir_path.exists():
-                        files = list(dir_path.glob('*.jpg'))
-                        if files:
-                            jpg_files = files
-                            self.logger.info(f"Найдены файлы в {dir_path}")
-                            break
-            
-            if not jpg_files:
-                self.logger.error("Не найдены jpg файлы ни в одной директории")
                 return False
             
             # Берем первый файл
