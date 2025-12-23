@@ -47,16 +47,55 @@ class MPVManager:
         )
         
         self._last_known_state = {
-            'paused': True,
+            'pause': True,
             'volume': 100,
             'mute': False
         }
+
+    def configure_for_slideshow(self):
+        """Настраивает MPV для работы со слайд-шоу"""
+        try:
+            self.logger.info("Настройка MPV для слайд-шоу")
+            
+            # Основные настройки для слайд-шоу
+            settings = {
+                # Отключаем аудио для изображений
+                "audio": "no",
+                # Включаем бесконечный цикл
+                "loop-playlist": "inf",
+                # Задержка между слайдами в миллисекундах
+                "image-display-duration": "5000",
+                # Режим отображения изображений
+                "video-aspect-override": "16:9",
+                # Включаем плавные переходы
+                "image-transition": "yes",
+                # Отключаем черные поля
+                "video-unscaled": "no",
+                "panscan": "1.0"
+            }
+            
+            for key, value in settings.items():
+                result = self._send_command({
+                    "command": ["set_property", key, value]
+                }, timeout=2.0)
+                
+                if result and result.get("error") == "success":
+                    self.logger.debug(f"Установлена настройка: {key}={value}")
+                else:
+                    self.logger.warning(f"Не удалось установить настройку: {key}={value}")
+            
+            self.logger.info("Настройка MPV для слайд-шоу завершена")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка настройки MPV для слайд-шоу: {e}")
+            return False
 
     def _cache_mpv_state(self):
         """Кеширует важные параметры MPV"""
         props = ["pause", "volume", "mute"]
         for prop in props:
-            resp = self._mpv_manager._send_command({
+            resp = self._send_command({
                 "command": ["get_property", prop]
             })
             if resp and "data" in resp:
@@ -65,8 +104,8 @@ class MPVManager:
     def _restore_mpv_state(self):
         """Восстанавливает кешированное состояние"""
         for prop, value in self._last_known_state.items():
-            self._send_ipc_command({
-                "command": ["set", prop, value]
+            self._send_command({
+                "command": ["set_property", prop, value]
             })
     
     def _log_operation(self, operation: str, status: str, details: Dict[str, Any] = None):
@@ -245,10 +284,47 @@ class MPVManager:
         )
         return False
 
+    def _read_socket_response(self, s: socket.socket, request_id: int, timeout: float) -> Optional[Dict[str, Any]]:
+        """Чтение ответа из сокета с улучшенной обработкой"""
+        s.settimeout(timeout)
+        buffer = b""
+        start_time = time.time()
+        
+        try:
+            while time.time() - start_time < timeout:
+                try:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    
+                    # Пробуем декодить и найти наш ответ
+                    decoded = buffer.decode('utf-8', errors='ignore')
+                    lines = decoded.split('\n')
+                    
+                    for line in lines:
+                        if line.strip():
+                            try:
+                                response = json.loads(line.strip())
+                                if response.get("request_id") == request_id:
+                                    return response
+                            except json.JSONDecodeError:
+                                continue
+                                
+                except socket.timeout:
+                    continue
+                    
+        except Exception as e:
+            self.logger.debug(
+                f"Socket read error: {str(e)}",
+                extra={"request_id": request_id}
+            )
+            
+        return None
+
     def _send_command(self, command: Dict[str, Any], timeout: float = 5.0) -> Optional[Dict[str, Any]]:
         """Отправка команды с трейсингом"""
         command_name = command.get("command", ["unknown"])[0]
-        # Используем целочисленный request_id
         request_id = int(time.time() * 1000)
         
         start_time = time.time()
@@ -265,70 +341,53 @@ class MPVManager:
         
         for attempt in range(PlaybackConstants.MAX_RETRIES):
             try:
-                with self._ipc_lock, \
-                     socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                    
-                    s.settimeout(timeout)
-                    
-                    try:
-                        s.connect(self.mpv_socket)
-                    except (ConnectionRefusedError, FileNotFoundError):
-                        self.logger.warning(
-                            "MPV socket not available, restarting service...",
-                            extra={
-                                "operation": "MPVCommand",
-                                "command": command_name,
-                                "attempt": attempt + 1,
-                                "request_id": request_id
-                            }
-                        )
-                        if not self._restart_systemd_service() or not self._wait_for_socket():
-                            time.sleep(PlaybackConstants.RETRY_DELAY)
-                            continue
-                        s.connect(self.mpv_socket)
-                    
-                    # Добавляем request_id в команду
-                    command_with_id = command.copy()
-                    command_with_id["request_id"] = request_id
-                    
-                    cmd_str = json.dumps(command_with_id) + '\n'
-                    s.sendall(cmd_str.encode())
-                    
-                    # Читаем все данные до конца
-                    response_data = b""
-                    while True:
-                        chunk = s.recv(4096)
-                        if not chunk:
-                            break
-                        response_data += chunk
-                        # Пытаемся разобрать JSON после каждого чанка
+                with self._ipc_lock:
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                        s.settimeout(timeout)
+                        
                         try:
-                            # Ищем первый полный JSON объект
-                            decoded = response_data.decode('utf-8')
-                            lines = decoded.strip().split('\n')
-                            for line in lines:
-                                if line.strip():
-                                    result = json.loads(line.strip())
-                                    # Проверяем, что это ответ на нашу команду
-                                    if result.get("request_id") == request_id:
-                                        self._log_operation(
-                                            "MPVCommand",
-                                            "completed",
-                                            {
-                                                "command": command_name,
-                                                "request_id": request_id,
-                                                "response": result,
-                                                "duration_sec": round(time.time() - start_time, 3),
-                                                "attempt": attempt + 1
-                                            }
-                                        )
-                                        return result
-                        except (json.JSONDecodeError, UnicodeDecodeError):
-                            # Продолжаем читать если JSON неполный
-                            continue
-                    
-                    raise TimeoutError("No valid JSON response from MPV")
-                    
+                            s.connect(self.mpv_socket)
+                        except (ConnectionRefusedError, FileNotFoundError):
+                            self.logger.warning(
+                                "MPV socket not available, restarting service...",
+                                extra={
+                                    "operation": "MPVCommand",
+                                    "command": command_name,
+                                    "attempt": attempt + 1,
+                                    "request_id": request_id
+                                }
+                            )
+                            if not self._restart_systemd_service() or not self._wait_for_socket():
+                                time.sleep(PlaybackConstants.RETRY_DELAY)
+                                continue
+                            s.connect(self.mpv_socket)
+                        
+                        # Добавляем request_id в команду
+                        command_with_id = command.copy()
+                        command_with_id["request_id"] = request_id
+                        
+                        cmd_str = json.dumps(command_with_id) + '\n'
+                        s.sendall(cmd_str.encode())
+                        
+                        # Читаем ответ с помощью улучшенного метода
+                        response = self._read_socket_response(s, request_id, timeout)
+                        
+                        if response:
+                            self._log_operation(
+                                "MPVCommand",
+                                "completed",
+                                {
+                                    "command": command_name,
+                                    "request_id": request_id,
+                                    "response": response,
+                                    "duration_sec": round(time.time() - start_time, 3),
+                                    "attempt": attempt + 1
+                                }
+                            )
+                            return response
+                        else:
+                            raise TimeoutError("No response from MPV")
+                            
             except Exception as e:
                 self.logger.warning(
                     f"Attempt {attempt+1} failed",
