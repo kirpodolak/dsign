@@ -9,8 +9,10 @@ class M3UManager:
         self.logger = logger
         self.media_root = Path(media_root)
         self.upload_folder = Path(upload_folder)
+        self.tmp_dir = self.upload_folder / 'tmp'
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
     
-        def _ensure_proper_m3u_format(self, playlist_file: Path) -> str:
+    def ensure_proper_m3u_format(self, playlist_file: Path) -> str:
         """Обеспечивает правильный формат M3U для слайд-шоу"""
         try:
             with open(playlist_file, 'r', encoding='utf-8') as f:
@@ -170,10 +172,6 @@ class M3UManager:
         self.logger.warning(f"Файл не найден: {file_path}")
         return file_path
     
-    def clean_file_path(self, file_path: str) -> str:
-        """Очищает путь от параметров запроса и нормализует"""
-        # ... код из playlist_management.py
-
     def _clean_file_path(self, file_path: str) -> str:
         """Очищает путь от параметров запроса и нормализует"""
         # Удаляем параметры запроса (все что после ?)
