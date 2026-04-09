@@ -1,7 +1,7 @@
 from flask_login import LoginManager
 import jwt
 from datetime import datetime, timedelta
-from flask import current_app, request, jsonify
+from flask import current_app, request
 from .logger import setup_logger
 
 login_manager = LoginManager()
@@ -17,54 +17,29 @@ class AuthService:
         self.login_attempts = {}
         self.max_attempts = 5
         self.lock_time = timedelta(minutes=15)
-        self.token_expiration = timedelta(hours=24)  # 24 часа для стандартных токенов
-        self.socket_token_expiration = timedelta(minutes=30)  # 30 минут для WebSocket токенов
-        self.token_refresh_threshold = timedelta(minutes=5)  # Порог для обновления токена
+        self.token_expiration = timedelta(days=1)
 
-    def generate_token(self, user_id, socket_token=False, refresh_token=False):
+    def generate_token(self, user_id):
         """
-        Улучшенная генерация JWT токенов
+        Генерация JWT токена
         :param user_id: ID пользователя
-        :param socket_token: Флаг для генерации токена WebSocket
-        :param refresh_token: Флаг для генерации refresh-токена
         :return: Сгенерированный токен
         """
         try:
-            if refresh_token:
-                expiration = timedelta(days=7)  # 7 дней для refresh-токена
-                token_type = 'refresh'
-            elif socket_token:
-                expiration = self.socket_token_expiration
-                token_type = 'socket'
-            else:
-                expiration = self.token_expiration
-                token_type = 'access'
-
             payload = {
                 'user_id': user_id,
-                'exp': datetime.utcnow() + expiration,
+                'exp': datetime.utcnow() + self.token_expiration,
                 'iat': datetime.utcnow(),
-                'iss': current_app.config.get('JWT_ISSUER', 'dsign-auth'),
-                'type': token_type,
-                'aud': 'socket-client' if socket_token else 'web-client'
+                'iss': current_app.config.get('JWT_ISSUER', 'dsign-auth')
             }
-
-            # Добавляем роли для пользователя
-            from ..models import User
-            user = User.query.get(user_id)
-            if user:
-                payload['roles'] = [role.name for role in user.roles] if hasattr(user, 'roles') else []
-                payload['is_admin'] = getattr(user, 'is_admin', False)
-
             token = jwt.encode(payload, self.secret_key, algorithm='HS256')
-
+            
             self.logger.info('Token generated', {
                 'user_id': user_id,
-                'token_type': token_type,
-                'expires': payload['exp'].isoformat()
+                'token_exp': payload['exp'].isoformat()
             })
             return token
-
+            
         except Exception as e:
             self.logger.error('Token generation failed', {
                 'error': str(e),
@@ -72,46 +47,29 @@ class AuthService:
             })
             raise RuntimeError("Token generation failed") from e
 
-    def verify_token(self, token, socket_token=False, refresh_token=False):
+    def verify_token(self, token):
         """
-        Улучшенная верификация JWT токена
+        Верификация JWT токена
         :param token: Токен для проверки
-        :param socket_token: Проверять как WebSocket токен
-        :param refresh_token: Проверять как refresh-токен
         :return: Декодированный payload или None
         """
         try:
             payload = jwt.decode(
-                token,
-                self.secret_key,
+                token, 
+                self.secret_key, 
                 algorithms=['HS256'],
-                options={'verify_exp': True},
-                audience='socket-client' if socket_token else 'web-client'
+                options={'verify_exp': True}
             )
-
-            # Проверка типа токена
-            if socket_token and payload.get('type') != 'socket':
-                raise jwt.InvalidTokenError('Not a WebSocket token')
-            if refresh_token and payload.get('type') != 'refresh':
-                raise jwt.InvalidTokenError('Not a refresh token')
-            if not (socket_token or refresh_token) and payload.get('type') != 'access':
-                raise jwt.InvalidTokenError('Not an access token')
-
-            # Проверка срока действия
-            expires_at = datetime.fromtimestamp(payload['exp'])
-            time_remaining = expires_at - datetime.utcnow()
-
+            
             self.logger.debug('Token verified', {
                 'user_id': payload['user_id'],
-                'token_type': payload.get('type', 'unknown'),
-                'expires': expires_at.isoformat(),
-                'time_remaining': str(time_remaining)
+                'expires': datetime.fromtimestamp(payload['exp']).isoformat()
             })
             return payload
-
+            
         except jwt.ExpiredSignatureError:
             self.logger.warning('Token expired', {
-                'token': token[:10] + '...'
+                'token': token[:10] + '...'  # Логируем только часть токена
             })
             return None
         except jwt.InvalidTokenError as e:
@@ -126,24 +84,6 @@ class AuthService:
                 'stack': True
             })
             return None
-
-    def should_refresh_token(self, token):
-        """
-        Проверка, нужно ли обновить токен
-        :param token: Токен для проверки
-        :return: True если нужно обновить
-        """
-        try:
-            payload = jwt.decode(
-                token,
-                self.secret_key,
-                algorithms=['HS256'],
-                options={'verify_exp': False}  # Не проверяем expiration
-            )
-            expires_at = datetime.fromtimestamp(payload['exp'])
-            return (expires_at - datetime.utcnow()) < self.token_refresh_threshold
-        except Exception:
-            return True
 
     def check_login_attempts(self, username):
         """
@@ -212,36 +152,6 @@ class AuthService:
                 'previous_attempts': self.login_attempts[username]['attempts']
             })
             del self.login_attempts[username]
-
-    def get_current_user_status(self, user_id):
-        """
-        Получение текущего статуса пользователя
-        :param user_id: ID пользователя
-        :return: Словарь с информацией о статусе
-        """
-        from ..models import User
-        user = User.query.get(user_id)
-        if not user:
-            return None
-            
-        return {
-            'authenticated': True,
-            'user_id': user.id,
-            'username': user.username,
-            'roles': [role.name for role in user.roles] if hasattr(user, 'roles') else [],
-            'is_admin': getattr(user, 'is_admin', False),
-            'timestamp': datetime.utcnow().isoformat()
-        }
-
-    def create_tokens(self, user_id):
-        """
-        Создание пары access и refresh токенов
-        :param user_id: ID пользователя
-        :return: Кортеж (access_token, refresh_token)
-        """
-        access_token = self.generate_token(user_id)
-        refresh_token = self.generate_token(user_id, refresh_token=True)
-        return access_token, refresh_token
 
 @login_manager.user_loader
 def load_user(user_id):
