@@ -56,11 +56,16 @@ export function showAlert(type, title, message, duration = 5000) {
         animation: fadeIn 0.3s ease-out;
         pointer-events: auto;
     `;
-    
-    alert.innerHTML = `
-        <strong>${title}</strong>
-        <div>${message}</div>
-    `;
+
+    // Avoid innerHTML to prevent DOM XSS
+    const titleEl = document.createElement('strong');
+    titleEl.textContent = String(title ?? '');
+
+    const messageEl = document.createElement('div');
+    messageEl.textContent = String(message ?? '');
+
+    alert.appendChild(titleEl);
+    alert.appendChild(messageEl);
 
     alertContainer.appendChild(alert);
     
