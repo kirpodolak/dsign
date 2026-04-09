@@ -4,7 +4,7 @@
  */
 
 import { AppInitializer } from './utils/app-init.js';
-import { getToken, clearToken, setCachedData, getCachedData } from './utils/helpers.js';
+import { clearToken } from './utils/helpers.js';
 import { AppLogger } from './utils/logging.js';
 
 class AppCore {
@@ -70,10 +70,9 @@ class AppCore {
 
             // Check authentication state
             const isLoginPage = window.location.pathname.includes('/api/auth/login');
-            const token = await this.auth.waitForToken().catch(() => null);
-            
-            if (!token && !isLoginPage) {
-                this.logger.warn('No token - redirecting to login');
+            const isAuth = await this.auth.checkAuth().catch(() => false);
+            if (!isAuth && !isLoginPage) {
+                this.logger.warn('Not authenticated - redirecting to login');
                 this.auth.handleUnauthorized();
                 return;
             }
@@ -141,13 +140,6 @@ class AppCore {
         if (this.state.socketInitialized) return;
         
         try {
-            // Verify token is available and valid
-            const token = await this.auth.waitForToken();
-            if (!token) {
-                this.logger.warn('WebSocket init aborted - no token available');
-                return;
-            }
-
             const isAuth = await this.auth.checkAuth();
             if (!isAuth) {
                 this.logger.warn('WebSocket init aborted - not authenticated');
@@ -163,7 +155,8 @@ class AppCore {
                 socketToken = result.token;
             } catch (error) {
                 this.logger.error('Failed to get socket token:', error);
-                await this.auth.refreshToken();
+                // Refresh is cookie-based; retry once
+                await this.auth.refreshToken().catch(() => {});
                 const result = await this.auth.getSocketToken();
                 socketToken = result.token;
             }
@@ -240,18 +233,9 @@ class AuthService {
 
     async checkAuth() {
         try {
-            const token = await this.waitForToken();
-            if (!token) return false;
-            
-            const response = await window.App.API.fetch('/auth/api/check-auth', {
-                method: 'GET',
-                headers: {
-                    'Authorization': `Bearer ${token}`
-                }
-            });
-            
-            const data = await response.json();
-            return data?.authenticated || false;
+            const response = await window.App.API.fetch('/api/auth/status', { method: 'GET' });
+            const data = await response.json().catch(() => ({}));
+            return Boolean(data?.authenticated);
         } catch (error) {
             this.logger.warn('Auth check failed:', error);
             return false;
@@ -260,19 +244,16 @@ class AuthService {
 
     async refreshToken() {
         try {
-            const response = await window.App.API.fetch('/auth/refresh-token', {
+            const response = await window.App.API.fetch('/api/auth/refresh-token', {
                 method: 'POST',
                 credentials: 'include'
             });
             
             if (!response.ok) throw new Error('Token refresh failed');
-            
-            const { token } = await response.json();
-            this.setToken(token);
+            await response.json().catch(() => ({}));
             return true;
         } catch (error) {
             this.logger.error('Token refresh failed:', error);
-            this.clearAuth();
             throw error;
         }
     }
@@ -297,53 +278,19 @@ class AuthService {
     }
 
     setToken(token) {
-        try {
-            window.App = window.App || {};
-            window.App.token = token;
-            
-            if (typeof localStorage !== 'undefined') {
-                localStorage.setItem('authToken', token);
-            }
-            
-            if (typeof document !== 'undefined') {
-                document.cookie = `authToken=${token}; path=/; max-age=${3600*24*7}; Secure; SameSite=Lax`;
-            }
-        } catch (e) {
-            this.logger.error('Failed to save auth token', e);
-        }
+        void token;
     }
 
     clearAuth() {
-        try {
-            window.App = window.App || {};
-            delete window.App.token;
-            
-            if (typeof localStorage !== 'undefined') {
-                localStorage.removeItem('authToken');
-            }
-            
-            if (typeof document !== 'undefined') {
-                document.cookie = 'authToken=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
-            }
-        } catch (e) {
-            this.logger.error('Failed to clear auth token', e);
-        }
+        // Best-effort cleanup of legacy non-HttpOnly storage.
+        clearToken();
     }
 
     async getSocketToken() {
         try {
-            const token = await this.waitForToken();
-            const response = await window.App.API.fetch('/auth/socket-token', {
-                headers: {
-                    'Authorization': `Bearer ${token}`
-                }
-            });
+            const response = await window.App.API.fetch('/api/auth/socket-token', { credentials: 'include' });
             
             if (!response.ok) {
-                if (response.status === 401) {
-                    await this.refreshToken();
-                    return this.getSocketToken();
-                }
                 throw new Error(`HTTP ${response.status}`);
             }
 
@@ -359,26 +306,10 @@ class AuthService {
     }
 
     async waitForToken(maxAttempts = 10, interval = 500) {
-        let attempts = 0;
-        
-        return new Promise((resolve, reject) => {
-            const checkToken = () => {
-                attempts++;
-                const token = window.App?.token || 
-                             localStorage.getItem('authToken') || 
-                             getCookie('authToken');
-                
-                if (token) {
-                    resolve(token);
-                } else if (attempts >= maxAttempts) {
-                    reject(new Error('Token not available'));
-                } else {
-                    setTimeout(checkToken, interval);
-                }
-            };
-            
-            checkToken();
-        });
+        // Legacy API: session cookie auth does not expose a token to JS.
+        void maxAttempts;
+        void interval;
+        return Promise.resolve('session');
     }
 }
 
@@ -426,11 +357,6 @@ class APIService {
                 'Content-Type': 'application/json',
                 ...options.headers
             };
-
-            const token = await window.App.auth.waitForToken().catch(() => null);
-            if (token) {
-                headers['Authorization'] = `Bearer ${token}`;
-            }
 
             const response = await fetch(url, {
                 credentials: 'include',
