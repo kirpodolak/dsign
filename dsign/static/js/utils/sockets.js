@@ -112,13 +112,7 @@ export class SocketManager {
      */
     async getSocketToken() {
         try {
-            const response = await window.App.API.fetch('/auth/socket-token', { credentials: 'include' });
-
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
-            }
-
-            const data = await response.json();
+            const data = await window.App.API.fetch('/auth/socket-token', { credentials: 'include' });
             if (!data?.token) {
                 throw new Error('No token in response');
             }
@@ -570,7 +564,7 @@ export class SocketManager {
      * Show alert message
      * @private
      * @param {string} type - Alert type
-     * @param {string} title - Alert title
+     // * @param {string} title - Alert title
      * @param {string} message - Alert message
      */
     showAlert(type, title, message) {
