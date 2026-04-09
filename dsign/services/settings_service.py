@@ -2,6 +2,7 @@
 import os
 import json
 import logging
+import traceback
 from typing import Optional, Dict, Any, Union
 from pathlib import Path
 from datetime import datetime
@@ -38,12 +39,20 @@ class SettingsService:
         self.logger = logger or ServiceLogger(self.__class__.__name__)
         self._ensure_directories()
 
-    def _log_error(self, message: str, exc_info: bool = True, extra: Optional[Dict[str, Any]] = None):
+        # Lightweight in-process cache to avoid repeated DB hits on frequent polling.
+        # (Each process has its own cache; safe for correctness with short TTL.)
+        self._cached_current_settings: Optional[Dict[str, Any]] = None
+        self._cached_current_settings_ts: float = 0.0
+        self._current_settings_cache_ttl_sec: float = 1.0
+
+    def _log_error(self, message: str, extra: Optional[Dict[str, Any]] = None):
         """Унифицированный метод для логирования ошибок"""
         extra_data = {'module': 'SettingsService'}
         if extra:
             extra_data.update(extra)
-        self.logger.error(message, exc_info=exc_info, extra=extra_data)
+        # ServiceLogger.error does not accept exc_info; include stack trace as structured data.
+        extra_data.setdefault('stack_trace', traceback.format_exc())
+        self.logger.error(message, extra=extra_data)
 
     def _log_info(self, message: str, extra: Optional[Dict[str, Any]] = None):
         """Унифицированный метод для информационных логов"""
@@ -134,44 +143,77 @@ class SettingsService:
             from dsign.models import PlaybackStatus, PlaylistProfileAssignment, PlaybackProfile
             
             if not current_app:
-                self._log_error("Application context not available", 
-                              extra={'action': 'get_active_profile_settings'})
+                self._log_error(
+                    "Application context not available",
+                    extra={'action': 'get_active_profile_settings'}
+                )
                 return self.DEFAULT_SETTINGS
 
-            with current_app.app_context():
-                # Получаем текущий статус воспроизведения
-                playback = db.session.query(PlaybackStatus).first()
+            now_ts = datetime.now().timestamp()
+            if (
+                self._cached_current_settings is not None
+                and (now_ts - self._cached_current_settings_ts) < self._current_settings_cache_ttl_sec
+            ):
+                return self._cached_current_settings
+
+            # Получаем текущий статус воспроизведения
+            playback = db.session.query(PlaybackStatus).first()
+            
+            if playback and playback.status == 'playing' and playback.playlist_id:
+                # Если есть активный плейлист, получаем его профиль
+                assignment = db.session.query(PlaylistProfileAssignment).filter_by(
+                    playlist_id=playback.playlist_id
+                ).first()
                 
-                if playback and playback.status == 'playing' and playback.playlist_id:
-                    # Если есть активный плейлист, получаем его профиль
-                    assignment = db.session.query(PlaylistProfileAssignment).filter_by(
-                        playlist_id=playback.playlist_id
-                    ).first()
-                    
-                    if assignment:
-                        profile = db.session.query(PlaybackProfile).get(assignment.profile_id)
-                        if profile:
-                            self._log_info("Using playlist profile settings", 
-                                         extra={'playlist_id': playback.playlist_id, 
-                                               'profile_id': assignment.profile_id})
-                            return {**self.DEFAULT_SETTINGS, **profile.settings}
-                
-                # Если нет активного плейлиста, используем idle профиль
-                idle_profile = db.session.query(PlaybackProfile).filter_by(
-                    profile_type='idle'
-                ).order_by(PlaybackProfile.id.desc()).first()
-                
-                if idle_profile:
-                    self._log_info("Using idle profile settings", 
-                                 extra={'profile_id': idle_profile.id})
-                    return {**self.DEFAULT_SETTINGS, **idle_profile.settings}
-                
-                self._log_warning("No active profile found, using default settings")
-                return self.DEFAULT_SETTINGS
+                if assignment:
+                    profile = db.session.query(PlaybackProfile).get(assignment.profile_id)
+                    if profile:
+                        self._log_info(
+                            "Using playlist profile settings",
+                            extra={'playlist_id': playback.playlist_id, 'profile_id': assignment.profile_id}
+                        )
+                        settings = {**self.DEFAULT_SETTINGS, **(profile.settings or {})}
+                        self._cached_current_settings = settings
+                        self._cached_current_settings_ts = now_ts
+                        return settings
+            
+            # Если нет активного плейлиста, используем idle профиль
+            idle_profile = db.session.query(PlaybackProfile).filter_by(
+                profile_type='idle'
+            ).order_by(PlaybackProfile.id.desc()).first()
+            
+            if idle_profile:
+                self._log_info("Using idle profile settings", extra={'profile_id': idle_profile.id})
+                settings = {**self.DEFAULT_SETTINGS, **(idle_profile.settings or {})}
+                self._cached_current_settings = settings
+                self._cached_current_settings_ts = now_ts
+                return settings
+
+                # If there is no idle profile at all, auto-seed one to avoid repeated warnings
+                # and to provide a stable "default" profile that can later be edited via UI/API.
+                try:
+                    seeded = PlaybackProfile(
+                        name="Default idle",
+                        profile_type='idle',
+                        settings=dict(self.DEFAULT_SETTINGS),
+                    )
+                    db.session.add(seeded)
+                    db.session.commit()
+                    self._log_info("Seeded default idle profile", extra={'profile_id': seeded.id})
+                    settings = {**self.DEFAULT_SETTINGS, **(seeded.settings or {})}
+                    self._cached_current_settings = settings
+                    self._cached_current_settings_ts = now_ts
+                    return settings
+                except Exception as e:
+                    db.session.rollback()
+                    self._log_warning("No active profile found, using default settings", extra={'seed_error': str(e)})
+                    return self.DEFAULT_SETTINGS
             
         except Exception as e:
-            self._log_error(f"Failed to get active profile settings: {str(e)}", 
-                          extra={'action': 'get_active_profile_settings'})
+            self._log_error(
+                f"Failed to get active profile settings: {str(e)}",
+                extra={'action': 'get_active_profile_settings'}
+            )
             return self.DEFAULT_SETTINGS
 
     def get_current_settings(self) -> Dict[str, Any]:
@@ -191,7 +233,7 @@ class SettingsService:
             bool: Успешность операции
         """
         try:
-            from .models import PlaylistProfileAssignment, PlaybackProfile
+            from dsign.models import PlaylistProfileAssignment, PlaybackProfile
             
             if not current_app:
                 self._log_error("Application context not available", 
