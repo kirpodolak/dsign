@@ -383,6 +383,10 @@ def get_socket_token():
         # Generate token with additional security claims
         payload = {
             'sub': current_user.id,
+            # Backward compatibility: some socket handlers expect user_id (not sub)
+            'user_id': current_user.id,
+            # Required by SocketService validator (prevents token confusion with other JWT types)
+            'purpose': 'socket',
             'ip': request.remote_addr or 'unknown',
             'user_agent': request.user_agent.string[:200],
             'exp': datetime.utcnow() + timedelta(minutes=SOCKET_TOKEN_EXPIRATION),
