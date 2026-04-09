@@ -14,7 +14,6 @@ from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
 from PIL import Image
 from dsign.config.config import THUMBNAIL_FOLDER, THUMBNAIL_URL
 from dsign.services import ThumbnailService
-from dsign.extensions import bcrypt
 
 thumbnail_lock = Lock()
 
@@ -693,7 +692,7 @@ def init_api_routes(api_bp, services):
                 os.chmod(file_path, 0o644)
 
                 # Обновляем логотип в плеере
-                if not playback_service.restart_idle_logo(upload_folder=upload_folder, idle_logo=filename):
+                if not playback_service.restart_idle_logo(upload_folder, filename):
                     raise RuntimeError("Failed to update player")
 
                 # Успешное завершение
@@ -712,7 +711,7 @@ def init_api_routes(api_bp, services):
                     if os.path.exists(file_path):
                         os.unlink(file_path)
                     os.rename(backup_path, file_path)
-                    playback_service.restart_idle_logo(upload_folder=upload_folder, idle_logo=filename)
+                    playback_service.restart_idle_logo(upload_folder, filename)
 
                 current_app.logger.error(f"Logo upload failed: {str(e)}")
                 return jsonify({
@@ -754,6 +753,7 @@ def init_api_routes(api_bp, services):
             }), 500
 
     @api_bp.route('/media/<path:filename>', methods=['GET'])
+    @login_required
     def serve_media(filename):
         try:
             upload_folder = current_app.config.get('UPLOAD_FOLDER', '/var/lib/dsign/media')
@@ -774,6 +774,7 @@ def init_api_routes(api_bp, services):
             abort(404)
                 
     @api_bp.route('/media/mpv_screenshot', methods=['GET'])
+    @login_required
     def get_mpv_screenshot():
         try:
             screenshot_path = os.path.join(current_app.config['STATIC_FOLDER'], 'images', 'on_air_screen.jpg')
@@ -840,6 +841,7 @@ def init_api_routes(api_bp, services):
             return jsonify({"success": False, "error": "Internal error"}), 500
             
     @api_bp.route('/media/thumbnail/<filename>', methods=['GET'])
+    @login_required
     def get_media_thumbnail(filename):
         try:
             # Всегда используем .jpg в пути
