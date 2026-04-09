@@ -71,8 +71,10 @@ const state = {
 // API functions
 const api = {
     async request(url, options = {}) {
+        const { showLoading = true, ...fetchOptions } = options || {};
         try {
-            if (elements.loadingIndicator) {
+            // Avoid blocking UI for background polling / image refreshes.
+            if (showLoading && elements.loadingIndicator) {
                 elements.loadingIndicator.style.display = 'block';
             }
 
@@ -81,11 +83,11 @@ const api = {
                             '';
 
             const response = await fetch(`${CONFIG.api.baseUrl}${url}`, {
-                ...options,
+                ...fetchOptions,
                 headers: {
                     ...CONFIG.api.headers,
                     'X-CSRFToken': csrfToken,
-                    ...options.headers
+                    ...(fetchOptions.headers || {})
                 },
                 credentials: 'include' // Ensure cookies are sent with requests
             });
@@ -110,7 +112,7 @@ const api = {
             console.error(`API request failed: ${url}`, error);
             throw error;
         } finally {
-            if (elements.loadingIndicator) {
+            if (showLoading && elements.loadingIndicator) {
                 elements.loadingIndicator.style.display = 'none';
             }
         }
@@ -715,7 +717,7 @@ const handlers = {
 
         state.refreshIntervalId = setInterval(async () => {
             try {
-                const settings = await api.getSettings();
+                const settings = await api.request(CONFIG.api.endpoints.settings, { showLoading: false });
                 if (JSON.stringify(state.currentSettings) !== JSON.stringify(settings)) {
                     state.currentSettings = settings;
                     ui.renderSettings(settings);
