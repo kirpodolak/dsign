@@ -56,7 +56,7 @@ class MPVManager:
         """Настраивает MPV для работы со слайд-шоу"""
         try:
             self.logger.info("Настройка MPV для слайд-шоу")
-            
+        
             # Основные настройки для слайд-шоу
             settings = {
                 # Отключаем аудио для изображений
@@ -67,26 +67,42 @@ class MPVManager:
                 "image-display-duration": "5000",
                 # Режим отображения изображений
                 "video-aspect-override": "16:9",
-                # Включаем плавные переходы
-                "image-transition": "yes",
                 # Отключаем черные поля
                 "video-unscaled": "no",
                 "panscan": "1.0"
             }
-            
+        
+            # Проверяем поддерживаемые настройки
+            supported_settings = {}
             for key, value in settings.items():
-                result = self._send_command({
-                    "command": ["set_property", key, value]
-                }, timeout=2.0)
+                # Проверяем существует ли свойство
+                check_response = self._send_command({
+                    "command": ["get_property", key]
+                }, timeout=1.0)
+            
+                if check_response and check_response.get("error") != "property not found":
+                    supported_settings[key] = value
+                    result = self._send_command({
+                        "command": ["set_property", key, value]
+                    }, timeout=2.0)
                 
-                if result and result.get("error") == "success":
-                    self.logger.debug(f"Установлена настройка: {key}={value}")
+                    if result and result.get("error") == "success":
+                        self.logger.debug(f"Установлена настройка: {key}={value}")
+                    else:
+                        self.logger.warning(f"Не удалось установить настройку: {key}={value}")
                 else:
-                    self.logger.warning(f"Не удалось установить настройку: {key}={value}")
-            
-            self.logger.info("Настройка MPV для слайд-шоу завершена")
+                    self.logger.info(f"Настройка не поддерживается: {key}")
+        
+            self.logger.info(
+                "Настройка MPV для слайд-шоу завершена",
+                extra={
+                    "supported_settings": list(supported_settings.keys()),
+                    "total_settings": len(settings),
+                    "unsupported_settings": [k for k in settings if k not in supported_settings]
+                }
+            )
             return True
-            
+        
         except Exception as e:
             self.logger.error(f"Ошибка настройки MPV для слайд-шоу: {e}")
             return False
