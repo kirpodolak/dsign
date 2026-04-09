@@ -5,394 +5,217 @@
 import { getCookie } from './helpers.js';
 
 /**
- * Enhanced service for handling authentication, tokens and authorization state
+ * Service for handling authentication, tokens and authorization state
  */
 export class AuthService {
     constructor() {
+        // Initialize logger
         this.logger = typeof window !== 'undefined' && window.App?.logger 
             ? window.App.logger 
             : console;
         
-        // Token configuration
+        // Tokens must not be stored in JS-accessible storage (XSS risk).
+        // Use session cookies (HttpOnly) + CSRF for state-changing requests.
         this.tokenKey = 'auth_token';
-        this.refreshTokenKey = 'refresh_token';
-        this.socketTokenKey = 'socket_token';
         this.authStatusKey = 'auth_status';
-        
-        // API endpoints
         this.loginEndpoint = '/api/auth/login';
-        this.checkAuthEndpoint = '/api/auth/check-auth';
+        this.checkAuthEndpoint = '/api/auth/status';
         this.refreshTokenEndpoint = '/api/auth/refresh-token';
         this.socketTokenEndpoint = '/api/auth/socket-token';
-        
-        // Timers
-        this.authStatusInterval = null;
-        this.tokenRefreshInterval = null;
-        this.socketTokenRefreshInterval = null;
-        
-        // State
-        this.status = false;
-        this.tokenCheckAttempts = 0;
-        this.maxTokenCheckAttempts = 5;
-        this.tokenRefreshThreshold = 5 * 60 * 1000; // 5 minutes before expiration
-        this.socketTokenRefreshThreshold = 2 * 60 * 1000; // 2 minutes buffer for socket token
     }
 
+    /**
+     * Check user authentication status
+     * @async
+     * @returns {Promise<boolean>} True if user is authenticated
+     */
     async checkAuth() {
         try {
             this.logger.debug('Checking authentication status');
+
+            const response = await window.App.API.fetch(this.checkAuthEndpoint);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
             
-            // First check if we have any token at all
-            const token = this.getToken();
-            if (!token) {
-                this.logger.debug('No token found - requiring login');
-                return false;
+            const data = await response.json();
+            
+            if (data?.authenticated) {
+                this.logger.debug('User authenticated');
+                return true;
             }
-
-            // Then validate token
-            if (!this._isTokenValid(token)) {
-                this.logger.debug('Token invalid - requiring reauthentication');
-                this.clearAuth();
-                return false;
-            }
-
-            // Verify authentication status
-            return await this._verifyAuthStatus();
+            
+            this.logger.debug('User not authenticated');
+            return false;
         } catch (error) {
             this.logger.error('Authentication check failed', error);
-            this.clearAuth();
             return false;
         }
     }
 
-    _isTokenValid(token) {
-        if (!token) return false;
-        
+    /**
+     * Refresh authentication token
+     * @async
+     * @returns {Promise<boolean>} True if token was refreshed successfully
+     * @throws {Error} If token refresh failed
+     */
+    async refreshToken() {
         try {
-            const payload = JSON.parse(atob(token.split('.')[1]));
-            return payload.exp * 1000 > Date.now();
-        } catch (e) {
-            this.logger.warn('Token validation failed:', e);
-            return false;
-        }
-    }
-
-    async _verifyAuthStatus() {
-        try {
-            const response = await fetch(this.checkAuthEndpoint, {
-                credentials: 'include',
-                headers: {
-                    'Authorization': `Bearer ${this.getToken()}`,
-                    'Accept': 'application/json'
-                }
-            });
-            
-            if (response.status === 401) {
-                this.handleUnauthorized();
-                return false;
-            }
-            
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
-            }
-            
-            const data = await response.json();
-            this.updateAuthStatus(data?.authenticated ?? false);
-            return data?.authenticated;
-        } catch (error) {
-            this.logger.error('Auth verification failed:', error);
-            throw error;
-        }
-    }
-
-    async login(credentials) {
-        try {
-            const response = await fetch(this.loginEndpoint, {
+            const response = await window.App.API.fetch(this.refreshTokenEndpoint, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                },
-                body: JSON.stringify(credentials)
+                credentials: 'include'
             });
-
-            if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.message || 'Login failed');
-            }
-
-            const data = await response.json();
-            this._processLoginResponse(data);
-            return data;
+            
+            if (!response.ok) throw new Error('Token refresh failed');
+            
+            // If server uses an HttpOnly cookie for a token, JS should not store it.
+            await response.json().catch(() => ({}));
+            return true;
         } catch (error) {
-            this.logger.error('Login failed:', error);
+            this.logger.error('Token refresh failed:', error);
             throw error;
         }
     }
 
-    _processLoginResponse(response) {
-        if (!response?.token) {
-            throw new Error('Invalid login response');
-        }
-
-        this.setToken(response.token);
-        if (response.refresh_token) {
-            this.setRefreshToken(response.refresh_token);
-        }
-
-        this.updateAuthStatus(true);
-        this._initSocketConnection();
-    }
-
-    _initSocketConnection() {
-        if (window.App?.Sockets) {
-            // Only initialize socket connection after successful login
-            setTimeout(() => {
-                window.App.Sockets.initAfterAuth();
-            }, 300);
-        }
-    }
-
-    async getSocketToken(forceRefresh = false) {
-        // Don't attempt if we don't have a valid auth token
-        if (!this.getToken()) {
-            throw new Error('Authentication required before getting socket token');
-        }
-
-        try {
-            const response = await fetch(this.socketTokenEndpoint, {
-                credentials: 'include',
-                headers: {
-                    'Authorization': `Bearer ${this.getToken()}`,
-                    'Accept': 'application/json'
-                }
-            });
-            
-            if (response.status === 401) {
-                this.handleUnauthorized();
-                return null;
-            }
-            
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
-            }
-            
-            const data = await response.json();
-            localStorage.setItem(this.socketTokenKey, data.token);
-            return data;
-        } catch (error) {
-            this.logger.error('Socket token error:', error);
-            throw error;
-        }
-    }
-
-    handleUnauthorized() {
-        // Don't redirect if we're already on login page
-        if (window.location.pathname.includes('/login')) return;
-
-        this.clearAuth();
-        const redirectPath = encodeURIComponent(window.location.pathname + window.location.search);
-        window.location.href = `/login?next=${redirectPath}`;
-    }
-
-    clearAuth() {
-        this.logger.debug('Clearing authentication data');
-        
-        // Clear tokens
-        window.App = window.App || {};
-        delete window.App.token;
-        
-        localStorage.removeItem(this.tokenKey);
-        localStorage.removeItem(this.refreshTokenKey);
-        localStorage.removeItem(this.socketTokenKey);
-        
-        // Clear cookies
-        this._clearCookie(this.tokenKey);
-        this._clearCookie(this.refreshTokenKey);
-        this._clearCookie(this.socketTokenKey);
-        
-        // Update status
-        this.updateAuthStatus(false);
-        
-        // Disconnect sockets
-        window.App?.Sockets?.disconnect?.();
-        
-        // Cleanup timers
-        this._cleanupTimers();
-    }
-
-    _clearCookie(name) {
-        document.cookie = `${name}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-    }
-
-    _cleanupTimers() {
-        clearInterval(this.authStatusInterval);
-        clearInterval(this.tokenRefreshInterval);
-        clearInterval(this.socketTokenRefreshInterval);
-    }
-
-    updateAuthStatus(isAuthenticated) {
-        if (this.status === isAuthenticated) return;
-        
-        this.status = isAuthenticated;
-        this._triggerAuthStatusChange(isAuthenticated);
-        this.logger.debug(`Auth status updated: ${isAuthenticated}`);
-    }
-
-    _triggerAuthStatusChange(isAuthenticated) {
-        if (typeof window !== 'undefined') {
-            const event = new CustomEvent('auth:status_changed', {
-                detail: isAuthenticated
-            });
-            document.dispatchEvent(event);
-        }
-    }
-
+    /**
+     * Get token from storage
+     * @returns {string|null} Token or null if not found
+     */
     getToken() {
         try {
-            return window.App?.token || 
-                   localStorage.getItem(this.tokenKey) || 
-                   getCookie(this.tokenKey);
+            // Legacy: return any server-set cookie value if readable, but do not store tokens in JS.
+            // Prefer session cookie auth; this should generally be null/empty.
+            return getCookie(this.tokenKey) || null;
         } catch (e) {
             this.logger.error('Failed to get auth token', e);
             return null;
         }
     }
 
-    getRefreshToken() {
-        try {
-            return localStorage.getItem(this.refreshTokenKey) || 
-                   getCookie(this.refreshTokenKey);
-        } catch (e) {
-            this.logger.error('Failed to get refresh token', e);
-            return null;
-        }
-    }
-
+    /**
+     * Save token to storage
+     * @param {string} token JWT token
+     */
     setToken(token) {
-        if (!token) return;
-
         try {
-            window.App = window.App || {};
-            window.App.token = token;
-            localStorage.setItem(this.tokenKey, token);
-            document.cookie = `${this.tokenKey}=${token}; path=/; max-age=86400; Secure; SameSite=Lax`;
+            // No-op: avoid persisting tokens in JS (XSS risk).
+            void token;
         } catch (e) {
             this.logger.error('Failed to save auth token', e);
         }
     }
 
-    setRefreshToken(token) {
-        if (!token) return;
-
+    /**
+     * Clear authentication data
+     */
+    clearAuth() {
         try {
-            localStorage.setItem(this.refreshTokenKey, token);
-            document.cookie = `${this.refreshTokenKey}=${token}; path=/; max-age=604800; Secure; SameSite=Strict`;
-        } catch (e) {
-            this.logger.error('Failed to save refresh token', e);
-        }
-    }
+            this.logger.debug('Clearing authentication data');
+            
+            window.App = window.App || {};
+            delete window.App.token;
 
-    async refreshToken() {
-        const refreshToken = this.getRefreshToken();
-        if (!refreshToken) {
-            throw new Error('No refresh token available');
-        }
-
-        const response = await fetch(this.refreshTokenEndpoint, {
-            method: 'POST',
-            credentials: 'include',
-            headers: {
-                'Authorization': `Bearer ${refreshToken}`,
-                'Content-Type': 'application/json'
+            if (typeof window !== 'undefined') {
+                window.App?.Helpers?.setCachedData?.(this.authStatusKey, { value: false });
+                window.App?.Sockets?.disconnect?.();
             }
-        });
-        
-        if (!response.ok) {
-            const errorData = await this._parseErrorResponse(response);
-            throw new Error(errorData.message || `HTTP ${response.status}`);
-        }
-        
-        const data = await response.json();
-        this.setToken(data.token);
-        if (data.refresh_token) {
-            this.setRefreshToken(data.refresh_token);
-        }
-        return true;
-    }
-
-    async _parseErrorResponse(response) {
-        try {
-            const contentType = response.headers.get('content-type');
-            if (contentType && contentType.includes('application/json')) {
-                return await response.json();
-            }
-            return { message: await response.text() };
         } catch (e) {
-            return { message: `HTTP ${response.status}` };
+            this.logger.error('Failed to clear auth token', e);
         }
     }
 
-    startAuthStatusChecker() {
-        this._clearAuthStatusChecker();
-        
-        // Initial check
-        this.checkAuth().catch(error => {
-            this.logger.error('Initial auth check failed:', error);
-        });
-
-        // Periodic checks
-        this.authStatusInterval = setInterval(() => {
-            this.checkAuth().catch(error => {
-                this.logger.error('Periodic auth check failed:', error);
-            });
-        }, 30000);
+    /**
+     * Validate token format and expiration
+     * @param {string} token JWT token
+     * @returns {boolean} True if token is valid
+     */
+    isTokenValid(token) {
+        void token;
+        return false;
     }
 
-    _clearAuthStatusChecker() {
-        if (this.authStatusInterval) {
-            clearInterval(this.authStatusInterval);
-            this.authStatusInterval = null;
-        }
+    /**
+     * Handle successful login
+     * @param {object} response Server response
+     */
+    handleLoginSuccess(response) {
+        void response;
+        this.logger.info('User logged in successfully');
     }
 
-    _shouldRefreshToken(token) {
-        if (!token || typeof token !== 'string' || token.split('.').length !== 3) {
-            return false;
+    /**
+     * Handle unauthorized access
+     */
+    handleUnauthorized() {
+        if (window.location.pathname.startsWith('/auth/login')) {
+            return;
         }
 
-        try {
-            const payload = JSON.parse(atob(token.split('.')[1]));
-            const expiresAt = payload.exp * 1000;
-            return (expiresAt - Date.now()) < this.tokenRefreshThreshold;
-        } catch (e) {
-            this.logger.warn('Token refresh check failed:', e);
-            return false;
-        }
+        const redirectPath = encodeURIComponent(window.location.pathname + window.location.search);
+        window.location.href = `/api/auth/login?next=${redirectPath}`;
     }
 
+    /**
+     * Wait for valid token to appear
+     * @param {number} [maxAttempts=10] Maximum attempts
+     * @param {number} [delay=1000] Delay between attempts (ms)
+     * @returns {Promise<string>} Valid token
+     * @throws {Error} If token not available after max attempts
+     */
     waitForToken(maxAttempts = 10, delay = 1000) {
         return new Promise((resolve, reject) => {
             let attempt = 0;
             
-            const checkToken = () => {
+            const checkToken = async () => {
                 attempt++;
-                const token = this.getToken();
-                
-                if (token && this._isTokenValid(token)) {
-                    this.tokenCheckAttempts = 0;
-                    resolve(token);
+                try {
+                    const ok = await this.checkAuth();
+                    if (ok) {
+                        resolve('session');
+                        return;
+                    }
+                } catch {
+                    // ignore
                 } else if (attempt >= maxAttempts) {
-                    this.tokenCheckAttempts = 0;
-                    reject(new Error('Token not available'));
+                    reject(new Error('Not authenticated'));
                 } else {
-                    this.tokenCheckAttempts = attempt;
+                    this.logger.debug(`Waiting for token (attempt ${attempt}/${maxAttempts})`);
                     setTimeout(checkToken, delay);
                 }
             };
             
             checkToken();
         });
+    }
+
+    /**
+     * Get WebSocket connection token
+     * @async
+     * @returns {Promise<{token: string, expiresIn: number, socketUrl: string}>} WebSocket connection data
+     * @throws {Error} If failed to get token
+     */
+    async getSocketToken() {
+        try {
+            const response = await window.App.API.fetch(this.socketTokenEndpoint, { credentials: 'include' });
+        
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+        
+            const data = await response.json();
+            if (!data?.token) {
+                throw new Error('Invalid token response');
+            }
+        
+            return {
+                token: data.token,
+                expiresIn: data.expires_in || 300,
+                socketUrl: data.socket_url || '/socket.io'
+            };
+        } catch (error) {
+            this.logger.error('Socket token fetch failed', error);
+            throw new Error(`Failed to get socket token: ${error.message}`);
+        }
     }
 }
 
@@ -401,12 +224,14 @@ if (typeof window !== 'undefined') {
     window.App = window.App || {};
     window.App.Auth = window.App.Auth || new AuthService();
     
-    // Only start auth checker on non-login pages
+    // Initialize auth check handlers when DOM is ready
     document.addEventListener('DOMContentLoaded', () => {
-        if (!window.location.pathname.includes('/login')) {
-            window.App.Auth.checkAuth().catch(() => {
-                // Silent error - will be handled by auth flow
-            });
+        if (!window.location.pathname.includes('/api/auth/login')) {
+            setInterval(() => {
+                window.App.Auth.checkAuth().catch(error => {
+                    window.App.logger?.error('Periodic auth check failed', error);
+                });
+            }, window.App.config?.authCheckInterval || 60000);
         }
     });
 }
