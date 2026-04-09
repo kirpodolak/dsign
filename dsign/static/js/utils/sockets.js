@@ -1,57 +1,45 @@
 /**
  * WebSocket Manager Module
  * @module SocketManager
- * @description Enhanced WebSocket manager with robust JWT auth handling and Circuit Breaker pattern
+ * @description Enhanced WebSocket manager for real-time communication with authentication and event management
  */
 
+// Configuration constants with enhanced security settings
 const CONFIG = {
     MAX_RETRIES: 5,
-    INITIAL_RETRY_DELAY: 2000,
-    MAX_RETRY_DELAY: 60000,
+    INITIAL_RETRY_DELAY: 1000,
+    MAX_RETRY_DELAY: 30000,
     PING_INTERVAL: 25000,
     AUTH_TIMEOUT: 30000,
-    TOKEN_CHECK_INTERVAL: 1000,
-    TOKEN_MAX_ATTEMPTS: 30,
+    TOKEN_CHECK_INTERVAL: 500,
+    TOKEN_MAX_ATTEMPTS: 10,
+    TOKEN_REFRESH_THRESHOLD: 300000, // 5 minutes before expiration
     MAX_EVENT_QUEUE: 50,
-    CONNECTION_TIMEOUT: 10000,
-    SERVER_CHECK_INTERVAL: 5000,
-    SERVER_CHECK_TIMEOUT: 2000,
-    AUTH_RETRY_DELAY: 5000,
-    SOCKET_TOKEN_EXPIRY_BUFFER: 300000, // 5 minutes buffer for token refresh
-    CIRCUIT_BREAKER_THRESHOLD: 3,       // Max failures before opening circuit
-    CIRCUIT_BREAKER_TIMEOUT: 30000      // Time to wait before half-open state
+    CONNECTION_TIMEOUT: 10000
 };
 
+/**
+ * WebSocket Manager Class
+ */
 export class SocketManager {
+    /**
+     * Create a new SocketManager instance
+     * @param {object} [options={}] - Configuration options
+     * @param {function} [options.onError] - Custom error handler
+     * @param {function} [options.onTokenRefresh] - Custom token refresh handler
+     * @param {function} [options.onReconnect] - Custom reconnect handler
+     * @param {number} [options.reconnectDelay] - Custom initial reconnect delay
+     */
     constructor(options = {}) {
-        // Validate required dependencies
-        if (typeof io === 'undefined') {
-            throw new Error('Socket.IO library is required');
-        }
-
         // Connection state
-        this.endpoint = options.endpoint || 
-                       window.location.origin.replace(/^http/, 'ws') || 
-                       '/socket.io';
         this.socket = null;
-        this.token = null;
-        this.authSocket = null;
         this.isConnected = false;
         this.isAuthenticated = false;
+        this.connectionEstablished = false;
         
         // Reconnection settings
         this.reconnectAttempts = 0;
         this.reconnectDelay = options.reconnectDelay || CONFIG.INITIAL_RETRY_DELAY;
-        this.maxReconnectAttempts = options.maxRetries || CONFIG.MAX_RETRIES;
-        
-        // Circuit Breaker state
-        this.circuitBreaker = {
-            isOpen: false,
-            failureCount: 0,
-            lastFailureTime: null,
-            threshold: options.circuitBreakerThreshold || CONFIG.CIRCUIT_BREAKER_THRESHOLD,
-            timeout: options.circuitBreakerTimeout || CONFIG.CIRCUIT_BREAKER_TIMEOUT
-        };
         
         // Event management
         this.pendingEvents = [];
@@ -62,740 +50,570 @@ export class SocketManager {
         this.authTimeout = null;
         this.connectionTimeout = null;
         this.tokenRefreshTimer = null;
-        this.serverCheckTimer = null;
-        this.authRetryTimer = null;
-        this.circuitBreakerTimer = null;
         
-        // Dependencies
-        this.authService = options.authService || this._createDefaultAuthService();
-        this.logger = options.logger || this._createDefaultLogger();
+        // Security
+        this.lastActivity = Date.now();
+        this.ipAddress = null;
         
         // Callbacks
         this.onError = options.onError || this.defaultErrorHandler;
         this.onTokenRefresh = options.onTokenRefresh || this.defaultTokenRefreshHandler;
         this.onReconnect = options.onReconnect || null;
-        this.onCircuitBreakerOpen = options.onCircuitBreakerOpen || null;
-        this.onCircuitBreakerClose = options.onCircuitBreakerClose || null;
+        
+        // Initialize connection
+        this.initWithTokenCheck();
     }
 
-    initAfterAuth = () => {
-        if (!this.authService.getToken()) {
-            this.logger.debug('[Socket] Skipping init - no auth token');
-            return;
-        }
-        this._initAuthSocket();
-    }
-
-    _createDefaultAuthService() {
-        return {
-            getSocketToken: async () => {
-                const response = await fetch('/api/auth/socket-token', {
-                    headers: {
-                        'Authorization': `Bearer ${this.getToken()}`
-                    }
-                });
-                
-                // Check for HTML response
-                const contentType = response.headers.get('content-type');
-                if (contentType && contentType.includes('text/html')) {
-                    throw new Error('Server returned HTML instead of JSON');
-                }
-                
-                if (!response.ok) throw new Error('Failed to get socket token');
-                return await response.json();
-            },
-            getToken: () => {
-                if (typeof window !== 'undefined' && window.App?.Auth?.getToken) {
-                    return window.App.Auth.getToken();
-                }
-                return localStorage?.getItem('authToken');
-            },
-            updateAuthStatus: (status) => {
-                if (typeof window !== 'undefined' && window.App?.Auth?.updateAuthStatus) {
-                    window.App.Auth.updateAuthStatus(status);
-                }
-            },
-            checkAuth: async () => {
-                if (typeof window !== 'undefined' && window.App?.Auth?.checkAuth) {
-                    return await window.App.Auth.checkAuth();
-                }
-                return false;
-            }
-        };
-    }
-
-    _createDefaultLogger() {
-        return {
-            debug: console.debug.bind(console),
-            log: console.log.bind(console),
-            warn: console.warn.bind(console),
-            error: console.error.bind(console)
-        };
-    }
-
-    defaultErrorHandler = (error) => {
-        this.logger.error('[Socket] Error:', error);
+    /**
+     * Default error handler
+     * @param {Error} error - Error object
+     */
+    defaultErrorHandler(error) {
+        console.error('[Socket] Error:', error);
         if (typeof window !== 'undefined' && window.App?.Alerts?.showError) {
             window.App.Alerts.showError('Connection Error', error.message);
         }
     }
 
-    defaultTokenRefreshHandler = (newToken) => {
-        this.logger.debug('[Socket] Token refreshed');
-        if (typeof window !== 'undefined' && window.App?.Helpers?.setToken) {
-            window.App.Helpers.setToken(newToken);
-        } else if (typeof localStorage !== 'undefined') {
-            localStorage.setItem('authToken', newToken);
+    /**
+     * Default token refresh handler
+     * @param {string} newToken - New authentication token
+     */
+    defaultTokenRefreshHandler(newToken) {
+        console.debug('[Socket] Token refreshed');
+        // Do not persist tokens in JS-accessible storage.
+        void newToken;
+    }
+
+    /**
+     * Initialize connection with token check
+     * @private
+     */
+    async initWithTokenCheck() {
+        try {
+            console.debug('[Socket] Starting connection with token check');
+            
+            // Wait for API service to be available
+            await this.waitForAPI();
+
+            // Session cookie auth is the source of truth; fetch a short-lived socket token.
+            await this.getSocketToken();
+            this.init();
+        } catch (error) {
+            console.error('[Socket] Initialization error:', error);
+            this.handleRetry(error);
         }
     }
 
-    async connect() {
-        // Don't attempt if circuit is open
-        if (this.circuitBreaker.isOpen) {
-            this.logger.debug('[Socket] Connection blocked: circuit is open');
-            return;
-        }
-
+    /**
+     * Get WebSocket authentication token
+     * @private
+     * @returns {Promise<string|null>} Authentication token or null
+     */
+    async getSocketToken() {
         try {
-            if (this.isConnected) {
-                this.logger.debug('[Socket] Already connected');
-                return;
+            const response = await window.App.API.fetch('/auth/socket-token', { credentials: 'include' });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
             }
 
-            // Get JWT socket token from server
-            let token;
-            try {
-                const result = await this.authService.getSocketToken();
-                if (!result?.token) {
-                    throw new Error('Invalid token response from server');
-                }
-                token = result.token;
-                
-                // Добавляем проверку формата токена
-                if (typeof token !== 'string' || token.split('.').length !== 3) {
-                    throw new Error('Invalid token format');
-                }
-            } catch (error) {
-                this.logger.error('[Socket] Failed to get socket token:', error);
-                
-                if (error.message.includes('Server returned HTML')) {
-                    this._showAlert(
-                        'error',
-                        'Server Error',
-                        'Authentication service is unavailable. Please try again later.'
-                    );
-                    return;
-                }
-                
-                // Добавляем задержку перед повторной попыткой
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                
-                // Проверяем, нужно ли открывать circuit breaker
-                if (this.circuitBreaker.failureCount >= this.circuitBreaker.threshold - 1) {
-                    this._openCircuit();
-                }
-                
-                throw error;
+            const data = await response.json();
+            if (!data?.token) {
+                throw new Error('No token in response');
             }
-
-            this.token = token;
-            await this._init(token);
-            
+            return data.token;
         } catch (error) {
-            this.logger.error('Socket connection error:', error);
-            this._handleRetry(error);
+            console.error('[Socket] Token fetch error:', error);
+            throw error;
+        }
+    }
+	
+    async waitForAPI(maxAttempts = 5, delay = 500) {
+        let attempts = 0;
+        return new Promise((resolve, reject) => {
+            const check = () => {
+                attempts++;
+                if (window.App?.API?.fetch) {
+                    resolve();
+                } else if (attempts >= maxAttempts) {
+                    reject(new Error('API service not available'));
+                } else {
+                    setTimeout(check, delay);
+                }
+            };
+            check();
+        });
+    }	
+
+    /**
+     * Validate token structure
+     * @private
+     * @param {string} token - JWT token
+     * @returns {boolean} True if token is valid
+     */
+    validateTokenStructure(token) {
+        try {
+            const parts = token.split('.');
+            if (parts.length !== 3) {
+                console.warn('[Socket] Invalid token format');
+                return false;
+            }
+            
+            // Basic payload validation
+            const payload = JSON.parse(atob(parts[1]));
+            if (!payload.exp || !payload.sub) {
+                console.warn('[Socket] Token missing required claims');
+                return false;
+            }
+            
+            // Check if token is about to expire
+            const now = Date.now() / 1000;
+            if (payload.exp - now < CONFIG.TOKEN_REFRESH_THRESHOLD / 1000) {
+                console.debug('[Socket] Token needs refresh');
+                this.scheduleTokenRefresh();
+            }
+            
+            return true;
+        } catch (e) {
+            console.warn('[Socket] Token validation failed:', e);
+            return false;
+        }
+    }
+
+    /**
+     * Schedule token refresh
+     * @private
+     */
+    scheduleTokenRefresh() {
+        if (this.tokenRefreshTimer) {
+            clearTimeout(this.tokenRefreshTimer);
+        }
+        
+        this.tokenRefreshTimer = setTimeout(() => {
+            this.refreshToken();
+        }, CONFIG.TOKEN_REFRESH_THRESHOLD - 60000); // 1 minute before expiration
+    }
+
+    /**
+     * Refresh authentication token
+     * @private
+     * @returns {Promise<boolean>} True if refresh was successful
+     */
+    async refreshToken() {
+        try {
+            console.debug('[Socket] Refreshing token...');
+            
+            // Use AuthService if available
+            if (typeof window !== 'undefined' && window.App?.Auth?.refreshToken) {
+                const success = await window.App.Auth.refreshToken();
+                return success;
+            }
+            
+            // Fallback to direct API call
+            const response = await fetch('/api/auth/refresh-token', {
+                method: 'POST',
+                credentials: 'include'
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to refresh token');
+            }
+            
+            const { token } = await response.json();
+            if (this.onTokenRefresh) {
+                this.onTokenRefresh(token);
+            }
+            
+            return true;
+        } catch (error) {
+            console.error('[Socket] Token refresh failed:', error);
             throw error;
         }
     }
 
-    _initAuthSocket = () => {
-        this._clearAuthSocketTimers();
-
-        if (!this._isSocketIOLoaded()) {
-            this.logger.error('[Socket] Socket.IO library not loaded');
-            this._scheduleAuthSocketRetry();
-            return;
-        }
-
-        this._setupAuthSocket();
-    }
-
-    _clearAuthSocketTimers() {
-        if (this.authRetryTimer) {
-            clearTimeout(this.authRetryTimer);
-            this.authRetryTimer = null;
-        }
-    }
-
-    _isSocketIOLoaded() {
-        return typeof io !== 'undefined';
-    }
-
-    _scheduleAuthSocketRetry() {
-        this.authRetryTimer = setTimeout(
-            () => this._initAuthSocket(), 
-            CONFIG.AUTH_RETRY_DELAY
-        );
-    }
-
-    _setupAuthSocket = () => {
-        if (this.authSocket) {
-            this.authSocket.disconnect();
-        }
-
+    /**
+     * Initialize socket connection
+     * @private
+     */
+    init() {
         try {
-            this.authSocket = io('/auth', {
-                reconnection: true,
-                reconnectionAttempts: CONFIG.MAX_RETRIES,
-                reconnectionDelay: this.reconnectDelay,
-                reconnectionDelayMax: 10000,
-                randomizationFactor: 0.5,
-                transports: ['websocket'],
-                upgrade: false,
-                forceNew: true,
-                timeout: CONFIG.CONNECTION_TIMEOUT,
-                query: {
-                    'client_type': 'browser',
-                    'version': '1.0'
-                }
-            });
-
-            this._setupAuthSocketEventHandlers();
+            console.debug('[Socket] Initializing connection...');
             
-            this.authSocket.on('connect_error', (error) => {
-                this.logger.error('[AuthSocket] Connection error:', error);
-                this._scheduleAuthSocketRetry();
-            });
-            
-        } catch (error) {
-            this.logger.error('[AuthSocket] Initialization error:', error);
-            this._scheduleAuthSocketRetry();
-        }
-    };
-
-    _setupAuthSocketEventHandlers = () => {
-        if (!this.authSocket) {
-            this.logger.error('[AuthSocket] Cannot setup handlers - authSocket is null');
-            return;
-        }
-
-        this.authSocket.on('connect', () => {
-            this.logger.debug('[AuthSocket] Connected');
-        });
-
-        this.authSocket.on('auth_ready', () => {
-            this.logger.debug('[AuthSocket] Server ready');
-            this._checkAuthViaWebSocket();
-        });
-
-        this.authSocket.on('disconnect', (reason) => {
-            this.logger.log('[AuthSocket] Disconnected:', reason);
-            if (reason === 'io server disconnect') {
-                this._scheduleAuthSocketRetry();
-            }
-        });
-
-        this.authSocket.on('connect_error', (error) => {
-            this.logger.error('[AuthSocket] Connection error:', error);
-            this._scheduleAuthSocketRetry();
-        });
-
-        this.authSocket.on('auth_status_response', (data) => {
-            this._handleAuthStatusResponse(data);
-        });
-
-        this.authSocket.on('authentication_result', (data) => {
-            this._handleAuthenticationResult(data);
-        });
-
-        this.authSocket.on('auth_error', (error) => {
-            this._handleAuthFailure(error.message || 'Authentication error');
-        });
-    };
-
-    _handleAuthStatusResponse(data) {
-        this.logger.debug('[AuthSocket] Received auth status:', data);
-        this.authService.updateAuthStatus(data?.authenticated ?? false);
-        if (data?.authenticated) {
-            this.connect();
-        } else {
-            this._handleAuthFailure('Not authenticated');
-        }
-    }
-
-    _handleAuthenticationResult(data) {
-        if (data.success) {
-            this.logger.debug('[AuthSocket] Authentication successful');
-            this.connect();
-        } else {
-            this._handleAuthFailure(data.error || 'Authentication failed');
-        }
-    }
-
-    _handleAuthFailure = (error) => {
-        this.logger.error('[AuthSocket] Authentication failed:', error);
-        this.authService.updateAuthStatus(false);
-        
-        if (typeof window !== 'undefined' && window.App?.Alerts?.showError) {
-            window.App.Alerts.showError('Authentication Error', error);
-        }
-        
-        if (this.authSocket) {
-            this.authSocket.disconnect();
-        }
-        this._scheduleAuthSocketRetry();
-    }
-
-    _init = (token) => {
-        try {
-            this.logger.debug('[Socket] Initializing connection...');
-            
-            if (!token) {
-                throw new Error('No token provided for WebSocket connection');
+            if (typeof io === 'undefined') {
+                throw new Error('Socket.IO library not loaded');
             }
 
             this.cleanup();
-            
+
             this.socket = io({
                 reconnection: true,
-                reconnectionAttempts: this.maxReconnectAttempts,
+                reconnectionAttempts: CONFIG.MAX_RETRIES,
                 reconnectionDelay: this.reconnectDelay,
                 transports: ['websocket'],
-                auth: {
-                    token: this._getFormattedToken()
-                },
-                query: {
-                    'socket_token': this._getFormattedToken()
-                },
-                timeout: CONFIG.CONNECTION_TIMEOUT,
-                pingTimeout: 5000,
-                pingInterval: CONFIG.PING_INTERVAL,
                 upgrade: false,
-                rememberUpgrade: false,
-                rejectUnauthorized: false,
-                forceNew: true
-            });
-            
-            this._setupEventHandlers();
-            
-            this.connectionTimeout = setTimeout(() => {
-                if (!this.isConnected) {
-                    this.logger.warn('[Socket] Connection timeout');
-                    this._handleError(new Error('Connection timeout'));
+                timeout: CONFIG.CONNECTION_TIMEOUT,
+                auth: (cb) => {
+                    try {
+                        this.getSocketToken().then(token => {
+                            if (!token) {
+                                throw new Error('No authentication token available');
+                            }
+                            
+                            cb({ 
+                                token,
+                                userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : ''
+                            });
+                        }).catch(error => {
+                            this.onError(new Error(`Authentication error: ${error.message}`));
+                            cb({ error: error.message });
+                        });
+                    } catch (authError) {
+                        this.onError(new Error(`Authentication error: ${authError.message}`));
+                        cb({ error: authError.message });
+                    }
                 }
-            }, CONFIG.CONNECTION_TIMEOUT);
-            
+            });
+
+            this.setupEventHandlers();
         } catch (error) {
-            this.logger.error('[Socket] Initialization error:', error);
-            this._handleRetry(error);
+            console.error('[Socket] Initialization error:', error);
+            this.handleRetry(error);
         }
     }
 
-    _getFormattedToken() {
-        if (this.token && typeof this.token === 'object') {
-            return this.token.token;
-        }
-        return String(this.token);
-    }
-
-    _setupEventHandlers = () => {
-        if (!this.socket) {
-            this.logger.error('[Socket] Cannot setup handlers - socket is null');
-            return;
-        }
-
-        this.socket.on('connect', this._handleConnect);
-        this.socket.on('disconnect', this._handleDisconnect);
-        this.socket.on('connect_error', this._handleConnectError);
-        this.socket.on('error', this._handleSocketError);
-        this.socket.on('authenticated', this._handleAuthenticated);
-        this.socket.on('unauthorized', this._handleUnauthorized);
-        this.socket.on('token_expired', this._handleTokenExpired);
-        this.socket.on('token_refresh', this._handleTokenRefresh);
-        this.socket.onAny(this._handleCustomEvent);
-    };
-
-    _handleConnect = () => {
-        this.circuitBreaker.failureCount = 0;
+    /**
+     * Setup socket event handlers
+     * @private
+     */
+    setupEventHandlers() {
+        // Connection events
+        this.socket.on('connect', () => this.handleConnect());
+        this.socket.on('disconnect', (reason) => this.handleDisconnect(reason));
+        this.socket.on('connect_error', (error) => this.handleError(error));
         
-        this.logger.debug('[Socket] Connected');
+        // Authentication events
+        this.socket.on('authentication_result', (data) => this.handleAuthenticationResult(data));
+        this.socket.on('auth_error', (error) => this.handleAuthError(error));
+        this.socket.on('token_refresh', (newToken) => this.handleTokenRefresh(newToken));
+        
+        // Application events
+        this.socket.on('playback_update', (data) => this.handlePlaybackUpdate(data));
+        this.socket.on('playlist_update', (data) => this.handlePlaylistUpdate(data));
+        this.socket.on('system_notification', (data) => this.handleSystemNotification(data));
+        
+        // System events
+        this.socket.on('inactivity_timeout', () => this.handleInactivityTimeout());
+        this.socket.on('auth_timeout', () => this.handleAuthTimeout());
+        this.socket.on('pong', (latency) => this.handlePong(latency));
+        this.socket.on('reconnect_failed', () => this.handleReconnectFailed());
+        this.socket.on('reconnect_attempt', (attempt) => this.handleReconnectAttempt(attempt));
+    }
+
+    /**
+     * Handle connection established
+     * @private
+     */
+    handleConnect() {
+        console.debug('[Socket] Connection established');
+        this.connectionEstablished = true;
+        clearTimeout(this.connectionTimeout);
+        
         this.isConnected = true;
         this.reconnectAttempts = 0;
         this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
         
-        this._processPendingEvents();
-        this._startPingInterval();
+        this.startPingInterval();
+        this.scheduleTokenRefresh();
         
-        if (this.onReconnect) {
-            this.onReconnect(this.reconnectAttempts);
-        }
+        // Set authentication timeout
+        this.authTimeout = setTimeout(() => {
+            if (!this.isAuthenticated) {
+                console.warn('[Socket] Authentication timeout');
+                this.socket.emit('auth_timeout');
+                this.onError(new Error('Authentication timeout'));
+            }
+        }, CONFIG.AUTH_TIMEOUT);
+        
+        this.processPendingEvents();
+        
+        // Track activity
+        this.lastActivity = Date.now();
     }
 
-    _handleDisconnect = (reason) => {
-        this.logger.log('[Socket] Disconnected:', reason);
-        this.isConnected = false;
-        this._handleDisconnectReason(reason);
+    /**
+     * Handle authentication result
+     * @private
+     * @param {object} data - Authentication result
+     */
+    handleAuthenticationResult(data) {
+        clearTimeout(this.authTimeout);
         
-        if (this.pingInterval) {
-            clearInterval(this.pingInterval);
-            this.pingInterval = null;
-        }
-    }
-
-    _handleDisconnectReason(reason) {
-        if (reason === 'io server disconnect') {
-            this.logger.warn('[Socket] Server forced disconnect, will attempt reconnection');
-            setTimeout(() => this.connect(), 5000);
+        if (data.success) {
+            this.isAuthenticated = true;
+            console.debug('[Socket] Authentication successful');
         } else {
-            this._handleRetry(new Error(reason));
+            this.isAuthenticated = false;
+            console.error('[Socket] Authentication failed:', data.error);
+            this.showAlert('error', 'Authentication Failed', data.error);
+            this.disconnect();
         }
     }
 
-    _handleConnectError = (error) => {
-        this.logger.error('[Socket] Connection error:', error);
-        
-        if (error.message.includes('Authentication error')) {
-            this._handleAuthFailure(error);
-        } else if (error.message.includes('timeout')) {
-            this._showAlert(
-                'warning',
-                'Connection Timeout',
-                'Server is not responding. Trying to reconnect...'
-            );
-        } else if (error.message.includes('xhr poll error')) {
-            this._showAlert(
-                'error',
-                'Network Error',
-                'Connection problem detected. Check your network.'
-            );
+    /**
+     * Handle token refresh
+     * @private
+     * @param {string} newToken - New authentication token
+     */
+    handleTokenRefresh(newToken) {
+        console.debug('[Socket] Received token refresh');
+        if (this.onTokenRefresh) {
+            this.onTokenRefresh(newToken);
         }
-        
+    }
+
+    /**
+     * Handle authentication error
+     * @private
+     * @param {Error} error - Error object
+     */
+    handleAuthError(error) {
+        this.onError(new Error(`Authentication error: ${error.message}`));
+        if (typeof window !== 'undefined' && window.App?.Base?.handleUnauthorized) {
+            window.App.Base.handleUnauthorized();
+        }
+    }
+
+    /**
+     * Handle disconnection
+     * @private
+     * @param {string} reason - Disconnection reason
+     */
+    handleDisconnect(reason) {
+        console.log('[Socket] Disconnected:', reason);
         this.isConnected = false;
-        this._handleError(error);
-        
-        if (this.socket) {
-            this.socket.disconnect();
-        }
-    };
-
-    _handleSocketError = (error) => {
-        this.logger.error('[Socket] Error:', error);
-        this._handleError(error);
-    }
-
-    _handleAuthenticated = () => {
-        this.logger.debug('[Socket] Authenticated');
-        this.isAuthenticated = true;
-        this._clearAuthTimeout();
-    }
-
-    _clearAuthTimeout() {
-        if (this.authTimeout) {
-            clearTimeout(this.authTimeout);
-            this.authTimeout = null;
-        }
-    }
-
-    _handleUnauthorized = (error) => {
-        this.logger.error('[Socket] Unauthorized:', error);
         this.isAuthenticated = false;
-        this._initAuthSocket();
-        this._handleError(new Error('Authentication failed'));
-    }
-
-    _handleTokenExpired = async () => {
-        this.logger.debug('[Socket] Token expired, reconnecting...');
-        try {
-            await this.connect();
-        } catch (err) {
-            this.logger.error('Reconnect failed:', err);
-        }
-    }
-
-    _handleTokenRefresh = (newToken) => {
-        this.logger.debug('[Socket] Received token refresh');
-        this.onTokenRefresh(newToken);
-    }
-
-    _handleCustomEvent = (event, ...args) => {
-        const handlers = this.eventHandlers.get(event);
-        if (handlers) {
-            handlers.forEach(handler => handler(...args));
-        }
-    }
-
-    _shouldOpenCircuit() {
-        const { failureCount, threshold, lastFailureTime, timeout } = this.circuitBreaker;
-        return failureCount >= threshold && Date.now() - lastFailureTime < timeout;
-    }
-
-    _openCircuit = () => {
-        this.circuitBreaker.isOpen = true;
-        this.circuitBreaker.lastFailureTime = Date.now();
-        this.logger.error('[Circuit Breaker] Circuit opened due to repeated failures');
+        this.connectionEstablished = false;
+        this.cleanupTimers();
         
-        if (this.onCircuitBreakerOpen) {
-            this.onCircuitBreakerOpen();
+        if (reason !== 'io client disconnect') {
+            const message = reason === 'io server disconnect' 
+                ? 'Disconnected by server' 
+                : 'Connection lost - attempting to reconnect';
+            this.showAlert('warning', 'Disconnected', message);
         }
-
-        this._showAlert(
-            'error',
-            'Connection Error',
-            'Server is temporarily unavailable. Trying to reconnect...'
-        );
-
-        this.circuitBreakerTimer = setTimeout(() => {
-            this._tryCloseCircuit();
-        }, this.circuitBreaker.timeout);
     }
 
-    _tryCloseCircuit = () => {
-        this.circuitBreaker.isOpen = false;
-        this.circuitBreaker.failureCount = 0;
-        this.logger.log('[Circuit Breaker] Circuit reset to half-open state');
-        
-        if (this.onCircuitBreakerClose) {
-            this.onCircuitBreakerClose();
-        }
-
-        this.connect().catch(err => {
-            this.logger.error('[Circuit Breaker] Half-open test failed:', err);
-            this._openCircuit();
-        });
-    }
-
-    _handleRetry = (error) => {
-        this.circuitBreaker.failureCount++;
-        this.circuitBreaker.lastFailureTime = Date.now();
-
-        if (this._shouldOpenCircuit() && !this.circuitBreaker.isOpen) {
-            this._openCircuit();
-            return;
-        }
-
-        if (this.circuitBreaker.isOpen) {
-            this.logger.debug('[Socket] Connection blocked: circuit is open');
-            return;
-        }
-
-        this.logger.error('[Socket] Handling retry for error:', error);
+    /**
+     * Handle connection error
+     * @private
+     * @param {Error} error - Error object
+     */
+    handleError(error) {
+        console.error('[Socket] Connection error:', error);
         this.reconnectAttempts++;
         
-        const jitter = Math.random() * 2000;
+        // Exponential backoff with jitter
         this.reconnectDelay = Math.min(
-            Math.pow(2, this.reconnectAttempts) * 1000 + jitter,
+            this.reconnectDelay * 2 + Math.random() * 1000,
             CONFIG.MAX_RETRY_DELAY
         );
         
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            this._handleMaxRetriesReached();
+        if (this.reconnectAttempts >= CONFIG.MAX_RETRIES) {
+            this.showAlert(
+                'error', 
+                'Connection Error', 
+                'Real-time updates disabled. Please refresh the page.'
+            );
         } else {
-            this.logger.log(`[Socket] Will retry in ${Math.round(this.reconnectDelay/1000)} sec...`);
-            setTimeout(() => {
-                this.authService.checkAuth().then(authenticated => {
-                    if (authenticated) {
-                        this.connect();
-                    } else {
-                        this._handleAuthFailure('Authentication required');
-                    }
-                });
-            }, this.reconnectDelay);
+            console.log(`[Socket] Retrying in ${Math.round(this.reconnectDelay/1000)} sec...`);
+            setTimeout(() => this.init(), this.reconnectDelay);
         }
-    };
-
-    _resetRetryAfterDelay() {
-        setTimeout(() => {
-            this.reconnectAttempts = 0;
-            this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
-        }, 120000);
     }
 
-    _scheduleReconnect() {
-        this.logger.log(`[Socket] Will retry in ${Math.round(this.reconnectDelay/1000)} sec...`);
-        setTimeout(() => {
-            this.connect();
-        }, this.reconnectDelay);
+    /**
+     * Handle inactivity timeout
+     * @private
+     */
+    handleInactivityTimeout() {
+        console.warn('[Socket] Disconnected due to inactivity');
+        this.showAlert('warning', 'Session Expired', 'Your session has timed out due to inactivity');
+        this.disconnect();
     }
 
-    _startPingInterval = () => {
-        this._clearPingInterval();
-        
+    /**
+     * Handle authentication timeout
+     * @private
+     */
+    handleAuthTimeout() {
+        console.warn('[Socket] Authentication timeout');
+        this.showAlert('error', 'Authentication Timeout', 'Please refresh the page');
+        this.disconnect();
+    }
+
+    /**
+     * Emit event through socket
+     * @param {string} event - Event name
+     * @param {object} data - Event data
+     * @returns {Promise} Promise that resolves with response or rejects with error
+     */
+    emit(event, data) {
+        return new Promise((resolve, reject) => {
+            if (!this.isConnected || !this.isAuthenticated) {
+                console.debug(`[Socket] Queueing event (${event}) while offline`);
+                
+                // Prevent queue from growing too large
+                if (this.pendingEvents.length >= CONFIG.MAX_EVENT_QUEUE) {
+                    this.pendingEvents.shift();
+                }
+                
+                this.pendingEvents.push({ event, data, resolve, reject });
+                return;
+            }
+
+            console.debug(`[Socket] Emitting event: ${event}`, data);
+            this.socket.emit(event, data, (response) => {
+                if (response?.error) {
+                    console.error(`[Socket] Event ${event} failed:`, response.error);
+                    reject(response.error);
+                } else {
+                    console.debug(`[Socket] Event ${event} successful`, response);
+                    resolve(response);
+                }
+            });
+        });
+    }
+
+    /**
+     * Process pending events
+     * @private
+     */
+    processPendingEvents() {
+        while (this.pendingEvents.length > 0) {
+            const { event, data, resolve, reject } = this.pendingEvents.shift();
+            this.emit(event, data).then(resolve).catch(reject);
+        }
+    }
+
+    /**
+     * Start ping interval
+     * @private
+     */
+    startPingInterval() {
+        this.cleanupTimers();
         this.pingInterval = setInterval(() => {
-            if (this.socket && this.isConnected) {
-                this.socket.emit('ping', { timestamp: Date.now() });
+            if (this.isConnected) {
+                const start = Date.now();
+                this.socket.emit('ping', {}, () => {
+                    const latency = Date.now() - start;
+                    this.socket.emit('pong', latency);
+                });
             }
         }, CONFIG.PING_INTERVAL);
     }
 
-    _clearPingInterval() {
-        if (this.pingInterval) {
-            clearInterval(this.pingInterval);
-            this.pingInterval = null;
-        }
+    /**
+     * Cleanup timers
+     * @private
+     */
+    cleanupTimers() {
+        clearInterval(this.pingInterval);
+        clearTimeout(this.authTimeout);
+        clearTimeout(this.connectionTimeout);
+        clearTimeout(this.tokenRefreshTimer);
     }
 
-    _processPendingEvents = () => {
-        while (this.pendingEvents.length > 0 && this.isConnected) {
-            const event = this.pendingEvents.shift();
-            this.emit(event.name, ...event.args);
-        }
-    }
-
-    _checkAuthViaWebSocket = () => {
-        if (this.authSocket && this.authSocket.connected) {
-            this.authSocket.emit('request_auth_status');
-        }
-    }
-
-    cleanup = () => {
-        this._disconnectSockets();
-        this._clearAllTimers();
-        this._resetConnectionState();
-    }
-
-    _disconnectSockets() {
+    /**
+     * Cleanup resources
+     * @private
+     */
+    cleanup() {
+        console.debug('[Socket] Cleaning up resources');
+        this.cleanupTimers();
+        
         if (this.socket) {
+            this.socket.off();
             this.socket.disconnect();
             this.socket = null;
         }
-        if (this.authSocket) {
-            this.authSocket.disconnect();
-            this.authSocket = null;
-        }
-    }
-
-    _clearAllTimers() {
-        this._clearPingInterval();
         
-        const timers = [
-            this.authTimeout,
-            this.connectionTimeout,
-            this.tokenRefreshTimer,
-            this.serverCheckTimer,
-            this.authRetryTimer,
-            this.circuitBreakerTimer
-        ];
-        
-        timers.forEach(timer => {
-            if (timer) {
-                clearTimeout(timer);
-            }
-        });
-    }
-
-    _resetConnectionState() {
         this.isConnected = false;
         this.isAuthenticated = false;
+        this.connectionEstablished = false;
     }
 
-    emit = (event, ...args) => {
-        if (this.socket && this.isConnected) {
-            this.socket.emit(event, ...args);
-        } else {
-            this._queueEvent(event, args);
-        }
-    }
-
-    _queueEvent(event, args) {
-        if (this.pendingEvents.length >= CONFIG.MAX_EVENT_QUEUE) {
-            this.pendingEvents.shift();
-        }
-        this.pendingEvents.push({ name: event, args });
-        this.logger.debug(`[Socket] Queued event (${event}), waiting for connection`);
-    }
-
-    on = (event, handler) => {
-        if (!this.eventHandlers.has(event)) {
-            this.eventHandlers.set(event, new Set());
-        }
-        this.eventHandlers.get(event).add(handler);
-        
-        if (this.socket && this.isConnected) {
-            this.socket.on(event, handler);
-        }
-    }
-
-    off = (event, handler) => {
-        if (this.eventHandlers.has(event)) {
-            const handlers = this.eventHandlers.get(event);
-            handlers.delete(handler);
-            
-            if (handlers.size === 0) {
-                this.eventHandlers.delete(event);
-            }
-        }
-        
-        if (this.socket && this.isConnected) {
-            this.socket.off(event, handler);
-        }
-    }
-
-    disconnect = () => {
+    /**
+     * Disconnect socket
+     */
+    disconnect() {
+        console.debug('[Socket] Disconnecting...');
         this.cleanup();
     }
 
-    _showAlert = (type, title, message) => {
-        this.logger.log(`[Socket] Alert: ${title} - ${message}`);
+    /**
+     * Handle connection retry
+     * @private
+     * @param {Error} [error] - Optional error that triggered retry
+     */
+    handleRetry(error) {
+        if (this.reconnectAttempts >= CONFIG.MAX_RETRIES) {
+            this.onError(new Error('Max retry attempts reached'));
+            return;
+        }
+        
+        console.log(`[Socket] Retrying connection (attempt ${this.reconnectAttempts + 1}/${CONFIG.MAX_RETRIES})...`);
+        setTimeout(() => this.initWithTokenCheck(), this.reconnectDelay);
+        this.reconnectAttempts++;
+    }
+
+    /**
+     * Show alert message
+     * @private
+     * @param {string} type - Alert type
+     * @param {string} title - Alert title
+     * @param {string} message - Alert message
+     */
+    showAlert(type, title, message) {
         if (typeof window !== 'undefined' && window.App?.Alerts?.showAlert) {
             window.App.Alerts.showAlert(type, title, message);
+        } else {
+            console.log(`[${type}] ${title}: ${message}`);
         }
     }
 }
 
+// Initialize and export singleton instance
 let socketManagerInstance = null;
 
-export function initializeSocketManager(options = {}) {
+/**
+ * Initialize socket manager
+ * @returns {SocketManager} Initialized socket manager instance
+ */
+export function initializeSocketManager() {
     if (!socketManagerInstance) {
-        try {
-            const defaultOptions = {
-                onError: (error) => {
-                    console.error('[Socket] Global error handler:', error);
-                    if (typeof window !== 'undefined' && window.App?.Alerts?.showError) {
-                        window.App.Alerts.showError('Socket Error', error.message);
-                    }
-                },
-                onTokenRefresh: (newToken) => {
-                    console.debug('[Socket] Updating token from refresh');
-                    if (typeof window !== 'undefined' && window.App?.Helpers?.setToken) {
-                        window.App.Helpers.setToken(newToken);
-                    }
-                },
-                onReconnect: (attempt) => {
-                    console.debug(`[Socket] Reconnect attempt ${attempt}`);
-                },
-                ...options
-            };
-
-            socketManagerInstance = new SocketManager(defaultOptions);
-        } catch (error) {
-            console.error('Failed to initialize SocketManager:', error);
-            
-            return {
-                emit: () => console.warn('SocketManager not initialized'),
-                disconnect: () => {},
-                on: () => console.warn('SocketManager not initialized'),
-                off: () => console.warn('SocketManager not initialized'),
-                connect: () => console.warn('SocketManager not initialized'),
-                isConnected: () => false
-            };
-        }
+        socketManagerInstance = new SocketManager({
+            onError: (error) => {
+                console.error('[Socket] Global error handler:', error);
+                if (typeof window !== 'undefined' && window.App?.Alerts?.showError) {
+                    window.App.Alerts.showError('Socket Error', error.message);
+                }
+            },
+            onTokenRefresh: (newToken) => {
+                console.debug('[Socket] Updating token from refresh');
+                if (typeof window !== 'undefined' && window.App?.Helpers?.setToken) {
+                    window.App.Helpers.setToken(newToken);
+                }
+            },
+            onReconnect: (attempt) => {
+                console.debug(`[Socket] Reconnect attempt ${attempt}`);
+            }
+        });
     }
     return socketManagerInstance;
 }
 
+// For backward compatibility with global App object
 if (typeof window !== 'undefined') {
     window.App = window.App || {};
-    try {
-        window.App.Sockets = window.App.Sockets || initializeSocketManager();
-    } catch (error) {
-        console.error('Failed to initialize global App.Sockets:', error);
-        window.App.Sockets = {
-            emit: () => console.warn('SocketManager not initialized'),
-            disconnect: () => {},
-            on: () => console.warn('SocketManager not initialized'),
-            off: () => console.warn('SocketManager not initialized'),
-            connect: () => console.warn('SocketManager not initialized'),
-            isConnected: () => false
-        };
-    }
+    window.App.Sockets = window.App.Sockets || initializeSocketManager();
 }
