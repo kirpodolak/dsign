@@ -2,7 +2,6 @@ from flask import render_template, redirect, url_for, flash, request, jsonify, c
 from flask_login import login_user, logout_user, login_required, current_user
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash
-from flask_jwt_extended import jwt_required, get_jwt_identity
 import jwt
 import os
 import traceback
@@ -11,7 +10,7 @@ from ..forms import LoginForm
 from ..models import User
 from functools import wraps
 from ..services.logger import setup_logger
-from ..services.sockets.service import SocketService
+from urllib.parse import urlparse, urljoin
 
 # Инициализация логгера
 logger = setup_logger('auth.routes')
@@ -22,12 +21,36 @@ auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 # Security configurations
 MAX_LOGIN_ATTEMPTS = 10
 LOGIN_TIMEOUT = 180  # 3 minutes in seconds
-TOKEN_EXPIRATION = 1440  # 1 hour in minutes
-SOCKET_TOKEN_EXPIRATION = 30  # 5 minutes in minutes
+TOKEN_EXPIRATION = 60  # 1 hour in minutes
+SOCKET_TOKEN_EXPIRATION = 5  # 5 minutes in minutes
 
 # Rate limiting storage with thread lock
 rate_limit_data = {}
 rate_limit_lock = Lock()
+
+def _is_safe_next_url(target: str) -> bool:
+    if not target:
+        return False
+    ref_url = urlparse(request.host_url)
+    test_url = urlparse(urljoin(request.host_url, target))
+    return (
+        test_url.scheme in ('http', 'https')
+        and ref_url.netloc == test_url.netloc
+    )
+
+def _get_next_url(default: str):
+    candidate = request.args.get('next') or request.form.get('next') or ''
+    if _is_safe_next_url(candidate):
+        return candidate
+    return default
+
+def _is_ajax_request() -> bool:
+    return request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+
+def _require_admin():
+    if not (current_user.is_authenticated and getattr(current_user, 'is_admin', False)):
+        return False
+    return True
 
 def generate_csrf_token():
     """Generate CSRF token for form protection"""
@@ -139,7 +162,7 @@ def login():
     try:
         # Redirect if already authenticated
         if current_user.is_authenticated:
-            next_url = request.args.get('next') or url_for('main.index')
+            next_url = _get_next_url(url_for('main.index'))
             if request.is_json:
                 return jsonify({
                     'success': True,
@@ -190,8 +213,6 @@ def login():
                             'stack_trace': traceback.format_exc()
                         })
 
-                # Authentication tokens
-                auth_token = generate_jwt_token(user.id)
                 remember = form.remember.data if hasattr(form, 'remember') else False
                 
                 login_user(user, remember=remember)
@@ -203,8 +224,7 @@ def login():
 
                 response_data = {
                     'success': True,
-                    'redirect': request.args.get('next') or url_for('main.index'),
-                    'token': auth_token,
+                    'redirect': _get_next_url(url_for('main.index')),
                     'user': {
                         'id': user.id,
                         'username': user.username,
@@ -214,23 +234,12 @@ def login():
                 }
 
                 # Response handling
-                if request.is_json:
+                if request.is_json or _is_ajax_request():
                     response = jsonify(response_data)
-                    response.headers.add('X-CSRF-Token', generate_csrf_token())
                 else:
                     response = redirect(response_data['redirect'])
                 
-                # Secure cookie settings
-                response.set_cookie(
-                    'authToken',
-                    value=auth_token,
-                    httponly=True,
-                    secure=current_app.config.get('SESSION_COOKIE_SECURE', True),
-                    samesite='Lax',
-                    max_age=3600*24*7 if remember else None,
-                    domain=current_app.config.get('SESSION_COOKIE_DOMAIN'),
-                    path='/'
-                )
+                # No JS-readable tokens; rely on Flask session/remember cookies.
                 
                 # Clear rate limiting
                 key = f"{request.remote_addr}-{user.username}"
@@ -356,63 +365,61 @@ def check_auth():
         }), 500
 
 @auth_bp.route('/socket-token')
+@login_required
 def get_socket_token():
-    """
-    Generate WebSocket token for authenticated users
-    Returns:
-        - 200: {success: true, token: string, expires_in: int, expires_at: isoformat}
-        - 401: If user is not authenticated (with JSON response)
-        - 503: If socket service not available
-        - 500: On server error
-    """
+    """Secure WebSocket token generation with enhanced validation"""
     try:
-        # Check authentication first
         if not current_user.is_authenticated:
+            logger.warning("Unauthorized socket token request", extra={
+                'ip': request.remote_addr,
+                'user_agent': request.user_agent.string
+            })
             return jsonify({
                 'success': False,
-                'error': 'Authentication required',
-                'auth_required': True,
+                'error': 'Not authenticated',
                 'login_url': url_for('auth.login')
             }), 401
 
-        if not hasattr(current_app, 'socket_service'):
-            logger.error("Socket service not available")
-            return jsonify({
-                'success': False,
-                'error': 'Socket service not available'
-            }), 503
-
-        expires_minutes = current_app.config.get('SOCKET_TOKEN_EXPIRE_MINUTES', 30)
-        expires_at = datetime.utcnow() + timedelta(minutes=expires_minutes)
+        # Generate token with additional security claims
+        payload = {
+            'sub': current_user.id,
+            'ip': request.remote_addr or 'unknown',
+            'user_agent': request.user_agent.string[:200],
+            'exp': datetime.utcnow() + timedelta(minutes=SOCKET_TOKEN_EXPIRATION),
+            'iss': current_app.config.get('JWT_ISSUER', 'digital-signage-socket'),
+            'aud': 'socket-client',
+            'jti': os.urandom(16).hex()
+        }
         
-        token = current_app.socket_service.generate_socket_token(
-            user_id=current_user.id,
-            expires_at=expires_at
+        token = jwt.encode(
+            payload,
+            current_app.config['SECRET_KEY'],
+            algorithm='HS256'
         )
-
-        response = jsonify({
+        
+        logger.info("Socket token generated", extra={
+            'user_id': current_user.id,
+            'ip': request.remote_addr
+        })
+        
+        return jsonify({
             'success': True,
             'token': token,
-            'expires_in': expires_minutes * 60,
-            'expires_at': expires_at.isoformat(),
-            'user_id': current_user.id
+            'expires_in': SOCKET_TOKEN_EXPIRATION * 60,
+            'expires_at': payload['exp'].isoformat(),
+            'socket_url': current_app.config.get('SOCKET_SERVER_URL', '/socket.io')
         })
-        
-        response.headers['Content-Type'] = 'application/json'
-        return response
-
     except Exception as e:
-        logger.error(
-            f"Socket token generation failed for user {getattr(current_user, 'id', 'unknown')}",
-            exc_info=True
-        )
-        response = jsonify({
-            'success': False,
-            'error': 'Internal server error',
-            'details': str(e) if current_app.debug else None
+        logger.error("Socket token generation failed", extra={
+            'user_id': current_user.id if current_user.is_authenticated else None,
+            'error': str(e),
+            'stack_trace': traceback.format_exc()
         })
-        response.headers['Content-Type'] = 'application/json'
-        return response, 500
+        return jsonify({
+            'success': False,
+            'error': 'Token generation failed',
+            'details': str(e)
+        }), 500
 
 @auth_bp.route('/check-socket-auth')
 def check_socket_auth():
@@ -582,9 +589,12 @@ def refresh_token():
         }), 500
 
 @auth_bp.route('/reset-limits', methods=['POST'])
+@login_required
 def reset_limits():
     """Reset rate limiting counters (for testing)"""
     try:
+        if not _require_admin():
+            return jsonify({'success': False, 'error': 'Unauthorized'}), 403
         global rate_limit_data
         rate_limit_data = {}
         logger.info("Rate limits reset")
