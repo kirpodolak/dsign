@@ -17,10 +17,7 @@ class AppInitializer {
 
         this.logger = new AppLogger('AppInitializer');
         this.authService = new AuthService();
-        this.socketManager = new SocketManager({
-            authService: this.authService,
-            logger: this.logger
-        });
+        this.socketManager = null;
         this.playerControls = new PlayerControls({
             API: { fetch: fetchAPI },
             Alerts: { showAlert, showError },
@@ -30,10 +27,10 @@ class AppInitializer {
         });
 
         this.initPromise = null;
-        this.socketInitialized = false;
     }
 
     async init() {
+        // Ensure initialization only happens once
         if (this.initPromise) {
             return this.initPromise;
         }
@@ -42,14 +39,27 @@ class AppInitializer {
             try {
                 this.logger.debug('Starting application initialization');
                 
+                // Initialize global state first
                 this.initGlobalState();
 
+                // Prevent redirect loops before any auth checks
                 if (this.preventRedirectLoops()) {
                     return;
                 }
 
-                await this.authService.checkAuth();
+                // Initialize socket manager after global state
+                this.socketManager = new SocketManager({
+                    authService: this.authService,
+                    logger: this.logger
+                });
 
+                // Check authentication
+                const isAuthenticated = await this.checkAuth();
+                if (!isAuthenticated) {
+                    return;
+                }
+
+                // Setup core components
                 await Promise.all([
                     this.setupLoader(),
                     this.setupAlerts(),
@@ -57,23 +67,13 @@ class AppInitializer {
                     this.setupAuthMonitoring()
                 ]);
 
-                document.addEventListener('auth:status_changed', (event) => {
-                    const isAuthenticated = event.detail;
-                    if (isAuthenticated && !this.socketInitialized) {
-                        this.initWebSocket().catch(error => {
-                            this.logger.error('WebSocket init after auth change failed:', error);
-                        });
-                    }
-                });
+                // Initialize WebSocket if authenticated
+                await this.initWebSocket();
 
-                if (this.authService.getToken()) {
-                    await this.initWebSocket();
-                }
-
+                // Initialize other modules
                 this.initModules();
 
                 this.logger.debug('Application initialization completed');
-                window.App.state.initialized = true;
             } catch (error) {
                 this.logger.error('Initialization error:', error);
                 this.showFatalError('Application initialization failed');
@@ -91,7 +91,7 @@ class AppInitializer {
             socketConnected: false,
             initialized: false,
             lastAuthCheck: null,
-            retryDelays: [2000, 5000, 10000]
+            retryDelays: [2000, 5000, 10000] // Progressive delays for retries
         };
 
         if (this.debugMode) {
@@ -104,6 +104,7 @@ class AppInitializer {
         const hasRedirectLoop = window.location.search.includes('redirect_loop=true');
     
         if (isLoginPage) {
+            // Clear any existing next parameters to break the loop
             if (window.location.search.includes('next=')) {
                 window.location.href = '/api/auth/login?clear=true';
                 return true;
@@ -114,6 +115,31 @@ class AppInitializer {
             }
         }
         return false;
+    }
+
+    async checkAuth() {
+        try {
+            const response = await fetch('/api/auth/status', {
+                credentials: 'include',
+                headers: {
+                    'Accept': 'application/json'
+                }
+            });
+    
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+        
+            const data = await response.json();
+            return data.authenticated;
+        } catch (error) {
+            console.error('Auth check failed:', error);
+            // Only redirect if not already on login page
+            if (!window.location.pathname.includes('/api/auth/login')) {
+                window.location.href = '/api/auth/login';
+            }
+            return false;
+        }
     }
 
     async setupLoader() {
@@ -132,7 +158,8 @@ class AppInitializer {
                     loader.style.display = 'none';
                     document.dispatchEvent(new CustomEvent('app-ready', {
                         detail: {
-                            authenticated: this.authService.getToken() !== null,
+                            // Session cookie auth is async; keep this boolean simple.
+                            authenticated: true,
                             timestamp: Date.now()
                         }
                     }));
@@ -140,6 +167,7 @@ class AppInitializer {
                 }, 300);
             };
 
+            // Start fade out after minimum display time
             setTimeout(fadeOut, 500);
         });
     }
@@ -179,6 +207,7 @@ class AppInitializer {
     }
 
     setupErrorHandling() {
+        // Global error handler
         window.addEventListener('error', (event) => {
             this.logger.error('Global Error:', event.error);
             
@@ -194,6 +223,7 @@ class AppInitializer {
             );
         });
 
+        // Unhandled promise rejections
         window.addEventListener('unhandledrejection', (event) => {
             const error = event.reason;
             this.logger.error('Unhandled Rejection:', error);
@@ -224,76 +254,43 @@ class AppInitializer {
     }
 
     setupAuthMonitoring() {
-        this.authService.startAuthStatusChecker();
+        // Periodic auth checks
+        this.authCheckInterval = setInterval(() => {
+            this.checkAuth().catch(error => {
+                this.logger.warn('Auth monitoring error:', error);
+            });
+        }, 5 * 60 * 1000); // 5 minutes
 
+        // Check auth when tab becomes visible
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') {
-                this.authService.checkAuth().catch(error => {
+                this.checkAuth().catch(error => {
                     this.logger.warn('Visibility change auth check error:', error);
                 });
             }
         });
-
-        if (typeof window !== 'undefined') {
-            window.App.trigger = window.App.trigger || function(event, data) {
-                document.dispatchEvent(new CustomEvent(event, { detail: data }));
-            };
-        }
     }
 
     async initWebSocket() {
         try {
+            this.socketManager = new SocketManager({
+                authService: this.authService,
+                logger: this.logger
+            });
+        
             await this.socketManager.connect();
-            this.socketInitialized = true;
-            window.App.state.socketConnected = true;
-            this.logger.debug('WebSocket initialized via SocketManager');
         } catch (error) {
             this.logger.error('WebSocket initialization failed:', error);
-            
-            const delay = this.calculateReconnectDelay();
-            this.logger.debug(`Will retry in ${delay}ms...`);
-            setTimeout(() => this.initWebSocket(), delay);
+            // Don't retry if it's an auth error
+            if (error.message.includes('auth') || error.message.includes('token')) {
+                return;
+            }
+            // Retry logic here...
         }
     }
 
-    calculateReconnectDelay() {
-        this.retryCount = this.retryCount || 0;
-        const baseDelay = 1000;
-        const maxDelay = 30000;
-        
-        const delay = Math.min(
-            baseDelay * Math.pow(2, this.retryCount), 
-            maxDelay
-        );
-        
-        const jitter = delay * 0.5 * Math.random();
-        this.retryCount++;
-        
-        return Math.min(delay + jitter, maxDelay);
-    }
-
-    handleAuthError(errorData) {
-        this.logger.error('Authentication error:', errorData);
-        
-        fetch('/api/auth/refresh-token')
-            .then(response => response.json())
-            .then(data => {
-                if (data.token) {
-                    this.logger.debug('Token refreshed, reconnecting...');
-                    this.initWebSocket();
-                } else {
-                    this.logger.error('Failed to refresh token');
-                    window.location.href = '/login?reason=session_expired';
-                }
-            })
-            .catch(err => {
-                this.logger.error('Token refresh failed:', err);
-                window.location.href = '/login?reason=auth_error';
-            });
-    }
-
     handleRateLimitError() {
-        const retryAfter = 60;
+        const retryAfter = 60; // seconds
         showError(
             'Too Many Requests',
             `Please wait ${retryAfter} seconds before trying again`,
@@ -335,8 +332,9 @@ class AppInitializer {
                 { timer: false }
             );
             
-            this.socketManager.disconnect();
-            window.App.state.socketConnected = false;
+            if (this.socketManager) {
+                this.socketManager.disconnect();
+            }
         });
 
         window.addEventListener('online', () => {
@@ -346,12 +344,28 @@ class AppInitializer {
                 'You are back online'
             );
             
-            if (!window.App.state.socketConnected && this.authService.status) {
-                this.initWebSocket().catch(error => {
-                    this.logger.error('WebSocket reinit after online failed:', error);
-                });
+            if (!window.App.state.socketConnected && this.socketManager) {
+                this.initWebSocket();
             }
         });
+    }
+
+    handleAuthError(error) {
+        this.logger.warn('Handling auth error:', error);
+        
+        // Clear auth data
+        this.authService.clearAuth();
+        
+        // Disconnect sockets
+        if (this.socketManager) {
+            this.socketManager.disconnect();
+        }
+        
+        // Redirect to login if not already there
+        if (!window.location.pathname.includes('/api/auth/login')) {
+            const redirectUrl = encodeURIComponent(window.location.pathname + window.location.search);
+            window.location.href = `/api/auth/login?redirect=${redirectUrl}`;
+        }
     }
 
     showFatalError(message) {
@@ -400,19 +414,26 @@ class AppInitializer {
     }
 
     cleanup() {
-        this.socketManager.disconnect();
-        this.socketInitialized = false;
-        window.App.state.socketConnected = false;
+        if (this.authCheckInterval) {
+            clearInterval(this.authCheckInterval);
+        }
+        
+        if (this.socketManager) {
+            this.socketManager.disconnect();
+        }
         
         window.removeEventListener('online', this.handleOnline);
         window.removeEventListener('offline', this.handleOffline);
     }
 }
 
+// Initialize and export singleton instance
 const appInitializer = new AppInitializer();
 
+// Export for testing purposes
 export { AppInitializer };
 
+// Initialize when DOM is ready
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => appInitializer.init());
 } else {
