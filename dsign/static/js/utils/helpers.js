@@ -20,9 +20,8 @@ const cache = {
  */
 export function getToken() {
     try {
-        return typeof localStorage !== 'undefined' 
-            ? localStorage.getItem('authToken') || getCookie('authToken') || null
-            : null;
+        // Tokens must not be stored in JS-accessible storage (XSS risk).
+        return null;
     } catch (error) {
         console.error('Token retrieval error:', error);
         return null;
@@ -36,10 +35,9 @@ export function getToken() {
  */
 export function setToken(token, remember = false) {
     try {
-        if (typeof localStorage !== 'undefined' && remember) {
-            localStorage.setItem('authToken', token);
-        }
-        setCookie('authToken', token, remember ? 7 : 1); // 7 days or 1 day expiry
+        // No-op: tokens are server-managed (session cookies / HttpOnly cookies).
+        void token;
+        void remember;
     } catch (error) {
         console.error('Token storage error:', error);
     }
@@ -50,9 +48,8 @@ export function setToken(token, remember = false) {
  */
 export function clearToken() {
     try {
-        if (typeof localStorage !== 'undefined') {
-            localStorage.removeItem('authToken');
-        }
+        // Best-effort cleanup of legacy, non-HttpOnly storage.
+        if (typeof localStorage !== 'undefined') localStorage.removeItem('authToken');
         deleteCookie('authToken');
     } catch (error) {
         console.error('Token clearance error:', error);
