@@ -93,13 +93,16 @@ class FileService:
             for f in self.upload_folder.iterdir():
                 if f.is_file() and f.suffix.lower()[1:] in self.ALLOWED_MEDIA_EXTENSIONS:
                     stat = f.stat()
+                    ext = f.suffix.lower()[1:]
                     files.append({
                         'filename': f.name,
                         'path': str(f.relative_to(self.upload_folder)),
                         'size': stat.st_size,
                         'modified': stat.st_mtime,
-                        'type': f.suffix.lower()[1:],
-                        'mimetype': self._get_mime_type(f.suffix.lower()[1:])
+                        'type': ext,
+                        'mimetype': self._get_mime_type(ext),
+                        # Convenience flag for UI (and clients) so they don't have to guess by extension.
+                        'is_video': ext.lower() in {'mp4', 'avi', 'webm', 'mov', 'mkv', 'm4v'}
                     })
             return files
         except Exception as e:
@@ -126,6 +129,7 @@ class FileService:
             file_path = os.path.join(self.upload_folder, filename)
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"File {filename} not found")
+            stat = os.stat(file_path)
         
             headers = {
                 'X-File-Size': str(stat.st_size),
@@ -286,7 +290,8 @@ class FileService:
             return [{
                 **file,
                 'included': file['filename'] in playlist_files,
-                'is_video': file['type'].lower() in {'mp4', 'avi', 'webm', 'mov'}
+                # `is_video` is already provided by get_media_files(); keep it stable if present.
+                'is_video': bool(file.get('is_video')) or file.get('type', '').lower() in {'mp4', 'avi', 'webm', 'mov', 'mkv', 'm4v'}
             } for file in all_files]
             
         except Exception as e:
