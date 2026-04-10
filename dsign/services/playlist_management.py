@@ -1,12 +1,12 @@
 import os
-import json
 import subprocess
 import traceback
+import time
+from threading import Event, Thread
 from typing import Dict, Optional
 from pathlib import Path
 
 from .playback_constants import PlaybackConstants
-from .playback_utils import PlaybackUtils
 
 class PlaylistManager:
     def __init__(self, logger, socketio, upload_folder, db_session, mpv_manager, logo_manager):
@@ -23,11 +23,87 @@ class PlaylistManager:
         self.tmp_dir = self.upload_folder / 'tmp'
         self.tmp_dir.mkdir(exist_ok=True)
 
+        self._play_thread: Optional[Thread] = None
+        self._stop_event = Event()
+        self._active_playlist_id: Optional[int] = None
+
+    def _stop_play_thread(self):
+        if self._play_thread and self._play_thread.is_alive():
+            self._stop_event.set()
+            try:
+                self._play_thread.join(timeout=2.0)
+            except Exception:
+                pass
+        self._play_thread = None
+        self._stop_event.clear()
+        self._active_playlist_id = None
+
+    def _manual_slideshow_loop(self, playlist_id: int, items: list[dict]):
+        """
+        Manual playback loop that enforces per-item durations for images and plays videos to EOF.
+        Runs in a background thread; advances images by sleeping for their duration and videos by
+        polling mpv properties until EOF.
+        """
+        self.logger.info("Starting manual playback loop", extra={"playlist_id": playlist_id, "items_count": len(items)})
+
+        default_duration = 10
+        while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
+            for item in items:
+                if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
+                    break
+
+                path = item["path"]
+                is_video = item["is_video"]
+                duration = item.get("duration") or default_duration
+
+                # Ensure correct looping behavior per media type
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "loop-file", "no" if is_video else "inf"]},
+                        timeout=2.0,
+                    )
+                except Exception:
+                    pass
+
+                # Load next media file
+                self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=10.0)
+                self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
+
+                if is_video:
+                    # Wait until playback ends
+                    start = time.time()
+                    while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
+                        # `eof-reached` is the most reliable signal for local files.
+                        resp = self._mpv_manager._send_command(
+                            {"command": ["get_property", "eof-reached"]},
+                            timeout=2.0,
+                        )
+                        if resp and resp.get("error") == "success" and resp.get("data") is True:
+                            break
+
+                        # Fallback for unusual states: if mpv goes idle, treat as ended
+                        resp = self._mpv_manager._send_command(
+                            {"command": ["get_property", "idle-active"]},
+                            timeout=2.0
+                        )
+                        if resp and resp.get("error") == "success" and resp.get("data") is True:
+                            break
+                        # prevent stuck forever: 6 hours max video
+                        if time.time() - start > 6 * 3600:
+                            break
+                        time.sleep(0.5)
+                else:
+                    # Show image for its duration
+                    time.sleep(max(1, int(duration)))
+
     def play(self, playlist_id: int) -> bool:
         """Play playlist with profile support"""
         from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
     
         try:
+            # Stop any previous manual playback loop
+            self._stop_play_thread()
+
             # Get playlist and validate
             playlist = self.db_session.query(Playlist).get(playlist_id)
             if not playlist:
@@ -50,37 +126,61 @@ class PlaylistManager:
                 if not self._mpv_manager.update_settings(profile_settings):
                     self.logger.warning("Failed to apply some profile settings")
 
-            # Create playlist file and load it
-            playlist_file = PlaybackUtils.create_playlist_file(
-                self.upload_folder, 
-                self.tmp_dir, 
-                playlist
-            )
-        
-            # Load ffconcat "playlist" as a file (mpv auto-detects ffconcat by header)
-            result = self._mpv_manager._send_command({
-                "command": ["loadfile", str(playlist_file), "replace"]
-            }, timeout=10.0)
-        
-            if not result or result.get("error") != "success":
-                raise RuntimeError("Failed to load playlist")
+            # Manual playback loop is the most reliable way to enforce per-item durations on mpv builds
+            # where ffconcat timing is inconsistent for images and mixed media.
+            items = []
+            missing = []
+            for pf in (playlist.files or []):
+                file_path = self.upload_folder / pf.file_name
+                if not file_path.exists():
+                    missing.append(str(file_path))
+                    continue
 
-            # Update playback status in DB only after MPV accepted the playlist
-            playback = self.db_session.query(PlaybackStatus).first() or PlaybackStatus()
+                ext = file_path.suffix.lower()
+                is_video = ext in (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
+                items.append(
+                    {
+                        "path": str(file_path),
+                        "duration": int(getattr(pf, "duration", 0) or 0),
+                        "is_video": is_video,
+                    }
+                )
+
+            if not items:
+                raise ValueError(
+                    f"Playlist {playlist_id} has no existing media files"
+                    + (f". Missing: {', '.join(missing[:10])}" if missing else "")
+                    + (" ..." if len(missing) > 10 else "")
+                )
+
+            self._active_playlist_id = playlist_id
+
+            # Show first item immediately for responsiveness
+            first = items[0]
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "loop-file", "no" if first["is_video"] else "inf"]},
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
+            self._mpv_manager._send_command({"command": ["loadfile", first["path"], "replace"]}, timeout=10.0)
+            self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
+
+            # Update playback status (single-row table; keep id=1 stable)
+            playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
             playback.playlist_id = playlist_id
             playback.status = 'playing'
             self.db_session.add(playback)
             self.db_session.commit()
 
-            # Ensure looping is enabled
-            self._mpv_manager._send_command({
-                "command": ["set_property", "loop-playlist", "inf"]
-            })
-
-            # Start playback
-            self._mpv_manager._send_command({
-                "command": ["set_property", "pause", "no"]
-            })
+            # Start background loop to enforce durations and EOF waits
+            self._play_thread = Thread(
+                target=self._manual_slideshow_loop,
+                args=(playlist_id, items),
+                daemon=True,
+            )
+            self._play_thread.start()
 
             # Notify clients
             self.socketio.emit('playback_state', {
@@ -108,7 +208,7 @@ class PlaylistManager:
             # Best-effort: persist non-playing state so UI doesn't show green when we fell back to idle
             try:
                 from ..models import PlaybackStatus
-                playback = self.db_session.query(PlaybackStatus).first() or PlaybackStatus()
+                playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
                 playback.status = 'idle'
                 playback.playlist_id = None
                 self.db_session.add(playback)
@@ -124,9 +224,22 @@ class PlaylistManager:
             raise RuntimeError(f"Failed to start playback: {str(e)}")
 
     def stop(self) -> bool:
-        """Stop playback"""
+        """Stop playback and persist stopped state so UI/API match MPV (idle logo)."""
+        from ..models import PlaybackStatus
+
         try:
-            return self._logo_manager.display_idle_logo()
+            playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
+            last_playlist_id = playback.playlist_id
+
+            self._stop_play_thread()
+            ok = self._logo_manager.display_idle_logo()
+
+            playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
+            playback.status = "stopped"
+            playback.playlist_id = last_playlist_id
+            self.db_session.add(playback)
+            self.db_session.commit()
+            return ok
         except Exception as e:
             self.logger.error(
                 "Stop error",
@@ -142,7 +255,7 @@ class PlaylistManager:
         """Get current playback status"""
         from ..models import PlaybackStatus
         
-        status = self.db_session.query(PlaybackStatus).first()
+        status = self.db_session.query(PlaybackStatus).get(1) or self.db_session.query(PlaybackStatus).first()
         return {
             'status': status.status if status else None,
             'playlist_id': status.playlist_id if status else None,
