@@ -1,31 +1,49 @@
-import { showAlert, showError } from './utils/alerts.js';
-
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', () => {
     const form = document.getElementById('login-form');
-    const errorDiv = document.getElementById('login-error');
+    const errorEl = document.getElementById('login-error');
     const passwordField = document.getElementById('password');
+    const toggleBtn = document.getElementById('password-toggle');
 
-    if (!form || !errorDiv) {
-        console.error('Login form elements not found');
-        return;
+    if (!form || !errorEl) return;
+
+    function setInlineError(message) {
+        if (!message) {
+            errorEl.textContent = '';
+            errorEl.hidden = true;
+            return;
+        }
+        errorEl.textContent = message;
+        errorEl.hidden = false;
     }
 
-    function displayError(message) {
-        errorDiv.textContent = message;
-        errorDiv.style.display = 'block';
-        showError('Login Error', message);
+    function setPasswordVisible(visible) {
+        if (!passwordField || !toggleBtn) return;
+        passwordField.setAttribute('type', visible ? 'text' : 'password');
+        toggleBtn.setAttribute('aria-label', visible ? 'Hide password' : 'Show password');
+        toggleBtn.setAttribute('aria-pressed', visible ? 'true' : 'false');
+        const icon = toggleBtn.querySelector('i');
+        if (icon) {
+            icon.classList.toggle('fa-eye', !visible);
+            icon.classList.toggle('fa-eye-slash', visible);
+        }
     }
 
-    form.addEventListener('submit', async function(e) {
+    if (toggleBtn && passwordField) {
+        toggleBtn.addEventListener('click', () => {
+            const next = passwordField.getAttribute('type') === 'password';
+            setPasswordVisible(next);
+        });
+    }
+
+    form.addEventListener('submit', async (e) => {
         e.preventDefault();
-        errorDiv.textContent = '';
-        errorDiv.style.display = 'none';
-        
-        const username = document.getElementById('username').value.trim();
-        const password = passwordField.value.trim();
-        
+        setInlineError('');
+
+        const username = document.getElementById('username')?.value.trim() ?? '';
+        const password = passwordField?.value.trim() ?? '';
+
         if (!username || !password) {
-            displayError('Please fill in all fields');
+            setInlineError('Please fill in all fields.');
             return;
         }
 
@@ -35,9 +53,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 method: 'POST',
                 body: formData,
                 credentials: 'include',
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
-                }
+                headers: { 'X-Requested-With': 'XMLHttpRequest' },
             });
 
             if (response.ok) {
@@ -45,45 +61,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (data.success && data.redirect) {
                     window.location.href = data.redirect;
                 } else {
-                    displayError(data.message || 'Login successful but no redirect');
+                    setInlineError(data.message || 'Login succeeded but no redirect target.');
                 }
             } else {
                 const errorData = await response.json().catch(() => ({}));
-                displayError(errorData.error || 'Login failed. Please try again.');
+                setInlineError(errorData.error || 'Login failed. Please try again.');
             }
         } catch (error) {
-            displayError('Connection error: ' + error.message);
-            console.error('Login error:', error);
+            setInlineError('Connection error: ' + (error?.message || 'unknown'));
         }
     });
-
-    // Add show/hide password toggle
-    if (passwordField) {
-        const togglePassword = document.createElement('button');
-        togglePassword.type = 'button';
-        togglePassword.innerHTML = '👁️';
-        togglePassword.style.cssText = `
-            background: none;
-            border: none;
-            cursor: pointer;
-            margin-left: 5px;
-            padding: 0;
-            font-size: 1em;
-        `;
-        
-        passwordField.insertAdjacentElement('afterend', togglePassword);
-        
-        togglePassword.addEventListener('click', function() {
-            const type = passwordField.getAttribute('type') === 'password' ? 'text' : 'password';
-            passwordField.setAttribute('type', type);
-            togglePassword.setAttribute('aria-label', 
-                type === 'password' ? 'Show password' : 'Hide password');
-        });
-    }
 });
-
-export function initializeLogin() {
-    document.addEventListener('DOMContentLoaded', () => {
-        console.log('Login module initialized');
-    });
-}
