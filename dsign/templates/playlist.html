@@ -1,41 +1,48 @@
 {% extends "base.html" %}
 
+{% block title %}Edit Playlist{% endblock %}
+
 {% block styles %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/playlist.css') }}">
 {% endblock %}
 
 {% block content %}
-<h1>Edit Playlist</h1>
-<div class="playlist-container">
-    <!-- Сообщение для пустого плейлиста -->
-    <div id="empty-playlist-message" class="empty-message" style="display: none;">
-        <p>This playlist is currently empty.</p>
-        <p>Select files from the list below and click "Save Playlist".</p>
-    </div>
+<div class="playlist-page">
+    <header class="playlist-page__header">
+        <h1 class="playlist-page__title">Edit playlist</h1>
+        <p class="playlist-page__lead">Choose slides and set how long each image is shown.</p>
+    </header>
 
-    <div class="table-responsive">
-        <table class="media-table">
-            <thead>
-                <tr>
-                    <th width="5%">#</th>
-                    <th width="10%">Include</th>
-                    <th width="20%">Preview</th>
-                    <th width="45%">File Name</th>
-                    <th width="20%">Duration (seconds)</th>
-                </tr>
-            </thead>
-            <tbody id="file-list">
-                <!-- JS заполняет сюда -->
-            </tbody>
-        </table>
-    </div>
-    <div class="button-group">
-        <button id="save-playlist" class="btn primary">
-            <i class="fas fa-save"></i> Save Playlist
-        </button>
-        <a href="{{ url_for('main.index') }}" class="btn">
-            <i class="fas fa-times"></i> Cancel
-        </a>
+    <div class="playlist-card">
+        <div id="empty-playlist-message" class="playlist-empty" style="display: none;">
+            <p class="playlist-empty__text">No media files found. Add files to the media folder first.</p>
+        </div>
+
+        <div class="playlist-table-scroll">
+            <table class="playlist-table" id="playlist-table">
+                <thead>
+                    <tr>
+                        <th class="playlist-table__th playlist-table__th--num" scope="col">#</th>
+                        <th class="playlist-table__th playlist-table__th--check" scope="col">Include</th>
+                        <th class="playlist-table__th playlist-table__th--preview" scope="col">Preview</th>
+                        <th class="playlist-table__th" scope="col">File name</th>
+                        <th class="playlist-table__th playlist-table__th--duration" scope="col">Duration (sec)</th>
+                    </tr>
+                </thead>
+                <tbody id="file-list"></tbody>
+            </table>
+        </div>
+
+        <footer class="playlist-actions">
+            <button type="button" id="save-playlist" class="btn btn-primary playlist-actions__save">
+                <i class="fas fa-save" aria-hidden="true"></i>
+                Save playlist
+            </button>
+            <a href="{{ url_for('main.index') }}" class="playlist-actions__cancel">
+                <i class="fas fa-times" aria-hidden="true"></i>
+                Cancel
+            </a>
+        </footer>
     </div>
 </div>
 {% endblock %}
