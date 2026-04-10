@@ -146,7 +146,7 @@ main {
 }
 
 /* Forms - clean and accessible */
-form:not(.settings-form) {
+form:not(.settings-form):not(.login-form) {
   background-color: var(--surface-color);
   border-radius: 8px;
   padding: var(--space-lg);
@@ -215,7 +215,7 @@ select:focus {
     font-size: var(--text-sm);
   }
   
-  form:not(.settings-form) {
+  form:not(.settings-form):not(.login-form) {
     padding: var(--space-md);
     margin: var(--space-lg) auto;
   }
