@@ -50,25 +50,25 @@
 
     <!-- Main app initialization -->
     <script type="module">
-        import '/static/js/utils/app-init.js';
+        import App from '/static/js/base.js';
         
-        // Fallback initialization if app-init fails
-        window.App = window.App || {};
-        window.App.Alerts = window.App.Alerts || {
-            showError: (title, message) => {
-                console.error(`${title}: ${message}`);
-                alert(`${title}: ${message}`);
-            }
-        };
-        
-        // Error handling for module loading
-        window.addEventListener('error', (event) => {
-            console.error('Application loading error:', event.error);
-            window.App.Alerts.showError(
-                'Load Error', 
-                'Failed to initialize application. Please refresh the page.'
-            );
+        // Initialize when DOM is ready
+        document.addEventListener('DOMContentLoaded', () => {
+            App.initialize();
         });
+    </script>
+
+    <!-- Safety: never leave loader stuck visible -->
+    <script>
+        (function () {
+            function hide() {
+                const el = document.getElementById('page-loader');
+                if (el) el.style.display = 'none';
+            }
+            document.addEventListener('DOMContentLoaded', hide);
+            window.addEventListener('load', hide);
+            setTimeout(hide, 8000);
+        })();
     </script>
     
     {% block scripts %}{% endblock %}
