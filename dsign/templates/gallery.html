@@ -41,19 +41,25 @@
 <form id="upload-form" enctype="multipart/form-data">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <div class="upload-container">
-    <input type="file" id="file-upload" multiple accept=".jpg,.jpeg,.png,.mp4,.webm">
-    <button type="button" id="upload-btn" class="btn primary">
-      <i class="fas fa-upload"></i> Upload Files
+    <input type="file" id="file-upload" multiple accept=".jpg,.jpeg,.png,.gif,.mp4,.webm,.avi">
+    <button type="button" id="upload-btn" class="btn primary upload-btn" aria-live="polite">
+      <span class="upload-btn__track" aria-hidden="true"><span class="upload-btn__fill"></span></span>
+      <span class="upload-btn__content">
+        <i class="fas fa-upload upload-btn__icon" aria-hidden="true"></i>
+        <span class="upload-btn__text">Upload</span>
+      </span>
     </button>
   </div>
 </form>
 
-<!-- Preview Modal -->
-<div id="preview-modal" class="modal">
-  <div class="modal-content">
-    <span class="close-modal">&times;</span>
-    <div id="preview-container"></div>
-    <div class="file-info">
+<!-- Preview: fixed overlay + centered dialog (styles in gallery.css) -->
+<div id="preview-modal" class="preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-filename" hidden>
+  <div class="preview-modal__panel">
+    <button type="button" class="preview-modal__close" id="preview-modal-close" aria-label="Close preview">
+      <i class="fas fa-times" aria-hidden="true"></i>
+    </button>
+    <div id="preview-container" class="preview-modal__media"></div>
+    <div class="preview-modal__meta">
       <h3 id="preview-filename"></h3>
       <p id="preview-filesize"></p>
       <p id="preview-date"></p>
