@@ -63,20 +63,29 @@
 
     <div id="playlist-status"></div>
 
-    <table class="playlist-table" id="playlist-table">
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Customer</th>
-                <th>Files Count</th>
-                <th>Status</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody id="playlist-table-body">
-            <!-- Динамически заполняется через JavaScript -->
-        </tbody>
-    </table>
+    <div class="playlist-table-wrap">
+        <table class="playlist-table" id="playlist-table">
+            <colgroup>
+                <col class="playlist-col-name">
+                <col class="playlist-col-customer">
+                <col class="playlist-col-files">
+                <col class="playlist-col-status">
+                <col class="playlist-col-actions">
+            </colgroup>
+            <thead>
+                <tr>
+                    <th scope="col">Name</th>
+                    <th scope="col">Customer</th>
+                    <th scope="col">Files</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="playlist-table-body">
+                <!-- Filled by JavaScript -->
+            </tbody>
+        </table>
+    </div>
 </div>
 
 <!-- Модальное окно создания плейлиста -->
