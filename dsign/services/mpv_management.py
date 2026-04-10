@@ -9,7 +9,34 @@ from pathlib import Path
 
 from .playback_constants import PlaybackConstants
 from .logger import ServiceLogger
-from dsign.extensions import socketio
+
+
+def _pick_mpv_ipc_command_reply(data: bytes, expect_request_id: Optional[int]) -> Optional[Dict[str, Any]]:
+    """
+    MPV IPC: в одном recv() часто приходит несколько JSON-строк (события + ответ команды).
+    Ответ команды всегда содержит ключ "error"; события — нет (только "event", ...).
+    """
+    if not data:
+        return None
+    text = data.decode("utf-8", errors="replace")
+    exact: Optional[Dict[str, Any]] = None
+    any_reply: Optional[Dict[str, Any]] = None
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict) or "error" not in obj:
+            continue
+        any_reply = obj
+        if expect_request_id is None or obj.get("request_id") == expect_request_id:
+            exact = obj
+            break
+    return exact if exact is not None else any_reply
+
 
 class MPVManager:
     def __init__(self, 
@@ -47,71 +74,16 @@ class MPVManager:
         )
         
         self._last_known_state = {
-            'pause': True,
+            'paused': True,
             'volume': 100,
             'mute': False
         }
-
-    def configure_for_slideshow(self):
-        """Настраивает MPV для работы со слайд-шоу"""
-        try:
-            self.logger.info("Настройка MPV для слайд-шоу")
-        
-            # Основные настройки для слайд-шоу
-            settings = {
-                # Отключаем аудио для изображений
-                "audio": "no",
-                # Включаем бесконечный цикл
-                "loop-playlist": "inf",
-                # Задержка между слайдами в миллисекундах
-                "image-display-duration": "5000",
-                # Режим отображения изображений
-                "video-aspect-override": "16:9",
-                # Отключаем черные поля
-                "video-unscaled": "no",
-                "panscan": "1.0"
-            }
-        
-            # Проверяем поддерживаемые настройки
-            supported_settings = {}
-            for key, value in settings.items():
-                # Проверяем существует ли свойство
-                check_response = self._send_command({
-                    "command": ["get_property", key]
-                }, timeout=1.0)
-            
-                if check_response and check_response.get("error") != "property not found":
-                    supported_settings[key] = value
-                    result = self._send_command({
-                        "command": ["set_property", key, value]
-                    }, timeout=2.0)
-                
-                    if result and result.get("error") == "success":
-                        self.logger.debug(f"Установлена настройка: {key}={value}")
-                    else:
-                        self.logger.warning(f"Не удалось установить настройку: {key}={value}")
-                else:
-                    self.logger.info(f"Настройка не поддерживается: {key}")
-        
-            self.logger.info(
-                "Настройка MPV для слайд-шоу завершена",
-                extra={
-                    "supported_settings": list(supported_settings.keys()),
-                    "total_settings": len(settings),
-                    "unsupported_settings": [k for k in settings if k not in supported_settings]
-                }
-            )
-            return True
-        
-        except Exception as e:
-            self.logger.error(f"Ошибка настройки MPV для слайд-шоу: {e}")
-            return False
 
     def _cache_mpv_state(self):
         """Кеширует важные параметры MPV"""
         props = ["pause", "volume", "mute"]
         for prop in props:
-            resp = self._send_command({
+            resp = self._mpv_manager._send_command({
                 "command": ["get_property", prop]
             })
             if resp and "data" in resp:
@@ -120,8 +92,8 @@ class MPVManager:
     def _restore_mpv_state(self):
         """Восстанавливает кешированное состояние"""
         for prop, value in self._last_known_state.items():
-            self._send_command({
-                "command": ["set_property", prop, value]
+            self._send_ipc_command({
+                "command": ["set", prop, value]
             })
     
     def _log_operation(self, operation: str, status: str, details: Dict[str, Any] = None):
@@ -300,110 +272,95 @@ class MPVManager:
         )
         return False
 
-    def _read_socket_response(self, s: socket.socket, request_id: int, timeout: float) -> Optional[Dict[str, Any]]:
-        """Чтение ответа из сокета с улучшенной обработкой"""
-        s.settimeout(timeout)
-        buffer = b""
-        start_time = time.time()
-        
-        try:
-            while time.time() - start_time < timeout:
-                try:
-                    chunk = s.recv(4096)
-                    if not chunk:
-                        break
-                    buffer += chunk
-                    
-                    # Пробуем декодить и найти наш ответ
-                    decoded = buffer.decode('utf-8', errors='ignore')
-                    lines = decoded.split('\n')
-                    
-                    for line in lines:
-                        if line.strip():
-                            try:
-                                response = json.loads(line.strip())
-                                if response.get("request_id") == request_id:
-                                    return response
-                            except json.JSONDecodeError:
-                                continue
-                                
-                except socket.timeout:
-                    continue
-                    
-        except Exception as e:
-            self.logger.debug(
-                f"Socket read error: {str(e)}",
-                extra={"request_id": request_id}
-            )
-            
-        return None
-
     def _send_command(self, command: Dict[str, Any], timeout: float = 5.0) -> Optional[Dict[str, Any]]:
-        """Отправка команды с трейсингом"""
+        """Отправка команды в MPV. Успехи — только DEBUG (слайдшоу иначе забивает journal)."""
         command_name = command.get("command", ["unknown"])[0]
-        request_id = int(time.time() * 1000)
-        
+        ipc_request_id = int(time.time() * 1_000_000) & 0x7FFFFFFF
         start_time = time.time()
-        
-        self._log_operation(
-            "MPVCommand",
-            "started",
-            {
+
+        self.logger.debug(
+            "MPVCommand started",
+            extra={
                 "command": command_name,
-                "request_id": request_id,
-                "timeout": timeout
-            }
+                "request_id": ipc_request_id,
+                "timeout": timeout,
+            },
         )
-        
+
         for attempt in range(PlaybackConstants.MAX_RETRIES):
             try:
-                with self._ipc_lock:
-                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                        s.settimeout(timeout)
-                        
+                with self._ipc_lock, \
+                     socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    
+                    s.settimeout(timeout)
+                    
+                    try:
+                        s.connect(self.mpv_socket)
+                    except (ConnectionRefusedError, FileNotFoundError):
+                        self.logger.warning(
+                            "MPV socket not available, restarting service...",
+                            extra={
+                                "operation": "MPVCommand",
+                                "command": command_name,
+                                "attempt": attempt + 1,
+                                "request_id": ipc_request_id
+                            }
+                        )
+                        if not self._restart_systemd_service() or not self._wait_for_socket():
+                            time.sleep(PlaybackConstants.RETRY_DELAY)
+                            continue
+                        s.connect(self.mpv_socket)
+
+                    payload = dict(command)
+                    payload["request_id"] = ipc_request_id
+                    cmd_str = json.dumps(payload, ensure_ascii=False) + "\n"
+                    s.sendall(cmd_str.encode())
+
+                    deadline = time.time() + timeout
+                    buffer = b""
+                    result: Optional[Dict[str, Any]] = None
+                    while time.time() < deadline:
+                        s.settimeout(max(0.05, deadline - time.time()))
                         try:
-                            s.connect(self.mpv_socket)
-                        except (ConnectionRefusedError, FileNotFoundError):
-                            self.logger.warning(
-                                "MPV socket not available, restarting service...",
+                            chunk = s.recv(16384)
+                        except socket.timeout:
+                            chunk = b""
+                        buffer += chunk
+                        result = _pick_mpv_ipc_command_reply(buffer, ipc_request_id)
+                        if result is not None:
+                            break
+                        if chunk == b"":
+                            break
+
+                    if result is not None:
+                        duration_sec = round(time.time() - start_time, 3)
+                        err = result.get("error")
+                        if err == "success":
+                            self.logger.debug(
+                                "MPVCommand completed",
                                 extra={
-                                    "operation": "MPVCommand",
                                     "command": command_name,
+                                    "request_id": ipc_request_id,
+                                    "duration_sec": duration_sec,
                                     "attempt": attempt + 1,
-                                    "request_id": request_id
-                                }
+                                },
                             )
-                            if not self._restart_systemd_service() or not self._wait_for_socket():
-                                time.sleep(PlaybackConstants.RETRY_DELAY)
-                                continue
-                            s.connect(self.mpv_socket)
-                        
-                        # Добавляем request_id в команду
-                        command_with_id = command.copy()
-                        command_with_id["request_id"] = request_id
-                        
-                        cmd_str = json.dumps(command_with_id) + '\n'
-                        s.sendall(cmd_str.encode())
-                        
-                        # Читаем ответ с помощью улучшенного метода
-                        response = self._read_socket_response(s, request_id, timeout)
-                        
-                        if response:
-                            self._log_operation(
-                                "MPVCommand",
-                                "completed",
-                                {
-                                    "command": command_name,
-                                    "request_id": request_id,
-                                    "response": response,
-                                    "duration_sec": round(time.time() - start_time, 3),
-                                    "attempt": attempt + 1
-                                }
-                            )
-                            return response
                         else:
-                            raise TimeoutError("No response from MPV")
-                            
+                            self.logger.warning(
+                                "MPVCommand error response",
+                                extra={
+                                    "command": command_name,
+                                    "request_id": ipc_request_id,
+                                    "duration_sec": duration_sec,
+                                    "attempt": attempt + 1,
+                                    "mpv_error": err,
+                                    "response": result,
+                                },
+                            )
+                        return result
+
+                    raise TimeoutError("No command reply from MPV (events only or empty buffer)")
+                    
             except Exception as e:
                 self.logger.warning(
                     f"Attempt {attempt+1} failed",
@@ -411,7 +368,7 @@ class MPVManager:
                         "operation": "MPVCommand",
                         "command": command_name,
                         "attempt": attempt + 1,
-                        "request_id": request_id,
+                        "request_id": ipc_request_id,
                         "error": str(e),
                         "type": type(e).__name__,
                         "duration_sec": round(time.time() - start_time, 3)
@@ -426,7 +383,7 @@ class MPVManager:
             extra={
                 "operation": "MPVCommand",
                 "command": command_name,
-                "request_id": request_id,
+                "request_id": ipc_request_id,
                 "max_attempts": PlaybackConstants.MAX_RETRIES,
                 "duration_sec": round(time.time() - start_time, 3)
             }
