@@ -1,11 +1,9 @@
 [Unit]
 Description=MPV Player for Digital Signage
-After=graphical.target
-Requires=graphical.target
-
+# Не указывать After=multi-user.target: оба юнита WantedBy=multi-user.target, а digital-signage
+# Requires=dsign-mpv — получится цикл «multi-user → signage → mpv → после multi-user».
 # MPV with --vo=drm needs a controlling TTY/VT to actually take over the screen.
-# Otherwise it can accept IPC commands but never draw (you'll still see the login/console).
-After=getty@tty1.service
+After=network.target graphical.target getty@tty1.service
 Conflicts=getty@tty1.service
 
 [Service]
