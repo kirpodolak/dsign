@@ -162,6 +162,10 @@ const api = {
         });
     },
 
+    async getPlaybackStatus() {
+        return this.request(`${CONFIG.api.endpoints.playback}/status`, { showLoading: false });
+    },
+
     async uploadLogo(formData) {
         try {
             const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || 
@@ -317,12 +321,17 @@ const ui = {
 
         tableBody.innerHTML = playlistsArray.map(playlist => `
             <tr data-id="${playlist.id}">
-                <td>${this.escapeHtml(playlist.name || 'Unnamed')}</td>
-                <td>${this.escapeHtml(playlist.customer)}</td>
-                <td>${playlist.files_count || 0}</td>
-                <td class="status-badge"></td>
-                <td>
-                    <div class="actions">
+                <td class="playlist-td-name">${this.escapeHtml(playlist.name || 'Unnamed')}</td>
+                <td class="playlist-td-customer">${this.escapeHtml(playlist.customer)}</td>
+                <td class="playlist-td-files">${playlist.files_count || 0}</td>
+                <td class="playlist-td-status">
+                    <div class="playlist-td-inner">
+                        <span class="status-badge"></span>
+                    </div>
+                </td>
+                <td class="playlist-td-actions">
+                    <div class="playlist-td-inner">
+                        <div class="actions">
                         <button class="btn play" data-id="${playlist.id}" title="Play">
                             <i class="fas fa-play"></i>
                         </button>
@@ -335,6 +344,7 @@ const ui = {
                         <button class="btn delete" data-id="${playlist.id}" title="Delete">
                             <i class="fas fa-trash"></i>
                         </button>
+                        </div>
                     </div>
                 </td>
             </tr>
@@ -351,25 +361,61 @@ const ui = {
             .replace(/'/g, "&#039;");
     },
 
-    togglePlaybackButtons(playlistId, isPlaying) {
+    /**
+     * @param {string|number} playlistId
+     * @param {'playing'|'stopped'|'idle'} mode
+     */
+    setPlaybackRowState(playlistId, mode) {
         const rows = document.querySelectorAll(`tr[data-id="${playlistId}"]`);
         if (!rows.length) return;
 
-        rows.forEach(row => {
+        rows.forEach((row) => {
             const playBtn = row.querySelector('.play');
             const stopBtn = row.querySelector('.stop');
             const statusBadge = row.querySelector('.status-badge');
+            if (!playBtn || !stopBtn || !statusBadge) return;
 
-            if (isPlaying) {
+            if (mode === 'playing') {
                 playBtn.disabled = true;
                 stopBtn.disabled = false;
                 statusBadge.textContent = 'Playing';
-                statusBadge.className = 'status-badge active';
+                statusBadge.className = 'status-badge active playing';
+            } else if (mode === 'stopped') {
+                playBtn.disabled = false;
+                stopBtn.disabled = true;
+                statusBadge.textContent = 'Stopped';
+                statusBadge.className = 'status-badge stopped';
             } else {
                 playBtn.disabled = false;
                 stopBtn.disabled = true;
-                statusBadge.textContent = '';
-                statusBadge.className = 'status-badge';
+                statusBadge.textContent = 'Idle';
+                statusBadge.className = 'status-badge idle';
+            }
+        });
+    },
+
+    /**
+     * Sets Playing / Stopped on the matching playlist and Idle on all others.
+     * @param {object|null|undefined} statusPayload - { status, playlist_id } from API or local state
+     * @param {Array<{id:number}>} playlists - current list (defaults to state.playlists)
+     */
+    applyPlaybackStatusFromServer(statusPayload, playlists) {
+        const list = playlists && playlists.length ? playlists : state.playlists || [];
+        const ids = list.map((p) => String(p.id));
+        if (!ids.length) return;
+
+        const rawPid = statusPayload && statusPayload.playlist_id;
+        const pid =
+            rawPid != null && rawPid !== '' ? String(rawPid) : null;
+        const st = String(statusPayload?.status || '').toLowerCase();
+
+        ids.forEach((id) => {
+            if (pid === id && st === 'playing') {
+                this.setPlaybackRowState(id, 'playing');
+            } else if (pid === id && st === 'stopped') {
+                this.setPlaybackRowState(id, 'stopped');
+            } else {
+                this.setPlaybackRowState(id, 'idle');
             }
         });
     },
@@ -473,18 +519,37 @@ const handlers = {
             await this.ensureTableBodyExists();
             console.log('Playlist table element found:', elements.playlistTableBody);
 
-            const [settings, playlists] = await Promise.all([
+            const [settings, playlists, playbackStatusResp] = await Promise.all([
                 api.getSettings(),
-                api.getPlaylists()
+                api.getPlaylists(),
+                api.getPlaybackStatus().catch((e) => {
+                    console.warn('Failed to load playback status:', e);
+                    return null;
+                })
             ]);
 
             console.log('Received playlists:', playlists);
 
             state.currentSettings = settings;
             state.playlists = playlists;
+            const innerStatus =
+                playbackStatusResp &&
+                typeof playbackStatusResp.status === 'object' &&
+                playbackStatusResp.status !== null &&
+                !Array.isArray(playbackStatusResp.status)
+                    ? playbackStatusResp.status
+                    : null;
+            state.playbackStatus = innerStatus;
 
             ui.renderSettings(settings);
             ui.renderPlaylists(playlists);
+
+            try {
+                ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
+            } catch (e) {
+                console.warn('Failed to apply playback status to UI:', e);
+            }
+
             ui.updateLogo(settings.display?.logo);
             ui.updatePreviewImage();
 
@@ -555,6 +620,7 @@ const handlers = {
                 }];
                 
                 ui.renderPlaylists(state.playlists);
+                ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
                 ui.toggleModal(false);
                 elements.playlistForm.reset();
                 showAlert('Playlist created successfully', 'success');
@@ -657,12 +723,20 @@ const handlers = {
             try {
                 if (btn.classList.contains('play')) {
                     await api.startPlayback(playlistId);
-                    ui.togglePlaybackButtons(playlistId, true);
+                    state.playbackStatus = {
+                        status: 'playing',
+                        playlist_id: Number(playlistId)
+                    };
+                    ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
                     showAlert('Playback started', 'success');
                     
                 } else if (btn.classList.contains('stop')) {
                     await api.stopPlayback();
-                    ui.togglePlaybackButtons(playlistId, false);
+                    state.playbackStatus = {
+                        status: 'stopped',
+                        playlist_id: Number(playlistId)
+                    };
+                    ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
                     showAlert('Playback stopped', 'info');
                     
                 } else if (btn.classList.contains('edit')) {
@@ -688,6 +762,13 @@ const handlers = {
                             
                             // Update state
                             state.playlists = state.playlists.filter(p => p.id !== playlistId);
+                            if (
+                                state.playbackStatus &&
+                                String(state.playbackStatus.playlist_id) === String(playlistId)
+                            ) {
+                                state.playbackStatus = null;
+                            }
+                            ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
                             showAlert('Playlist deleted', 'info');
                         } catch (error) {
                             console.error('Delete failed:', error);
