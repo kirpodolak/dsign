@@ -2,13 +2,10 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from flask_login import LoginManager
 from flask_socketio import SocketIO
-from flask import current_app
+from flask import request
 import os
 import logging
-import traceback
 from typing import Dict, Any
-from dsign.config.config import Config, config
-from dsign.services.sockets.service import SocketService  # Добавлен новый импорт
 
 # Инициализация экземпляров расширений
 db = SQLAlchemy()
@@ -18,59 +15,67 @@ socketio = SocketIO()
 
 def init_extensions(app) -> Dict[str, Any]:
     """
-    Инициализация Flask-расширений без создания сервисов
+    Полная инициализация всех компонентов
     :param app: Экземпляр Flask приложения
-    :return: Словарь с инициализированными расширениями
+    :return: Словарь с инициализированными сервисами
     """
+    # Настройка логгера
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    
     try:
-        # 1. Инициализация базовых расширений
+        # 1. Инициализация Flask-расширений
         db.init_app(app)
         bcrypt.init_app(app)
         
-        # 2. Настройка SocketIO с более строгими параметрами
+        # Настройка SocketIO
         socketio.init_app(
             app,
-            async_mode=app.config['SOCKETIO_ASYNC_MODE'],
-            cors_allowed_origins=app.config['SOCKETIO_CORS_ALLOWED_ORIGINS'],
-            logger=app.config.get('SOCKETIO_LOGGER', True),
-            engineio_logger=app.config.get('SOCKETIO_ENGINEIO_LOGGER', False),
-            cors_credentials=app.config.get('SOCKETIO_CORS_CREDENTIALS', False),
-            http_compression=app.config.get('SOCKETIO_HTTP_COMPRESSION', True),
-            always_connect=True  # Важно для стабильности соединений
+            cors_allowed_origins=app.config.get('SOCKETIO_CORS_ALLOWED_ORIGINS', "*"),
+            async_mode=app.config.get('SOCKETIO_ASYNC_MODE', 'eventlet'),
+            logger=logger,
+            engineio_logger=logger if app.debug else False
         )
         
-        # 3. Инициализация SocketService
-        socket_service = SocketService(
-            socketio=socketio,
-            db_session=db,
-            app=app,
-            logger=app.logger
-        )
-        app.socket_service = socket_service  # Прикрепляем к app
-        
-        # 4. Настройка аутентификации
+        # 2. Настройка аутентификации
         _configure_auth(app)
         
-        # 5. Создание рабочих директорий
+        # 3. Создание рабочих директорий
         _ensure_directories(app)
         
-        # 6. Установка обработчиков
+        # 4. Установка обработчиков
         app.teardown_appcontext(_shutdown_session)
         
-        # 7. Настройка кэширования
+        # 5. Инициализация сервисов с проверкой MPV
+        with app.app_context():
+            from .services import init_services  # Локальный импорт
+            services = init_services(
+                config=app.config,
+                db=db,
+                socketio=socketio,
+                logger=logger
+            )
+            
+            # Явная проверка инициализации MPV
+            if 'playback_service' in services:
+                if not hasattr(services['playback_service'], '_mpv_manager'):
+                    logger.error("MPV manager not found in playback service")
+                    raise RuntimeError("MPV manager initialization failed")
+                
+                if not services['playback_service']._mpv_manager.wait_for_mpv_ready(timeout=30):
+                    logger.error("MPV initialization timeout")
+                    raise RuntimeError("MPV failed to initialize")
+                
+                logger.info("MPV initialized and ready")
+                
+        # 6. Настройка кэширования статических файлов
         configure_static_cache(app)
         
-        app.logger.info("Extensions initialized successfully")
-        return {
-            'db': db,
-            'bcrypt': bcrypt,
-            'login_manager': login_manager,
-            'socketio': socketio,
-            'socket_service': socket_service  # Добавлен в возвращаемые расширения
-        }
+        logger.info("All extensions initialized successfully")
+        return services
         
     except Exception as e:
-        app.logger.critical(f"Extensions initialization failed: {str(e)}", extra={'stack_trace': traceback.format_exc()})
+        logger.critical(f"Failed to initialize extensions: {str(e)}", exc_info=True)
         raise RuntimeError(f"Extensions initialization failed: {str(e)}")
 
 def _configure_auth(app) -> None:
@@ -79,59 +84,44 @@ def _configure_auth(app) -> None:
     login_manager.login_message = 'Please log in to access this page.'
     login_manager.init_app(app)
     
+    # Импорт модели User только внутри функции
+    from .models import User
+    
     @login_manager.user_loader
     def load_user(user_id):
-        from .models import User  # Ленивый импорт
         try:
             return db.session.get(User, int(user_id))
         except Exception as e:
-            app.logger.error(f"User loading error: {str(e)}")
+            app.logger.error(f"Error loading user {user_id}: {str(e)}")
             return None
 
 def _ensure_directories(app) -> None:
     """Создание необходимых директорий"""
-    required_dirs = [
-        app.config['UPLOAD_FOLDER'],
-        os.path.join(app.config['UPLOAD_FOLDER'], 'logo'),
-        os.path.join(app.config['UPLOAD_FOLDER'], 'tmp'),
-        app.config['THUMBNAIL_FOLDER']
-    ]
-    
-    for directory in required_dirs:
-        try:
-            os.makedirs(directory, exist_ok=True)
-        except Exception as e:
-            app.logger.error(f"Directory creation failed: {directory} - {str(e)}")
-            raise
+    upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
+    try:
+        os.makedirs(upload_folder, exist_ok=True)
+        os.makedirs(os.path.join(upload_folder, 'logo'), exist_ok=True)
+        os.makedirs(os.path.join(upload_folder, 'tmp'), exist_ok=True)
+        app.logger.info(f"Created required directories in {upload_folder}")
+    except Exception as e:
+        app.logger.error(f"Failed to create directories: {str(e)}")
+        raise RuntimeError(f"Directory creation failed: {str(e)}")
 
 def _shutdown_session(exception=None) -> None:
     """Корректное завершение сессии БД"""
-    if db.session:
-        try:
+    try:
+        if db.session:
             db.session.remove()
-        except Exception as e:
-            current_app.logger.error(f"Session shutdown error: {str(e)}")
-
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Error during session shutdown: {str(e)}")
+        
 def configure_static_cache(app):
     """Настройка кэширования статических файлов"""
     @app.after_request
     def add_cache_headers(response):
-        if response.direct_passthrough:
-            return response
-            
-        if response.status_code < 400 and any(
-            response.headers.get('Content-Type', '').startswith(t) 
-            for t in ['text/css', 'application/javascript', 'image/']
-        ):
-            response.cache_control.max_age = 86400
+        if request.path.startswith('/static/'):
+            response.cache_control.max_age = 86400  # 1 день
             response.cache_control.public = True
         return response
 
-__all__ = [
-    'db', 
-    'bcrypt', 
-    'login_manager', 
-    'socketio', 
-    'init_extensions',
-    'SocketService'  # Добавлен в экспортируемые объекты
-]
+__all__ = ['db', 'bcrypt', 'login_manager', 'socketio', 'init_extensions', 'configure_static_cache']
