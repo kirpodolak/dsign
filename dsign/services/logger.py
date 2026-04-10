@@ -7,9 +7,8 @@ import logging
 from logging.handlers import RotatingFileHandler
 from typing import Optional, Dict, Any, Union
 import json
-import traceback
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime  # <-- Восстановленный импорт
 from flask import Flask
 import sys
 
@@ -69,11 +68,12 @@ class ServiceLogger:
     def error(self, msg: str, extra: Optional[Dict[str, Any]] = None):
         self.logger.error(self._format_message(msg, extra))
 
-    def critical(self, msg: str, extra: Optional[Dict[str, Any]] = None, exc_info=False):
-        if exc_info:
-            extra = extra or {}
-            extra['stack_trace'] = traceback.format_exc()
+    def critical(self, msg: str, extra: Optional[Dict[str, Any]] = None):
         self.logger.critical(self._format_message(msg, extra))
+
+    def exception(self, msg, *args, **kwargs):
+        """Совместимость с logging.Logger.exception (в т.ч. app.logger.exception(...))."""
+        return self.logger.exception(msg, *args, **kwargs)
 
 def setup_logger(name: str, **kwargs) -> ServiceLogger:
     """
