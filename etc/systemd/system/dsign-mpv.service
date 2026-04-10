@@ -12,6 +12,7 @@ Conflicts=getty@tty1.service
 User=dsign
 Group=video
 SupplementaryGroups=tty
+PermissionsStartOnly=true
 Environment="DISPLAY=:0"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
 Environment="PULSE_RUNTIME_PATH=/run/user/1000/pulse"
@@ -26,6 +27,7 @@ TTYVHangup=yes
 TTYVTDisallocate=yes
 
 # Подготовка директории и прав
+ExecStartPre=/bin/chvt 1
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv
 ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
