@@ -3,13 +3,27 @@ Description=MPV Player for Digital Signage
 After=graphical.target
 Requires=graphical.target
 
+# MPV with --vo=drm needs a controlling TTY/VT to actually take over the screen.
+# Otherwise it can accept IPC commands but never draw (you'll still see the login/console).
+After=getty@tty1.service
+Conflicts=getty@tty1.service
+
 [Service]
 User=dsign
 Group=video
+SupplementaryGroups=tty
 Environment="DISPLAY=:0"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
 Environment="PULSE_RUNTIME_PATH=/run/user/1000/pulse"
+Environment="TERM=linux"
 WorkingDirectory=/home/dsign
+
+# Attach to tty1 so DRM can switch to graphics mode
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
 
 # Подготовка директории и прав
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv
@@ -17,8 +31,9 @@ ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 
-# Основная команда запуска (ИСПРАВЛЕН ПУТЬ)
-ExecStart=/usr/bin/mpv --idle=yes --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --hwdec=auto --vo=drm --log-file=/var/log/dsign/mpv.log
+# Основная команда запуска
+# NOTE: On Raspberry Pi OS mpv is typically at /usr/bin/mpv (not /usr/local/bin/mpv).
+ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --hwdec=auto --vo=drm --fullscreen --demuxer-lavf-o=safe=0 --log-file=/var/log/dsign/mpv.log
 
 # Настройки перезапуска
 Restart=always
