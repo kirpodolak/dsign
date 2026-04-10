@@ -275,10 +275,14 @@ class FileService:
         """Получает файлы с информацией о принадлежности к плейлисту"""
         try:
             all_files = self.get_media_files()
-    
+
             if not playlist_id or playlist_id == 'all':
                 return all_files
-                
+
+            # Редактор плейлиста: idle logo не является медиа слайда — не показывать в списке.
+            logo_l = self.DEFAULT_LOGO.lower()
+            all_files = [f for f in all_files if f.get('filename', '').lower() != logo_l]
+
             if not db_session:
                 raise RuntimeError("Database session not provided")
             
