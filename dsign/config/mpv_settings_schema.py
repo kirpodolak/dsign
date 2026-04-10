@@ -83,6 +83,14 @@ MPV_SETTINGS_SCHEMA = {
         "label": "Полноэкранный режим",
         "type": "boolean"
     },
+    "panscan": {
+        "label": "Panscan: 0 — вписать в экран, 1 — заполнить с обрезкой краёв",
+        "type": "range",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 0,
+    },
     "sub-visibility": {
         "label": "Показывать субтитры",
         "type": "boolean"
