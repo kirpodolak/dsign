@@ -141,6 +141,7 @@ export class PlaylistManager {
         this.exportBtn = document.getElementById('export-m3u');
         this.emptyMessage = document.getElementById('empty-playlist-message');
         this.ui = new PlaylistUI();
+        this._thumbObserver = null;
 
         this.init();
     }
@@ -225,56 +226,25 @@ export class PlaylistManager {
     }
 
     // Предпросмотр изображений
-    async loadPreview(file) {
-        const cacheKey = `preview-${file.filename}`;
-    
-        // Check memory cache first
-        if (previewCache.has(cacheKey)) {
-            return previewCache.get(cacheKey);
-        }
+    _getPreviewUrl(file) {
+        return `/api/media/thumbnail/${encodeURIComponent(file.filename)}`;
+    }
 
-        const previewUrl = `/api/media/thumbnail/${encodeURIComponent(file.filename)}`;
-        const fallbackUrl = '/static/images/default-preview.jpg';
+    _ensureThumbObserver() {
+        if (this._thumbObserver) return;
 
-        try {
-            const response = await fetch(previewUrl, {
-                credentials: 'include'
-            });
-        
-            if (response.ok && response.headers.get('Content-Type')?.startsWith('image/')) {
-                const blob = await response.blob();
-            
-                // Verify the image is valid and has reasonable size
-                if (blob.size > 1024) {
-                    const url = URL.createObjectURL(blob);
-                    previewCache.set(cacheKey, url);
-                
-                    // Add video indicator if needed
-                    if (file.is_video) {
-                        setTimeout(() => {
-                            const img = document.querySelector(`img[data-filename="${file.filename}"]`);
-                            if (img) {
-                                img.classList.add('video-thumbnail');
-                            }
-                        }, 100);
-                    }
-                
-                    return url;
+        // Lazy-load thumbnails only when they become visible.
+        this._thumbObserver = new IntersectionObserver((entries) => {
+            for (const entry of entries) {
+                if (!entry.isIntersecting) continue;
+                const img = entry.target;
+                const src = img.dataset.src;
+                if (src && img.src !== src) {
+                    img.src = src;
                 }
+                this._thumbObserver.unobserve(img);
             }
-        
-            throw new Error('Invalid thumbnail response');
-        
-        } catch (error) {
-            console.warn(`Preview load failed for ${file.filename}:`, error);
-        
-            // For video files, mark to use fallback in future
-            if (file.is_video) {
-                sessionStorage.setItem(`video-fallback-${file.filename}`, 'true');
-            }
-        
-            return fallbackUrl;
-        }
+        }, { root: null, rootMargin: '300px 0px', threshold: 0.01 });
     }
 
     // Рендеринг таблицы файлов
@@ -289,6 +259,7 @@ export class PlaylistManager {
 
         if (this.emptyMessage) this.emptyMessage.style.display = 'none';
         this.fileListEl.innerHTML = '';
+        this._ensureThumbObserver();
 
         files.forEach((file, index) => {
             const row = document.createElement('tr');
@@ -297,6 +268,15 @@ export class PlaylistManager {
             img.alt = 'Preview';
             img.className = `file-preview ${file.is_video ? 'video-thumbnail' : ''}`;
             img.dataset.filename = file.filename;
+            img.loading = 'lazy';
+            img.decoding = 'async';
+
+            const previewUrl = this._getPreviewUrl(file);
+            img.dataset.src = previewUrl;
+            img.onerror = function () {
+                this.onerror = null;
+                this.src = '/static/images/default-preview.jpg';
+            };
         
             const isVideo = file.is_video || ['.mp4', '.avi', '.mov', '.mkv'].some(ext => file.filename.toLowerCase().endsWith(ext));
         
@@ -316,10 +296,13 @@ export class PlaylistManager {
         
             row.querySelector('td:nth-child(3)').appendChild(img);
             this.fileListEl.appendChild(row);
-        
-            this.loadPreview(file).then(url => {
-                img.src = url;
-            });
+
+            // Observe for lazy-load (fallback to immediate if not supported).
+            if (this._thumbObserver) {
+                this._thumbObserver.observe(img);
+            } else {
+                img.src = previewUrl;
+            }
         });
     }
 
