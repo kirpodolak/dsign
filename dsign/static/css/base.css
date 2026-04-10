@@ -262,3 +262,28 @@ select:focus {
     white-space: pre-wrap;
     word-wrap: break-word;
 }
+
+/* Full-page loader (hidden by default; shown via JS when needed) */
+#page-loader {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 9999;
+  justify-content: center;
+  align-items: center;
+}
+
+#page-loader .loader-content {
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--text-primary);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.18);
+}
