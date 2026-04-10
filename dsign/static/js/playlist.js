@@ -267,7 +267,7 @@ export class PlaylistManager {
             const img = document.createElement('img');
             img.src = '/static/images/default-preview.jpg';
             img.alt = 'Preview';
-            img.className = `file-preview ${file.is_video ? 'video-thumbnail' : ''}`;
+            img.className = `playlist-thumb-img${file.is_video ? ' playlist-thumb-img--video' : ''}`;
             img.dataset.filename = file.filename;
             img.loading = 'lazy';
             img.decoding = 'async';
@@ -292,20 +292,20 @@ export class PlaylistManager {
             })();
         
             row.innerHTML = `
-                <td>${index + 1}</td>
-                <td><input type="checkbox" class="include-checkbox" data-filename="${file.filename}" ${file.included ? 'checked' : ''}></td>
-                <td></td>
-                <td>${file.filename}</td>
-                <td>
-                    ${isVideo ? 
-                        '<span class="video-duration">Полное видео</span>' : 
-                        `<input type="number" class="duration-input" data-filename="${file.filename}" 
+                <td class="playlist-col-num">${index + 1}</td>
+                <td class="playlist-col-check"><input type="checkbox" class="include-checkbox" data-filename="${file.filename}" ${file.included ? 'checked' : ''}></td>
+                <td class="playlist-col-preview"><div class="playlist-thumb-wrap"></div></td>
+                <td class="playlist-col-name">${file.filename}</td>
+                <td class="playlist-col-duration">
+                    ${isVideo ?
+                        '<span class="playlist-video-hint">Полное видео</span>' :
+                        `<input type="number" class="duration-input" data-filename="${file.filename}"
                           value="${imageSeconds}" min="1">`
                     }
                 </td>
             `;
-        
-            row.querySelector('td:nth-child(3)').appendChild(img);
+
+            row.querySelector('.playlist-thumb-wrap').appendChild(img);
             this.fileListEl.appendChild(row);
 
             // Observe for lazy-load (fallback to immediate if not supported).
