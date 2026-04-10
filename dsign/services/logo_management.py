@@ -58,6 +58,10 @@ class LogoManager:
                 self.logger.warning(f"Failed command: {' '.join(map(str, cmd))}")
                 return False
 
+        self._mpv_manager._send_command(
+            {"command": ["set_property", "panscan", 0.0]},
+            timeout=2.0,
+        )
         return True
 
     def _validate_logo_file(self) -> Path:
@@ -213,6 +217,10 @@ class LogoManager:
             # Apply known-good settings for idle logo
             self._mpv_manager._send_command({"command": ["set_property", "loop-file", "inf"]}, timeout=2.0)
             self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=2.0)
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "panscan", 0.0]},
+                timeout=2.0,
+            )
             return True
 
         except Exception as e:
