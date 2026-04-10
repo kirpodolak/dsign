@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, Optional
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
+from flask import current_app
 
 from .playback_constants import PlaybackConstants
 
@@ -72,21 +73,18 @@ class LogoManager:
         return logo_path
 
 
-    def _send_ipc_command(self, command: Dict, timeout: float = 2.0) -> Optional[Dict]:
-        """Safe IPC command sending with retries and timeout - возвращает response или None"""
+    def _send_ipc_command(self, command: Dict, timeout: float = 2.0) -> bool:
+        """Safe IPC command sending with retries and timeout"""
         for attempt in range(3):
             try:
-                # Добавляем целочисленный request_id
-                command_with_id = command.copy()
-                command_with_id["request_id"] = int(time.time() * 1000)
-                
-                response = self._mpv_manager._send_command(command_with_id)
-                # Возвращаем полный response, а не булево значение
-                return response
+                response = self._mpv_manager._send_command(command)
+                if response and response.get('error') == 'success':
+                    return True
+                time.sleep(0.1 * (attempt + 1))
             except Exception as e:
                 self.logger.warning(f"IPC attempt {attempt + 1} failed: {command} - {str(e)}")
                 time.sleep(0.2)
-        return None
+        return False
 
     def _validate_logo_file(self) -> Path:
         """Validate logo file with improved error handling"""
@@ -193,44 +191,29 @@ class LogoManager:
         return False
             
     def restart_idle_logo(self, upload_folder=None, idle_logo=None):
-        """Обновляет логотип с проверкой через метаданные файла"""
+        """Обновляет логотип (best-effort).
+
+        На некоторых сборках mpv свойства вроде `filename` могут быть `property unavailable`,
+        поэтому не делаем "жесткую" проверку через get_property, а считаем успехом успешный loadfile.
+        """
         try:
             # Установка значений по умолчанию из конфига
             upload_folder = upload_folder or current_app.config['UPLOAD_FOLDER']
             idle_logo = idle_logo or current_app.config['IDLE_LOGO']
             
             logo_path = Path(upload_folder) / idle_logo
-            
-            # 1. Получаем текущие метаданные файла
-            initial_stat = os.stat(logo_path)
-            
-            # 2. Отправляем команду замены с целочисленным request_id
-            cmd = {
-                "command": ["loadfile", str(logo_path), "replace"],
-                "request_id": int(time.time() * 1000)  # Целое число
-            }
-            response = self._send_ipc_command(cmd, timeout=2.0)
-            
-            # Исправляем проверку ответа - response теперь объект или None
-            if not response or response.get("error") != "success":
-                raise RuntimeError("MPV не подтвердил обновление логотипа")
-            
-            # 3. Проверяем изменение файла (3 попытки)
-            for _ in range(3):
-                time.sleep(0.3)
-                current_stat = os.stat(logo_path)
-                if current_stat.st_mtime != initial_stat.st_mtime or \
-                   current_stat.st_size != initial_stat.st_size:
-                    self.logger.info("Файл логотипа изменен (mtime или size изменился)")
-                    return True
-            
-            # 4. Дополнительная проверка через MPV
-            mpv_file = self._get_mpv_current_file()
-            if mpv_file and mpv_file.endswith(idle_logo):
-                self.logger.info("MPV подтверждает отображение логотипа")
-                return True
-                
-            raise RuntimeError("Не удалось подтвердить обновление логотипа")
+
+            resp = self._mpv_manager._send_command(
+                {"command": ["loadfile", str(logo_path), "replace"]},
+                timeout=5.0
+            )
+            if not resp or resp.get("error") != "success":
+                raise RuntimeError("Failed to load idle logo in MPV")
+
+            # Apply known-good settings for idle logo
+            self._mpv_manager._send_command({"command": ["set_property", "loop-file", "inf"]}, timeout=2.0)
+            self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=2.0)
+            return True
 
         except Exception as e:
             self.logger.error(f"Ошибка обновления логотипа: {str(e)}")
