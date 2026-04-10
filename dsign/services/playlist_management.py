@@ -126,6 +126,14 @@ class PlaylistManager:
                 if not self._mpv_manager.update_settings(profile_settings):
                     self.logger.warning("Failed to apply some profile settings")
 
+            # panscan>0 даёт «зум под размер экрана» и на части DRM/сборок ведёт к обрезке даже при 16:9.
+            # По умолчанию вписываем кадр без обрезки; при необходимости убрать полосы — задать panscan в профиле MPV.
+            if "panscan" not in profile_settings:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "panscan", 0.0]},
+                    timeout=2.0,
+                )
+
             # Manual playback loop is the most reliable way to enforce per-item durations on mpv builds
             # where ffconcat timing is inconsistent for images and mixed media.
             items = []
