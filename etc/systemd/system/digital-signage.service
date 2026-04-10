@@ -20,7 +20,8 @@ TimeoutStopSec=30
 KillMode=mixed
 
 # Ограничения ресурсов
-MemoryLimit=500M
+# Загрузка в галерею до 1 GiB буферизуется в процессе; 500M обрывала крупные файлы (~70% от ~650 MB).
+MemoryMax=2G
 CPUQuota=50%
 
 [Install]
