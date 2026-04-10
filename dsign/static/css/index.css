@@ -25,6 +25,11 @@
     --success-color: #66bb6a;
     --warning-accent: #ffa726;
     --text-secondary: #757575;
+    --text-muted: #6b7280;
+    --text-sm: 0.8125rem;
+    --table-header: #4f46e5;
+    --table-row-alt: #f8fafc;
+    --table-border: #e2e8f0;
 }
 
 .info-panel {
@@ -126,59 +131,189 @@
     margin: var(--space-xl) 0;
     background: var(--surface-color);
     padding: var(--space-lg);
-    border-radius: var(--radius-md);
-    box-shadow: var(--shadow-sm);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-md);
 }
 
 .section-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: var(--space-lg);
+    margin-bottom: var(--space-md);
+    flex-wrap: wrap;
+    gap: var(--space-md);
+}
+
+.section-header h2 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #1e293b;
+}
+
+/* Wrapper: rounded card, horizontal scroll on narrow screens */
+.playlist-table-wrap {
+    margin-top: var(--space-md);
+    overflow-x: auto;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--table-border);
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
 }
 
 .playlist-table {
     width: 100%;
+    min-width: 640px;
     border-collapse: separate;
     border-spacing: 0;
-    margin-top: var(--space-lg);
+    table-layout: fixed;
 }
 
-.playlist-table th {
-    background-color: var(--primary-accent);
-    color: white;
+.playlist-col-name {
+    width: 22%;
+}
+
+.playlist-col-customer {
+    width: 22%;
+}
+
+.playlist-col-files {
+    width: 10%;
+}
+
+.playlist-col-status {
+    width: 18%;
+}
+
+.playlist-col-actions {
+    width: 28%;
+}
+
+.playlist-table thead th {
+    background: linear-gradient(180deg, var(--table-header) 0%, #4338ca 100%);
+    color: #fff;
     font-weight: 600;
-    text-transform: uppercase;
     font-size: var(--text-sm);
-    letter-spacing: 0.5px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    padding: 0.75rem 1rem;
+    border: none;
+    vertical-align: middle;
+    white-space: nowrap;
 }
 
-.playlist-table th, 
-.playlist-table td {
-    padding: var(--space-md);
-    text-align: left;
-    border-bottom: 1px solid var(--border-color);
+.playlist-table thead th:first-child {
+    border-radius: var(--radius-md) 0 0 0;
 }
 
-.playlist-table tr:nth-child(even) {
-    background-color: var(--zebra-stripe);
+.playlist-table thead th:last-child {
+    border-radius: 0 var(--radius-md) 0 0;
 }
 
-.playlist-table tr:hover {
-    background-color: var(--hover-bg);
+.playlist-table tbody td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--table-border);
+    vertical-align: middle;
+    font-size: var(--text-sm);
+    color: #334155;
+    line-height: 1.45;
 }
 
-.playlist-table tr.active_playlist {
+/* Name & customer: larger, readable typography */
+.playlist-table tbody td.playlist-td-name {
+    font-size: 1.0625rem;
+    font-weight: 600;
+    color: #0f172a;
+    letter-spacing: -0.015em;
+    line-height: 1.4;
+}
+
+.playlist-table tbody td.playlist-td-customer {
+    font-size: 1rem;
+    font-weight: 500;
+    color: #334155;
+    line-height: 1.45;
+}
+
+.playlist-table tbody td.playlist-td-files {
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
+    color: #475569;
+}
+
+/* Status & actions: inner flex avoids display:flex on <td> (table layout quirks) */
+.playlist-table tbody td.playlist-td-status,
+.playlist-table tbody td.playlist-td-actions {
+    padding: 0;
+    vertical-align: middle;
+}
+
+.playlist-table .playlist-td-inner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 3.25rem;
+    padding: 0.65rem 0.75rem;
+    box-sizing: border-box;
+}
+
+.playlist-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.playlist-table tbody tr:nth-child(even) {
+    background-color: var(--table-row-alt);
+}
+
+.playlist-table tbody tr:hover {
+    background-color: #f1f5f9;
+}
+
+.playlist-table tbody tr.active_playlist {
     background-color: var(--active-bg);
-    font-weight: bold;
+    font-weight: 600;
     color: var(--active-text);
 }
 
-.status-badge {
-    padding: var(--space-xs) var(--space-sm);
-    border-radius: 20px;
-    font-size: var(--text-sm);
+/* Name & customer: left */
+.playlist-table th:nth-child(1),
+.playlist-table td:nth-child(1),
+.playlist-table th:nth-child(2),
+.playlist-table td:nth-child(2) {
+    text-align: left;
+}
+
+/* Files, status, actions: centered */
+.playlist-table th:nth-child(3),
+.playlist-table td:nth-child(3),
+.playlist-table th:nth-child(4),
+.playlist-table td:nth-child(4),
+.playlist-table th:nth-child(5),
+.playlist-table td:nth-child(5) {
+    text-align: center;
+}
+
+.playlist-table td.playlist-td-name,
+.playlist-table td.playlist-td-customer {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.playlist-table .status-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.4rem 0.85rem;
+    border-radius: 999px;
+    font-size: 0.8125rem;
     font-weight: 600;
+    line-height: 1.25;
+    min-width: 4.75rem;
+    max-width: 100%;
+    white-space: nowrap;
+    box-sizing: border-box;
+    flex-shrink: 0;
 }
 
 .status-badge.inactive {
@@ -190,6 +325,95 @@
 .status-badge.playing {
     background-color: var(--success-color);
     color: white;
+}
+
+.status-badge.stopped {
+    background-color: #6c757d;
+    color: white;
+}
+
+.status-badge.idle {
+    background-color: #f1f5f9;
+    color: var(--text-muted);
+    border: 1px solid var(--table-border);
+}
+
+/* Action buttons inside playlist table: fixed size, no overlap */
+.playlist-table .actions {
+    display: flex;
+    flex-wrap: nowrap;
+    justify-content: center;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 0;
+}
+
+.playlist-table .actions .btn {
+    width: 2.25rem;
+    height: 2.25rem;
+    min-width: 2.25rem;
+    min-height: 2.25rem;
+    padding: 0;
+    flex-shrink: 0;
+    border-radius: var(--radius-md);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    border: 1px solid transparent;
+    background: #f8fafc;
+    color: #475569;
+    transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+.playlist-table .actions .btn:hover:not(:disabled) {
+    background: #e2e8f0;
+    color: #1e293b;
+}
+
+.playlist-table .actions .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.playlist-table .actions .btn.play {
+    color: #15803d;
+    border-color: #bbf7d0;
+    background: #f0fdf4;
+}
+
+.playlist-table .actions .btn.play:hover:not(:disabled) {
+    background: #dcfce7;
+}
+
+.playlist-table .actions .btn.stop {
+    color: #b91c1c;
+    border-color: #fecaca;
+    background: #fef2f2;
+}
+
+.playlist-table .actions .btn.stop:hover:not(:disabled) {
+    background: #fee2e2;
+}
+
+.playlist-table .actions .btn.edit {
+    color: #1d4ed8;
+    border-color: #bfdbfe;
+    background: #eff6ff;
+}
+
+.playlist-table .actions .btn.edit:hover:not(:disabled) {
+    background: #dbeafe;
+}
+
+.playlist-table .actions .btn.delete {
+    color: #b45309;
+    border-color: #fde68a;
+    background: #fffbeb;
+}
+
+.playlist-table .actions .btn.delete:hover:not(:disabled) {
+    background: #fef3c7;
 }
 
 /* Кнопки */
@@ -292,6 +516,15 @@
         width: 100%;
         min-width: auto;
     }
+
+    .playlist-section {
+        padding: var(--space-md);
+    }
+
+    .playlist-table tbody td,
+    .playlist-table thead th {
+        padding: 0.5rem 0.65rem;
+    }
     
     .modal-content {
         width: 90%;
@@ -299,55 +532,7 @@
     }
 }
 
-/* Добавьте эти стили в конец файла */
-
-/* Гарантируем, что таблица видима */
-.playlist-table {
-    visibility: visible !important;
-    opacity: 1 !important;
-    display: table !important;
-}
-
-/* Стили для тела таблицы */
+/* #playlist-table is the <table> element — must stay display: table */
 #playlist-table {
-    display: table-row-group;
-}
-
-/* Явные стили для ячеек таблицы */
-.playlist-table td {
-    vertical-align: middle;
-    padding: 12px 16px;
-    white-space: nowrap;
-}
-
-/* Стили для кнопок действий */
-.playlist-table .actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: nowrap;
-}
-
-.playlist-table .btn {
-    min-width: 32px;
-    height: 32px;
-    padding: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-}
-
-/* Гарантируем видимость статуса */
-.status-badge {
-    display: inline-block !important;
-    min-width: 80px;
-    text-align: center;
-}
-
-/* Дебаг-стиль для проверки */
-.debug-table-border {
-    border: 2px solid red !important;
-}
-
-.debug-table-cell {
-    border: 1px solid blue !important;
+    display: table;
 }
