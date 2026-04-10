@@ -283,13 +283,19 @@ class FileService:
                 raise RuntimeError("Database session not provided")
             
             playlist_files = set()
+            duration_by_name: dict = {}
             playlist = db_session.query(Playlist).get(playlist_id)
             if playlist:
-                playlist_files = {f.file_name for f in playlist.files}
-            
+                for pf in playlist.files or []:
+                    playlist_files.add(pf.file_name)
+                    # Persisted display duration for images (videos often store 0); UI reads this key.
+                    duration_by_name[pf.file_name] = pf.duration
+
             return [{
                 **file,
                 'included': file['filename'] in playlist_files,
+                # Sync with playlist_files.duration from DB (null if file not in playlist).
+                'duration': duration_by_name.get(file['filename']),
                 # `is_video` is already provided by get_media_files(); keep it stable if present.
                 'is_video': bool(file.get('is_video')) or file.get('type', '').lower() in {'mp4', 'avi', 'webm', 'mov', 'mkv', 'm4v'}
             } for file in all_files]
