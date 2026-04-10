@@ -14,6 +14,11 @@ function formatFileSize(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
+function safeDomId(prefix, name) {
+  const safe = String(name).replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `${prefix}-${safe}`;
+}
+
 function formatDate(timestamp) {
   if (!timestamp) return 'Unknown date';
   try {
@@ -25,8 +30,8 @@ function formatDate(timestamp) {
 
 // Constants
 const ALLOWED_IMAGE_TYPES = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
-const ALLOWED_VIDEO_TYPES = ['mp4', 'webm', 'ogg', 'mov'];
-const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+const ALLOWED_VIDEO_TYPES = ['mp4', 'webm', 'ogg', 'mov', 'avi'];
+const MAX_FILE_SIZE = 1024 * 1024 * 1024; // 1 GiB, согласовано с Config.MAX_UPLOAD_BYTES / FileService
 const PLACEHOLDER_IMAGE = '/static/images/placeholder.jpg';
 
 // Configuration
@@ -42,7 +47,7 @@ const GALLERY_CONFIG = {
   uploadBtn: '#upload-btn',
   previewModal: '#preview-modal',
   previewContainer: '#preview-container',
-  closeModalBtn: '.close-modal',
+  closeModalBtn: '#preview-modal-close',
   filenameElement: '#preview-filename',
   filesizeElement: '#preview-filesize',
   dateElement: '#preview-date'
@@ -215,13 +220,14 @@ class MediaGallery {
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
       checkbox.className = 'file-checkbox';
-      checkbox.id = `checkbox-${file.name}`;
+      const cbId = safeDomId('cb', file.name);
+      checkbox.id = cbId;
       checkbox.dataset.filename = file.name;
       checkbox.checked = this.selectedFiles.has(file.name);
       item.appendChild(checkbox);
 
       const checkboxLabel = document.createElement('label');
-      checkboxLabel.htmlFor = `checkbox-${file.name}`;
+      checkboxLabel.htmlFor = cbId;
       checkboxLabel.className = 'custom-checkbox-label';
       item.appendChild(checkboxLabel);
 
@@ -230,7 +236,7 @@ class MediaGallery {
       if (ALLOWED_IMAGE_TYPES.includes(file.type)) {
         previewContainer.classList.add('file-preview-container');
         const img = document.createElement('img');
-        img.src = `/api/media/${file.name}?${Date.now()}`;
+        img.src = `/api/media/${encodeURIComponent(file.name)}?${Date.now()}`;
         img.alt = file.name;
         img.classList.add('file-preview');
         img.loading = 'lazy';
@@ -253,7 +259,7 @@ class MediaGallery {
         if (e.target?.tagName !== 'INPUT' && e.target?.tagName !== 'LABEL') {
           this.showPreview({
             ...file,
-            path: `/api/media/${file.name}`
+            path: `/api/media/${encodeURIComponent(file.name)}`
           });
         }
       });
@@ -268,16 +274,17 @@ class MediaGallery {
       this.elements.container.appendChild(item);
     });
 
-    document.querySelectorAll('.file-checkbox').forEach(checkbox => {
-      checkbox.addEventListener('change', function() {
-        const filename = this.dataset.filename;
-        if (this.checked) {
+    document.querySelectorAll('.file-checkbox').forEach((checkbox) => {
+      checkbox.addEventListener('change', () => {
+        const filename = checkbox.dataset.filename;
+        if (!filename) return;
+        if (checkbox.checked) {
           this.selectedFiles.add(filename);
         } else {
           this.selectedFiles.delete(filename);
         }
         this.toggleDeleteButton(this.selectedFiles.size > 0);
-      }.bind(this));
+      });
     });
   }
 
@@ -306,10 +313,8 @@ class MediaGallery {
     
     if (ALLOWED_IMAGE_TYPES.includes(file.type)) {
       const img = document.createElement('img');
-      img.src = `/api/media/${file.name}`;
+      img.src = `/api/media/${encodeURIComponent(file.name)}`;
       img.alt = file.name;
-      img.style.maxWidth = '100%';
-      img.style.maxHeight = '70vh';
       img.onerror = () => {
         img.src = PLACEHOLDER_IMAGE;
         img.style.opacity = '0.7';
@@ -322,25 +327,23 @@ class MediaGallery {
       const video = document.createElement('video');
       video.controls = true;
       video.autoplay = true;
-      video.style.maxWidth = '100%';
-      video.style.maxHeight = '70vh';
       const source = document.createElement('source');
-      source.src = `/api/media/${file.name}`;
+      source.src = `/api/media/${encodeURIComponent(file.name)}`;
       source.type = file.mimetype || `video/${file.type}`;
       video.appendChild(source);
       this.elements.previewContainer.appendChild(video);
     }
     
     if (this.elements.previewModal) {
-      this.elements.previewModal.style.display = 'block';
+      this.elements.previewModal.removeAttribute('hidden');
       document.body.style.overflow = 'hidden';
     }
   }
 
   closePreview() {
     if (this.elements.previewModal) {
-      this.elements.previewModal.style.display = 'none';
-      document.body.style.overflow = 'auto';
+      this.elements.previewModal.setAttribute('hidden', '');
+      document.body.style.overflow = '';
       
       const video = this.elements.previewContainer?.querySelector('video');
       if (video) {
@@ -395,28 +398,19 @@ class MediaGallery {
 
     if (validFilesCount === 0) {
       if (window.App?.Alerts?.show) {
-        window.App.Alerts.show('No valid files to upload (allowed: images and videos <50MB)', 'error');
+        window.App.Alerts.show('No valid files to upload (allowed: images and videos up to 1 GB)', 'error');
       }
       return;
     }
 
     try {
-      this.setButtonLoading(this.elements.uploadBtn, true);
-      
-      const response = await fetch('/api/media/upload', {
-        method: 'POST',
-        body: formData,
-        headers: {
-            'X-CSRFToken': csrfToken
-        }
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData?.error || `Upload failed with status ${response.status}`);
-      }
-
-      const result = await response.json();
+      this.setUploadButtonBusy();
+      const result = await this._xhrUploadWithProgress(
+        '/api/media/upload',
+        formData,
+        csrfToken,
+        (percent) => this.setUploadButtonProgress(percent)
+      );
       if (window.App?.Alerts?.show) {
         window.App.Alerts.show(`Uploaded ${result.files?.length || 0} file(s) successfully`, 'success');
       }
@@ -428,8 +422,102 @@ class MediaGallery {
         window.App.Alerts.show(`Upload failed: ${error.message}`, 'error');
       }
     } finally {
-      this.setButtonLoading(this.elements.uploadBtn, false);
+      this.resetUploadButton();
     }
+  }
+
+  /**
+   * POST multipart with upload progress (fetch не отдаёт progress для тела запроса).
+   */
+  _xhrUploadWithProgress(url, formData, csrfToken, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      xhr.withCredentials = true;
+      if (csrfToken) {
+        xhr.setRequestHeader('X-CSRFToken', csrfToken);
+      }
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && e.total > 0) {
+          onProgress((e.loaded / e.total) * 100);
+        } else {
+          onProgress(null);
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText || '{}'));
+          } catch {
+            resolve({});
+          }
+          return;
+        }
+        let msg = `Upload failed (${xhr.status})`;
+        try {
+          const err = JSON.parse(xhr.responseText || '{}');
+          if (err.error) msg = err.error;
+        } catch {
+          /* ignore */
+        }
+        reject(new Error(msg));
+      };
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.onabort = () => reject(new Error('Upload cancelled'));
+      xhr.send(formData);
+    });
+  }
+
+  setUploadButtonBusy() {
+    const btn = this.elements.uploadBtn;
+    if (!btn) return;
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    const icon = btn.querySelector('.upload-btn__icon');
+    const text = btn.querySelector('.upload-btn__text');
+    const fill = btn.querySelector('.upload-btn__fill');
+    if (icon) icon.className = 'fas fa-circle-notch fa-spin upload-btn__icon';
+    if (text) text.textContent = '0%';
+    if (fill) {
+      fill.style.width = '0%';
+      fill.classList.remove('upload-btn__fill--pulse');
+      fill.style.opacity = '';
+    }
+  }
+
+  setUploadButtonProgress(percent) {
+    const btn = this.elements.uploadBtn;
+    const fill = btn?.querySelector('.upload-btn__fill');
+    const text = btn?.querySelector('.upload-btn__text');
+    if (!fill || !text) return;
+    if (percent == null || !Number.isFinite(percent)) {
+      fill.classList.add('upload-btn__fill--pulse');
+      fill.style.width = '100%';
+      text.textContent = 'Uploading…';
+      return;
+    }
+    fill.classList.remove('upload-btn__fill--pulse');
+    fill.style.opacity = '';
+    const p = Math.min(100, Math.max(0, percent));
+    fill.style.width = `${p}%`;
+    text.textContent = `${Math.round(p)}%`;
+  }
+
+  resetUploadButton() {
+    const btn = this.elements.uploadBtn;
+    if (!btn) return;
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+    const fill = btn.querySelector('.upload-btn__fill');
+    const text = btn.querySelector('.upload-btn__text');
+    const icon = btn.querySelector('.upload-btn__icon');
+    if (fill) {
+      fill.style.width = '0%';
+      fill.classList.remove('upload-btn__fill--pulse');
+      fill.style.opacity = '';
+    }
+    if (text) text.textContent = 'Upload';
+    if (icon) icon.className = 'fas fa-upload upload-btn__icon';
   }
 
   async deleteSelectedMedia() {
@@ -481,17 +569,18 @@ class MediaGallery {
 
   setButtonLoading(button, isLoading) {
     if (!button) return;
-    
+
+    if (button.id === 'upload-btn') {
+      if (!isLoading) this.resetUploadButton();
+      return;
+    }
+
     if (isLoading) {
       button.disabled = true;
-      button.innerHTML = button.id.includes('delete') ? 
-        '<i class="fas fa-spinner fa-spin"></i> Deleting...' : 
-        '<i class="fas fa-spinner fa-spin"></i> Uploading...';
+      button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Deleting...';
     } else {
       button.disabled = false;
-      button.innerHTML = button.id.includes('delete') ? 
-        '<i class="fas fa-trash"></i> Delete Selected' : 
-        '<i class="fas fa-upload"></i> Upload Files';
+      button.innerHTML = '<i class="fas fa-trash"></i> Delete Selected';
     }
   }
 
@@ -525,13 +614,15 @@ class MediaGallery {
     }
 
     window.addEventListener('click', (e) => {
-      if (e.target === this.elements.previewModal) {
+      const modal = this.elements.previewModal;
+      if (modal && !modal.hasAttribute('hidden') && e.target === modal) {
         this.closePreview();
       }
     });
 
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.elements.previewModal.style.display === 'block') {
+      const modal = this.elements.previewModal;
+      if (e.key === 'Escape' && modal && !modal.hasAttribute('hidden')) {
         this.closePreview();
       }
     });
