@@ -126,13 +126,25 @@ def check_rate_limit(ip, username):
         rate_limit_data[key]['count'] += 1
         return True
 
+def _username_for_rate_limit() -> str:
+    """Имя пользователя только для POST-логина; без парсинга JSON на GET (пустое тело + application/json даёт 400)."""
+    if request.method != 'POST':
+        return ''
+    if request.is_json:
+        data = request.get_json(silent=True)
+        if isinstance(data, dict):
+            u = data.get('username', '')
+            return u if isinstance(u, str) else ''
+    return request.form.get('username', '') or ''
+
+
 def rate_limited(f):
     """Custom rate limiting decorator"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         try:
             ip = request.remote_addr or 'unknown'
-            username = request.json.get('username', '') if request.is_json else request.form.get('username', '')
+            username = _username_for_rate_limit()
             
             if not check_rate_limit(ip, username):
                 logger.warning("Rate limit exceeded", extra={
@@ -285,13 +297,26 @@ def logout():
     try:
         username = current_user.username if current_user.is_authenticated else 'unknown'
         logout_user()
-        
+
         response = redirect(url_for('auth.login'))
-        response.delete_cookie('authToken')
-        if 'SESSION_COOKIE_NAME' in current_app.config:
-            response.delete_cookie(current_app.config['SESSION_COOKIE_NAME'])
-        response.headers.add('Clear-Site-Data', '"cookies", "storage"')
-        
+        cfg = current_app.config
+
+        # Remember-me: без secure/samesite/path как при установке cookie браузер часто не сбрасывает
+        # cookie → Flask-Login снова поднимает пользователя из remember_token → редирект с /login на /.
+        remember_name = cfg.get('REMEMBER_COOKIE_NAME', 'remember_token')
+        response.delete_cookie(
+            remember_name,
+            path=cfg.get('REMEMBER_COOKIE_PATH', '/'),
+            domain=cfg.get('REMEMBER_COOKIE_DOMAIN'),
+            secure=cfg.get('REMEMBER_COOKIE_SECURE', False),
+            httponly=cfg.get('REMEMBER_COOKIE_HTTPONLY', True),
+            samesite=cfg.get('REMEMBER_COOKIE_SAMESITE'),
+        )
+
+        response.delete_cookie('authToken', path='/')
+        # Сессию обновляет Flask после logout_user(); отдельный delete_cookie(session) ломает flash и
+        # конфликтует с Set-Cookie. Clear-Site-Data убран — редирект мог уйти до фактической очистки.
+
         logger.info("User logged out", extra={
             'username': username,
             'ip': request.remote_addr
