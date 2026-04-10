@@ -164,6 +164,7 @@ export class PlaylistManager {
         if (window.App?.Sockets?.socket) {
             window.App.Sockets.socket.on('playlist_updated', (data) => {
                 if (data.playlist_id == this.playlistId) {
+                    sessionStorage.removeItem(`media-files-v2-${this.playlistId}`);
                     sessionStorage.removeItem(`media-files-${this.playlistId}`);
                     this.loadMediaFiles();
                     
@@ -193,7 +194,7 @@ export class PlaylistManager {
         }
 
         try {
-            const cacheKey = `media-files-${this.playlistId}`;
+            const cacheKey = `media-files-v2-${this.playlistId}`;
             const cachedData = sessionStorage.getItem(cacheKey);
             
             if (cachedData) {
@@ -279,6 +280,16 @@ export class PlaylistManager {
             };
         
             const isVideo = file.is_video || ['.mp4', '.avi', '.mov', '.mkv'].some(ext => file.filename.toLowerCase().endsWith(ext));
+
+            // Use DB duration when present (avoid `|| 10` which treats 0 as missing).
+            const imageSeconds = (() => {
+                const d = file.duration;
+                if (d != null && d !== '') {
+                    const n = parseInt(String(d), 10);
+                    if (Number.isFinite(n) && n >= 1) return n;
+                }
+                return 10;
+            })();
         
             row.innerHTML = `
                 <td>${index + 1}</td>
@@ -289,7 +300,7 @@ export class PlaylistManager {
                     ${isVideo ? 
                         '<span class="video-duration">Полное видео</span>' : 
                         `<input type="number" class="duration-input" data-filename="${file.filename}" 
-                          value="${file.duration || 10}" min="1">`
+                          value="${imageSeconds}" min="1">`
                     }
                 </td>
             `;
@@ -390,9 +401,9 @@ export class PlaylistManager {
                 throw new Error(errorMsg);
             }
 
-            this.ui.showAlert('Плейлист сохранен. M3U файл обновлен.', 'success');
+            this.ui.showAlert('Плейлист сохранен. Переход на главную…', 'success');
+            sessionStorage.removeItem(`media-files-v2-${this.playlistId}`);
             sessionStorage.removeItem(`media-files-${this.playlistId}`);
-            await this.loadMediaFiles();
 
             if (window.App?.Sockets) {
                 window.App.Sockets.emit('playlist_updated', {
@@ -401,6 +412,10 @@ export class PlaylistManager {
                     m3u_generated: true
                 });
             }
+
+            setTimeout(() => {
+                window.location.href = '/';
+            }, 400);
 
         } catch (error) {
             console.error('Ошибка сохранения:', error);
