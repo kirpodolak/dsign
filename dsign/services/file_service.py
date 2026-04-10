@@ -7,14 +7,15 @@ from typing import List, Dict, Any, Optional, Union
 from PIL import Image
 import io
 from dsign.models import Playlist
+from dsign.config.config import Config
 from .logger import ServiceLogger
 
 class FileService:
-    ALLOWED_MEDIA_EXTENSIONS = {'jpg', 'jpeg', 'png', 'mp4', 'avi'}
+    ALLOWED_MEDIA_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif', 'mp4', 'avi', 'webm'}
     ALLOWED_LOGO_EXTENSIONS = {'jpg', 'jpeg', 'png'}
     DEFAULT_LOGO = 'idle_logo.jpg'
     MAX_LOGO_SIZE = 2 * 1024 * 1024  # 2MB
-    MAX_MEDIA_SIZE = 50 * 1024 * 1024  # 50MB
+    MAX_MEDIA_SIZE = Config.MAX_UPLOAD_BYTES
     THUMBNAIL_CACHE = {}  # Классовый кэш для миниатюр
     THUMBNAIL_SIZE = (200, 200)  # Размер миниатюры
 
@@ -70,7 +71,11 @@ class FileService:
         """
         has_valid_extension = '.' in filename and \
                filename.rsplit('.', 1)[1].lower() in self.ALLOWED_MEDIA_EXTENSIONS
-        has_valid_size = file_size <= self.MAX_MEDIA_SIZE if file_size > 0 else True
+        # content_length у FileStorage часто None — не сравнивать с порогом до реального размера
+        if file_size is None or file_size <= 0:
+            has_valid_size = True
+        else:
+            has_valid_size = file_size <= self.MAX_MEDIA_SIZE
         return has_valid_extension and has_valid_size
 
     def allowed_logo_file(self, filename: str, file_size: int = 0) -> bool:
@@ -83,7 +88,10 @@ class FileService:
         """
         has_valid_extension = '.' in filename and \
                filename.rsplit('.', 1)[1].lower() in self.ALLOWED_LOGO_EXTENSIONS
-        has_valid_size = file_size <= self.MAX_LOGO_SIZE if file_size > 0 else True
+        if file_size is None or file_size <= 0:
+            has_valid_size = True
+        else:
+            has_valid_size = file_size <= self.MAX_LOGO_SIZE
         return has_valid_extension and has_valid_size
 
     def get_media_files(self, playlist_id: Optional[int] = None) -> List[dict]:
@@ -154,25 +162,71 @@ class FileService:
             'png': 'image/png',
             'gif': 'image/gif',
             'mp4': 'video/mp4',
-            'webm': 'video/webm'
+            'webm': 'video/webm',
+            'avi': 'video/x-msvideo',
         }
         return mime_map.get(ext, 'application/octet-stream')
+
+    def _upload_file_size(self, file) -> Optional[int]:
+        """Размер из multipart: content_length часто None — определяем через seek."""
+        cl = getattr(file, 'content_length', None)
+        if cl is not None and cl > 0:
+            return int(cl)
+        stream = getattr(file, 'stream', None)
+        if stream is None:
+            return None
+        try:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(0)
+            return int(size) if size >= 0 else None
+        except (OSError, IOError, TypeError):
+            try:
+                stream.seek(0)
+            except Exception:
+                pass
+            return None
 
     def handle_upload(self, files: List) -> List[str]:
         """Обработка загрузки файлов"""
         saved_files = []
         for file in files:
-            if file and self.allowed_file(file.filename, file.content_length):
-                try:
-                    filename = secure_filename(file.filename)
-                    file_path = self.upload_folder / filename
-                    file.save(file_path)
-                    saved_files.append(filename)
-                    self._log_info(f"Successfully uploaded file: {filename}", 
-                                 extra={'filename': filename, 'action': 'file_upload'})
-                except Exception as e:
-                    self._log_error(f"Failed to upload file {file.filename}: {str(e)}", 
-                                  extra={'filename': file.filename, 'action': 'file_upload'})
+            if not file or not file.filename:
+                continue
+            try:
+                reported = self._upload_file_size(file)
+            except Exception:
+                reported = None
+            if not self.allowed_file(file.filename, reported):
+                self._log_warning(
+                    f"Rejected upload: {file.filename}",
+                    extra={'filename': file.filename, 'reported_size': reported, 'action': 'file_upload'},
+                )
+                continue
+            try:
+                filename = secure_filename(file.filename)
+                if not filename:
+                    continue
+                file_path = self.upload_folder / filename
+                file.save(str(file_path))
+                actual = file_path.stat().st_size
+                if actual > self.MAX_MEDIA_SIZE:
+                    file_path.unlink(missing_ok=True)
+                    self._log_warning(
+                        f"Removed oversized file after save: {filename}",
+                        extra={'filename': filename, 'size': actual, 'action': 'file_upload'},
+                    )
+                    continue
+                saved_files.append(filename)
+                self._log_info(
+                    f"Successfully uploaded file: {filename}",
+                    extra={'filename': filename, 'action': 'file_upload'},
+                )
+            except Exception as e:
+                self._log_error(
+                    f"Failed to upload file {file.filename}: {str(e)}",
+                    extra={'filename': file.filename, 'action': 'file_upload'},
+                )
         return saved_files
 
     def handle_logo_upload(self, logo) -> Dict[str, Any]:
