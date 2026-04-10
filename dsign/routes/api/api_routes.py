@@ -780,16 +780,22 @@ def init_api_routes(api_bp, services):
             screenshot_path = os.path.join(current_app.config['STATIC_FOLDER'], 'images', 'on_air_screen.jpg')
             default_path = os.path.join(current_app.config['STATIC_FOLDER'], 'images', 'default-preview.jpg')
         
-            # Check if screenshot exists and is a valid image
+            # Hot path: this endpoint is polled by the UI.
+            # Avoid expensive PIL open/verify here; do validation in the capture endpoint instead.
             if os.path.exists(screenshot_path) and os.path.getsize(screenshot_path) > 1024:
-                try:
-                    with Image.open(screenshot_path) as img:
-                        img.verify()
-                    return send_file(screenshot_path, mimetype='image/jpeg')
-                except:
-                    current_app.logger.warning("Invalid screenshot image, using default")
+                return send_file(
+                    screenshot_path,
+                    mimetype='image/jpeg',
+                    conditional=True,
+                    max_age=0
+                )
         
-            return send_file(default_path, mimetype='image/jpeg')
+            return send_file(
+                default_path,
+                mimetype='image/jpeg',
+                conditional=True,
+                max_age=0
+            )
         
         except Exception as e:
             current_app.logger.error(f"Screenshot error: {str(e)}")
@@ -826,6 +832,18 @@ def init_api_routes(api_bp, services):
             )
     
             current_app.logger.info(f"Screenshot service started: {result.stdout}")
+
+            # Best-effort validation (one-time cost, not on every GET poll).
+            # systemctl "start" may return before the file is fully written, so we don't fail the request
+            # if validation cannot be performed yet.
+            try:
+                screenshot_path = os.path.join(current_app.config['STATIC_FOLDER'], 'images', 'on_air_screen.jpg')
+                if os.path.exists(screenshot_path) and os.path.getsize(screenshot_path) > 1024:
+                    with Image.open(screenshot_path) as img:
+                        img.verify()
+            except Exception as ve:
+                current_app.logger.warning(f"Screenshot validation skipped/failed: {str(ve)}")
+
             return jsonify({"success": True})
 
         except subprocess.TimeoutExpired as e:
