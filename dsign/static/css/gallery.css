@@ -166,6 +166,65 @@
     transform: translateY(-2px);
 }
 
+/* Upload button: progress fill + label (laconic, same footprint as .btn.primary) */
+.upload-btn {
+    position: relative;
+    overflow: hidden;
+    min-width: 148px;
+    justify-content: center;
+}
+
+.upload-btn:hover:not(:disabled) {
+    transform: translateY(-2px);
+}
+
+.upload-btn:disabled {
+    transform: none;
+    cursor: wait;
+    opacity: 1;
+}
+
+.upload-btn__track {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background: rgba(0, 0, 0, 0.08);
+}
+
+.upload-btn__fill {
+    display: block;
+    height: 100%;
+    width: 0%;
+    background: rgba(255, 255, 255, 0.28);
+    transition: width 0.12s ease-out;
+}
+
+.upload-btn__fill.upload-btn__fill--pulse {
+    width: 100% !important;
+    opacity: 0.2;
+    animation: upload-indeterminate 1.1s ease-in-out infinite;
+}
+
+@keyframes upload-indeterminate {
+    0%, 100% { opacity: 0.12; }
+    50% { opacity: 0.28; }
+}
+
+.upload-btn__content {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-variant-numeric: tabular-nums;
+}
+
+.upload-btn__icon {
+    width: 1em;
+    text-align: center;
+}
+
 .btn.danger {
     background-color: #ef5350;
     color: white;
@@ -238,4 +297,127 @@
     color: #757575;
     padding: 40px;
     font-size: 1.1rem;
+}
+
+.group-header {
+    grid-column: 1 / -1;
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #5c6bc0;
+    margin: 0.5rem 0 0.25rem;
+    padding: 0 4px;
+}
+
+/* ——— Preview lightbox (fixed viewport center, above sticky nav) ——— */
+.preview-modal[hidden] {
+    display: none !important;
+}
+
+.preview-modal:not([hidden]) {
+    position: fixed;
+    inset: 0;
+    z-index: 2500;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: clamp(12px, 3vw, 28px);
+    background: rgba(15, 23, 42, 0.72);
+    backdrop-filter: blur(5px);
+    -webkit-backdrop-filter: blur(5px);
+    overflow-y: auto;
+    box-sizing: border-box;
+}
+
+.preview-modal__panel {
+    position: relative;
+    width: min(96vw, 920px);
+    max-height: min(92vh, 900px);
+    margin: auto;
+    background: #fff;
+    border-radius: 14px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.preview-modal__close {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 5;
+    width: 48px;
+    height: 48px;
+    min-width: 48px;
+    min-height: 48px;
+    padding: 0;
+    border: none;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.96);
+    color: #374151;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.35rem;
+    line-height: 1;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+    transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+
+.preview-modal__close:hover {
+    background: #e5e7eb;
+    color: #111827;
+}
+
+.preview-modal__close:active {
+    transform: scale(0.96);
+}
+
+.preview-modal__close:focus-visible {
+    outline: 3px solid #5c6bc0;
+    outline-offset: 2px;
+}
+
+.preview-modal__media {
+    flex: 1 1 auto;
+    min-height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 52px 16px 16px;
+    background: linear-gradient(180deg, #f1f5f9 0%, #f8fafc 100%);
+}
+
+.preview-modal__media img,
+.preview-modal__media video {
+    max-width: 100%;
+    max-height: min(68vh, 640px);
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    border-radius: 8px;
+}
+
+.preview-modal__meta {
+    flex-shrink: 0;
+    padding: 14px 18px 18px;
+    border-top: 1px solid #e5e7eb;
+    text-align: center;
+}
+
+.preview-modal__meta h3 {
+    margin: 0 0 6px;
+    font-size: 1rem;
+    font-weight: 600;
+    word-break: break-word;
+    color: #1f2937;
+}
+
+.preview-modal__meta p {
+    margin: 4px 0;
+    font-size: 0.875rem;
+    color: #6b7280;
 }
