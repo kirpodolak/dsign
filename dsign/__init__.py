@@ -4,16 +4,13 @@ from flask_wtf import CSRFProtect
 import logging
 import time
 import subprocess
-import traceback
 from pathlib import Path
 from threading import Thread
 from typing import Dict, Any
-from flask_socketio import SocketIO
 
 from dsign.config.config import Config, config
 from dsign.services import init_services
 from dsign.services.logger import ServiceLogger
-from dsign.extensions import socketio  # Добавлен импорт socketio
 
 def should_display_logo(db_session) -> bool:
     """Проверяет, нужно ли отображать логотип (нет активных плейлистов)"""
@@ -61,14 +58,10 @@ def create_app(config_class: Config = config) -> Flask:
             raise RuntimeError("MPV service is not running")
         app.logger.info("MPV service is active and ready")
 
-        # 2. Инициализация расширений (включая SocketIO)
+        # 2. Инициализация расширений
         app.logger.info("Initializing extensions...")
-        from .extensions import init_extensions
-        
-        # Инициализируем все расширения, включая SocketIO
-        extensions = init_extensions(app)
-        socketio = extensions['socketio']  # Получаем экземпляр SocketIO из extensions
-        
+        from .extensions import init_extensions, db, socketio
+        init_extensions(app)
         csrf = CSRFProtect(app)
         app.logger.info("Extensions initialized successfully")
 
@@ -76,9 +69,16 @@ def create_app(config_class: Config = config) -> Flask:
         app.logger.info("Initializing services...")
         with app.app_context():
             services = init_services(
-                config=app.config,
-                db=extensions['db'],
-                socketio=socketio,  # Используем единый экземпляр SocketIO
+                config={
+                    'UPLOAD_FOLDER': config_class.UPLOAD_FOLDER,
+                    'SECRET_KEY': config_class.SECRET_KEY,
+                    'SETTINGS_FILE': config_class.SETTINGS_FILE,
+                    'THUMBNAIL_FOLDER': config_class.THUMBNAIL_FOLDER,
+                    'THUMBNAIL_URL': config_class.THUMBNAIL_URL,
+                    'DEFAULT_LOGO': config_class.DEFAULT_LOGO
+                },
+                db=db,
+                socketio=socketio,
                 logger=app.logger
             )
             
@@ -86,11 +86,6 @@ def create_app(config_class: Config = config) -> Flask:
             for name, service in services.items():
                 setattr(app, name, service)
                 app.logger.debug(f"Service attached: {name}")
-
-        # Инициализация SocketService с приложением
-        if hasattr(app, 'socket_service'):
-            app.socket_service.init_app(app)
-            app.logger.info("SocketService initialized with Flask app")
 
         # Проверка обязательных сервисов
         required_services = [
@@ -126,7 +121,8 @@ def create_app(config_class: Config = config) -> Flask:
         return app
 
     except Exception as e:
-        app.logger.critical(f"Application initialization failed: {str(e)}", extra={'stack_trace': traceback.format_exc()})
+        app.logger.critical(f"Application initialization failed: {str(e)}")
+        app.logger.exception(e)  # This will log the full traceback
         raise RuntimeError(f"Application startup failed: {str(e)}") from e
 
 def _configure_playback_service(app: Flask) -> None:
@@ -136,37 +132,26 @@ def _configure_playback_service(app: Flask) -> None:
     
     with app.app_context():
         try:
-            # Сначала убедимся что таблицы существуют
-            db.create_all()
-            
-            # Теперь безопасно запрашиваем статус
             playback_status = db.session.query(PlaybackStatus).first()
             app.logger.info("Database connection verified")
             
             if not playback_status or not playback_status.playlist_id:
                 app.logger.info("No active playlist found, starting idle logo...")
                 _start_idle_logo(app)
-            else:
+            elif getattr(playback_status, "status", None) == "playing":
                 app.logger.info(f"Active playlist found (ID: {playback_status.playlist_id}), resuming playback...")
                 _resume_playback(app, playback_status.playlist_id)
+            else:
+                app.logger.info(
+                    f"Playback status is {getattr(playback_status, 'status', None)!r} (not playing); idle logo only."
+                )
+                _start_idle_logo(app)
                 
         except Exception as db_error:
+            # ServiceLogger.error does not support exc_info kwarg.
             app.logger.error(f"Database/playback initialization failed: {str(db_error)}")
-            
-            # Попытка восстановления: создаем таблицы и начальный статус
-            try:
-                db.create_all()
-                new_status = PlaybackStatus(status='idle', playlist_id=None)
-                db.session.add(new_status)
-                db.session.commit()
-                app.logger.info("Recovery: Created tables and initial playback status")
-                _start_idle_logo(app)
-            except Exception as recovery_error:
-                app.logger.error(f"Recovery also failed: {str(recovery_error)}")
-                _fallback_to_idle_logo(app)
-            
-            # Не падаем полностью, продолжаем с idle режимом
-            app.logger.warning("Continuing in idle mode despite initialization issues")
+            _fallback_to_idle_logo(app)
+            raise RuntimeError("Initialization failed") from db_error
 
 def _start_idle_logo(app: Flask) -> None:
     """Запуск логотипа в режиме ожидания"""
@@ -179,7 +164,7 @@ def _start_idle_logo(app: Flask) -> None:
                 app.logger.warning(f"Idle logo display failed (attempt {attempt + 1}/{max_attempts})")
                 time.sleep(2)
             except Exception as e:
-                app.logger.error(f"Failed to display idle logo (attempt {attempt + 1}): {str(e)}", exc_info=True)
+                app.logger.error(f"Failed to display idle logo (attempt {attempt + 1}): {str(e)}")
                 time.sleep(2)
         app.logger.error("All attempts to display idle logo failed")
     
@@ -188,11 +173,12 @@ def _start_idle_logo(app: Flask) -> None:
 def _resume_playback(app: Flask, playlist_id: int) -> None:
     """Возобновление воспроизведения плейлиста"""
     try:
-        if not app.playlist_service.play(playlist_id):
+        # playback_service controls mpv; playlist_service is CRUD only.
+        if not app.playback_service.play(playlist_id):
             app.logger.error("Failed to resume playlist playback, falling back to idle logo")
             _fallback_to_idle_logo(app)
     except Exception as e:
-        app.logger.error(f"Error resuming playback: {str(e)}", exc_info=True)
+        app.logger.error(f"Error resuming playback: {str(e)}")
         app.logger.info("Falling back to idle logo due to playback error")
         _fallback_to_idle_logo(app)
 
@@ -201,14 +187,13 @@ def _fallback_to_idle_logo(app: Flask) -> None:
     try:
         app.playback_service.display_idle_logo()
     except Exception as e:
-        app.logger.critical(f"Application initialization failed: {str(e)}", extra={'stack_trace': traceback.format_exc()})
-        app.logger.error(f"SocketIO initialization failed: {str(e)}", exc_info=True)
+        app.logger.critical(f"Application initialization failed: {str(e)}")
+        app.logger.exception(e)  # This will log the full traceback
 
 def register_error_handlers(app: Flask) -> None:
     """Регистрация обработчиков ошибок"""
     from flask import jsonify, render_template, request
-    import traceback
-    
+
     def is_api_request() -> bool:
         return request.path.startswith(('/api/', '/auth/'))
 
@@ -258,7 +243,7 @@ def register_error_handlers(app: Flask) -> None:
 
     @app.errorhandler(500)
     def internal_error(error):
-        app.logger.error(f"Server Error: {str(error)}\n{traceback.format_exc()}")
+        app.logger.error(f"Server Error: {str(error)}")
         if is_api_request():
             return jsonify({
                 "success": False,
