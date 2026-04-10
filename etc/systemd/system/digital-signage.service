@@ -2,6 +2,8 @@
 Description=Digital Signage Controller
 After=network.target dsign-mpv.service
 Requires=dsign-mpv.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -12,8 +14,6 @@ ExecStart=/usr/bin/python3 /home/dsign/run.py
 # Настройки перезапуска
 Restart=on-failure
 RestartSec=30s
-StartLimitIntervalSec=60
-StartLimitBurst=3
 
 # Настройки завершения
 TimeoutStopSec=30
