@@ -67,6 +67,8 @@ class PlaylistFiles(db.Model):
     playlist_id = db.Column(db.Integer, db.ForeignKey('playlists.id', ondelete='CASCADE'), nullable=False)
     file_name = db.Column(db.String(255), nullable=False)
     duration = db.Column(db.Integer)
+    # Per-item audio toggle (mainly useful for videos). Stored in DB and applied during playback.
+    muted = db.Column(db.Boolean, nullable=False, default=False)
     order = db.Column(db.Integer, nullable=False)  # Теперь обязательное поле
     created_at = db.Column(db.Integer, default=lambda: int(time.time()))
     
@@ -242,32 +244,6 @@ class PlaylistProfileAssignment(db.Model):
     def assigned_dt(self):
         """Дата назначения как datetime"""
         return datetime.fromtimestamp(self.assigned_at) if self.assigned_at else None
-
-class Settings(db.Model):
-    """Модель настроек приложения"""
-    __tablename__ = 'settings'
-    
-    id = db.Column(db.Integer, primary_key=True)
-    default_volume = db.Column(db.Integer, default=50)
-    default_duration = db.Column(db.Integer, default=10)
-    auto_play = db.Column(db.Boolean, default=True)
-    created_at = db.Column(db.Integer, default=lambda: int(time.time()))
-    
-    @property
-    def created_dt(self):
-        """Дата создания как datetime"""
-        return datetime.fromtimestamp(self.created_at) if self.created_at else None
-    
-    def __repr__(self) -> str:
-        return f'<Settings volume={self.default_volume}>'
-    
-    def to_dict(self) -> Dict:
-        return {
-            'default_volume': self.default_volume,
-            'default_duration': self.default_duration,
-            'auto_play': self.auto_play,
-            'created_at': self.created_dt.isoformat() if self.created_dt else None
-        }
 
 # Автоматическое обновление временных меток
 @event.listens_for(Playlist, 'before_update')
