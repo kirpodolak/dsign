@@ -209,6 +209,17 @@
     margin-bottom: 0;
 }
 
+/* Display mode section */
+.display-mode-section .text-muted {
+    color: #6c757d;
+    margin: 0;
+    font-size: 0.9rem;
+}
+
+.display-mode-section .submit-btn {
+    white-space: nowrap;
+}
+
 /* Текущие настройки */
 .settings-grid {
     display: grid;
