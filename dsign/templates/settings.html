@@ -20,6 +20,24 @@
         <div id="current-settings-display" class="settings-grid">
             <!-- Current settings will be inserted here -->
         </div>
+
+        <!-- Display / HDMI output (requires reboot to apply) -->
+        <div class="assignment-section display-mode-section">
+            <h3>Display resolution (HDMI)</h3>
+            <div class="form-group form-group-row">
+                <select id="display-mode-select" class="form-control">
+                    <option value="auto">Auto (EDID)</option>
+                    <option value="1080p60">1920×1080 @ 60 Hz</option>
+                    <option value="4k30">3840×2160 @ 30 Hz</option>
+                </select>
+                <button id="apply-display-mode" class="submit-btn" type="button">
+                    Apply &amp; reboot
+                </button>
+            </div>
+            <p class="text-muted" id="display-mode-hint">
+                Changing HDMI mode will reboot the device.
+            </p>
+        </div>
         
         <!-- MPV Settings Form -->
         <form id="mpv-settings-form">
