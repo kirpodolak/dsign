@@ -55,11 +55,21 @@ class PlaylistManager:
                 path = item["path"]
                 is_video = item["is_video"]
                 duration = item.get("duration") or default_duration
+                muted = bool(item.get("muted", False))
 
                 # Ensure correct looping behavior per media type
                 try:
                     self._mpv_manager._send_command(
                         {"command": ["set_property", "loop-file", "no" if is_video else "inf"]},
+                        timeout=2.0,
+                    )
+                except Exception:
+                    pass
+
+                # Apply per-item mute (mainly relevant for videos).
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "mute", "yes" if muted else "no"]},
                         timeout=2.0,
                     )
                 except Exception:
@@ -151,6 +161,7 @@ class PlaylistManager:
                         "path": str(file_path),
                         "duration": int(getattr(pf, "duration", 0) or 0),
                         "is_video": is_video,
+                        "muted": bool(getattr(pf, "muted", False)) if is_video else False,
                     }
                 )
 
@@ -168,6 +179,13 @@ class PlaylistManager:
             try:
                 self._mpv_manager._send_command(
                     {"command": ["set_property", "loop-file", "no" if first["is_video"] else "inf"]},
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "mute", "yes" if bool(first.get("muted")) else "no"]},
                     timeout=2.0,
                 )
             except Exception:
