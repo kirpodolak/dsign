@@ -21,6 +21,23 @@
             <!-- Current settings will be inserted here -->
         </div>
 
+        <!-- Auto preview capture (optional) -->
+        <div class="assignment-section display-mode-section">
+            <h3>Preview (MPV screenshot)</h3>
+            <div class="form-group form-group-row">
+                <select id="preview-auto-select" class="form-control">
+                    <option value="0">Off (manual refresh only)</option>
+                    <option value="300">Every 5 minutes</option>
+                    <option value="600">Every 10 minutes</option>
+                    <option value="900">Every 15 minutes</option>
+                </select>
+                <button id="apply-preview-auto" class="submit-btn" type="button">Apply</button>
+            </div>
+            <p class="text-muted">
+                Auto preview runs a background capture job. For smooth video on Pi 3B+, keep this Off or infrequent.
+            </p>
+        </div>
+
         <!-- Display / HDMI output (requires reboot to apply) -->
         <div class="assignment-section display-mode-section">
             <h3>Display resolution (HDMI)</h3>
