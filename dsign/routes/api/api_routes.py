@@ -26,6 +26,10 @@ def init_api_routes(api_bp, services):
     socketio = services.get('socketio')
     UPLOAD_LOGO_NAME = "idle_logo.jpg"
     MAX_LOGO_SIZE = 5 * 1024 * 1024  # 5MB
+    # Throttle expensive MPV screenshot capture requests (software fallback is CPU-heavy on Pi 3B+).
+    screenshot_capture_lock = Lock()
+    last_screenshot_capture_ts: float = 0.0
+    screenshot_min_interval_sec: float = 10.0
 
     # ======================
     # MPV Settings (/api/settings)
@@ -153,6 +157,42 @@ def init_api_routes(api_bp, services):
             return jsonify({"success": True, "preset": preset, "reboot": reboot})
         except Exception as e:
             current_app.logger.error(f"Error applying display mode: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/settings/preview/auto', methods=['POST'])
+    @login_required
+    def set_auto_preview_timer():
+        """
+        Configure screenshot.timer interval:
+        - Off
+        - 5 / 10 / 15 minutes
+        Applies via helper script (sudo) and stores preference in settings.json.
+        """
+        try:
+            if not (getattr(current_user, "is_admin", False) or current_user.username == "admin"):
+                return jsonify({"success": False, "error": "Unauthorized"}), 403
+
+            data = request.get_json(silent=True) or {}
+            interval_sec = int(data.get("interval_sec", 0) or 0)
+            if interval_sec not in {0, 300, 600, 900}:
+                return jsonify({"success": False, "error": "Invalid interval"}), 400
+
+            # Persist to settings.json so UI reflects desired state.
+            settings_service.set_preview_auto_interval_sec(interval_sec)
+
+            helper = "/usr/local/bin/dsign-preview-timer"
+            cmd = ["sudo", helper, "off"] if interval_sec == 0 else ["sudo", helper, "set", str(interval_sec)]
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+            except FileNotFoundError:
+                return jsonify({"success": False, "error": f"Helper script not found: {helper}"}), 500
+            except subprocess.CalledProcessError as e:
+                msg = (e.stderr or e.stdout or "").strip() or f"Command failed: {e.returncode}"
+                return jsonify({"success": False, "error": msg}), 403
+
+            return jsonify({"success": True, "interval_sec": interval_sec})
+        except Exception as e:
+            current_app.logger.error(f"Error updating preview timer: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500
 
     # ======================
@@ -856,6 +896,44 @@ def init_api_routes(api_bp, services):
     def force_screenshot_update():
         """Запуск systemd-сервиса для обновления скриншота"""
         try:
+            # If Auto preview is Off, only allow explicit manual capture requests.
+            # This prevents any background/implicit polling from starting screenshot.service.
+            try:
+                current_settings = settings_service.get_current_settings() if settings_service else {}
+                display = current_settings.get("display") if isinstance(current_settings.get("display"), dict) else {}
+                auto_interval = int(display.get("preview_auto_interval_sec") or 0)
+            except Exception:
+                auto_interval = 0
+
+            intent = (request.headers.get("X-DSIGN-Preview-Intent") or "").strip().lower()
+            is_manual = intent == "manual"
+            if auto_interval <= 0 and not is_manual:
+                return jsonify(
+                    {
+                        "success": True,
+                        "skipped": True,
+                        "reason": "auto_preview_off",
+                        "retry_in_sec": 0,
+                    }
+                )
+
+            # Audit: this endpoint is the only place that starts screenshot.service.
+            # If the service triggers unexpectedly, this log helps identify the caller.
+            try:
+                current_app.logger.info(
+                    "MPV screenshot capture requested",
+                    extra={
+                        "operation": "mpv_screenshot_capture",
+                        "user": getattr(current_user, "username", None),
+                        "remote_addr": request.headers.get("X-Forwarded-For") or request.remote_addr,
+                        "user_agent": request.headers.get("User-Agent", ""),
+                        "referer": request.headers.get("Referer", ""),
+                    },
+                )
+            except Exception:
+                # Never block capture due to logging issues
+                pass
+
             # Check if CSRF token is present in form data or headers
             csrf_token = request.form.get('csrf_token') or request.headers.get('X-CSRFToken')
             if not csrf_token:
@@ -867,6 +945,17 @@ def init_api_routes(api_bp, services):
             except Exception as e:
                 current_app.logger.error(f"CSRF validation failed: {str(e)}")
                 abort(403, description="Invalid CSRF token")
+
+            nonlocal last_screenshot_capture_ts
+
+            # Fast-path throttle: if we captured recently, don't start a new systemd job.
+            now = time.time()
+            with screenshot_capture_lock:
+                if (now - last_screenshot_capture_ts) < screenshot_min_interval_sec:
+                    wait_sec = round(screenshot_min_interval_sec - (now - last_screenshot_capture_ts), 2)
+                    return jsonify({"success": True, "skipped": True, "retry_in_sec": wait_sec})
+                # Reserve the slot; even if the systemd start fails, we keep a short cooldown to avoid storms.
+                last_screenshot_capture_ts = now
 
             # Import subprocess here to avoid UnboundLocalError
             import subprocess
@@ -894,7 +983,7 @@ def init_api_routes(api_bp, services):
             except Exception as ve:
                 current_app.logger.warning(f"Screenshot validation skipped/failed: {str(ve)}")
 
-            return jsonify({"success": True})
+            return jsonify({"success": True, "skipped": False})
 
         except subprocess.TimeoutExpired as e:
             current_app.logger.error(f"Service timeout: {e.stderr}")
