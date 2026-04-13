@@ -11,7 +11,6 @@ from threading import Thread
 from typing import Dict, Any
 
 from dsign.config.config import Config, config
-from dsign.services import init_services
 from dsign.services.logger import ServiceLogger
 
 def should_display_logo(db_session) -> bool:
@@ -81,6 +80,9 @@ def create_app(config_class: Config = config) -> Flask:
         # 3. Инициализация сервисов
         app.logger.info("Initializing services...")
         with app.app_context():
+            # Import here to avoid heavy side effects during module import
+            # and to prevent circular imports when tooling/scripts import dsign.* modules.
+            from dsign.services import init_services
             services = init_services(
                 config={
                     'UPLOAD_FOLDER': config_class.UPLOAD_FOLDER,
