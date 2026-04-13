@@ -33,7 +33,7 @@ ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 
 # Основная команда запуска
 # NOTE: On Raspberry Pi OS mpv is typically at /usr/bin/mpv (not /usr/local/bin/mpv).
-ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --hwdec=auto --vo=drm --fullscreen --demuxer-lavf-o=safe=0 --log-file=/var/log/dsign/mpv.log
+ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-resample --log-file=/var/log/dsign/mpv.log
 
 # Настройки перезапуска
 Restart=always
