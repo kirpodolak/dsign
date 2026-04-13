@@ -13,7 +13,7 @@ from dsign.models import PlaybackProfile, PlaylistProfileAssignment, Playlist, U
 from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
 from PIL import Image
 from dsign.config.config import THUMBNAIL_FOLDER, THUMBNAIL_URL
-from dsign.services import ThumbnailService
+# Import service classes directly from their modules (dsign.services no longer re-exports them).
 
 thumbnail_lock = Lock()
 
