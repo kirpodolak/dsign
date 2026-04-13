@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+OVERRIDE_DIR = Path("/etc/systemd/system/screenshot.timer.d")
+OVERRIDE_FILE = OVERRIDE_DIR / "dsign.conf"
+
+
+def write_override(interval_sec: int) -> None:
+    OVERRIDE_DIR.mkdir(parents=True, exist_ok=True)
+    OVERRIDE_FILE.write_text(
+        "[Timer]\n"
+        f"OnUnitActiveSec={interval_sec}s\n",
+        encoding="utf-8",
+    )
+
+
+def remove_override() -> None:
+    if OVERRIDE_FILE.exists():
+        OVERRIDE_FILE.unlink()
+    # Keep directory; systemd doesn't care if empty.
+
+
+def run(*cmd: str) -> None:
+    subprocess.run(list(cmd), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="dsign-preview-timer",
+        description="Enable/disable screenshot.timer with a chosen interval (safe systemd override).",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+
+    p_set = sub.add_parser("set", help="Enable timer with interval seconds")
+    p_set.add_argument("interval_sec", type=int, help="Interval in seconds (e.g. 300, 600, 900)")
+
+    sub.add_parser("off", help="Disable timer")
+
+    args = parser.parse_args()
+
+    if os.geteuid() != 0:
+        print("ERROR: must run as root (use sudo)", file=sys.stderr)
+        return 2
+
+    if args.action == "off":
+        remove_override()
+        run("systemctl", "daemon-reload")
+        run("systemctl", "disable", "--now", "screenshot.timer")
+        return 0
+
+    interval_sec = int(args.interval_sec)
+    if interval_sec < 30 or interval_sec > 24 * 3600:
+        print("ERROR: interval_sec out of range", file=sys.stderr)
+        return 2
+
+    write_override(interval_sec)
+    run("systemctl", "daemon-reload")
+    run("systemctl", "enable", "--now", "screenshot.timer")
+    run("systemctl", "restart", "screenshot.timer")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
