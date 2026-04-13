@@ -2,6 +2,8 @@
 /dsign/service/__init__.py 
 Модуль инициализации сервисов с централизованным логированием
 """
+from __future__ import annotations
+
 import io
 import os
 import sys
@@ -12,16 +14,10 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 from .logger import setup_logger
 
-# Импортируем все сервисы
-from .file_service import FileService
-from .playback_service import PlaybackService
-from .playlist_service import PlaylistService
-from .settings_service import SettingsService
-from .auth import AuthService
-from .sockets.service import SocketService
-from .sockets.connection import ConnectionService
-from .sockets.auth import SocketAuthService
-from .thumbnail_service import ThumbnailService
+# IMPORTANT:
+# Do NOT import service classes at module import time.
+# This file is imported as `dsign.services.*` and any heavyweight/circular imports here
+# can break application startup (seen in production systemd logs).
 
 class ServiceFactory:
     """Фабрика для инициализации сервисов с централизованным логированием"""
@@ -31,9 +27,10 @@ class ServiceFactory:
         upload_folder: str, 
         thumbnail_service=None,
         logger=None
-    ) -> Optional[FileService]:
+    ) -> Optional[Any]:
         logger = logger or setup_logger('FileService')
         try:
+            from .file_service import FileService
             logger.info('Initializing FileService', {
                 'upload_folder': upload_folder
             })
@@ -56,9 +53,10 @@ class ServiceFactory:
         thumbnail_url: str,
         default_thumbnail: str,
         logger=None
-    ) -> Optional[ThumbnailService]:
+    ) -> Optional[Any]:
         logger = logger or setup_logger('ThumbnailService')
         try:
+            from .thumbnail_service import ThumbnailService
             logger.info('Initializing ThumbnailService', {
                 'upload_folder': upload_folder,
                 'thumbnail_folder': thumbnail_folder,
@@ -101,7 +99,7 @@ class ServiceFactory:
         db, 
         socketio=None, 
         logger=None
-    ) -> Optional[PlaybackService]:
+    ) -> Optional[Any]:
         """
         Создание сервиса воспроизведения
         :param upload_folder: Папка с медиафайлами
@@ -136,6 +134,7 @@ class ServiceFactory:
                 })
                 raise RuntimeError(f"MPV player check failed: {str(e)}") from e
 
+            from .playback_service import PlaybackService
             return PlaybackService(
                 upload_folder=upload_folder,
                 db_session=db,
@@ -143,19 +142,25 @@ class ServiceFactory:
                 logger=logger
             )
         except Exception as e:
-            logger.error('PlaybackService initialization failed', {
-                'error': str(e),
-                'stack': True,
-                'exception_type': type(e).__name__,
-                'system': {
-                    'python': sys.version,
-                    'platform': platform.platform()
-                }
-            })
-            return None
+            # Do not swallow the exception silently: playback_service is mandatory.
+            # If we return None here, the caller loses the real root cause.
+            logger.error(
+                'PlaybackService initialization failed',
+                {
+                    'error': str(e),
+                    'exception_type': type(e).__name__,
+                    'traceback': traceback.format_exc(),
+                    'system': {
+                        'python': sys.version,
+                        'platform': platform.platform(),
+                    },
+                    'upload_folder': upload_folder,
+                },
+            )
+            raise RuntimeError(f"PlaybackService initialization failed: {e}") from e
         
     @staticmethod
-    def create_playlist_service(db, logger=None) -> Optional[PlaylistService]:
+    def create_playlist_service(db, logger=None) -> Optional[Any]:
         """
         Создание сервиса работы с плейлистами
         :param db: Сессия базы данных
@@ -165,6 +170,7 @@ class ServiceFactory:
         logger = logger or setup_logger('PlaylistService')
         try:
             logger.info('Initializing PlaylistService')
+            from .playlist_service import PlaylistService
             return PlaylistService(db, logger)
         except Exception as e:
             logger.error('PlaylistService initialization failed', {
@@ -178,7 +184,7 @@ class ServiceFactory:
         settings_file: str, 
         upload_folder: str, 
         logger=None
-    ) -> Optional[SettingsService]:
+    ) -> Optional[Any]:
         """
         Создание сервиса настроек
         :param settings_file: Путь к файлу настроек
@@ -191,6 +197,7 @@ class ServiceFactory:
             logger.info('Initializing SettingsService', {
                 'settings_file': settings_file
             })
+            from .settings_service import SettingsService
             return SettingsService(settings_file, upload_folder, logger)
         except Exception as e:
             logger.error('SettingsService initialization failed', {
@@ -210,6 +217,7 @@ class ServiceFactory:
         logger = logger or setup_logger('AuthService')
         try:
             logger.info('Initializing AuthService')
+            from .auth import AuthService
             return AuthService(secret_key, logger)
         except Exception as e:
             logger.error('AuthService initialization failed', {
@@ -219,47 +227,19 @@ class ServiceFactory:
             return None
 
     @staticmethod
-    def create_socket_service(socketio, db, logger=None, require_socketio: bool = True) -> Optional[SocketService]:
+    def create_socket_service(socketio, db, logger=None) -> Optional[SocketService]:
         """
         Создание сервиса WebSocket
         :param socketio: Экземпляр SocketIO
         :param db: Сессия базы данных
         :param logger: Логгер (опционально)
-        :param require_socketio: Вызывать исключение если socketio=None
         :return: Экземпляр SocketService или None при ошибке
-        :raises RuntimeError: Если require_socketio=True и socketio=None
         """
         logger = logger or setup_logger('SocketService')
-        
         try:
-            # Проверка на дублирование инициализации
-            if hasattr(ServiceFactory, '_socket_service_instance'):
-                logger.warning('SocketService already initialized, returning existing instance')
-                return ServiceFactory._socket_service_instance
-            
-            # Обработка отсутствия socketio
-            if socketio is None:
-                if require_socketio:
-                    raise RuntimeError("SocketIO instance is required but was None")
-                logger.warning('SocketIO instance is None, SocketService will be disabled')
-                return None
-
-            logger.info('Initializing SocketService', {
-                'version': '1.0.0',
-                'socketio_version': getattr(socketio, '__version__', 'unknown')
-            })
-            
-            service = SocketService(socketio, db, logger)
-            ServiceFactory._socket_service_instance = service  # Сохраняем инстанс
-            
-            return service
-            
-        except ImportError as e:
-            logger.error('SocketService dependencies not installed', {
-                'error': str(e),
-                'required': ['flask_socketio>=5.3.4']
-            })
-            return None
+            logger.info('Initializing SocketService')
+            from .sockets import SocketService
+            return SocketService(socketio, db, logger)
         except Exception as e:
             logger.error('SocketService initialization failed', {
                 'error': str(e),
@@ -267,13 +247,11 @@ class ServiceFactory:
             })
             return None
 
-
 def init_services(
     config: Dict[str, Any], 
     db, 
     socketio=None, 
-    logger=None,
-    require_socket: bool = True
+    logger=None
 ) -> Dict[str, Any]:
     """Инициализация всех сервисов приложения с расширенной диагностикой"""
     logger = logger or setup_logger('ServiceManager')
@@ -374,6 +352,7 @@ def init_services(
                 except Exception as e:
                     logger.error(f"Не удалось создать временный логотип: {str(e)}")
 
+            from .thumbnail_service import ThumbnailService
             thumbnail_service = ThumbnailService(
                 upload_folder=config['UPLOAD_FOLDER'],
                 thumbnail_folder=config['THUMBNAIL_FOLDER'],
@@ -417,6 +396,7 @@ def init_services(
         }
 
         try:
+            from .file_service import FileService
             file_service = FileService(
                 upload_folder=config['UPLOAD_FOLDER'],
                 thumbnail_service=thumbnail_service,
@@ -461,13 +441,13 @@ def init_services(
 
         # Инициализация опциональных сервисов
         optional_services = [
-            ('playlist_service', lambda: PlaylistService(db.session, logger)),
-            ('settings_service', lambda: SettingsService(
+            ('playlist_service', lambda: ServiceFactory.create_playlist_service(db.session, logger)),
+            ('settings_service', lambda: ServiceFactory.create_settings_service(
                 config.get('SETTINGS_FILE', 'settings.json'),
                 config['UPLOAD_FOLDER'],
                 logger
             )),
-            ('auth_service', lambda: AuthService(config['SECRET_KEY'], logger))
+            ('auth_service', lambda: ServiceFactory.create_auth_service(config['SECRET_KEY'], logger))
         ]
 
         for name, factory in optional_services:
@@ -484,38 +464,21 @@ def init_services(
                     'stack': traceback.format_exc()
                 })
 
-        # Инициализация SocketService
-        try:
-            if socketio is not None:
-                socket_service = ServiceFactory.create_socket_service(
-                    socketio=socketio,
-                    db=db,
-                    logger=logger
-                )
+        # Инициализация SocketService если требуется
+        if socketio:
+            try:
+                socket_service = ServiceFactory.create_socket_service(socketio, db, logger)
+                services['socket_service'] = socket_service
+                logger.info("SocketService успешно инициализирован")
                 
-                if socket_service:
-                    services['socket_service'] = socket_service
-                    logger.info("SocketService успешно инициализирован")
-                else:
-                    logger.warning("SocketService вернул None при инициализации")
-                    if require_socket:
-                        raise RuntimeError("SocketService initialization failed but is required")
-            elif require_socket:
-                raise RuntimeError("SocketIO instance is required but was None")
-            else:
-                logger.warning("SocketService пропущен (socketio=None)")
-                
-        except Exception as e:
-            if require_socket:
-                logger.critical("Ошибка инициализации обязательного SocketService", {
+                # Привязываем socketio к сервису
+                socket_service.socketio = socketio
+                logger.info("SocketIO привязан к SocketService")
+            except Exception as e:
+                logger.error("Ошибка инициализации SocketService", {
                     'error': str(e),
                     'stack': traceback.format_exc()
                 })
-                raise
-            logger.error("Ошибка инициализации SocketService", {
-                'error': str(e),
-                'stack': traceback.format_exc()
-            })
 
         logger.info("Все сервисы инициализированы", {
             'initialized': list(services.keys()),
@@ -539,14 +502,5 @@ def init_services(
 __all__ = [
     'ServiceFactory',
     'init_services',
-    'FileService',
-    'PlaybackService',
-    'PlaylistService',
-    'SettingsService',
-    'AuthService',
-    'ThumbnailService',
-    'ServiceLogger',
-    'SocketService',
-    'ConnectionService', 
-    'SocketAuthService'
+    'ServiceLogger'
 ]
