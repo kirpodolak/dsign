@@ -4,6 +4,8 @@ from flask_wtf import CSRFProtect
 import logging
 import time
 import subprocess
+import os
+import tempfile
 from pathlib import Path
 from threading import Thread
 from typing import Dict, Any
@@ -44,6 +46,17 @@ def create_app(config_class: Config = config) -> Flask:
     app.config.from_object(config_class)
     app.static_folder = config_class.STATIC_FOLDER
     app.static_url_path = '/static'
+
+    # Large multipart uploads may spool to the OS temp dir; on Raspberry Pi /tmp is often tmpfs (RAM).
+    # Force temp to a disk-backed directory to avoid OOM/connection drops on 500MB+ uploads.
+    try:
+        tmp_dir = Path(app.config.get("UPLOAD_FOLDER", "/var/lib/dsign/media")) / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["TMPDIR"] = str(tmp_dir)
+        tempfile.tempdir = str(tmp_dir)
+    except Exception:
+        # Best-effort; if this fails uploads may still work for smaller files.
+        pass
     
     # Установка ServiceLogger как основного логгера
     app.logger = ServiceLogger('FlaskApp')
