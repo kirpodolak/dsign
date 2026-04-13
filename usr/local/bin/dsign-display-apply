@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Tuple
+
+
+BEGIN = "# DSIGN_DISPLAY_BEGIN"
+END = "# DSIGN_DISPLAY_END"
+
+
+def _config_path() -> Path:
+    for p in ("/boot/firmware/config.txt", "/boot/config.txt"):
+        pp = Path(p)
+        if pp.exists():
+            return pp
+    # Default on newer Raspberry Pi OS
+    return Path("/boot/firmware/config.txt")
+
+
+def _preset_to_block(preset: str) -> str:
+    # CEA modes:
+    # - 16: 1920x1080 @ 60
+    # - 95: 3840x2160 @ 30
+    if preset == "auto":
+        body = "# Using EDID (auto)\n"
+    elif preset == "1080p60":
+        body = "hdmi_group=1\nhdmi_mode=16\n"
+    elif preset == "4k30":
+        body = "hdmi_group=1\nhdmi_mode=95\n"
+    else:
+        raise ValueError("Invalid preset")
+
+    return f"{BEGIN}\n{body}{END}\n"
+
+
+def _split_existing(content: str) -> Tuple[str, str, bool]:
+    if BEGIN not in content or END not in content:
+        return content, "", False
+    pre, rest = content.split(BEGIN, 1)
+    _, post = rest.split(END, 1)
+    return pre, post, True
+
+
+def upsert_block(path: Path, block: str) -> None:
+    content = ""
+    if path.exists():
+        content = path.read_text(encoding="utf-8", errors="replace")
+
+    pre, post, had = _split_existing(content)
+    if had:
+        new_content = pre.rstrip("\n") + "\n" + block.rstrip("\n") + "\n" + post.lstrip("\n")
+    else:
+        new_content = content.rstrip("\n") + "\n\n" + block
+
+    path.write_text(new_content, encoding="utf-8")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="dsign-display-apply",
+        description="Apply Raspberry Pi HDMI output preset (writes config.txt block).",
+    )
+    parser.add_argument("preset", choices=["auto", "1080p60", "4k30"])
+    parser.add_argument("--no-reboot", action="store_true", help="Do not reboot automatically")
+    parser.add_argument("--print-config-path", action="store_true", help="Print config.txt path and exit")
+    args = parser.parse_args()
+
+    if args.print_config_path:
+        print(str(_config_path()))
+        return 0
+
+    if os.geteuid() != 0:
+        print("ERROR: must run as root (use sudo)", file=sys.stderr)
+        return 2
+
+    cfg = _config_path()
+    block = _preset_to_block(args.preset)
+    upsert_block(cfg, block)
+    print(f"Applied preset {args.preset} to {cfg}")
+
+    if not args.no_reboot:
+        # Non-blocking: system will terminate us shortly
+        subprocess.Popen(["systemctl", "reboot"])
+        print("Rebooting…")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
