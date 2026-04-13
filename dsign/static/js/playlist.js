@@ -296,6 +296,9 @@ export class PlaylistManager {
                 <td class="playlist-col-check"><input type="checkbox" class="include-checkbox" data-filename="${file.filename}" ${file.included ? 'checked' : ''}></td>
                 <td class="playlist-col-preview"><div class="playlist-thumb-wrap"></div></td>
                 <td class="playlist-col-name">${file.filename}</td>
+                <td class="playlist-col-mute">
+                    ${isVideo ? `<input type="checkbox" class="mute-checkbox" data-filename="${file.filename}" ${file.muted ? 'checked' : ''}>` : '<span class="playlist-video-hint">—</span>'}
+                </td>
                 <td class="playlist-col-duration">
                     ${isVideo ?
                         '<span class="playlist-video-hint">Полное видео</span>' :
@@ -358,6 +361,7 @@ export class PlaylistManager {
                     selectedFiles.push({
                         file_name: filename,
                         duration: isVideo ? 0 : duration,
+                        muted: isVideo ? Boolean(row.querySelector('.mute-checkbox')?.checked) : false,
                         order: index + 1
                     });
 
