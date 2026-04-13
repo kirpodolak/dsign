@@ -105,6 +105,56 @@ def init_api_routes(api_bp, services):
                 'error': str(e)
             }), 500
 
+    @api_bp.route('/settings/display/apply', methods=['POST'])
+    @login_required
+    def apply_display_mode():
+        """
+        Apply HDMI output preset by calling /usr/local/bin/dsign-display-apply (sudo) and rebooting.
+        Requires sudoers rule allowing the helper script (and optionally reboot).
+        """
+        try:
+            if not (getattr(current_user, "is_admin", False) or current_user.username == "admin"):
+                return jsonify({"success": False, "error": "Unauthorized"}), 403
+
+            data = request.get_json(silent=True) or {}
+            preset = data.get("preset", "auto")
+            reboot = bool(data.get("reboot", True))
+            if preset not in {"auto", "1080p60", "4k30"}:
+                return jsonify({"success": False, "error": "Invalid preset"}), 400
+
+            # Persist selection in settings.json (so UI shows it even before reboot)
+            settings_service.set_display_mode_preset(preset)
+
+            helper = "/usr/local/bin/dsign-display-apply"
+            cmd = ["sudo", helper, preset]
+            if not reboot:
+                cmd.append("--no-reboot")
+
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+            except FileNotFoundError:
+                return jsonify({
+                    "success": False,
+                    "error": f"Helper script not found: {helper}"
+                }), 500
+            except subprocess.CalledProcessError as e:
+                # sudo missing permissions / helper error
+                msg = (e.stderr or e.stdout or "").strip() or f"Command failed: {e.returncode}"
+                return jsonify({
+                    "success": False,
+                    "error": msg
+                }), 403
+
+            current_app.logger.info(
+                "Display mode preset apply requested",
+                extra={"operation": "DisplayModeApply", "preset": preset, "reboot": reboot}
+            )
+
+            return jsonify({"success": True, "preset": preset, "reboot": reboot})
+        except Exception as e:
+            current_app.logger.error(f"Error applying display mode: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
     # ======================
     # Playback Profiles (/api/profiles)
     # ======================
