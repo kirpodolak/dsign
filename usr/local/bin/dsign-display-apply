@@ -6,9 +6,11 @@ import sys
 from pathlib import Path
 from typing import Tuple
 
-
 BEGIN = "# DSIGN_DISPLAY_BEGIN"
 END = "# DSIGN_DISPLAY_END"
+
+EDID_DIR = Path("/lib/firmware/edid")
+EDID_FILE = EDID_DIR / "good-monitor.bin"
 
 
 def _config_path() -> Path:
@@ -16,24 +18,17 @@ def _config_path() -> Path:
         pp = Path(p)
         if pp.exists():
             return pp
-    # Default on newer Raspberry Pi OS
     return Path("/boot/firmware/config.txt")
 
 
-def _preset_to_block(preset: str) -> str:
-    # CEA modes:
-    # - 16: 1920x1080 @ 60
-    # - 95: 3840x2160 @ 30
-    if preset == "auto":
-        body = "# Using EDID (auto)\n"
-    elif preset == "1080p60":
-        body = "hdmi_group=1\nhdmi_mode=16\n"
-    elif preset == "4k30":
-        body = "hdmi_group=1\nhdmi_mode=95\n"
-    else:
-        raise ValueError("Invalid preset")
-
-    return f"{BEGIN}\n{body}{END}\n"
+def _cmdline_path() -> Path:
+    # Bullseye/Bookworm часто используют /boot/firmware/cmdline.txt,
+    # а /boot/cmdline.txt может быть заглушкой.
+    for p in ("/boot/firmware/cmdline.txt", "/boot/cmdline.txt"):
+        pp = Path(p)
+        if pp.exists():
+            return pp
+    return Path("/boot/firmware/cmdline.txt")
 
 
 def _split_existing(content: str) -> Tuple[str, str, bool]:
@@ -44,7 +39,22 @@ def _split_existing(content: str) -> Tuple[str, str, bool]:
     return pre, post, True
 
 
-def upsert_block(path: Path, block: str) -> None:
+def _upsert_config_block(path: Path, preset: str) -> None:
+    """
+    По умолчанию НЕ форсим hdmi_mode, чтобы не получить черный экран на "плохом" мониторе.
+    Блок оставляем как маркер, но строки hdmi_* комментируем.
+    """
+    if preset == "auto":
+        body = "# Using EDID (auto)\n"
+    elif preset == "1080p60":
+        body = "# Prefer 1080p60 via EDID override (no hdmi_mode force)\n"
+    elif preset == "4k30":
+        body = "# Prefer 4K@30 via EDID override if supported (no hdmi_mode force)\n"
+    else:
+        raise ValueError("Invalid preset")
+
+    block = f"{BEGIN}\n{body}{END}\n"
+
     content = ""
     if path.exists():
         content = path.read_text(encoding="utf-8", errors="replace")
@@ -58,31 +68,82 @@ def upsert_block(path: Path, block: str) -> None:
     path.write_text(new_content, encoding="utf-8")
 
 
+def _normalize_cmdline_one_line(path: Path) -> str:
+    # cmdline.txt must be exactly one line.
+    data = path.read_text(encoding="utf-8", errors="replace")
+    line = " ".join(data.split())
+    return line.strip()
+
+
+def _set_cmdline_edid_override(path: Path, enable: bool) -> None:
+    line = _normalize_cmdline_one_line(path)
+
+    # Remove existing parameters (both variants).
+    parts = [p for p in line.split(" ") if p]
+    parts = [p for p in parts if not p.startswith("drm.edid_firmware=")]
+    parts = [p for p in parts if not p.startswith("drm_kms_helper.edid_firmware=")]
+
+    if enable:
+        if not EDID_FILE.exists() or EDID_FILE.stat().st_size < 128:
+            raise RuntimeError(f"EDID file missing or empty: {EDID_FILE}")
+        # This one was verified working on Raspberry Pi OS when EDID is broken.
+        parts.append(f"drm.edid_firmware=HDMI-A-1:edid/{EDID_FILE.name}")
+
+    new_line = " ".join(parts).strip() + "\n"
+    path.write_text(new_line, encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="dsign-display-apply",
-        description="Apply Raspberry Pi HDMI output preset (writes config.txt block).",
+        description=(
+            "Apply HDMI display preset safely.\n"
+            "This tool primarily enables/disables EDID override via cmdline.txt to avoid black screens.\n"
+            "It also writes a marker block into config.txt (without forcing hdmi_mode by default)."
+        ),
     )
-    parser.add_argument("preset", choices=["auto", "1080p60", "4k30"])
+    parser.add_argument("preset", nargs="?", choices=["auto", "1080p60", "4k30"])
     parser.add_argument("--no-reboot", action="store_true", help="Do not reboot automatically")
     parser.add_argument("--print-config-path", action="store_true", help="Print config.txt path and exit")
+    parser.add_argument("--print-cmdline-path", action="store_true", help="Print cmdline.txt path and exit")
+    parser.add_argument("--print-edid-path", action="store_true", help="Print EDID firmware file path and exit")
     args = parser.parse_args()
 
     if args.print_config_path:
         print(str(_config_path()))
         return 0
+    if args.print_cmdline_path:
+        print(str(_cmdline_path()))
+        return 0
+    if args.print_edid_path:
+        print(str(EDID_FILE))
+        return 0
+
+    if not args.preset:
+        print("ERROR: preset is required (auto|1080p60|4k30)", file=sys.stderr)
+        return 2
 
     if os.geteuid() != 0:
         print("ERROR: must run as root (use sudo)", file=sys.stderr)
         return 2
 
     cfg = _config_path()
-    block = _preset_to_block(args.preset)
-    upsert_block(cfg, block)
-    print(f"Applied preset {args.preset} to {cfg}")
+    cmdline = _cmdline_path()
+
+    # Safe behavior:
+    # - auto: disable EDID override
+    # - 1080p60/4k30: enable EDID override (good-monitor.bin) so KMS gets real modes even if EDID=0
+    enable_override = args.preset in {"1080p60", "4k30"}
+
+    _upsert_config_block(cfg, args.preset)
+    _set_cmdline_edid_override(cmdline, enable=enable_override)
+
+    print(f"Applied preset {args.preset}")
+    print(f"  config:  {cfg}")
+    print(f"  cmdline: {cmdline}")
+    print(f"  edid:    {'enabled' if enable_override else 'disabled'} ({EDID_FILE})")
 
     if not args.no_reboot:
-        # Non-blocking: system will terminate us shortly
         subprocess.Popen(["systemctl", "reboot"])
         print("Rebooting…")
     return 0
