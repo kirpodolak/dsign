@@ -25,6 +25,8 @@ class SettingsService:
             # HDMI output mode preset. "auto" relies on EDID; other values are applied via config.txt + reboot.
             # Valid values: "auto" | "1080p60" | "4k30"
             "hdmi_mode_preset": "auto",
+            # Auto preview capture interval (seconds). null/0 disables.
+            "preview_auto_interval_sec": 0,
         }
     }
 
@@ -90,7 +92,11 @@ class SettingsService:
                     settings = json.load(f)
                     self._log_info("Settings loaded from file", 
                                  extra={'file_path': str(self.settings_file)})
-                    return {**self.DEFAULT_SETTINGS, **settings}
+                    merged = {**self.DEFAULT_SETTINGS, **settings}
+                    # Deep-merge display settings so new keys don't get lost.
+                    file_display = settings.get("display") if isinstance(settings.get("display"), dict) else {}
+                    merged["display"] = {**self.DEFAULT_SETTINGS.get("display", {}), **file_display}
+                    return merged
             self._log_info("Using default settings (file not found)", 
                          extra={'file_path': str(self.settings_file)})
             return self.DEFAULT_SETTINGS
@@ -106,8 +112,13 @@ class SettingsService:
     def save_settings(self, settings: Dict[str, Any]) -> None:
         """Сохранение настроек в файл"""
         try:
+            # Ensure display is deep-merged so defaults remain present on disk.
+            to_save = {**self.DEFAULT_SETTINGS, **settings}
+            base_display = self.DEFAULT_SETTINGS.get("display", {})
+            cur_display = settings.get("display") if isinstance(settings.get("display"), dict) else {}
+            to_save["display"] = {**base_display, **cur_display}
             with open(self.settings_file, "w") as f:
-                json.dump({**self.DEFAULT_SETTINGS, **settings}, f, indent=4)
+                json.dump(to_save, f, indent=4)
             self._log_info("Settings saved successfully", 
                          extra={'file_path': str(self.settings_file)})
         except Exception as e:
@@ -179,7 +190,12 @@ class SettingsService:
                             "Using playlist profile settings",
                             extra={'playlist_id': playback.playlist_id, 'profile_id': assignment.profile_id}
                         )
-                        settings = {**self.DEFAULT_SETTINGS, **base_settings, **(profile.settings or {})}
+                        profile_settings = profile.settings or {}
+                        settings = {**self.DEFAULT_SETTINGS, **base_settings, **profile_settings}
+                        # Preserve global display settings (logo, auto preview interval, etc.)
+                        base_display = base_settings.get("display") if isinstance(base_settings.get("display"), dict) else {}
+                        prof_display = profile_settings.get("display") if isinstance(profile_settings.get("display"), dict) else {}
+                        settings["display"] = {**base_display, **prof_display}
                         self._cached_current_settings = settings
                         self._cached_current_settings_ts = now_ts
                         return settings
@@ -191,7 +207,11 @@ class SettingsService:
             
             if idle_profile:
                 self._log_info("Using idle profile settings", extra={'profile_id': idle_profile.id})
-                settings = {**self.DEFAULT_SETTINGS, **base_settings, **(idle_profile.settings or {})}
+                profile_settings = idle_profile.settings or {}
+                settings = {**self.DEFAULT_SETTINGS, **base_settings, **profile_settings}
+                base_display = base_settings.get("display") if isinstance(base_settings.get("display"), dict) else {}
+                prof_display = profile_settings.get("display") if isinstance(profile_settings.get("display"), dict) else {}
+                settings["display"] = {**base_display, **prof_display}
                 self._cached_current_settings = settings
                 self._cached_current_settings_ts = now_ts
                 return settings
@@ -244,6 +264,23 @@ class SettingsService:
         self.save_settings(settings)
 
         # Invalidate cache so UI immediately reflects the updated global setting.
+        self._cached_current_settings = None
+        self._cached_current_settings_ts = 0.0
+        return settings
+
+    def set_preview_auto_interval_sec(self, interval_sec: int) -> Dict[str, Any]:
+        """
+        Persist auto preview timer interval (seconds) in settings.json.
+        0 disables.
+        """
+        if interval_sec not in {0, 300, 600, 900}:
+            raise ValueError("Invalid preview interval")
+
+        settings = self.load_settings()
+        display = settings.get("display") if isinstance(settings.get("display"), dict) else {}
+        display["preview_auto_interval_sec"] = interval_sec
+        settings["display"] = display
+        self.save_settings(settings)
         self._cached_current_settings = None
         self._cached_current_settings_ts = 0.0
         return settings
