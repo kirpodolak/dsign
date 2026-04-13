@@ -2,7 +2,7 @@
 Description=MPV Player for Digital Signage
 # Не указывать After=multi-user.target: оба юнита WantedBy=multi-user.target, а digital-signage
 # Requires=dsign-mpv — получится цикл «multi-user → signage → mpv → после multi-user».
-# MPV with --vo=drm needs a controlling TTY/VT to actually take over the screen.
+# MPV with DRM/KMS needs a controlling TTY/VT (--vo=gpu --gpu-context=drm or --vo=drm).
 After=network.target graphical.target getty@tty1.service
 Conflicts=getty@tty1.service
 
@@ -33,7 +33,10 @@ ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 
 # Основная команда запуска
 # NOTE: On Raspberry Pi OS mpv is typically at /usr/bin/mpv (not /usr/local/bin/mpv).
-ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-resample --log-file=/var/log/dsign/mpv.log
+# --vo=gpu --gpu-context=drm: avoids vo=drm modeset per clip (1440p/720p reconfig + pin disconnect on Pi).
+# --video-sync=display-vdrop: меньше CPU, чем display-resample (на слабом SoC меньше «вязкости»).
+# Выкл. звука по элементам плейлиста — через IPC из приложения (mute и т.д.), не через --no-audio здесь.
+ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=gpu --gpu-context=drm --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --vf=scale=1920:1080:flags=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --audio-samplerate=48000 --log-file=/var/log/dsign/mpv.log
 
 # Настройки перезапуска
 Restart=always
