@@ -58,6 +58,8 @@ export class SettingsManager {
             currentProfileIndicator: document.getElementById('current-profile-indicator'),
             displayModeSelect: document.getElementById('display-mode-select'),
             applyDisplayModeBtn: document.getElementById('apply-display-mode'),
+            previewAutoSelect: document.getElementById('preview-auto-select'),
+            applyPreviewAutoBtn: document.getElementById('apply-preview-auto'),
         };
 
         this.state = {
@@ -329,6 +331,11 @@ export class SettingsManager {
         if (this.elements.displayModeSelect) {
             this.elements.displayModeSelect.value = preset;
         }
+
+        const interval = String(this.state.currentSettings?.display?.preview_auto_interval_sec ?? 0);
+        if (this.elements.previewAutoSelect) {
+            this.elements.previewAutoSelect.value = interval;
+        }
     }
 
     renderSettingsForm() {
@@ -412,6 +419,7 @@ export class SettingsManager {
         this.elements.saveProfileBtn?.addEventListener('click', () => this.handleSaveProfile());
         this.elements.mpvSettingsForm?.addEventListener('submit', (e) => this.handleMpvSettingsSubmit(e));
         this.elements.applyDisplayModeBtn?.addEventListener('click', () => this.handleApplyDisplayMode());
+        this.elements.applyPreviewAutoBtn?.addEventListener('click', () => this.handleApplyPreviewAuto());
 
         document.addEventListener('click', (e) => {
             if (e.target.classList.contains('btn-save')) {
@@ -661,6 +669,43 @@ export class SettingsManager {
             if (this.elements.applyDisplayModeBtn) {
                 this.elements.applyDisplayModeBtn.disabled = false;
                 this.elements.applyDisplayModeBtn.textContent = 'Apply & reboot';
+            }
+        }
+    }
+
+    async handleApplyPreviewAuto() {
+        const intervalSec = Number(this.elements.previewAutoSelect?.value || 0);
+        const label = this.elements.previewAutoSelect?.selectedOptions?.[0]?.textContent || `${intervalSec}s`;
+        if (!confirm(`Apply auto preview: ${label}?`)) return;
+
+        try {
+            this.elements.applyPreviewAutoBtn.disabled = true;
+            this.elements.applyPreviewAutoBtn.textContent = 'Applying…';
+
+            const response = await fetch('/api/settings/preview/auto', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCSRFToken()
+                },
+                body: JSON.stringify({ interval_sec: intervalSec })
+            });
+
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) {
+                throw new Error(result.error || `HTTP ${response.status}`);
+            }
+
+            showAlert('Auto preview updated', 'success');
+            await this.loadCurrentSettings();
+            this.renderCurrentSettings();
+        } catch (error) {
+            console.error('Error applying preview auto:', error);
+            showAlert(error.message || 'Failed to update auto preview', 'error');
+        } finally {
+            if (this.elements.applyPreviewAutoBtn) {
+                this.elements.applyPreviewAutoBtn.disabled = false;
+                this.elements.applyPreviewAutoBtn.textContent = 'Apply';
             }
         }
     }
