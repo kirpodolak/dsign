@@ -40,16 +40,13 @@ class LogoManager:
         if not logo_path:
             return False
 
-        settings = {
-            "vo": "drm",
-            "loop-file": "inf",
-            "pause": "no"
-        }
-
-        # Преобразуем путь в строку
+        # Не трогаем vo: он задан в systemd (например --vo=gpu --gpu-context=drm).
+        # Принудительный vo=drm здесь ломал согласованность с unit и мог реинициализировать вывод.
         commands = [
-            ["loadfile", str(logo_path), "replace"]
-        ] + [["set", key, value] for key, value in settings.items()]
+            ["loadfile", str(logo_path), "replace"],
+            ["set_property", "loop-file", "inf"],
+            ["set_property", "pause", "no"],
+        ]
 
         for cmd in commands:
             response = self._mpv_manager._send_command({"command": cmd})
