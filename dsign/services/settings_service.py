@@ -21,7 +21,10 @@ class SettingsService:
         "display": {
             "theme": "light",
             "refresh_rate": 30,
-            "logo": "default.png"
+            "logo": "default.png",
+            # HDMI output mode preset. "auto" relies on EDID; other values are applied via config.txt + reboot.
+            # Valid values: "auto" | "1080p60" | "4k30"
+            "hdmi_mode_preset": "auto",
         }
     }
 
@@ -156,6 +159,10 @@ class SettingsService:
             ):
                 return self._cached_current_settings
 
+            # Base settings are stored in a JSON file (global settings like UI/display).
+            # Profile settings are stored in DB and should override MPV-related keys when active.
+            base_settings = self.load_settings()
+
             # Получаем текущий статус воспроизведения
             playback = db.session.query(PlaybackStatus).first()
             
@@ -172,7 +179,7 @@ class SettingsService:
                             "Using playlist profile settings",
                             extra={'playlist_id': playback.playlist_id, 'profile_id': assignment.profile_id}
                         )
-                        settings = {**self.DEFAULT_SETTINGS, **(profile.settings or {})}
+                        settings = {**self.DEFAULT_SETTINGS, **base_settings, **(profile.settings or {})}
                         self._cached_current_settings = settings
                         self._cached_current_settings_ts = now_ts
                         return settings
@@ -184,7 +191,7 @@ class SettingsService:
             
             if idle_profile:
                 self._log_info("Using idle profile settings", extra={'profile_id': idle_profile.id})
-                settings = {**self.DEFAULT_SETTINGS, **(idle_profile.settings or {})}
+                settings = {**self.DEFAULT_SETTINGS, **base_settings, **(idle_profile.settings or {})}
                 self._cached_current_settings = settings
                 self._cached_current_settings_ts = now_ts
                 return settings
@@ -200,14 +207,15 @@ class SettingsService:
                     db.session.add(seeded)
                     db.session.commit()
                     self._log_info("Seeded default idle profile", extra={'profile_id': seeded.id})
-                    settings = {**self.DEFAULT_SETTINGS, **(seeded.settings or {})}
+                    settings = {**self.DEFAULT_SETTINGS, **base_settings, **(seeded.settings or {})}
                     self._cached_current_settings = settings
                     self._cached_current_settings_ts = now_ts
                     return settings
                 except Exception as e:
                     db.session.rollback()
                     self._log_warning("No active profile found, using default settings", extra={'seed_error': str(e)})
-                    return self.DEFAULT_SETTINGS
+                    return {**self.DEFAULT_SETTINGS, **base_settings}
+            return {**self.DEFAULT_SETTINGS, **base_settings}
             
         except Exception as e:
             self._log_error(
@@ -219,6 +227,26 @@ class SettingsService:
     def get_current_settings(self) -> Dict[str, Any]:
         """Алиас для get_settings_for_active_profile (совместимость)"""
         return self.get_settings_for_active_profile()
+
+    def set_display_mode_preset(self, preset: str) -> Dict[str, Any]:
+        """
+        Persist HDMI mode preset in settings.json.
+
+        preset: "auto" | "1080p60" | "4k30"
+        """
+        if preset not in {"auto", "1080p60", "4k30"}:
+            raise ValueError("Invalid display preset")
+
+        settings = self.load_settings()
+        display = settings.get("display") if isinstance(settings.get("display"), dict) else {}
+        display["hdmi_mode_preset"] = preset
+        settings["display"] = display
+        self.save_settings(settings)
+
+        # Invalidate cache so UI immediately reflects the updated global setting.
+        self._cached_current_settings = None
+        self._cached_current_settings_ts = 0.0
+        return settings
 
     def update_mpv_settings(self, settings: Dict[str, Any], profile_type: str = None, playlist_id: int = None) -> bool:
         """
