@@ -411,11 +411,15 @@ class MediaGallery {
         csrfToken,
         (percent) => this.setUploadButtonProgress(percent)
       );
+      // Upload bytes are fully sent at this point; server may still be finalizing writes.
+      this.setUploadButtonProcessing();
       if (window.App?.Alerts?.show) {
         window.App.Alerts.show(`Uploaded ${result.files?.length || 0} file(s) successfully`, 'success');
       }
       if (this.elements.fileUploadInput) this.elements.fileUploadInput.value = '';
       await this.loadMediaFiles();
+      // Only now the file is visible in gallery -> we can confidently show 100%.
+      this.setUploadButtonProgress(100);
     } catch (error) {
       console.error('Upload error:', error);
       if (window.App?.Alerts?.show) {
@@ -498,9 +502,26 @@ class MediaGallery {
     }
     fill.classList.remove('upload-btn__fill--pulse');
     fill.style.opacity = '';
-    const p = Math.min(100, Math.max(0, percent));
+    // XHR progress reaches 100% when bytes are sent, but server can still be saving/processing.
+    // Keep at 99% until we explicitly set 100% after gallery refresh.
+    const capped = percent >= 99.5 ? 99 : percent;
+    const p = Math.min(100, Math.max(0, capped));
     fill.style.width = `${p}%`;
     text.textContent = `${Math.round(p)}%`;
+  }
+
+  setUploadButtonProcessing() {
+    const btn = this.elements.uploadBtn;
+    if (!btn) return;
+    const fill = btn.querySelector('.upload-btn__fill');
+    const text = btn.querySelector('.upload-btn__text');
+    const icon = btn.querySelector('.upload-btn__icon');
+    if (fill) {
+      fill.classList.add('upload-btn__fill--pulse');
+      fill.style.width = '100%';
+    }
+    if (text) text.textContent = 'Processing…';
+    if (icon) icon.className = 'fas fa-circle-notch fa-spin upload-btn__icon';
   }
 
   resetUploadButton() {
