@@ -4,7 +4,9 @@ Requires=screenshot.service
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=60s
+# Capturing mpv screenshots is CPU-heavy on Pi 3B+ (often software fallback).
+# Keep this infrequent; UI can request on-demand refresh.
+OnUnitActiveSec=300s
 AccuracySec=1s
 Persistent=true
 Unit=screenshot.service
