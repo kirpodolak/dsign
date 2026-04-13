@@ -42,7 +42,6 @@ class LogoManager:
 
         settings = {
             "vo": "drm",
-            "hwdec": "no",
             "loop-file": "inf",
             "pause": "no"
         }
