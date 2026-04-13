@@ -65,7 +65,8 @@ const state = {
     previewLoadAttempts: 0,
     fallbackLogoUsed: false,
     fallbackPreviewUsed: false,
-    isPreviewRefreshing: false
+    isPreviewRefreshing: false,
+    previewCaptureCooldownUntil: 0
 };
 
 // API functions
@@ -119,7 +120,12 @@ const api = {
     },
 
     async getSettings() {
-        return this.request(CONFIG.api.endpoints.settings);
+        const resp = await this.request(CONFIG.api.endpoints.settings);
+        // API may return wrapper: { success, settings, profile }
+        if (resp && typeof resp === 'object' && !Array.isArray(resp) && resp.settings) {
+            return resp.settings;
+        }
+        return resp;
     },
 
     async getPlaylists() {
@@ -242,13 +248,18 @@ const api = {
     async refreshPreview() {
         try {
             state.isPreviewRefreshing = true;
-            await this.request(`${CONFIG.api.endpoints.previewImage}/capture`, {
-                method: 'POST'
+            const result = await this.request(`${CONFIG.api.endpoints.previewImage}/capture`, {
+                method: 'POST',
+                headers: {
+                    // Explicitly mark this as a user-initiated capture (manual click).
+                    // Server may reject background/implicit captures when Auto preview is Off.
+                    'X-DSIGN-Preview-Intent': 'manual'
+                }
             });
-            return true;
+            return result && typeof result === 'object' ? result : { success: true };
         } catch (error) {
             console.warn('Preview refresh failed:', error);
-            return false;
+            return { success: false, error };
         } finally {
             state.isPreviewRefreshing = false;
         }
@@ -278,6 +289,26 @@ const ui = {
         }
     },
 
+    updatePreviewAutoStatus(settings) {
+        const el = document.querySelector('#mpv-auto-refresh-status');
+        if (!el) return;
+        const sec = Number(settings?.display?.preview_auto_interval_sec || 0);
+        if (!sec) {
+            el.innerHTML = [
+                '<span class="mpv-auto-refresh-line"><strong>Auto preview:</strong> Off</span>',
+                '<span class="mpv-auto-refresh-line">Background capture is blocked. Use the Refresh button.</span>'
+            ].join('');
+            el.classList.add('is-off');
+        } else {
+            const mins = Math.round(sec / 60);
+            el.innerHTML = [
+                `<span class="mpv-auto-refresh-line"><strong>Auto preview:</strong> Every ${mins} min</span>`,
+                '<span class="mpv-auto-refresh-line">Tip: On Pi 3B+ use Off or infrequent.</span>'
+            ].join('');
+            el.classList.remove('is-off');
+        }
+    },
+
     renderSettings(settings) {
         if (!elements.settingsPanel) return;
 
@@ -294,6 +325,7 @@ const ui = {
             </div>
         `;
         elements.settingsPanel.innerHTML = html;
+        this.updatePreviewAutoStatus(settings);
     },
 
     renderPlaylists(playlists) {
@@ -422,15 +454,16 @@ const ui = {
 
     updateLogo(logoPath) {
         if (!elements.logoImage) return;
-
+        // The active logo is stored as a canonical file (idle_logo.jpg).
+        // Do not trust settings.display.logo here (profiles may override display).
         if (logoPath) {
             state.fallbackLogoUsed = false;
             state.logoLoadAttempts = 0;
         }
 
-        const basePath = state.fallbackLogoUsed ? 
-            CONFIG.defaultLogo : 
-            `${CONFIG.api.endpoints.serveMedia}/${logoPath || 'idle_logo.jpg'}`;
+        const basePath = state.fallbackLogoUsed
+            ? CONFIG.defaultLogo
+            : `${CONFIG.api.endpoints.serveMedia}/idle_logo.jpg`;
 
         const newSrc = `${basePath}?t=${Date.now()}`;
 
@@ -448,7 +481,7 @@ const ui = {
                 this.src = `${CONFIG.defaultLogo}?t=${Date.now()}`;
             } else if (!state.fallbackLogoUsed) {
                 setTimeout(() => {
-                    this.src = `${CONFIG.api.endpoints.serveMedia}/${logoPath || 'idle_logo.jpg'}?t=${Date.now()}`;
+                    this.src = `${CONFIG.api.endpoints.serveMedia}/idle_logo.jpg?t=${Date.now()}`;
                 }, 2000);
             }
         };
@@ -457,15 +490,16 @@ const ui = {
         elements.logoImage.style.display = 'none';
     },
 
-    updatePreviewImage() {
+    updatePreviewImage(options = {}) {
         if (!elements.previewImage) return;
 
+        const { updateTimestamp = true } = options || {};
         const newSrc = `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
 
         elements.previewImage.onload = function() {
             this.style.display = 'block';
             state.previewLoadAttempts = 0;
-            if (elements.mpvLastUpdate) {
+            if (updateTimestamp && elements.mpvLastUpdate) {
                 elements.mpvLastUpdate.textContent = new Date().toLocaleTimeString();
             }
         };
@@ -551,11 +585,13 @@ const handlers = {
             }
 
             ui.updateLogo(settings.display?.logo);
-            ui.updatePreviewImage();
+            // Initial paint: load current preview image without implying a fresh capture
+            // (avoid updating "Last updated" from background GET refresh).
+            ui.updatePreviewImage({ updateTimestamp: false });
 
             this.setupEventListeners();
             this.startAutoRefresh();
-            this.startPreviewRefresh();
+            this.startPreviewRefresh(settings);
 
         } catch (error) {
             console.error('Initialization failed:', error);
@@ -698,9 +734,21 @@ const handlers = {
                     icon.className = 'fas fa-spinner fa-spin';
                 }
                 
-                await api.refreshPreview();
-                ui.updatePreviewImage();
-                showAlert('Preview refreshed', 'success');
+                const r = await api.refreshPreview();
+                const now = Date.now();
+                const retryMs = Math.max(0, Math.round((r?.retry_in_sec || 0) * 1000));
+                if (r?.skipped) {
+                    // Capture was throttled on server; just reload existing image and inform user.
+                    state.previewCaptureCooldownUntil = now + retryMs;
+                    ui.updatePreviewImage({ updateTimestamp: false });
+                    showAlert('Preview is up to date', 'info');
+                } else if (r?.success) {
+                    // Service may still be writing the file; reload after a short delay.
+                    setTimeout(() => ui.updatePreviewImage({ updateTimestamp: true }), 1200);
+                    showAlert('Preview refreshed', 'success');
+                } else {
+                    throw new Error(r?.error || 'Preview refresh failed');
+                }
             } catch (error) {
                 console.warn('Failed to refresh preview:', error);
                 showError('Failed to refresh preview');
@@ -798,11 +846,13 @@ const handlers = {
 
         state.refreshIntervalId = setInterval(async () => {
             try {
-                const settings = await api.request(CONFIG.api.endpoints.settings, { showLoading: false });
+                const settings = await api.getSettings();
                 if (JSON.stringify(state.currentSettings) !== JSON.stringify(settings)) {
                     state.currentSettings = settings;
                     ui.renderSettings(settings);
                     ui.updateLogo(settings.display?.logo);
+                    // If Auto preview interval changed in Settings, reflect it here.
+                    this.startPreviewRefresh(settings);
                 }
             } catch (error) {
                 console.error('Auto-refresh failed:', error);
@@ -810,14 +860,23 @@ const handlers = {
         }, CONFIG.refreshInterval);
     },
 
-    startPreviewRefresh() {
+    startPreviewRefresh(settings) {
         if (state.previewRefreshId) {
             clearInterval(state.previewRefreshId);
+            state.previewRefreshId = null;
         }
 
+        const intervalSec = Number(settings?.display?.preview_auto_interval_sec || 0);
+        // If Auto preview is Off, do not background-refresh the preview image.
+        if (!intervalSec) return;
+
+        const intervalMs = Math.max(15000, intervalSec * 1000);
         state.previewRefreshId = setInterval(() => {
-            ui.updatePreviewImage();
-        }, CONFIG.previewRefreshInterval);
+            // Do not trigger expensive capture here; only refresh the <img> src.
+            // Also avoid hammering the browser cache if the user just requested a manual capture.
+            if (Date.now() < (state.previewCaptureCooldownUntil || 0)) return;
+            ui.updatePreviewImage({ updateTimestamp: false });
+        }, intervalMs);
     },
 
     cleanup() {
