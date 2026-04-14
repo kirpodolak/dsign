@@ -19,11 +19,11 @@ def init_extensions(app) -> Dict[str, Any]:
     :param app: Экземпляр Flask приложения
     :return: Словарь с инициализированными сервисами
     """
-    # Настройка логгера
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
-    
     try:
+        # SocketIO/EngineIO can be very noisy; keep it quiet by default.
+        logger = logging.getLogger("dsign.socketio")
+        logger.setLevel(logging.DEBUG if app.config.get("DEBUG", False) else logging.WARNING)
+
         # 1. Инициализация Flask-расширений
         db.init_app(app)
         bcrypt.init_app(app)
@@ -46,36 +46,14 @@ def init_extensions(app) -> Dict[str, Any]:
         # 4. Установка обработчиков
         app.teardown_appcontext(_shutdown_session)
         
-        # 5. Инициализация сервисов с проверкой MPV
-        with app.app_context():
-            from .services import init_services  # Локальный импорт
-            services = init_services(
-                config=app.config,
-                db=db,
-                socketio=socketio,
-                logger=logger
-            )
-            
-            # Явная проверка инициализации MPV
-            if 'playback_service' in services:
-                if not hasattr(services['playback_service'], '_mpv_manager'):
-                    logger.error("MPV manager not found in playback service")
-                    raise RuntimeError("MPV manager initialization failed")
-                
-                if not services['playback_service']._mpv_manager.wait_for_mpv_ready(timeout=30):
-                    logger.error("MPV initialization timeout")
-                    raise RuntimeError("MPV failed to initialize")
-                
-                logger.info("MPV initialized and ready")
-                
-        # 6. Настройка кэширования статических файлов
+        # 5. Настройка кэширования статических файлов
         configure_static_cache(app)
-        
-        logger.info("All extensions initialized successfully")
-        return services
+        return {}
         
     except Exception as e:
-        logger.critical(f"Failed to initialize extensions: {str(e)}", exc_info=True)
+        logging.getLogger(__name__).critical(
+            f"Failed to initialize extensions: {str(e)}", exc_info=True
+        )
         raise RuntimeError(f"Extensions initialization failed: {str(e)}")
 
 def _configure_auth(app) -> None:
@@ -102,7 +80,7 @@ def _ensure_directories(app) -> None:
         os.makedirs(upload_folder, exist_ok=True)
         os.makedirs(os.path.join(upload_folder, 'logo'), exist_ok=True)
         os.makedirs(os.path.join(upload_folder, 'tmp'), exist_ok=True)
-        app.logger.info(f"Created required directories in {upload_folder}")
+        app.logger.debug(f"Created required directories in {upload_folder}")
     except Exception as e:
         app.logger.error(f"Failed to create directories: {str(e)}")
         raise RuntimeError(f"Directory creation failed: {str(e)}")
