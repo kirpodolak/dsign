@@ -324,11 +324,13 @@ class MPVManager:
                         try:
                             chunk = s.recv(16384)
                         except socket.timeout:
-                            chunk = b""
+                            # No data yet; keep waiting until deadline.
+                            continue
                         buffer += chunk
                         result = _pick_mpv_ipc_command_reply(buffer, ipc_request_id)
                         if result is not None:
                             break
+                        # recv() returns b"" only when the peer closed the connection.
                         if chunk == b"":
                             break
 
@@ -346,7 +348,10 @@ class MPVManager:
                                 },
                             )
                         else:
-                            self.logger.warning(
+                            # "property unavailable" is common on some mpv builds and is not actionable in production.
+                            # Keep it at DEBUG to avoid log spam.
+                            log_fn = self.logger.debug if err == "property unavailable" else self.logger.warning
+                            log_fn(
                                 "MPVCommand error response",
                                 extra={
                                     "command": command_name,
@@ -354,7 +359,8 @@ class MPVManager:
                                     "duration_sec": duration_sec,
                                     "attempt": attempt + 1,
                                     "mpv_error": err,
-                                    "response": result,
+                                    # Drop full response from warning logs (too noisy); keep essentials.
+                                    **({} if err != "property unavailable" else {"response": result}),
                                 },
                             )
                         return result
