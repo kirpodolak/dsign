@@ -58,6 +58,8 @@ class MediaGallery {
     this.config = config;
     this.elements = {};
     this.currentFiles = [];
+    this.transcodeStatus = {};
+    this.transcodePollTimer = null;
     this.selectedFiles = new Set();
     
     this.initElements();
@@ -115,6 +117,8 @@ class MediaGallery {
         is_video: file.is_video || false
       }));
 
+      // Merge transcode status (best-effort)
+      await this.refreshTranscodeStatus({ startPolling: true });
       this.renderGallery(this.currentFiles);
     } catch (error) {
       console.error('Failed to load media files:', error);
@@ -216,6 +220,12 @@ class MediaGallery {
       const item = document.createElement('div');
       item.classList.add('file-item');
       item.dataset.filename = file.name;
+      const st = this.transcodeStatus?.[file.name];
+      if (st && st.state === 'running') {
+        item.dataset.transcoding = 'true';
+      } else {
+        delete item.dataset.transcoding;
+      }
 
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
@@ -266,6 +276,24 @@ class MediaGallery {
 
       item.appendChild(previewContainer);
 
+      // Transcode overlay
+      if (st && (st.state === 'queued' || st.state === 'running' || st.state === 'failed')) {
+        const overlay = document.createElement('div');
+        overlay.className = 'transcode-overlay';
+        overlay.dataset.filename = file.name;
+        const meta = document.createElement('div');
+        meta.className = 'transcode-overlay__meta';
+        const bar = document.createElement('div');
+        bar.className = 'transcode-overlay__bar';
+        const fill = document.createElement('div');
+        fill.className = 'transcode-overlay__fill';
+        bar.appendChild(fill);
+        overlay.appendChild(meta);
+        overlay.appendChild(bar);
+        item.appendChild(overlay);
+        this._applyTranscodeOverlay(overlay, st);
+      }
+
       const fileNameDiv = document.createElement('div');
       fileNameDiv.classList.add('file-name');
       fileNameDiv.textContent = file.name;
@@ -286,6 +314,77 @@ class MediaGallery {
         this.toggleDeleteButton(this.selectedFiles.size > 0);
       });
     });
+  }
+
+  _formatEta(sec) {
+    if (sec == null || !Number.isFinite(sec) || sec < 0) return '';
+    const s = Math.round(sec);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}m ${r}s`;
+  }
+
+  _applyTranscodeOverlay(overlayEl, st) {
+    if (!overlayEl || !st) return;
+    const meta = overlayEl.querySelector('.transcode-overlay__meta');
+    const fill = overlayEl.querySelector('.transcode-overlay__fill');
+    const pct = Number(st.percent || 0);
+    if (fill) fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+    if (meta) {
+      if (st.state === 'failed') {
+        meta.innerHTML = `<strong>Transcode failed</strong>`;
+      } else if (st.state === 'queued') {
+        meta.innerHTML = `<strong>Queued for optimization…</strong>`;
+      } else {
+        const eta = this._formatEta(st.eta_sec);
+        meta.innerHTML = `<strong>Optimizing video…</strong> ${Math.round(pct)}%${eta ? ` · ETA ${eta}` : ''}`;
+      }
+    }
+  }
+
+  async refreshTranscodeStatus({ startPolling = false } = {}) {
+    try {
+      const resp = await fetch('/api/media/transcode/status', {
+        headers: { 'Accept': 'application/json' },
+        credentials: 'include'
+      });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (!data?.success) return;
+      this.transcodeStatus = data.status || {};
+
+      // Update existing overlays without re-rendering everything.
+      document.querySelectorAll('.transcode-overlay').forEach((el) => {
+        const fn = el.dataset.filename;
+        if (!fn) return;
+        const st = this.transcodeStatus?.[fn];
+        if (!st || st.state === 'completed') {
+          el.remove();
+          const parent = el.closest('.file-item');
+          if (parent) delete parent.dataset.transcoding;
+          return;
+        }
+        const parent = el.closest('.file-item');
+        if (parent) parent.dataset.transcoding = st.state === 'running' ? 'true' : '';
+        this._applyTranscodeOverlay(el, st);
+      });
+
+      if (startPolling) {
+        const anyRunning = Object.values(this.transcodeStatus || {}).some(s => s && s.state === 'running');
+        if (anyRunning && !this.transcodePollTimer) {
+          this.transcodePollTimer = setInterval(() => {
+            if (!document.hidden) this.refreshTranscodeStatus();
+          }, 1500);
+        }
+        if (!anyRunning && this.transcodePollTimer) {
+          clearInterval(this.transcodePollTimer);
+          this.transcodePollTimer = null;
+        }
+      }
+    } catch {
+      // ignore
+    }
   }
 
   toggleDeleteButton(enabled) {
@@ -413,6 +512,15 @@ class MediaGallery {
       );
       // Upload bytes are fully sent at this point; server may still be finalizing writes.
       this.setUploadButtonProcessing();
+      // If server returned initial transcode status, show it immediately (no refresh needed).
+      if (result && typeof result === 'object' && result.transcode_status && typeof result.transcode_status === 'object') {
+        this.transcodeStatus = { ...(this.transcodeStatus || {}), ...(result.transcode_status || {}) };
+        // Start polling if any uploaded file is queued/running.
+        const anyActive = Object.values(result.transcode_status || {}).some(s => s && (s.state === 'queued' || s.state === 'running'));
+        if (anyActive) {
+          this.refreshTranscodeStatus({ startPolling: true });
+        }
+      }
       if (window.App?.Alerts?.show) {
         window.App.Alerts.show(`Uploaded ${result.files?.length || 0} file(s) successfully`, 'success');
       }
