@@ -6,6 +6,11 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 from PIL import Image
 import io
+import json
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
+from datetime import datetime
 from dsign.models import Playlist
 from dsign.config.config import Config
 from .logger import ServiceLogger
@@ -28,6 +33,12 @@ class FileService:
         self.upload_folder = Path(upload_folder)
         self.logger = logger or ServiceLogger(self.__class__.__name__)
         self.thumbnail_service = thumbnail_service  # Добавлено
+        # Serialize transcoding work: Pi-class devices don't like parallel ffmpeg.
+        self._transcode_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dsign-transcode")
+        self._transcode_lock = Lock()
+        # filename -> status
+        # status: {state, percent, eta_sec, out_time_sec, duration_sec, speed, started_at, updated_at, message}
+        self._transcode_status: Dict[str, Dict[str, Any]] = {}
         self._ensure_directories()
 
     def _log_error(self, message: str, exc_info: bool = True, extra: Optional[Dict[str, Any]] = None):
@@ -222,12 +233,328 @@ class FileService:
                     f"Successfully uploaded file: {filename}",
                     extra={'filename': filename, 'action': 'file_upload'},
                 )
+
+                # Background transcoding: normalize videos for smoother playback (Pi 3B+).
+                try:
+                    ext = file_path.suffix.lower().lstrip(".")
+                    if Config.AUTO_TRANSCODE_VIDEOS and ext in {"mp4", "avi", "webm", "mov", "mkv", "m4v"}:
+                        self._maybe_transcode_video_async(file_path)
+                except Exception as e:
+                    self._log_warning(
+                        "Failed to schedule transcode",
+                        extra={"filename": filename, "error": str(e), "action": "transcode_schedule"},
+                    )
             except Exception as e:
                 self._log_error(
                     f"Failed to upload file {file.filename}: {str(e)}",
                     extra={'filename': file.filename, 'action': 'file_upload'},
                 )
         return saved_files
+
+    def _probe_video(self, file_path: Path) -> Optional[Dict[str, Any]]:
+        """Return a small ffprobe summary for the first video stream."""
+        try:
+            cmd = [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name,profile,level,pix_fmt,width,height,r_frame_rate,avg_frame_rate",
+                "-of", "json",
+                str(file_path),
+            ]
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if p.returncode != 0 or not p.stdout:
+                return None
+            data = json.loads(p.stdout)
+            streams = data.get("streams") or []
+            return streams[0] if streams else None
+        except Exception:
+            return None
+
+    def _parse_fps(self, rate: str) -> Optional[float]:
+        try:
+            if not rate or rate == "0/0":
+                return None
+            num, den = rate.split("/", 1)
+            num_i = float(num)
+            den_i = float(den)
+            if den_i == 0:
+                return None
+            return num_i / den_i
+        except Exception:
+            return None
+
+    def _maybe_transcode_video_async(self, file_path: Path) -> None:
+        """Schedule transcoding if the file doesn't match target constraints."""
+        info = self._probe_video(file_path)
+        if info is None:
+            # If probing fails, skip to avoid breaking uploads.
+            return
+
+        target_res = getattr(Config, "TRANSCODE_TARGET_RESOLUTION", "1920x1080")
+        try:
+            target_w, target_h = [int(x) for x in str(target_res).lower().split("x", 1)]
+        except Exception:
+            target_w, target_h = 1920, 1080
+
+        fps = self._parse_fps(info.get("avg_frame_rate") or info.get("r_frame_rate") or "")
+        codec = (info.get("codec_name") or "").lower()
+        pix_fmt = (info.get("pix_fmt") or "").lower()
+        width = int(info.get("width") or 0)
+        height = int(info.get("height") or 0)
+        level = int(info.get("level") or 0)
+
+        # Heuristics: keep it simple and Pi-friendly.
+        needs = []
+        if codec != "h264":
+            needs.append("codec")
+        if pix_fmt not in {"yuv420p", "nv12"}:
+            needs.append("pix_fmt")
+        # h264 level is stored as 40, 41, 42 etc. Keep <= 4.0.
+        if level and level > 40:
+            needs.append("level")
+        if width != target_w or height != target_h:
+            needs.append("resolution")
+        # If fps is missing, or differs significantly, normalize.
+        target_fps = int(getattr(Config, "TRANSCODE_TARGET_FPS", 25))
+        if fps is None or abs(fps - target_fps) > 0.5:
+            needs.append("fps")
+
+        if not needs:
+            return
+
+        self._log_info(
+            "Scheduling background transcode",
+            extra={
+                "filename": file_path.name,
+                "needs": needs,
+                "src": {"codec": codec, "pix_fmt": pix_fmt, "w": width, "h": height, "level": level, "fps": fps},
+                "dst": {"w": target_w, "h": target_h, "fps": target_fps},
+                "action": "transcode_schedule",
+            },
+        )
+        self._transcode_executor.submit(self._transcode_video_in_place, file_path, target_w, target_h, target_fps)
+
+    def _transcode_video_in_place(self, file_path: Path, w: int, h: int, fps: int) -> None:
+        """Transcode to temp file then atomically replace original."""
+        tmp_dir = self.upload_folder / "tmp"
+        tmp_dir.mkdir(exist_ok=True, parents=True)
+        tmp_out = tmp_dir / f".{file_path.name}.transcoding.mp4"
+        bak = tmp_dir / f".{file_path.name}.orig"
+
+        # Avoid clobbering if multiple jobs happen (shouldn't with max_workers=1, but be safe).
+        try:
+            if tmp_out.exists():
+                tmp_out.unlink()
+        except Exception:
+            pass
+
+        # Determine duration for percent/ETA.
+        duration_sec: Optional[float] = None
+        try:
+            cmd_dur = [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=nw=1:nk=1",
+                str(file_path),
+            ]
+            pd = subprocess.run(cmd_dur, capture_output=True, text=True, timeout=10)
+            if pd.returncode == 0:
+                duration_sec = float((pd.stdout or "").strip() or "0") or None
+        except Exception:
+            duration_sec = None
+
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-y",
+            "-i", str(file_path),
+            # Normalize timing
+            "-vsync", "cfr",
+            "-r", str(int(fps)),
+            # Video
+            "-vf", f"scale={w}:{h}:flags=bilinear",
+            "-c:v", "libx264",
+            "-profile:v", "main",
+            "-level", "4.0",
+            "-pix_fmt", "yuv420p",
+            "-preset", "veryfast",
+            "-crf", "23",
+            # Audio (keep simple, HDMI friendly)
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ar", "48000",
+            # Web-friendly MP4
+            "-movflags", "+faststart",
+            # Machine-readable progress for UI
+            "-progress", "pipe:1",
+            "-nostats",
+            str(tmp_out),
+        ]
+
+        start = None
+        try:
+            import time as _t
+            start = _t.time()
+            with self._transcode_lock:
+                self._transcode_status[file_path.name] = {
+                    "state": "running",
+                    "percent": 0.0,
+                    "eta_sec": None,
+                    "out_time_sec": 0.0,
+                    "duration_sec": duration_sec,
+                    "speed": None,
+                    "started_at": datetime.utcnow().isoformat() + "Z",
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                    "message": "transcoding",
+                }
+
+            # Stream progress
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            out_time_ms = 0
+            speed = None
+            try:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    line = (line or "").strip()
+                    if not line or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    if k == "out_time_ms":
+                        try:
+                            out_time_ms = int(v)
+                        except Exception:
+                            pass
+                    elif k == "speed":
+                        try:
+                            speed = float(v.replace("x", "").strip())
+                        except Exception:
+                            pass
+                    elif k == "progress" and v in {"end", "error"}:
+                        break
+
+                    # Update at most a few times per second
+                    if duration_sec and out_time_ms > 0:
+                        out_time_sec = out_time_ms / 1_000_000.0
+                        percent = max(0.0, min(99.0, (out_time_sec / duration_sec) * 100.0))
+                        eta_sec = None
+                        if speed and speed > 0 and out_time_sec <= duration_sec:
+                            eta_sec = max(0.0, (duration_sec - out_time_sec) / speed)
+                        with self._transcode_lock:
+                            st = self._transcode_status.get(file_path.name) or {}
+                            st.update(
+                                {
+                                    "percent": round(percent, 2),
+                                    "eta_sec": round(eta_sec, 1) if eta_sec is not None else None,
+                                    "out_time_sec": round(out_time_sec, 2),
+                                    "speed": speed,
+                                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                                }
+                            )
+                            self._transcode_status[file_path.name] = st
+            finally:
+                rc = proc.wait(timeout=60 * 30)
+                stderr = (proc.stderr.read() if proc.stderr else "") if proc.stderr is not None else ""
+
+            if rc != 0 or not tmp_out.exists() or tmp_out.stat().st_size < 1024 * 50:
+                self._log_warning(
+                    "Transcode failed",
+                    extra={
+                        "filename": file_path.name,
+                        "returncode": rc,
+                        "stderr_tail": (stderr or "")[-2000:],
+                        "action": "transcode",
+                    },
+                )
+                with self._transcode_lock:
+                    self._transcode_status[file_path.name] = {
+                        **(self._transcode_status.get(file_path.name) or {}),
+                        "state": "failed",
+                        "message": "ffmpeg failed",
+                        "updated_at": datetime.utcnow().isoformat() + "Z",
+                    }
+                try:
+                    if tmp_out.exists():
+                        tmp_out.unlink()
+                except Exception:
+                    pass
+                return
+
+            # Replace original (keep a backup in tmp for debugging)
+            try:
+                if bak.exists():
+                    bak.unlink()
+            except Exception:
+                pass
+
+            try:
+                file_path.replace(bak)
+            except Exception:
+                # If replace fails, abort safely.
+                self._log_warning("Failed to move original aside", extra={"filename": file_path.name, "action": "transcode"})
+                return
+
+            try:
+                tmp_out.replace(file_path)
+            except Exception:
+                # Attempt rollback
+                try:
+                    if file_path.exists():
+                        file_path.unlink()
+                except Exception:
+                    pass
+                try:
+                    bak.replace(file_path)
+                except Exception:
+                    pass
+                self._log_warning("Failed to install transcoded file", extra={"filename": file_path.name, "action": "transcode"})
+                with self._transcode_lock:
+                    self._transcode_status[file_path.name] = {
+                        **(self._transcode_status.get(file_path.name) or {}),
+                        "state": "failed",
+                        "message": "install failed",
+                        "updated_at": datetime.utcnow().isoformat() + "Z",
+                    }
+                return
+
+            dur = round((_t.time() - start), 2) if start else None
+            self._log_info(
+                "Transcode completed",
+                extra={"filename": file_path.name, "duration_sec": dur, "action": "transcode"},
+            )
+            with self._transcode_lock:
+                self._transcode_status[file_path.name] = {
+                    **(self._transcode_status.get(file_path.name) or {}),
+                    "state": "completed",
+                    "percent": 100.0,
+                    "eta_sec": 0.0,
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                    "message": "completed",
+                }
+
+        except Exception as e:
+            self._log_warning("Transcode exception", extra={"filename": file_path.name, "error": str(e), "action": "transcode"})
+            with self._transcode_lock:
+                self._transcode_status[file_path.name] = {
+                    **(self._transcode_status.get(file_path.name) or {}),
+                    "state": "failed",
+                    "message": str(e),
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                }
+            try:
+                if tmp_out.exists():
+                    tmp_out.unlink()
+            except Exception:
+                pass
+
+    def get_transcode_status(self, filename: Optional[str] = None) -> Dict[str, Any]:
+        """Return current transcode status (all files or one)."""
+        with self._transcode_lock:
+            if filename:
+                return self._transcode_status.get(filename, {})
+            # Return a shallow copy so callers can't mutate internal state
+            return {k: dict(v) for k, v in self._transcode_status.items()}
 
     def handle_logo_upload(self, logo) -> Dict[str, Any]:
         """
