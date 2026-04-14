@@ -11,6 +11,7 @@ from pathlib import Path
 from datetime import datetime  # <-- Восстановленный импорт
 from flask import Flask
 import sys
+import os
 
 class ServiceLogger:
     def __init__(self, name: str, log_level: str = 'INFO', log_dir: Union[str, Path] = 'logs'):
@@ -20,8 +21,14 @@ class ServiceLogger:
         :param log_level: Уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         :param log_dir: Директория для хранения логов
         """
+        # Allow environment override. Recommended on Pi: WARNING in production.
+        env_level = os.getenv("DSIGN_LOG_LEVEL")
+        effective_level = (env_level or log_level or "INFO").upper()
+
         self.logger = logging.getLogger(name)
-        self.logger.setLevel(log_level)
+        self.logger.setLevel(effective_level)
+        # Prevent double-logging via root logger handlers.
+        self.logger.propagate = False
         
         # Форматтер с JSON-подобным выводом
         self.formatter = logging.Formatter(
@@ -29,23 +36,32 @@ class ServiceLogger:
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         
-        # Консольный вывод
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(self.formatter)
-        self.logger.addHandler(console_handler)
-        
-        # Файловый вывод с ротацией
-        log_dir = Path(log_dir)
-        log_dir.mkdir(exist_ok=True)
-        
-        file_handler = RotatingFileHandler(
-            log_dir / f'{name}.log',
-            maxBytes=10*1024*1024,  # 10 MB
-            backupCount=5,
-            encoding='utf-8'
-        )
-        file_handler.setFormatter(self.formatter)
-        self.logger.addHandler(file_handler)
+        # Avoid adding duplicate handlers if this logger is constructed more than once
+        # (e.g., app init + service factories). If handlers already exist, only update level/formatter.
+        if not self.logger.handlers:
+            # Консольный вывод
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setFormatter(self.formatter)
+            self.logger.addHandler(console_handler)
+
+            # Файловый вывод с ротацией
+            log_dir = Path(log_dir)
+            log_dir.mkdir(exist_ok=True)
+
+            file_handler = RotatingFileHandler(
+                log_dir / f'{name}.log',
+                maxBytes=10*1024*1024,  # 10 MB
+                backupCount=5,
+                encoding='utf-8'
+            )
+            file_handler.setFormatter(self.formatter)
+            self.logger.addHandler(file_handler)
+        else:
+            for h in self.logger.handlers:
+                try:
+                    h.setFormatter(self.formatter)
+                except Exception:
+                    pass
 
     def _format_message(self, msg: str, extra: Optional[Dict[str, Any]] = None) -> str:
         """
@@ -102,3 +118,12 @@ def setup_flask_logging(app: Flask):
     
     # Отключаем propagate чтобы избежать дублирования логов
     app.logger.propagate = False
+
+    # Quiet down noisy libraries unless app is explicitly in DEBUG.
+    # (Flask-SocketIO/EngineIO can spam "emitting event ..." otherwise.)
+    if not app.debug:
+        for noisy in ("engineio", "socketio", "werkzeug"):
+            try:
+                logging.getLogger(noisy).setLevel(logging.WARNING)
+            except Exception:
+                pass
