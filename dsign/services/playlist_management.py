@@ -57,27 +57,27 @@ class PlaylistManager:
                 duration = item.get("duration") or default_duration
                 muted = bool(item.get("muted", False))
 
-                # Ensure correct looping behavior per media type
+                # Apply per-item settings (best-effort, longer timeout to avoid IPC churn on Pi 3B+).
+                # NOTE: if MPV is under load, short timeouts cause broken pipes and retry storms.
                 try:
                     self._mpv_manager._send_command(
                         {"command": ["set_property", "loop-file", "no" if is_video else "inf"]},
-                        timeout=2.0,
+                        timeout=5.0,
                     )
                 except Exception:
                     pass
 
-                # Apply per-item mute (mainly relevant for videos).
                 try:
                     self._mpv_manager._send_command(
                         {"command": ["set_property", "mute", "yes" if muted else "no"]},
-                        timeout=2.0,
+                        timeout=5.0,
                     )
                 except Exception:
                     pass
 
                 # Load next media file
-                self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=10.0)
-                self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
+                self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
+                self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
 
                 if is_video:
                     # Wait until playback ends
@@ -86,7 +86,7 @@ class PlaylistManager:
                         # `eof-reached` is the most reliable signal for local files.
                         resp = self._mpv_manager._send_command(
                             {"command": ["get_property", "eof-reached"]},
-                            timeout=2.0,
+                            timeout=5.0,
                         )
                         if resp and resp.get("error") == "success" and resp.get("data") is True:
                             break
@@ -94,14 +94,14 @@ class PlaylistManager:
                         # Fallback for unusual states: if mpv goes idle, treat as ended
                         resp = self._mpv_manager._send_command(
                             {"command": ["get_property", "idle-active"]},
-                            timeout=2.0
+                            timeout=5.0
                         )
                         if resp and resp.get("error") == "success" and resp.get("data") is True:
                             break
                         # prevent stuck forever: 6 hours max video
                         if time.time() - start > 6 * 3600:
                             break
-                        time.sleep(0.5)
+                        time.sleep(1.0)
                 else:
                     # Show image for its duration
                     time.sleep(max(1, int(duration)))
