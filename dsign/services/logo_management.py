@@ -190,7 +190,7 @@ class LogoManager:
                 time.sleep(0.3)
         return False
             
-    def restart_idle_logo(self, upload_folder=None, idle_logo=None):
+    def restart_idle_logo(self, upload_folder=None, idle_logo=None, rotate: Optional[int] = None):
         """Обновляет логотип (best-effort).
 
         На некоторых сборках mpv свойства вроде `filename` могут быть `property unavailable`,
@@ -217,6 +217,11 @@ class LogoManager:
                 {"command": ["set_property", "panscan", 0.0]},
                 timeout=2.0,
             )
+            if rotate is not None and int(rotate) in (0, 90, 180, 270):
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "video-rotate", int(rotate)]},
+                    timeout=2.0,
+                )
             return True
 
         except Exception as e:
