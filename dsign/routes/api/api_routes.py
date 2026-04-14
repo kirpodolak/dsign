@@ -13,6 +13,7 @@ from dsign.models import PlaybackProfile, PlaylistProfileAssignment, Playlist, U
 from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
 from PIL import Image
 from dsign.config.config import THUMBNAIL_FOLDER, THUMBNAIL_URL
+import re
 # Import service classes directly from their modules (dsign.services no longer re-exports them).
 
 thumbnail_lock = Lock()
@@ -30,6 +31,198 @@ def init_api_routes(api_bp, services):
     screenshot_capture_lock = Lock()
     last_screenshot_capture_ts: float = 0.0
     screenshot_min_interval_sec: float = 10.0
+
+    # ======================
+    # System status / audio (dashboard)
+    # ======================
+    def _read_cpu_temp_c() -> float | None:
+        # Raspberry Pi / Linux common path
+        for p in (
+            "/sys/class/thermal/thermal_zone0/temp",
+            "/sys/devices/virtual/thermal/thermal_zone0/temp",
+        ):
+            try:
+                if os.path.exists(p):
+                    raw = Path(p).read_text(encoding="utf-8").strip()
+                    v = float(raw)
+                    return round(v / 1000.0, 1) if v > 1000 else round(v, 1)
+            except Exception:
+                continue
+        return None
+
+    def _read_cpu_load_percent() -> float | None:
+        try:
+            load1, _, _ = os.getloadavg()
+            cpu_count = os.cpu_count() or 1
+            return round(min(100.0, (load1 / cpu_count) * 100.0), 1)
+        except Exception:
+            return None
+
+    _procstat_last: dict = {"total": None, "idle": None, "ts": None}
+
+    def _read_cpu_percent_procstat() -> float | None:
+        """
+        "Real" CPU% from /proc/stat delta.
+        Returns percent usage since last call (needs 2 samples).
+        """
+        try:
+            p = "/proc/stat"
+            if not os.path.exists(p):
+                return None
+            first = Path(p).read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+            # cpu  user nice system idle iowait irq softirq steal guest guest_nice
+            parts = first.split()
+            if len(parts) < 5 or parts[0] != "cpu":
+                return None
+            nums = [int(x) for x in parts[1:]]
+            idle = nums[3] + (nums[4] if len(nums) > 4 else 0)
+            total = sum(nums)
+
+            last_total = _procstat_last["total"]
+            last_idle = _procstat_last["idle"]
+            _procstat_last["total"] = total
+            _procstat_last["idle"] = idle
+            _procstat_last["ts"] = time.time()
+
+            if last_total is None or last_idle is None:
+                return None
+            dt_total = total - last_total
+            dt_idle = idle - last_idle
+            if dt_total <= 0:
+                return None
+            usage = (dt_total - dt_idle) / dt_total * 100.0
+            return round(max(0.0, min(100.0, usage)), 1)
+        except Exception:
+            return None
+
+    def _disk_usage(path: str) -> dict | None:
+        try:
+            usage = shutil.disk_usage(path)
+            used = usage.used
+            total = usage.total
+            free = usage.free
+            pct = round((used / total) * 100.0, 1) if total else None
+            return {"path": path, "total": total, "used": used, "free": free, "used_percent": pct}
+        except Exception:
+            return None
+
+    def _amixer_available() -> bool:
+        try:
+            subprocess.run(["amixer", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            return True
+        except Exception:
+            return False
+
+    def _audio_get() -> dict:
+        """
+        Best-effort global audio status via ALSA amixer.
+        Returns: { available, volume_percent, muted }
+        """
+        if not _amixer_available():
+            return {"available": False, "volume_percent": None, "muted": None}
+        try:
+            out = subprocess.check_output(["amixer", "sget", "Master"], text=True, stderr=subprocess.STDOUT)
+            # Parse first "[NN%]" and last "[on]/[off]"
+            m_vol = re.search(r"\[(\d{1,3})%\]", out)
+            m_mute = re.findall(r"\[(on|off)\]", out)
+            vol = int(m_vol.group(1)) if m_vol else None
+            muted = (m_mute[-1] == "off") if m_mute else None
+            return {"available": True, "volume_percent": vol, "muted": muted}
+        except Exception:
+            return {"available": True, "volume_percent": None, "muted": None}
+
+    def _audio_set(volume_percent: int | None = None, muted: bool | None = None) -> dict:
+        if not _amixer_available():
+            return {"available": False, "volume_percent": None, "muted": None}
+        if volume_percent is not None:
+            volume_percent = int(max(0, min(100, volume_percent)))
+            subprocess.run(["amixer", "sset", "Master", f"{volume_percent}%"], check=False)
+        if muted is not None:
+            subprocess.run(["amixer", "sset", "Master", "mute" if muted else "unmute"], check=False)
+        return _audio_get()
+
+    @api_bp.route('/system/status', methods=['GET'])
+    @login_required
+    def get_system_status():
+        try:
+            upload_folder = current_app.config.get("UPLOAD_FOLDER", "/var/lib/dsign/media")
+            return jsonify(
+                {
+                    "success": True,
+                    "status": {
+                        "storage": {
+                            "root": _disk_usage("/"),
+                            "media": _disk_usage(upload_folder),
+                        },
+                        "cpu": {
+                            "temp_c": _read_cpu_temp_c(),
+                            # Prefer procstat CPU% (delta) when available; fall back to loadavg-based estimate.
+                            "usage_percent": _read_cpu_percent_procstat(),
+                            "load_percent": _read_cpu_load_percent(),
+                        },
+                        "audio": _audio_get(),
+                    },
+                }
+            )
+        except Exception as e:
+            current_app.logger.error(f"Error getting system status: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/system/audio', methods=['POST'])
+    @login_required
+    def set_system_audio():
+        try:
+            data = request.get_json(silent=True) or {}
+            vol = data.get("volume_percent")
+            muted = data.get("muted")
+            vol_i = int(vol) if vol is not None else None
+            muted_b = bool(muted) if muted is not None else None
+            state = _audio_set(volume_percent=vol_i, muted=muted_b)
+            return jsonify({"success": True, "audio": state})
+        except Exception as e:
+            current_app.logger.error(f"Error setting system audio: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/media/idle_logo_rotation', methods=['GET'])
+    @login_required
+    def get_idle_logo_rotation():
+        try:
+            cur = settings_service.load_settings() if settings_service else {}
+            display = cur.get("display") if isinstance(cur.get("display"), dict) else {}
+            rotate = int(display.get("idle_logo_rotate", 0) or 0)
+            if rotate not in (0, 90, 180, 270):
+                rotate = 0
+            return jsonify({"success": True, "rotate": rotate})
+        except Exception as e:
+            current_app.logger.error(f"Error getting idle logo rotation: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/media/idle_logo_rotation', methods=['POST'])
+    @login_required
+    def set_idle_logo_rotation():
+        try:
+            data = request.get_json(silent=True) or {}
+            rotate = int(data.get("rotate", 0) or 0)
+            if rotate not in (0, 90, 180, 270):
+                return jsonify({"success": False, "error": "Invalid rotation"}), 400
+
+            if settings_service:
+                cur = settings_service.load_settings()
+                display = cur.get("display") if isinstance(cur.get("display"), dict) else {}
+                display["idle_logo_rotate"] = rotate
+                cur["display"] = display
+                settings_service.save_settings(cur)
+
+            # Apply immediately (best-effort) by reloading idle logo and setting rotation.
+            try:
+                playback_service.restart_idle_logo(rotate=rotate)
+            except Exception:
+                pass
+
+            return jsonify({"success": True, "rotate": rotate})
+        except Exception as e:
+            current_app.logger.error(f"Error setting idle logo rotation: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
 
     # ======================
     # MPV Settings (/api/settings)
@@ -193,6 +386,26 @@ def init_api_routes(api_bp, services):
             return jsonify({"success": True, "interval_sec": interval_sec})
         except Exception as e:
             current_app.logger.error(f"Error updating preview timer: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/settings/transcode/apply', methods=['POST'])
+    @login_required
+    def apply_transcode_settings():
+        """Enable/disable upload-time transcoding and persist settings.json."""
+        try:
+            if not (getattr(current_user, "is_admin", False) or current_user.username == "admin"):
+                return jsonify({"success": False, "error": "Unauthorized"}), 403
+
+            data = request.get_json(silent=True) or {}
+            enabled = bool(data.get("enabled", False))
+            resolution = str(data.get("resolution", "1920x1080"))
+            fps = int(data.get("fps", 25))
+            settings_service.set_transcode_settings(enabled=enabled, resolution=resolution, fps=fps)
+            return jsonify({"success": True, "enabled": enabled, "resolution": resolution, "fps": fps})
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+        except Exception as e:
+            current_app.logger.error(f"Error applying transcode settings: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500
 
     # ======================
@@ -383,6 +596,124 @@ def init_api_routes(api_bp, services):
                 "success": False,
                 "error": "Failed to load assignments"
             }), 500
+
+    # ======================
+    # Playlist overrides (simplified UI over existing profiles/assignments)
+    # ======================
+    @api_bp.route('/playlists/overrides', methods=['GET'])
+    @login_required
+    def get_playlist_overrides():
+        try:
+            from dsign.models import Playlist, PlaylistProfileAssignment, PlaybackProfile
+
+            playlists = db.session.query(Playlist).all()
+            assignments = {
+                a.playlist_id: a.profile_id
+                for a in db.session.query(PlaylistProfileAssignment).all()
+                if a.playlist_id and a.profile_id
+            }
+            profiles = {
+                p.id: p
+                for p in db.session.query(PlaybackProfile).filter_by(profile_type="playlist").all()
+            }
+
+            rows = []
+            for pl in playlists:
+                pid = assignments.get(pl.id)
+                prof = profiles.get(pid) if pid else None
+                settings = (prof.settings or {}) if prof else {}
+                rows.append(
+                    {
+                        "playlist_id": pl.id,
+                        "playlist_name": pl.name,
+                        "has_overrides": bool(prof),
+                        "overrides": {
+                            "video_rotate": settings.get("video-rotate", 0),
+                            "panscan": settings.get("panscan", 0.0),
+                            "mute": bool(settings.get("mute", False)),
+                            "dwidth": settings.get("dwidth"),
+                            "dheight": settings.get("dheight"),
+                        },
+                    }
+                )
+
+            return jsonify({"success": True, "playlists": rows})
+        except Exception as e:
+            current_app.logger.error(f"Error getting playlist overrides: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/playlists/overrides', methods=['POST'])
+    @login_required
+    def set_playlist_overrides():
+        """
+        Create/update a hidden playlist profile and assignment for a playlist.
+        This keeps DB model stable while simplifying UI.
+        """
+        try:
+            from dsign.models import PlaylistProfileAssignment, PlaybackProfile
+
+            data = request.get_json(silent=True) or {}
+            playlist_id = int(data.get("playlist_id"))
+            enabled = bool(data.get("enabled", False))
+
+            # If overrides disabled -> remove assignment (keep profile record for now)
+            assignment = db.session.query(PlaylistProfileAssignment).filter_by(playlist_id=playlist_id).first()
+            if not enabled:
+                if assignment:
+                    db.session.delete(assignment)
+                    db.session.commit()
+                return jsonify({"success": True, "disabled": True})
+
+            rotate = int(data.get("video_rotate", 0))
+            if rotate not in (0, 90, 180, 270):
+                return jsonify({"success": False, "error": "Invalid rotation"}), 400
+
+            panscan = float(data.get("panscan", 0.0))
+            if panscan < 0.0 or panscan > 1.0:
+                return jsonify({"success": False, "error": "Invalid panscan"}), 400
+
+            mute = bool(data.get("mute", False))
+            dwidth = data.get("dwidth")
+            dheight = data.get("dheight")
+            if dwidth is not None:
+                dwidth = int(dwidth)
+                if dwidth <= 0 or dwidth > 7680:
+                    return jsonify({"success": False, "error": "Invalid dwidth"}), 400
+            if dheight is not None:
+                dheight = int(dheight)
+                if dheight <= 0 or dheight > 4320:
+                    return jsonify({"success": False, "error": "Invalid dheight"}), 400
+            if (dwidth is None) != (dheight is None):
+                return jsonify({"success": False, "error": "dwidth/dheight must be set together"}), 400
+
+            # Use a deterministic hidden profile name so we can find/update it.
+            prof_name = f"_dsign_playlist_{playlist_id}"
+            profile = db.session.query(PlaybackProfile).filter_by(profile_type="playlist", name=prof_name).first()
+            if not profile:
+                profile = PlaybackProfile(name=prof_name, profile_type="playlist", settings={})
+                db.session.add(profile)
+                db.session.flush()
+
+            profile.settings = {
+                "video-rotate": rotate,
+                "panscan": panscan,
+                "mute": mute,
+                **({"dwidth": dwidth, "dheight": dheight} if dwidth is not None and dheight is not None else {}),
+            }
+            db.session.add(profile)
+
+            if not assignment:
+                assignment = PlaylistProfileAssignment(playlist_id=playlist_id, profile_id=profile.id)
+            assignment.profile_id = profile.id
+            db.session.add(assignment)
+            db.session.commit()
+
+            return jsonify({"success": True, "profile_id": profile.id})
+
+        except Exception as e:
+            db.session.rollback()
+            current_app.logger.error(f"Error setting playlist overrides: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
 
     # ======================
     # Playback Control (/api/playback)
@@ -720,10 +1051,30 @@ def init_api_routes(api_bp, services):
                     "error": "No files provided"
                 }), 400
 
-            saved_files = file_service.handle_upload(request.files.getlist('files'))
+            # Use persisted settings.json toggle (default OFF) for transcoding.
+            try:
+                cur = settings_service.load_settings() if settings_service else {}
+                display = cur.get("display") if isinstance(cur.get("display"), dict) else {}
+                transcode_cfg = {
+                    "enabled": bool(display.get("auto_transcode_videos", False)),
+                    "resolution": str(display.get("transcode_target_resolution", "1920x1080")),
+                    "fps": int(display.get("transcode_target_fps", 25) or 25),
+                }
+            except Exception:
+                transcode_cfg = {"enabled": False, "resolution": "1920x1080", "fps": 25}
+
+            saved_files = file_service.handle_upload(request.files.getlist('files'), transcode=transcode_cfg)
+            # Return initial per-file transcode status so the UI can show "Queued…" immediately
+            # without requiring a page refresh.
+            try:
+                transcode_status = {fn: file_service.get_transcode_status(filename=fn) for fn in (saved_files or [])}
+            except Exception:
+                transcode_status = {}
             return jsonify({
                 "success": True,
-                "files": saved_files
+                "files": saved_files,
+                "transcode_status": transcode_status,
+                "transcode_enabled": bool(transcode_cfg.get("enabled")),
             })
         except Exception as e:
             current_app.logger.error(f"Error uploading media: {str(e)}")
@@ -731,6 +1082,18 @@ def init_api_routes(api_bp, services):
                 "success": False,
                 "error": str(e)
             }), 500
+
+    @api_bp.route('/media/transcode/status', methods=['GET'])
+    @login_required
+    def get_transcode_status():
+        """Return background transcode progress (percent + ETA)."""
+        try:
+            filename = request.args.get("filename")
+            status = file_service.get_transcode_status(filename=filename)
+            return jsonify({"success": True, "status": status})
+        except Exception as e:
+            current_app.logger.error(f"Error getting transcode status: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/media/upload_logo', methods=['POST'])
     @login_required
