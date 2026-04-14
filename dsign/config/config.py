@@ -82,6 +82,14 @@ class Config:
     PROCESS_TIMEOUT = 5  # сек
     MPV_GRACE_PERIOD = 0.5  # сек
 
+    # Video transcoding (to keep playback smooth on low-power devices like Pi 3B+)
+    # If enabled, uploaded videos are transcoded in background to a Pi-friendly H.264 MP4.
+    AUTO_TRANSCODE_VIDEOS = os.getenv("DSIGN_AUTO_TRANSCODE_VIDEOS", "true").lower() == "true"
+    # Target resolution for video files in playlists. Keep consistent to avoid VO reconfig.
+    TRANSCODE_TARGET_RESOLUTION = os.getenv("DSIGN_TRANSCODE_TARGET_RESOLUTION", "1920x1080")
+    # Target FPS (CFR). 25 is a safe default for many signage loops; adjust if needed.
+    TRANSCODE_TARGET_FPS = int(os.getenv("DSIGN_TRANSCODE_TARGET_FPS", "25"))
+
     # Конфигурация CORS
     CORS_ORIGINS = [
         "http://localhost:5000",
