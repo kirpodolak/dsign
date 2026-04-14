@@ -2,8 +2,8 @@
 Description=MPV Player for Digital Signage
 # Не указывать After=multi-user.target: оба юнита WantedBy=multi-user.target, а digital-signage
 # Requires=dsign-mpv — получится цикл «multi-user → signage → mpv → после multi-user».
-# MPV with DRM/KMS needs a controlling TTY/VT (--vo=gpu --gpu-context=drm or --vo=drm).
-After=network.target graphical.target getty@tty1.service
+# MPV with DRM/KMS needs a controlling TTY/VT. Pi 3B+: --vo=drm is lighter than --vo=gpu.
+After=network.target getty@tty1.service
 Conflicts=getty@tty1.service
 
 [Service]
@@ -11,9 +11,6 @@ User=dsign
 Group=video
 SupplementaryGroups=tty
 PermissionsStartOnly=true
-Environment="DISPLAY=:0"
-Environment="XDG_RUNTIME_DIR=/run/user/1000"
-Environment="PULSE_RUNTIME_PATH=/run/user/1000/pulse"
 Environment="TERM=linux"
 WorkingDirectory=/home/dsign
 
@@ -33,10 +30,13 @@ ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 
 # Основная команда запуска
 # NOTE: On Raspberry Pi OS mpv is typically at /usr/bin/mpv (not /usr/local/bin/mpv).
-# --vo=gpu --gpu-context=drm: avoids vo=drm modeset per clip (1440p/720p reconfig + pin disconnect on Pi).
-# --video-sync=display-vdrop: меньше CPU, чем display-resample (на слабом SoC меньше «вязкости»).
-# Выкл. звука по элементам плейлиста — через IPC из приложения (mute и т.д.), не через --no-audio здесь.
-ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=gpu --gpu-context=drm --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --vf=scale=1920:1080:flags=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --audio-samplerate=48000 --log-file=/var/log/dsign/mpv.log
+# --vo=drm + connector/mode: стабильный вывод на Pi 3; без vf=scale если ролики уже 1080p.
+# --drm-drmprime-video-plane=primary: избегаем overlay plane для drmprime (на Pi 3 это часто даёт pin disconnect).
+# --drm-draw-plane=primary: рисуем на primary plane для предсказуемости.
+# hwdec=v4l2m2m-copy: более предсказуемо на Pi 3B+; v4l2m2m без -copy у нас давал ещё большие тормоза.
+# --video-sync=display-vdrop: меньше CPU, чем display-resample. Звук по mute — через IPC/плейлист.
+# Без --audio-samplerate: меньше принудительного ресемплинга на ARM (при необходимости верните 48000).
+ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --no-ytdl --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --log-file=/var/log/dsign/mpv.log
 
 # Настройки перезапуска
 Restart=always
