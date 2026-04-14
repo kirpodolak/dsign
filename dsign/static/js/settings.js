@@ -41,11 +41,6 @@ export function getCSRFToken() {
 export class SettingsManager {
     constructor() {
         this.elements = {
-            idleProfileSelect: document.getElementById('idle-profile-select'),
-            applyIdleBtn: document.getElementById('apply-idle-profile'),
-            playlistSelect: document.getElementById('playlist-select'),
-            profileSelect: document.getElementById('playlist-profile-select'),
-            assignBtn: document.getElementById('assign-profile'),
             profileNameInput: document.getElementById('profile-name'),
             profileTypeSelect: document.getElementById('profile-type'),
             saveProfileBtn: document.getElementById('save-profile'),
@@ -54,21 +49,29 @@ export class SettingsManager {
             mpvSettingsForm: document.getElementById('mpv-settings-form'),
             profilesGrid: document.getElementById('profiles-grid'),
             playlistAssignments: document.getElementById('playlist-assignments'),
-            currentSettingsDisplay: document.getElementById('current-settings-display'),
+            playlistOverrides: document.getElementById('playlist-overrides'),
+            systemDashboard: document.getElementById('system-dashboard'),
             currentProfileIndicator: document.getElementById('current-profile-indicator'),
             displayModeSelect: document.getElementById('display-mode-select'),
             applyDisplayModeBtn: document.getElementById('apply-display-mode'),
             previewAutoSelect: document.getElementById('preview-auto-select'),
             applyPreviewAutoBtn: document.getElementById('apply-preview-auto'),
+            transcodeEnabled: document.getElementById('transcode-enabled'),
+            transcodeResolution: document.getElementById('transcode-resolution'),
+            transcodeFps: document.getElementById('transcode-fps'),
+            applyTranscodeBtn: document.getElementById('apply-transcode'),
+            idleLogoRotate: document.getElementById('idle-logo-rotate'),
+            applyIdleLogoRotateBtn: document.getElementById('apply-idle-logo-rotate'),
         };
 
         this.state = {
             currentProfile: null,
             currentSettings: {},
-            profiles: [],
             playlists: [],
-            assignments: {},
-            settingsSchema: {}
+            playlistOverrides: [],
+            settingsSchema: {},
+            systemStatus: null,
+            systemPollTimer: null,
         };
 
         this.init();
@@ -76,45 +79,181 @@ export class SettingsManager {
 
     async init() {
         try {
-            if (!this.elements.idleProfileSelect || !this.elements.profileSelect) {
-                throw new Error('Required DOM elements not found');
-            }
-
-            const [profiles, playlists, assignments] = await Promise.all([
-                this.loadProfiles().catch(e => {
-                    console.error('Profile load error:', e);
-                    return [];
-                }),
-                this.loadPlaylists().catch(e => {
-                    console.error('Playlist load error:', e);
-                    return [];
-                }),
-                this.loadAssignments().catch(e => {
-                    console.error('Assignment load error:', e);
-                    return {};
-                })
-            ]);
-
-            this.state.profiles = Array.isArray(profiles) ? profiles : [];
-            this.state.playlists = Array.isArray(playlists) ? playlists : [];
-            this.state.assignments = assignments && typeof assignments === 'object' ? assignments : {};
-
-            this.renderProfileSelects();
-            this.renderPlaylistAssignments();
+            await this.loadPlaylistOverrides().catch(() => []);
+            this.renderPlaylistOverrides();
 
             await Promise.all([
                 this.loadCurrentSettings(),
-                this.loadSettingsSchema()
+                this.loadSettingsSchema(),
+                this.loadIdleLogoRotation().catch(() => 0)
             ]);
 
-            this.renderCurrentSettings();
+            this.renderStatusDashboardSkeleton();
+            await this.refreshSystemStatus({ startPolling: true }).catch(() => {});
             this.renderSettingsForm();
-            this.renderProfileGrid();
             this.setupEventListeners();
 
         } catch (error) {
             console.error('Initialization error:', error);
             showAlert('Failed to initialize settings. Please try again.', 'error');
+        }
+    }
+
+    async loadPlaylistOverrides() {
+        const response = await fetch('/api/playlists/overrides', { credentials: 'include' });
+        if (!response.ok) throw new Error('Failed to load playlist overrides');
+        const data = await response.json();
+        if (!data.success) throw new Error(data.error || 'Invalid playlist overrides data');
+        this.state.playlistOverrides = Array.isArray(data.playlists) ? data.playlists : [];
+        return this.state.playlistOverrides;
+    }
+
+    async loadIdleLogoRotation() {
+        if (!this.elements.idleLogoRotate) return 0;
+        const resp = await fetch('/api/media/idle_logo_rotation', { credentials: 'include' });
+        if (!resp.ok) throw new Error('Failed to load idle logo rotation');
+        const data = await resp.json();
+        if (!data.success) throw new Error(data.error || 'Invalid idle rotation data');
+        const rotate = Number(data.rotate ?? 0);
+        this.elements.idleLogoRotate.value = String([0, 90, 180, 270].includes(rotate) ? rotate : 0);
+        return rotate;
+    }
+
+    _formatBytes(bytes) {
+        if (bytes == null || Number.isNaN(Number(bytes))) return '—';
+        const b = Number(bytes);
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let u = 0;
+        let v = b;
+        while (v >= 1024 && u < units.length - 1) {
+            v /= 1024;
+            u += 1;
+        }
+        return `${v.toFixed(u === 0 ? 0 : 1)} ${units[u]}`;
+    }
+
+    renderStatusDashboardSkeleton() {
+        if (!this.elements.systemDashboard) return;
+        this.elements.systemDashboard.innerHTML = `
+            <div class="status-tile status-tile--donut">
+              <div class="donut" data-k="diskDonut" style="--p:0;"></div>
+              <div class="status-tile__meta">
+                <p class="status-tile__title">Storage (media)</p>
+                <p class="status-tile__value" data-k="mediaFree">—</p>
+                <p class="status-tile__sub" data-k="mediaSub"></p>
+              </div>
+            </div>
+            <div class="status-tile status-tile--donut">
+              <div class="donut" data-k="tempDonut" style="--p:0;"></div>
+              <div class="status-tile__meta">
+                <p class="status-tile__title">CPU temp</p>
+                <p class="status-tile__value" data-k="cpuTemp">—</p>
+                <p class="status-tile__sub" data-k="cpuTempSub"></p>
+              </div>
+            </div>
+            <div class="status-tile status-tile--donut">
+              <div class="donut" data-k="cpuDonut" style="--p:0;"></div>
+              <div class="status-tile__meta">
+                <p class="status-tile__title">CPU usage</p>
+                <p class="status-tile__value" data-k="cpuUsage">—</p>
+                <p class="status-tile__sub" data-k="cpuUsageSub"></p>
+              </div>
+            </div>
+            <div class="status-tile">
+              <p class="status-tile__title">Audio</p>
+              <p class="status-tile__value" data-k="audioValue">—</p>
+              <div class="status-audio-row">
+                <input type="range" min="0" max="100" step="1" value="0" data-k="audioSlider" />
+                <label class="checkbox-row">
+                  <input type="checkbox" data-k="audioMute" />
+                  <span>Mute</span>
+                </label>
+                <button class="submit-btn" type="button" data-k="audioApply">Apply</button>
+              </div>
+              <p class="status-tile__sub" data-k="audioSub"></p>
+            </div>
+        `;
+    }
+
+    _qsDashboard(k) {
+        return this.elements.systemDashboard?.querySelector(`[data-k="${k}"]`);
+    }
+
+    async refreshSystemStatus({ startPolling = false } = {}) {
+        const resp = await fetch('/api/system/status', { credentials: 'include' });
+        if (!resp.ok) throw new Error('Failed to load system status');
+        const data = await resp.json();
+        if (!data.success) throw new Error(data.error || 'Invalid system status data');
+        this.state.systemStatus = data.status || null;
+        this.applySystemStatusToDashboard();
+
+        if (startPolling && !this.state.systemPollTimer) {
+            this.state.systemPollTimer = setInterval(() => {
+                this.refreshSystemStatus().catch(() => {});
+            }, 2000);
+        }
+    }
+
+    applySystemStatusToDashboard() {
+        const st = this.state.systemStatus;
+        if (!st || !this.elements.systemDashboard) return;
+
+        const media = st.storage?.media || st.storage?.root;
+        if (media) {
+            const free = this._formatBytes(media.free);
+            const total = this._formatBytes(media.total);
+            const usedPct = media.used_percent != null ? `${media.used_percent}% used` : '';
+            const pFree = this._qsDashboard('mediaFree');
+            const pSub = this._qsDashboard('mediaSub');
+            if (pFree) pFree.textContent = free;
+            if (pSub) pSub.textContent = `${usedPct} • ${total} total`;
+
+            const donut = this._qsDashboard('diskDonut');
+            if (donut && media.used_percent != null) {
+                donut.style.setProperty('--p', String(Math.max(0, Math.min(100, media.used_percent))));
+            }
+        }
+
+        const temp = st.cpu?.temp_c;
+        const pTemp = this._qsDashboard('cpuTemp');
+        if (pTemp) pTemp.textContent = (temp != null ? `${temp}°C` : '—');
+
+        const tempDonut = this._qsDashboard('tempDonut');
+        if (tempDonut && temp != null) {
+            const p = Math.max(0, Math.min(100, (Number(temp) / 85) * 100));
+            tempDonut.style.setProperty('--p', String(p));
+        }
+
+        const usage = st.cpu?.usage_percent ?? null;
+        const loadFallback = st.cpu?.load_percent ?? null;
+        const pUsage = this._qsDashboard('cpuUsage');
+        const pUsageSub = this._qsDashboard('cpuUsageSub');
+        if (pUsage) pUsage.textContent = (usage != null ? `${usage}%` : (loadFallback != null ? `${loadFallback}%` : '—'));
+        if (pUsageSub) pUsageSub.textContent = usage != null ? 'from /proc/stat' : 'estimated (loadavg)';
+        const cpuDonut = this._qsDashboard('cpuDonut');
+        if (cpuDonut) {
+            const val = usage != null ? Number(usage) : (loadFallback != null ? Number(loadFallback) : 0);
+            cpuDonut.style.setProperty('--p', String(Math.max(0, Math.min(100, val))));
+        }
+
+        const audio = st.audio || {};
+        const audioValue = this._qsDashboard('audioValue');
+        const audioSub = this._qsDashboard('audioSub');
+        const slider = this._qsDashboard('audioSlider');
+        const mute = this._qsDashboard('audioMute');
+        const available = Boolean(audio.available);
+        if (!available) {
+            if (audioValue) audioValue.textContent = 'N/A';
+            if (audioSub) audioSub.textContent = 'amixer not available';
+            if (slider) slider.disabled = true;
+            if (mute) mute.disabled = true;
+        } else {
+            const vol = audio.volume_percent;
+            const isMuted = Boolean(audio.muted);
+            if (audioValue) audioValue.textContent = (vol != null ? `${vol}%` : '—');
+            if (audioSub) audioSub.textContent = isMuted ? 'Muted' : 'On';
+            if (slider && vol != null) slider.value = String(vol);
+            if (mute) mute.checked = Boolean(isMuted);
         }
     }
 
@@ -192,6 +331,7 @@ export class SettingsManager {
                     ? data.settings 
                     : {};
                 this.state.currentProfile = data.profile || null;
+                this.applyGlobalSettingsToControls();
                 return { settings: this.state.currentSettings, profile: this.state.currentProfile };
             } else {
                 throw new Error(data.error || 'Invalid settings data');
@@ -227,115 +367,88 @@ export class SettingsManager {
         }
     }
 
-    // Rendering methods
-    renderProfileSelects() {
-        if (!this.elements.idleProfileSelect || !this.elements.profileSelect) return;
+    renderPlaylistOverrides() {
+        if (!this.elements.playlistOverrides) return;
+        const el = this.elements.playlistOverrides;
+        el.innerHTML = '';
 
-        this.elements.idleProfileSelect.innerHTML = '<option value="">Default</option>';
-        this.elements.profileSelect.innerHTML = '<option value="">Default</option>';
+        (this.state.playlistOverrides || []).forEach((row) => {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'assignment-row';
 
-        this.state.profiles
-            .filter(profile => profile && profile.profile_type === 'idle')
-            .forEach(profile => {
-                const option = document.createElement('option');
-                option.value = profile.id;
-                option.textContent = profile.name;
-                this.elements.idleProfileSelect.appendChild(option);
-            });
+            const enabled = Boolean(row.has_overrides);
+            const rotate = Number(row.overrides?.video_rotate ?? 0);
+            const panscan = Number(row.overrides?.panscan ?? 0);
+            const mute = Boolean(row.overrides?.mute ?? false);
+            const dwidth = row.overrides?.dwidth ?? null;
+            const dheight = row.overrides?.dheight ?? null;
+            const disabledClass = enabled ? '' : 'ov-muted';
+            const isDefault = !enabled;
+            const outPreset =
+                (dwidth === 1920 && dheight === 1080) ? '1080p'
+                : (dwidth === 1280 && dheight === 720) ? '720p'
+                : 'auto';
 
-        this.state.profiles
-            .filter(profile => profile && profile.profile_type === 'playlist')
-            .forEach(profile => {
-                const option = document.createElement('option');
-                option.value = profile.id;
-                option.textContent = profile.name;
-                this.elements.profileSelect.appendChild(option);
-            });
-    }
-
-    renderProfileGrid() {
-        if (!this.elements.profilesGrid) return;
-        
-        this.elements.profilesGrid.innerHTML = '';
-        
-        this.state.profiles.forEach(profile => {
-            if (!profile) return;
-            
-            const card = document.createElement('div');
-            card.className = 'profile-card';
-            card.innerHTML = `
-                <div class="profile-header">
-                    <span class="profile-name">${profile.name}</span>
-                    <span class="profile-type">${profile.profile_type}</span>
+            wrapper.innerHTML = `
+                <span class="playlist-name">
+                  ${row.playlist_name}
+                  ${isDefault ? '<span class="badge badge--default">Default</span>' : ''}
+                </span>
+                <label class="checkbox-row">
+                  <input type="checkbox" class="ov-enabled" ${enabled ? 'checked' : ''} data-playlist-id="${row.playlist_id}">
+                  <span>Override</span>
+                </label>
+                <div class="segmented ${disabledClass}" data-ov="out" data-playlist-id="${row.playlist_id}">
+                  <button type="button" class="segmented-btn ${outPreset==='auto'?'is-active':''}" data-value="auto">Auto</button>
+                  <button type="button" class="segmented-btn ${outPreset==='1080p'?'is-active':''}" data-value="1080p">1080p</button>
+                  <button type="button" class="segmented-btn ${outPreset==='720p'?'is-active':''}" data-value="720p">720p</button>
                 </div>
-                <div class="profile-actions">
-                    <button class="btn-edit" data-id="${profile.id}">✏️</button>
-                    <button class="btn-delete" data-id="${profile.id}">🗑️</button>
-                </div>
-            `;
-            this.elements.profilesGrid.appendChild(card);
-        });
-    }
-
-    renderPlaylistAssignments() {
-        if (!this.elements.playlistAssignments) return;
-        
-        this.elements.playlistAssignments.innerHTML = '';
-        
-        this.state.playlists.forEach(playlist => {
-            if (!playlist) return;
-            
-            const row = document.createElement('div');
-            row.className = 'assignment-row';
-            row.innerHTML = `
-                <span class="playlist-name">${playlist.name}</span>
-                <select class="profile-select" data-playlist-id="${playlist.id}">
-                    <option value="">Default</option>
-                    ${this.state.profiles
-                        .filter(p => p && p.profile_type === 'playlist')
-                        .map(p => `<option value="${p.id}" 
-                            ${this.state.assignments[playlist.id] === p.id ? 'selected' : ''}>
-                            ${p.name}
-                        </option>`)
-                        .join('')}
+                <select class="ov-rotate form-control ${disabledClass}" data-playlist-id="${row.playlist_id}" ${enabled ? '' : 'disabled'}>
+                  <option value="0" ${rotate===0?'selected':''}>0°</option>
+                  <option value="90" ${rotate===90?'selected':''}>90°</option>
+                  <option value="180" ${rotate===180?'selected':''}>180°</option>
+                  <option value="270" ${rotate===270?'selected':''}>270°</option>
                 </select>
-                <button class="btn-save" data-playlist-id="${playlist.id}">Save</button>
+                <select class="ov-fit form-control ${disabledClass}" data-playlist-id="${row.playlist_id}" ${enabled ? '' : 'disabled'}>
+                  <option value="0" ${panscan<=0.01?'selected':''}>Fit</option>
+                  <option value="1" ${panscan>=0.99?'selected':''}>Fill</option>
+                </select>
+                <label class="checkbox-row ${disabledClass}">
+                  <input type="checkbox" class="ov-mute" ${mute ? 'checked' : ''} data-playlist-id="${row.playlist_id}" ${enabled ? '' : 'disabled'}>
+                  <span>Mute</span>
+                </label>
+                <button class="btn-save submit-btn" data-playlist-id="${row.playlist_id}">Apply</button>
             `;
-            this.elements.playlistAssignments.appendChild(row);
+            el.appendChild(wrapper);
         });
     }
 
-    renderCurrentSettings() {
-        if (!this.elements.currentSettingsDisplay || !this.elements.currentProfileIndicator) return;
-
-        if (this.state.currentProfile) {
-            this.elements.currentProfileIndicator.innerHTML = `
-                <p>Current Profile: <strong>${this.state.currentProfile.name}</strong></p>
-                <p>Type: <strong>${this.state.currentProfile.profile_type}</strong></p>
-            `;
-        } else {
-            this.elements.currentProfileIndicator.innerHTML = '<p>Using default settings</p>';
-        }
-
-        this.elements.currentSettingsDisplay.innerHTML = `
-            <div><strong>Resolution:</strong> ${this.state.currentSettings.resolution || 'N/A'}</div>
-            <div><strong>Aspect Ratio:</strong> ${this.state.currentSettings.aspect_ratio || 'N/A'}</div>
-            <div><strong>Rotation:</strong> ${this.state.currentSettings.rotation || '0'}°</div>
-            <div><strong>Overscan:</strong> ${this.state.currentSettings.overscan ? 'On' : 'Off'}</div>
-            <div><strong>Volume:</strong> ${this.state.currentSettings.volume || '100'}%</div>
-            <div><strong>Mute:</strong> ${this.state.currentSettings.mute ? 'On' : 'Off'}</div>
-        `;
-
+    applyGlobalSettingsToControls() {
         // Display preset (global)
         const preset = this.state.currentSettings?.display?.hdmi_mode_preset || 'auto';
-        if (this.elements.displayModeSelect) {
-            this.elements.displayModeSelect.value = preset;
-        }
+        if (this.elements.displayModeSelect) this.elements.displayModeSelect.value = preset;
 
         const interval = String(this.state.currentSettings?.display?.preview_auto_interval_sec ?? 0);
-        if (this.elements.previewAutoSelect) {
-            this.elements.previewAutoSelect.value = interval;
-        }
+        if (this.elements.previewAutoSelect) this.elements.previewAutoSelect.value = interval;
+
+        // Transcode settings (global)
+        const display = this.state.currentSettings?.display || {};
+        if (this.elements.transcodeEnabled) this.elements.transcodeEnabled.value = String(Boolean(display.auto_transcode_videos));
+        if (this.elements.transcodeResolution) this.elements.transcodeResolution.value = String(display.transcode_target_resolution || '1920x1080');
+        if (this.elements.transcodeFps) this.elements.transcodeFps.value = String(display.transcode_target_fps || 25);
+
+        // Reflect hidden inputs into segmented UI
+        document.querySelectorAll('.segmented[data-seg]').forEach((seg) => {
+            const key = seg.dataset.seg;
+            let v = null;
+            if (key === 'preview_auto_interval_sec') v = this.elements.previewAutoSelect?.value;
+            if (key === 'auto_transcode_videos') v = this.elements.transcodeEnabled?.value;
+            if (key === 'transcode_target_resolution') v = this.elements.transcodeResolution?.value;
+            if (key === 'transcode_target_fps') v = this.elements.transcodeFps?.value;
+            if (key === 'hdmi_mode_preset') v = this.elements.displayModeSelect?.value;
+            if (key === 'idle_logo_rotate') v = this.elements.idleLogoRotate?.value;
+            if (v != null) this._setSegmentedValue(seg, v);
+        });
     }
 
     renderSettingsForm() {
@@ -414,16 +527,30 @@ export class SettingsManager {
 
     // Event handlers
     setupEventListeners() {
-        this.elements.applyIdleBtn?.addEventListener('click', () => this.handleApplyIdleProfile());
-        this.elements.assignBtn?.addEventListener('click', () => this.handleAssignProfile());
-        this.elements.saveProfileBtn?.addEventListener('click', () => this.handleSaveProfile());
         this.elements.mpvSettingsForm?.addEventListener('submit', (e) => this.handleMpvSettingsSubmit(e));
         this.elements.applyDisplayModeBtn?.addEventListener('click', () => this.handleApplyDisplayMode());
         this.elements.applyPreviewAutoBtn?.addEventListener('click', () => this.handleApplyPreviewAuto());
+        this.elements.applyTranscodeBtn?.addEventListener('click', () => this.handleApplyTranscode());
+        this.elements.applyIdleLogoRotateBtn?.addEventListener('click', () => this.handleApplyIdleLogoRotate());
 
         document.addEventListener('click', (e) => {
+            const segBtn = e.target?.closest?.('.segmented-btn');
+            if (segBtn) {
+                const seg = segBtn.closest('.segmented');
+                if (seg?.dataset?.seg) {
+                    this._handleSegmentedGlobal(seg, segBtn);
+                    return;
+                }
+                if (seg?.dataset?.ov === 'out') {
+                    this._handleSegmentedOverrideOut(seg, segBtn);
+                    return;
+                }
+            }
+            if (e.target?.dataset?.k === 'audioApply') {
+                this.handleApplyAudioFromDashboard();
+            }
             if (e.target.classList.contains('btn-save')) {
-                this.handleSaveAssignment(e);
+                this.handleSaveOverride(e);
             }
             
             if (e.target.classList.contains('btn-edit')) {
@@ -434,6 +561,127 @@ export class SettingsManager {
                 this.handleDeleteProfile(e);
             }
         });
+    }
+
+    _setSegmentedValue(segEl, value) {
+        segEl.querySelectorAll('.segmented-btn').forEach((b) => {
+            b.classList.toggle('is-active', String(b.dataset.value) === String(value));
+        });
+    }
+
+    _handleSegmentedGlobal(segEl, btn) {
+        const key = segEl.dataset.seg;
+        const value = btn.dataset.value;
+        this._setSegmentedValue(segEl, value);
+
+        // write into hidden inputs to keep existing handlers working
+        if (key === 'preview_auto_interval_sec' && this.elements.previewAutoSelect) this.elements.previewAutoSelect.value = String(value);
+        if (key === 'auto_transcode_videos' && this.elements.transcodeEnabled) this.elements.transcodeEnabled.value = String(value);
+        if (key === 'transcode_target_resolution' && this.elements.transcodeResolution) this.elements.transcodeResolution.value = String(value);
+        if (key === 'transcode_target_fps' && this.elements.transcodeFps) this.elements.transcodeFps.value = String(value);
+        if (key === 'hdmi_mode_preset' && this.elements.displayModeSelect) this.elements.displayModeSelect.value = String(value);
+        if (key === 'idle_logo_rotate' && this.elements.idleLogoRotate) this.elements.idleLogoRotate.value = String(value);
+    }
+
+    _handleSegmentedOverrideOut(segEl, btn) {
+        this._setSegmentedValue(segEl, btn.dataset.value);
+    }
+
+    async handleSaveOverride(e) {
+        const btn = e.target;
+        const playlistId = Number(btn?.dataset?.playlistId);
+        if (!playlistId) return;
+        try {
+            btn.disabled = true;
+            btn.textContent = 'Saving…';
+
+            const enabled = Boolean(document.querySelector(`.ov-enabled[data-playlist-id="${playlistId}"]`)?.checked);
+            const rotate = Number(document.querySelector(`.ov-rotate[data-playlist-id="${playlistId}"]`)?.value || 0);
+            const panscan = Number(document.querySelector(`.ov-fit[data-playlist-id="${playlistId}"]`)?.value || 0);
+            const mute = Boolean(document.querySelector(`.ov-mute[data-playlist-id="${playlistId}"]`)?.checked);
+            const outSeg = document.querySelector(`.segmented[data-ov="out"][data-playlist-id="${playlistId}"]`);
+            const outVal = outSeg?.querySelector('.segmented-btn.is-active')?.dataset?.value || 'auto';
+            const outMap = {
+                auto: { dwidth: null, dheight: null },
+                '1080p': { dwidth: 1920, dheight: 1080 },
+                '720p': { dwidth: 1280, dheight: 720 },
+            };
+            const out = outMap[outVal] || outMap.auto;
+
+            const resp = await fetch('/api/playlists/overrides', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCSRFToken()
+                },
+                credentials: 'include',
+                body: JSON.stringify({
+                    playlist_id: playlistId,
+                    enabled,
+                    video_rotate: rotate,
+                    panscan,
+                    mute,
+                    dwidth: out.dwidth,
+                    dheight: out.dheight,
+                })
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+
+            showAlert('Overrides saved', 'success');
+            await this.loadPlaylistOverrides();
+            this.renderPlaylistOverrides();
+        } catch (err) {
+            console.error('Override save failed:', err);
+            showAlert(err.message || 'Failed to save overrides', 'error');
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = 'Apply';
+            }
+        }
+    }
+
+    async handleApplyAudioFromDashboard() {
+        try {
+            const slider = this._qsDashboard('audioSlider');
+            const mute = this._qsDashboard('audioMute');
+            const volume = slider ? Number(slider.value) : null;
+            const muted = mute ? Boolean(mute.checked) : null;
+            const resp = await fetch('/api/system/audio', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCSRFToken() },
+                credentials: 'include',
+                body: JSON.stringify({ volume_percent: volume, muted })
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+            this.state.systemStatus = this.state.systemStatus || {};
+            this.state.systemStatus.audio = data.audio || data.audio?.audio || data.audio;
+            await this.refreshSystemStatus().catch(() => {});
+            showAlert('Audio updated', 'success');
+        } catch (err) {
+            console.error('Audio update failed:', err);
+            showAlert(err.message || 'Failed to update audio', 'error');
+        }
+    }
+
+    async handleApplyIdleLogoRotate() {
+        const val = Number(this.elements.idleLogoRotate?.value || 0);
+        try {
+            const resp = await fetch('/api/media/idle_logo_rotation', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCSRFToken() },
+                credentials: 'include',
+                body: JSON.stringify({ rotate: val })
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+            showAlert('Idle rotation applied', 'success');
+        } catch (err) {
+            console.error('Idle rotation failed:', err);
+            showAlert(err.message || 'Failed to apply idle rotation', 'error');
+        }
     }
 
     async handleApplyIdleProfile() {
@@ -453,7 +701,7 @@ export class SettingsManager {
             if (result.success) {
                 showAlert('Idle profile applied successfully', 'success');
                 await this.loadCurrentSettings();
-                this.renderCurrentSettings();
+                this.applyGlobalSettingsToControls();
             } else {
                 throw new Error(result.error || 'Failed to apply profile');
             }
@@ -615,7 +863,7 @@ export class SettingsManager {
             if (result.success) {
                 showAlert('Settings updated successfully', 'success');
                 await this.loadCurrentSettings();
-                this.renderCurrentSettings();
+                this.applyGlobalSettingsToControls();
             } else {
                 throw new Error(result.error || 'Failed to update settings');
             }
@@ -698,7 +946,7 @@ export class SettingsManager {
 
             showAlert('Auto preview updated', 'success');
             await this.loadCurrentSettings();
-            this.renderCurrentSettings();
+            this.applyGlobalSettingsToControls();
         } catch (error) {
             console.error('Error applying preview auto:', error);
             showAlert(error.message || 'Failed to update auto preview', 'error');
@@ -706,6 +954,44 @@ export class SettingsManager {
             if (this.elements.applyPreviewAutoBtn) {
                 this.elements.applyPreviewAutoBtn.disabled = false;
                 this.elements.applyPreviewAutoBtn.textContent = 'Apply';
+            }
+        }
+    }
+
+    async handleApplyTranscode() {
+        try {
+            if (!this.elements.applyTranscodeBtn) return;
+            this.elements.applyTranscodeBtn.disabled = true;
+            this.elements.applyTranscodeBtn.textContent = 'Applying…';
+
+            const enabled = Boolean(this.elements.transcodeEnabled?.checked);
+            const resolution = String(this.elements.transcodeResolution?.value || '1920x1080');
+            const fps = Number(this.elements.transcodeFps?.value || 25);
+
+            const response = await fetch('/api/settings/transcode/apply', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCSRFToken()
+                },
+                body: JSON.stringify({ enabled, resolution, fps })
+            });
+
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) {
+                throw new Error(result.error || `Failed (${response.status})`);
+            }
+
+            showAlert('Transcode settings applied', 'success');
+            await this.loadCurrentSettings();
+            this.applyGlobalSettingsToControls();
+        } catch (error) {
+            console.error('Transcode apply failed:', error);
+            showAlert(`Failed to apply transcode settings: ${error.message}`, 'error');
+        } finally {
+            if (this.elements.applyTranscodeBtn) {
+                this.elements.applyTranscodeBtn.disabled = false;
+                this.elements.applyTranscodeBtn.textContent = 'Apply';
             }
         }
     }
