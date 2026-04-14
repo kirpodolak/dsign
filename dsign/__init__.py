@@ -61,24 +61,25 @@ def create_app(config_class: Config = config) -> Flask:
     app.logger = ServiceLogger('FlaskApp')
     
     try:
-        app.logger.info("Starting application initialization")
+        # Reduce startup chatter on low-power devices; set DSIGN_LOG_LEVEL=INFO/DEBUG when needed.
+        app.logger.debug("Starting application initialization")
 
         # 1. Проверка MPV сервиса
-        app.logger.info("Checking MPV service status...")
+        app.logger.debug("Checking MPV service status...")
         if not check_mpv_service(app.logger):
             app.logger.error("MPV service is not active")
             raise RuntimeError("MPV service is not running")
-        app.logger.info("MPV service is active and ready")
+        app.logger.debug("MPV service is active and ready")
 
         # 2. Инициализация расширений
-        app.logger.info("Initializing extensions...")
+        app.logger.debug("Initializing extensions...")
         from .extensions import init_extensions, db, socketio
         init_extensions(app)
         csrf = CSRFProtect(app)
-        app.logger.info("Extensions initialized successfully")
+        app.logger.debug("Extensions initialized successfully")
 
         # 3. Инициализация сервисов
-        app.logger.info("Initializing services...")
+        app.logger.debug("Initializing services...")
         with app.app_context():
             # Import here to avoid heavy side effects during module import
             # and to prevent circular imports when tooling/scripts import dsign.* modules.
@@ -116,21 +117,21 @@ def create_app(config_class: Config = config) -> Flask:
             app.logger.error(f"Missing required services: {', '.join(missing_services)}")
             raise RuntimeError(f"Missing required services: {', '.join(missing_services)}")
         
-        app.logger.info("All required services verified and initialized")
+        app.logger.debug("All required services verified and initialized")
 
         # Настройка сервиса воспроизведения
-        app.logger.info("Configuring playback service...")
+        app.logger.debug("Configuring playback service...")
         _configure_playback_service(app)
         
         # Инициализация маршрутов
-        app.logger.info("Initializing routes...")
+        app.logger.debug("Initializing routes...")
         from .routes import init_routes
         init_routes(app, services)
-        app.logger.info("Routes initialized successfully")
+        app.logger.debug("Routes initialized successfully")
 
         # Регистрация обработчиков ошибок
         register_error_handlers(app)
-        app.logger.info("Error handlers registered")
+        app.logger.debug("Error handlers registered")
 
         app.logger.info("Application initialization completed successfully")
         return app
