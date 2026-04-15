@@ -961,24 +961,12 @@ def init_api_routes(api_bp, services):
     @login_required
     def delete_playlist(playlist_id):
         try:
-            # Получаем имя плейлиста перед удалением для удаления M3U файла
-            playlist = db.session.query(Playlist).get(playlist_id)
-            playlist_name = playlist.name if playlist else None
-
             # Удаляем привязки к профилям
             db.session.query(PlaylistProfileAssignment).filter_by(
                 playlist_id=playlist_id
             ).delete()
 
             result = playlist_service.delete_playlist(playlist_id)
-            
-            # Удаление M3U файла через сервис
-            if result.get('success') and playlist_name:
-                try:
-                    playlist_service._delete_m3u_file(playlist_name)
-                    current_app.logger.info(f"M3U file deleted for playlist {playlist_id}")
-                except Exception as e:
-                    current_app.logger.warning(f"Could not delete M3U file for playlist {playlist_id}: {str(e)}")
 
             if socketio:
                 socketio.emit('playlist_deleted', {'playlist_id': playlist_id})
