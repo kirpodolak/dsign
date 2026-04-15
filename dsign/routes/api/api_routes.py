@@ -113,6 +113,53 @@ def init_api_routes(api_bp, services):
         except Exception:
             return False
 
+    def _amixer_pick_control() -> tuple[int, str] | None:
+        """
+        Pick a reasonable ALSA simple control for volume/mute.
+        Different images/cards expose different names (e.g. Master, PCM, Headphone).
+        """
+        if not _amixer_available():
+            return None
+        try:
+            # Try default card first, then a few numeric cards.
+            preferred = ["Master", "PCM", "Headphone", "Speaker", "Line Out", "Line", "Digital", "HDMI"]
+            candidates: list[tuple[int, list[str]]] = []
+
+            def read_names(args: list[str]) -> list[str]:
+                out = subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
+                return re.findall(r"Simple mixer control '([^']+)'", out)
+
+            # Default card (no -c) is sometimes HDMI and can have no simple controls.
+            try:
+                names0 = read_names(["amixer", "scontrols"])
+                if names0:
+                    candidates.append((-1, names0))
+            except Exception:
+                pass
+
+            for card in range(0, 6):
+                try:
+                    names = read_names(["amixer", "-c", str(card), "scontrols"])
+                    if names:
+                        candidates.append((card, names))
+                except Exception:
+                    continue
+
+            if not candidates:
+                return None
+
+            # Prefer cards with preferred control names.
+            for p in preferred:
+                for card, names in candidates:
+                    if p in names:
+                        return (card if card >= 0 else 0, p) if card == -1 else (card, p)
+
+            # Fall back to first control on first candidate card.
+            card, names = candidates[0]
+            return (card if card >= 0 else 0, names[0]) if names else None
+        except Exception:
+            return None
+
     def _audio_get() -> dict:
         """
         Best-effort global audio status via ALSA amixer.
@@ -121,7 +168,11 @@ def init_api_routes(api_bp, services):
         if not _amixer_available():
             return {"available": False, "volume_percent": None, "muted": None}
         try:
-            out = subprocess.check_output(["amixer", "sget", "Master"], text=True, stderr=subprocess.STDOUT)
+            picked = _amixer_pick_control()
+            if not picked:
+                return {"available": False, "volume_percent": None, "muted": None}
+            card, ctl = picked
+            out = subprocess.check_output(["amixer", "-c", str(card), "sget", ctl], text=True, stderr=subprocess.STDOUT)
             # Parse first "[NN%]" and last "[on]/[off]"
             m_vol = re.search(r"\[(\d{1,3})%\]", out)
             m_mute = re.findall(r"\[(on|off)\]", out)
@@ -134,11 +185,15 @@ def init_api_routes(api_bp, services):
     def _audio_set(volume_percent: int | None = None, muted: bool | None = None) -> dict:
         if not _amixer_available():
             return {"available": False, "volume_percent": None, "muted": None}
+        picked = _amixer_pick_control()
+        if not picked:
+            return {"available": False, "volume_percent": None, "muted": None}
+        card, ctl = picked
         if volume_percent is not None:
             volume_percent = int(max(0, min(100, volume_percent)))
-            subprocess.run(["amixer", "sset", "Master", f"{volume_percent}%"], check=False)
+            subprocess.run(["amixer", "-c", str(card), "sset", ctl, f"{volume_percent}%"], check=False)
         if muted is not None:
-            subprocess.run(["amixer", "sset", "Master", "mute" if muted else "unmute"], check=False)
+            subprocess.run(["amixer", "-c", str(card), "sset", ctl, "mute" if muted else "unmute"], check=False)
         return _audio_get()
 
     @api_bp.route('/system/status', methods=['GET'])
@@ -301,6 +356,23 @@ def init_api_routes(api_bp, services):
                 'success': False,
                 'error': str(e)
             }), 500
+
+    @api_bp.route('/settings/mpv/global', methods=['POST'])
+    @login_required
+    def save_global_mpv():
+        """
+        Persist advanced MPV options in settings.json (mpv) and apply to the running player.
+        """
+        try:
+            data = request.get_json(silent=True) or {}
+            mpv_mgr = getattr(playback_service, '_mpv_manager', None) if playback_service else None
+            ok = settings_service.save_global_mpv_and_apply(data, mpv_mgr)
+            if ok:
+                return jsonify({'success': True})
+            return jsonify({'success': False, 'error': 'Failed to save MPV settings'}), 500
+        except Exception as e:
+            current_app.logger.error(f"Error saving global MPV settings: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
 
     @api_bp.route('/settings/display/apply', methods=['POST'])
     @login_required
@@ -1063,11 +1135,27 @@ def init_api_routes(api_bp, services):
             except Exception:
                 transcode_cfg = {"enabled": False, "resolution": "1920x1080", "fps": 25}
 
-            saved_files = file_service.handle_upload(request.files.getlist('files'), transcode=transcode_cfg)
+            files = request.files.getlist('files')
+            # Backward-compatible call: older deployments may not accept `transcode=` yet.
+            try:
+                import inspect
+                params = inspect.signature(getattr(file_service, "handle_upload")).parameters
+                if "transcode" in params:
+                    saved_files = file_service.handle_upload(files, transcode=transcode_cfg)
+                else:
+                    saved_files = file_service.handle_upload(files)
+            except Exception:
+                # Fall back to legacy call shape
+                saved_files = file_service.handle_upload(files)
             # Return initial per-file transcode status so the UI can show "Queued…" immediately
             # without requiring a page refresh.
             try:
-                transcode_status = {fn: file_service.get_transcode_status(filename=fn) for fn in (saved_files or [])}
+                # Only include non-empty statuses (videos that are queued/running/failed/completed).
+                transcode_status = {}
+                for fn in (saved_files or []):
+                    st = file_service.get_transcode_status(filename=fn)
+                    if st:
+                        transcode_status[fn] = st
             except Exception:
                 transcode_status = {}
             return jsonify({
