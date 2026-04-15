@@ -801,7 +801,10 @@ const handlers = {
                             }
                             btn.disabled = true;
 
-                            await api.deletePlaylist(playlistId);
+                            const delResult = await api.deletePlaylist(playlistId);
+                            if (delResult && typeof delResult === 'object' && delResult.success === false) {
+                                throw new Error(delResult.error || 'Delete failed');
+                            }
                             
                             // Remove the playlist row immediately
                             const row = document.querySelector(`tr[data-id="${playlistId}"]`);
