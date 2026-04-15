@@ -18,6 +18,8 @@ class SettingsService:
         "overscan": False,
         "volume": 80,
         "mute": False,
+        # Global MPV tweaks (flat keys mirrored at top level for UI / IPC).
+        "mpv": {},
         "display": {
             "theme": "light",
             "refresh_rate": 30,
@@ -27,6 +29,11 @@ class SettingsService:
             "hdmi_mode_preset": "auto",
             # Auto preview capture interval (seconds). null/0 disables.
             "preview_auto_interval_sec": 0,
+            # Video transcoding (upload-time normalization for smoother playback).
+            # Default OFF because ffmpeg is slow on Pi 3B+ and uses significant CPU.
+            "auto_transcode_videos": False,
+            "transcode_target_resolution": "1920x1080",
+            "transcode_target_fps": 25,
         }
     }
 
@@ -191,7 +198,9 @@ class SettingsService:
                             extra={'playlist_id': playback.playlist_id, 'profile_id': assignment.profile_id}
                         )
                         profile_settings = profile.settings or {}
-                        settings = {**self.DEFAULT_SETTINGS, **base_settings, **profile_settings}
+                        base_no_mpv = {k: v for k, v in base_settings.items() if k != "mpv"}
+                        mpv_layer = dict(base_settings.get("mpv") or {}) if isinstance(base_settings.get("mpv"), dict) else {}
+                        settings = {**self.DEFAULT_SETTINGS, **base_no_mpv, **mpv_layer, **profile_settings}
                         # Preserve global display settings (logo, auto preview interval, etc.)
                         base_display = base_settings.get("display") if isinstance(base_settings.get("display"), dict) else {}
                         prof_display = profile_settings.get("display") if isinstance(profile_settings.get("display"), dict) else {}
@@ -208,7 +217,9 @@ class SettingsService:
             if idle_profile:
                 self._log_info("Using idle profile settings", extra={'profile_id': idle_profile.id})
                 profile_settings = idle_profile.settings or {}
-                settings = {**self.DEFAULT_SETTINGS, **base_settings, **profile_settings}
+                base_no_mpv = {k: v for k, v in base_settings.items() if k != "mpv"}
+                mpv_layer = dict(base_settings.get("mpv") or {}) if isinstance(base_settings.get("mpv"), dict) else {}
+                settings = {**self.DEFAULT_SETTINGS, **base_no_mpv, **mpv_layer, **profile_settings}
                 base_display = base_settings.get("display") if isinstance(base_settings.get("display"), dict) else {}
                 prof_display = profile_settings.get("display") if isinstance(profile_settings.get("display"), dict) else {}
                 settings["display"] = {**base_display, **prof_display}
@@ -235,8 +246,10 @@ class SettingsService:
                     db.session.rollback()
                     self._log_warning("No active profile found, using default settings", extra={'seed_error': str(e)})
                     return {**self.DEFAULT_SETTINGS, **base_settings}
-            return {**self.DEFAULT_SETTINGS, **base_settings}
-            
+            base_no_mpv = {k: v for k, v in base_settings.items() if k != "mpv"}
+            mpv_layer = dict(base_settings.get("mpv") or {}) if isinstance(base_settings.get("mpv"), dict) else {}
+            return {**self.DEFAULT_SETTINGS, **base_no_mpv, **mpv_layer}
+
         except Exception as e:
             self._log_error(
                 f"Failed to get active profile settings: {str(e)}",
@@ -279,6 +292,36 @@ class SettingsService:
         settings = self.load_settings()
         display = settings.get("display") if isinstance(settings.get("display"), dict) else {}
         display["preview_auto_interval_sec"] = interval_sec
+        settings["display"] = display
+        self.save_settings(settings)
+        self._cached_current_settings = None
+        self._cached_current_settings_ts = 0.0
+        return settings
+
+    def set_transcode_settings(self, enabled: bool, resolution: str, fps: int) -> Dict[str, Any]:
+        """Persist upload-time transcode settings in settings.json."""
+        enabled = bool(enabled)
+        res = str(resolution or "").strip().lower()
+        if not res or "x" not in res:
+            raise ValueError("Invalid resolution")
+        try:
+            w_s, h_s = res.split("x", 1)
+            w = int(w_s)
+            h = int(h_s)
+            if w < 320 or h < 240 or w > 7680 or h > 4320:
+                raise ValueError("Invalid resolution")
+        except Exception:
+            raise ValueError("Invalid resolution")
+
+        fps_i = int(fps)
+        if fps_i not in {24, 25, 30}:
+            raise ValueError("Invalid fps")
+
+        settings = self.load_settings()
+        display = settings.get("display") if isinstance(settings.get("display"), dict) else {}
+        display["auto_transcode_videos"] = enabled
+        display["transcode_target_resolution"] = f"{w}x{h}"
+        display["transcode_target_fps"] = fps_i
         settings["display"] = display
         self.save_settings(settings)
         self._cached_current_settings = None
@@ -344,4 +387,68 @@ class SettingsService:
                           extra={'action': 'update_mpv_settings'})
             if current_app:
                 db.session.rollback()
+            return False
+
+    def expand_audio_route(self, route: str) -> Dict[str, str]:
+        """Map UI audio-route to mpv ao + audio-device (best-effort for Raspberry Pi OS)."""
+        r = (route or "auto").strip().lower()
+        if r == "hdmi":
+            return {"ao": "alsa", "audio-device": "alsa/plughw:CARD=vc4hdmi,DEV=0"}
+        if r in ("headphones", "jack", "analog"):
+            return {"ao": "alsa", "audio-device": "alsa/plughw:CARD=Headphones,DEV=0"}
+        return {"ao": "alsa", "audio-device": "auto"}
+
+    def save_global_mpv_and_apply(self, raw: Dict[str, Any], mpv_manager=None) -> bool:
+        """
+        Persist advanced MPV options under settings.json → \"mpv\" and optionally apply live via IPC.
+        """
+        try:
+            from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
+
+            out: Dict[str, Any] = {}
+            for key, meta in MPV_SETTINGS_SCHEMA.items():
+                if key not in raw:
+                    continue
+                val = raw.get(key)
+                stype = (meta or {}).get("type")
+                if stype == "boolean":
+                    out[key] = bool(val) if not isinstance(val, str) else val.lower() in ("1", "true", "yes", "on")
+                elif stype == "range":
+                    try:
+                        out[key] = float(val)
+                    except (TypeError, ValueError):
+                        continue
+                elif stype == "number":
+                    s = str(val).strip() if val is not None else ""
+                    if s == "":
+                        continue
+                    try:
+                        out[key] = int(float(s))
+                    except (TypeError, ValueError):
+                        continue
+                elif stype == "select":
+                    opts = (meta or {}).get("options") or []
+                    if val not in opts:
+                        continue
+                    out[key] = val
+                else:
+                    if val is not None and str(val).strip() != "":
+                        out[key] = val
+
+            settings = self.load_settings()
+            settings["mpv"] = out
+            self.save_settings(settings)
+            self._cached_current_settings = None
+            self._cached_current_settings_ts = 0.0
+
+            if mpv_manager is not None and hasattr(mpv_manager, "update_settings"):
+                apply_map: Dict[str, Any] = dict(out)
+                route = apply_map.pop("audio-route", None)
+                if route is not None:
+                    apply_map.update(self.expand_audio_route(str(route)))
+                mpv_manager.update_settings(apply_map)
+
+            return True
+        except Exception as e:
+            self._log_error(f"save_global_mpv_and_apply failed: {str(e)}", extra={"action": "save_global_mpv"})
             return False
