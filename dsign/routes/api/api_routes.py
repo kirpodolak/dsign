@@ -801,18 +801,13 @@ def init_api_routes(api_bp, services):
                     "error": "Missing playlist_id"
                 }), 400
 
-            # Get additional settings from request if provided
-            additional_settings = data.get('settings', {})
-        
-            # Start playback through service
-            result = playback_service.play(
-                playlist_id=data['playlist_id'],
-                settings=additional_settings
-            )
+            # Backward-compatible: older clients might send `settings`, but PlaybackService.play() doesn't take it.
+            playlist_id = int(data['playlist_id'])
+            result = playback_service.play(playlist_id=playlist_id)
         
             return jsonify({
                 "success": True,
-                "playlist_id": data['playlist_id'],
+                "playlist_id": playlist_id,
                 "details": result
             })
         except Exception as e:
