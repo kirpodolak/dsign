@@ -3,6 +3,7 @@ from pathlib import Path
 import logging
 from threading import Lock
 import subprocess
+import traceback
 from PIL import Image, UnidentifiedImageError
 from flask import current_app
 import time
@@ -50,7 +51,10 @@ class ThumbnailService:
         log_extra = {'service': 'ThumbnailService'}
         if extra:
             log_extra.update({k: v for k, v in extra.items() if k != 'module'})  # Исключаем конфликтный ключ
-        self.logger.error(message, exc_info=exc_info, extra=log_extra)
+        # ServiceLogger.error() doesn't support exc_info; include traceback explicitly.
+        if exc_info:
+            log_extra.setdefault("stack_trace", traceback.format_exc())
+        self.logger.error(message, extra=log_extra)
 
     def _log_info(self, message: str, extra: Optional[Dict[str, Any]] = None):
         """Унифицированный метод для информационных логов"""
@@ -142,7 +146,7 @@ class ThumbnailService:
             
                 if ext in ('.jpg', '.jpeg', '.png', '.webp'):
                     return self._generate_image_thumbnail(file_path, thumb_path)
-                elif ext in ('.mp4', '.avi', '.mov'):
+                elif ext in ('.mp4', '.avi', '.mov', '.mkv', '.m4v', '.webm'):
                     return self._generate_video_thumbnail(file_path, thumb_path)
             
                 self._log_warning(
@@ -213,9 +217,11 @@ class ThumbnailService:
         try:
             cmd = [
                 'ffmpeg',
-                '-i', str(source_path),
+                # Fast seek (place -ss before -i) to avoid decoding from start.
                 '-ss', '00:00:01',
-                '-vframes', '1',
+                '-i', str(source_path),
+                '-an', '-sn', '-dn',
+                '-frames:v', '1',
                 '-q:v', '2',
                 '-vf', f'scale={self.thumbnail_size[0]}:-1',
                 '-f', 'mjpeg',
@@ -260,7 +266,7 @@ class ThumbnailService:
                 "FFmpeg command failed",
                 extra={
                     'command': ' '.join(cmd),
-                    'error': e.stderr.decode(),
+                    'error': (e.stderr or b'').decode(errors='replace'),
                     'action': 'generate_video_thumbnail'
                 }
             )
