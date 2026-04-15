@@ -55,13 +55,15 @@ export class SettingsManager {
             displayModeSelect: document.getElementById('display-mode-select'),
             applyDisplayModeBtn: document.getElementById('apply-display-mode'),
             previewAutoSelect: document.getElementById('preview-auto-select'),
-            applyPreviewAutoBtn: document.getElementById('apply-preview-auto'),
             transcodeEnabled: document.getElementById('transcode-enabled'),
             transcodeResolution: document.getElementById('transcode-resolution'),
             transcodeFps: document.getElementById('transcode-fps'),
-            applyTranscodeBtn: document.getElementById('apply-transcode'),
             idleLogoRotate: document.getElementById('idle-logo-rotate'),
-            applyIdleLogoRotateBtn: document.getElementById('apply-idle-logo-rotate'),
+            mpvAdvancedBackdrop: document.getElementById('mpv-advanced-backdrop'),
+            btnMpvAdvanced: document.getElementById('btn-mpv-advanced'),
+            mpvAdvancedSave: document.getElementById('mpv-advanced-save'),
+            mpvAdvancedCancel: document.getElementById('mpv-advanced-cancel'),
+            mpvAdvancedClose: document.getElementById('mpv-advanced-close'),
         };
 
         this.state = {
@@ -72,6 +74,10 @@ export class SettingsManager {
             settingsSchema: {},
             systemStatus: null,
             systemPollTimer: null,
+            /** Local audio state during drag (0–100, muted) */
+            audioLocal: { volume: null, muted: null },
+            _overrideSaveTimers: new Map(),
+            _globalSaveTimer: null,
         };
 
         this.init();
@@ -90,6 +96,7 @@ export class SettingsManager {
 
             this.renderStatusDashboardSkeleton();
             await this.refreshSystemStatus({ startPolling: true }).catch(() => {});
+            this._bindVolumeKnob();
             this.renderSettingsForm();
             this.setupEventListeners();
 
@@ -159,20 +166,119 @@ export class SettingsManager {
                 <p class="status-tile__sub" data-k="cpuUsageSub"></p>
               </div>
             </div>
-            <div class="status-tile">
-              <p class="status-tile__title">Audio</p>
-              <p class="status-tile__value" data-k="audioValue">—</p>
-              <div class="status-audio-row">
-                <input type="range" min="0" max="100" step="1" value="0" data-k="audioSlider" />
-                <label class="checkbox-row">
-                  <input type="checkbox" data-k="audioMute" />
-                  <span>Mute</span>
-                </label>
-                <button class="submit-btn" type="button" data-k="audioApply">Apply</button>
+            <div class="status-tile status-tile--audio">
+              <div class="volume-knob" data-k="audioKnobWrap">
+                <div class="volume-knob__ticks" aria-hidden="true"></div>
+                <div class="donut" data-k="audioDonut" style="--p:0;"></div>
+                <button type="button" class="volume-knob__center" data-k="audioMuteBtn" title="Mute / unmute">M</button>
               </div>
-              <p class="status-tile__sub" data-k="audioSub"></p>
+              <div class="status-tile__meta">
+                <p class="status-tile__title">Audio</p>
+                <p class="status-tile__value" data-k="audioValue">—</p>
+                <p class="status-tile__sub" data-k="audioSub">Drag ring up/down for volume</p>
+              </div>
             </div>
         `;
+    }
+
+    _bindVolumeKnob() {
+        const wrap = this._qsDashboard('audioKnobWrap');
+        const donut = this._qsDashboard('audioDonut');
+        const btn = this._qsDashboard('audioMuteBtn');
+        if (!wrap || !donut || !btn) return;
+
+        let drag = null;
+
+        const applyLocalToUi = () => {
+            const v = this.state.audioLocal.volume;
+            const m = this.state.audioLocal.muted;
+            if (v != null) donut.style.setProperty('--p', String(Math.max(0, Math.min(100, v))));
+            const valEl = this._qsDashboard('audioValue');
+            const subEl = this._qsDashboard('audioSub');
+            if (valEl) valEl.textContent = v != null ? `${Math.round(v)}%` : '—';
+            if (subEl) subEl.textContent = m ? 'Muted' : 'Drag ring vertically to change';
+            btn.classList.toggle('is-muted', Boolean(m));
+            btn.textContent = m ? 'Ø' : 'M';
+        };
+
+        const scheduleAudioPost = () => {
+            clearTimeout(this._audioPostTimer);
+            this._audioPostTimer = setTimeout(() => this._flushAudioPost(), 450);
+        };
+
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const cur = this.state.audioLocal.muted;
+            this.state.audioLocal.muted = !cur;
+            applyLocalToUi();
+            scheduleAudioPost();
+        });
+
+        donut.addEventListener('pointerdown', (e) => {
+            if (e.target === btn || btn.contains(e.target)) return;
+            e.preventDefault();
+            let base =
+                this.state.audioLocal.volume != null
+                    ? this.state.audioLocal.volume
+                    : (() => {
+                          const raw = donut.style.getPropertyValue('--p').trim();
+                          const parsed = parseFloat(raw);
+                          if (!Number.isNaN(parsed)) return parsed;
+                          const sv = this.state.systemStatus?.audio?.volume_percent;
+                          return typeof sv === 'number' ? sv : 50;
+                      })();
+            base = Math.max(0, Math.min(100, base));
+            drag = { y0: e.clientY, v0: base };
+            donut.setPointerCapture(e.pointerId);
+        });
+
+        donut.addEventListener('pointermove', (e) => {
+            if (!drag) return;
+            e.preventDefault();
+            const dy = drag.y0 - e.clientY;
+            const v = Math.max(0, Math.min(100, drag.v0 + dy * 0.35));
+            this.state.audioLocal.volume = v;
+            if (v > 0) this.state.audioLocal.muted = false;
+            applyLocalToUi();
+            scheduleAudioPost();
+        });
+
+        const endDrag = (e) => {
+            if (!drag) return;
+            drag = null;
+            try {
+                donut.releasePointerCapture(e.pointerId);
+            } catch (_) { /* noop */ }
+        };
+        donut.addEventListener('pointerup', endDrag);
+        donut.addEventListener('pointercancel', endDrag);
+    }
+
+    async _flushAudioPost() {
+        const vol = this.state.audioLocal.volume;
+        const muted = this.state.audioLocal.muted;
+        try {
+            const resp = await fetch('/api/system/audio', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCSRFToken() },
+                credentials: 'include',
+                body: JSON.stringify({
+                    volume_percent: vol != null ? Math.round(vol) : null,
+                    muted: muted != null ? Boolean(muted) : null,
+                }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+            if (data.audio) {
+                this.state.systemStatus = this.state.systemStatus || {};
+                this.state.systemStatus.audio = data.audio;
+                this._applyAudioToDashboard(data.audio);
+            }
+            this.state.audioLocal = { volume: null, muted: null };
+        } catch (err) {
+            console.error('Audio save failed:', err);
+        }
     }
 
     _qsDashboard(k) {
@@ -185,7 +291,12 @@ export class SettingsManager {
         const data = await resp.json();
         if (!data.success) throw new Error(data.error || 'Invalid system status data');
         this.state.systemStatus = data.status || null;
-        this.applySystemStatusToDashboard();
+        this.applyNonAudioStatusToDashboard();
+        const audioIdle =
+            this.state.audioLocal.volume == null && this.state.audioLocal.muted == null;
+        if (audioIdle) {
+            this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
+        }
 
         if (startPolling && !this.state.systemPollTimer) {
             this.state.systemPollTimer = setInterval(() => {
@@ -194,7 +305,34 @@ export class SettingsManager {
         }
     }
 
-    applySystemStatusToDashboard() {
+    _applyAudioToDashboard(audio) {
+        if (!this.elements.systemDashboard) return;
+        const audioValue = this._qsDashboard('audioValue');
+        const audioSub = this._qsDashboard('audioSub');
+        const audioDonut = this._qsDashboard('audioDonut');
+        const muteBtn = this._qsDashboard('audioMuteBtn');
+        const available = Boolean(audio?.available);
+        if (!available) {
+            if (audioValue) audioValue.textContent = 'N/A';
+            if (audioSub) audioSub.textContent = 'amixer not available';
+            if (muteBtn) muteBtn.disabled = true;
+            return;
+        }
+        const vol = audio.volume_percent;
+        const isMuted = Boolean(audio.muted);
+        if (audioValue) audioValue.textContent = vol != null ? `${vol}%` : '—';
+        if (audioSub) audioSub.textContent = isMuted ? 'Muted' : 'Drag ring vertically to change';
+        if (audioDonut && vol != null) {
+            audioDonut.style.setProperty('--p', String(Math.max(0, Math.min(100, Number(vol)))));
+        }
+        if (muteBtn) {
+            muteBtn.disabled = false;
+            muteBtn.classList.toggle('is-muted', isMuted);
+            muteBtn.textContent = isMuted ? 'Ø' : 'M';
+        }
+    }
+
+    applyNonAudioStatusToDashboard() {
         const st = this.state.systemStatus;
         if (!st || !this.elements.systemDashboard) return;
 
@@ -234,26 +372,6 @@ export class SettingsManager {
         if (cpuDonut) {
             const val = usage != null ? Number(usage) : (loadFallback != null ? Number(loadFallback) : 0);
             cpuDonut.style.setProperty('--p', String(Math.max(0, Math.min(100, val))));
-        }
-
-        const audio = st.audio || {};
-        const audioValue = this._qsDashboard('audioValue');
-        const audioSub = this._qsDashboard('audioSub');
-        const slider = this._qsDashboard('audioSlider');
-        const mute = this._qsDashboard('audioMute');
-        const available = Boolean(audio.available);
-        if (!available) {
-            if (audioValue) audioValue.textContent = 'N/A';
-            if (audioSub) audioSub.textContent = 'amixer not available';
-            if (slider) slider.disabled = true;
-            if (mute) mute.disabled = true;
-        } else {
-            const vol = audio.volume_percent;
-            const isMuted = Boolean(audio.muted);
-            if (audioValue) audioValue.textContent = (vol != null ? `${vol}%` : '—');
-            if (audioSub) audioSub.textContent = isMuted ? 'Muted' : 'On';
-            if (slider && vol != null) slider.value = String(vol);
-            if (mute) mute.checked = Boolean(isMuted);
         }
     }
 
@@ -372,9 +490,24 @@ export class SettingsManager {
         const el = this.elements.playlistOverrides;
         el.innerHTML = '';
 
+        // Header (desktop)
+        const header = document.createElement('div');
+        header.className = 'playlist-ov-header';
+        header.innerHTML = `
+            <div>Playlist</div>
+            <div>Override</div>
+            <div>Output</div>
+            <div>Rotate</div>
+            <div>Fit</div>
+            <div>Mute</div>
+            <div>Status</div>
+        `;
+        el.appendChild(header);
+
         (this.state.playlistOverrides || []).forEach((row) => {
             const wrapper = document.createElement('div');
-            wrapper.className = 'assignment-row';
+            wrapper.className = 'playlist-ov-row';
+            wrapper.dataset.playlistId = String(row.playlist_id);
 
             const enabled = Boolean(row.has_overrides);
             const rotate = Number(row.overrides?.video_rotate ?? 0);
@@ -390,37 +523,117 @@ export class SettingsManager {
                 : 'auto';
 
             wrapper.innerHTML = `
-                <span class="playlist-name">
-                  ${row.playlist_name}
-                  ${isDefault ? '<span class="badge badge--default">Default</span>' : ''}
-                </span>
+                <div class="playlist-ov-name">
+                  <span class="playlist-name"></span>
+                </div>
+
                 <label class="checkbox-row">
                   <input type="checkbox" class="ov-enabled" ${enabled ? 'checked' : ''} data-playlist-id="${row.playlist_id}">
-                  <span>Override</span>
+                  <span>On</span>
                 </label>
+
                 <div class="segmented ${disabledClass}" data-ov="out" data-playlist-id="${row.playlist_id}">
                   <button type="button" class="segmented-btn ${outPreset==='auto'?'is-active':''}" data-value="auto">Auto</button>
                   <button type="button" class="segmented-btn ${outPreset==='1080p'?'is-active':''}" data-value="1080p">1080p</button>
                   <button type="button" class="segmented-btn ${outPreset==='720p'?'is-active':''}" data-value="720p">720p</button>
                 </div>
-                <select class="ov-rotate form-control ${disabledClass}" data-playlist-id="${row.playlist_id}" ${enabled ? '' : 'disabled'}>
-                  <option value="0" ${rotate===0?'selected':''}>0°</option>
-                  <option value="90" ${rotate===90?'selected':''}>90°</option>
-                  <option value="180" ${rotate===180?'selected':''}>180°</option>
-                  <option value="270" ${rotate===270?'selected':''}>270°</option>
-                </select>
-                <select class="ov-fit form-control ${disabledClass}" data-playlist-id="${row.playlist_id}" ${enabled ? '' : 'disabled'}>
-                  <option value="0" ${panscan<=0.01?'selected':''}>Fit</option>
-                  <option value="1" ${panscan>=0.99?'selected':''}>Fill</option>
-                </select>
-                <label class="checkbox-row ${disabledClass}">
-                  <input type="checkbox" class="ov-mute" ${mute ? 'checked' : ''} data-playlist-id="${row.playlist_id}" ${enabled ? '' : 'disabled'}>
-                  <span>Mute</span>
-                </label>
-                <button class="btn-save submit-btn" data-playlist-id="${row.playlist_id}">Apply</button>
+
+                <div class="segmented ${disabledClass}" data-ov="rotate" data-playlist-id="${row.playlist_id}">
+                  <button type="button" class="segmented-btn ${rotate===0?'is-active':''}" data-value="0">0°</button>
+                  <button type="button" class="segmented-btn ${rotate===90?'is-active':''}" data-value="90">90°</button>
+                  <button type="button" class="segmented-btn ${rotate===180?'is-active':''}" data-value="180">180°</button>
+                  <button type="button" class="segmented-btn ${rotate===270?'is-active':''}" data-value="270">270°</button>
+                </div>
+
+                <div class="segmented ${disabledClass}" data-ov="fit" data-playlist-id="${row.playlist_id}">
+                  <button type="button" class="segmented-btn ${panscan<=0.01?'is-active':''}" data-value="0">Fit</button>
+                  <button type="button" class="segmented-btn ${panscan>=0.99?'is-active':''}" data-value="1">Fill</button>
+                </div>
+
+                <div class="segmented ${disabledClass}" data-ov="pmute" data-playlist-id="${row.playlist_id}">
+                  <button type="button" class="segmented-btn ${!mute?'is-active':''}" data-value="0">Sound</button>
+                  <button type="button" class="segmented-btn ${mute?'is-active':''}" data-value="1">Mute</button>
+                </div>
+
+                <div class="playlist-ov-status">
+                  ${isDefault ? '<span class="badge badge--default">Default</span>' : '<span class="badge">Override</span>'}
+                </div>
             `;
             el.appendChild(wrapper);
+            const nameEl = wrapper.querySelector('.playlist-name');
+            if (nameEl) {
+                const nm = String(row.playlist_name ?? '');
+                nameEl.textContent = nm;
+                nameEl.title = nm;
+            }
         });
+
+        el.querySelectorAll('.ov-enabled').forEach((cb) => {
+            cb.addEventListener('change', () => {
+                const pid = Number(cb.dataset.playlistId);
+                if (pid) this._schedulePlaylistOverrideSave(pid);
+            });
+        });
+    }
+
+    _collectPlaylistOverridePayload(playlistId) {
+        const row = document.querySelector(`.playlist-ov-row[data-playlist-id="${playlistId}"]`);
+        if (!row) return null;
+        const enabled = Boolean(row.querySelector('.ov-enabled')?.checked);
+        const outVal = row.querySelector('.segmented[data-ov="out"] .segmented-btn.is-active')?.dataset?.value || 'auto';
+        const rotate = Number(row.querySelector('.segmented[data-ov="rotate"] .segmented-btn.is-active')?.dataset?.value || 0);
+        const fit = Number(row.querySelector('.segmented[data-ov="fit"] .segmented-btn.is-active')?.dataset?.value || 0);
+        const pmute = row.querySelector('.segmented[data-ov="pmute"] .segmented-btn.is-active')?.dataset?.value || '0';
+        const mute = pmute === '1';
+        const outMap = {
+            auto: { dwidth: null, dheight: null },
+            '1080p': { dwidth: 1920, dheight: 1080 },
+            '720p': { dwidth: 1280, dheight: 720 },
+        };
+        const out = outMap[outVal] || outMap.auto;
+        return {
+            playlist_id: playlistId,
+            enabled,
+            video_rotate: rotate,
+            panscan: fit,
+            mute,
+            dwidth: out.dwidth,
+            dheight: out.dheight,
+        };
+    }
+
+    _schedulePlaylistOverrideSave(playlistId) {
+        const timers = this.state._overrideSaveTimers;
+        const prev = timers.get(playlistId);
+        if (prev) clearTimeout(prev);
+        timers.set(
+            playlistId,
+            setTimeout(() => {
+                timers.delete(playlistId);
+                this._postPlaylistOverride(playlistId).catch((err) => {
+                    console.error(err);
+                    showAlert(err?.message || 'Failed to save playlist overrides', 'error');
+                });
+            }, 450),
+        );
+    }
+
+    async _postPlaylistOverride(playlistId) {
+        const payload = this._collectPlaylistOverridePayload(playlistId);
+        if (!payload) return;
+        const resp = await fetch('/api/playlists/overrides', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCSRFToken(),
+            },
+            credentials: 'include',
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+        await this.loadPlaylistOverrides();
+        this.renderPlaylistOverrides();
     }
 
     applyGlobalSettingsToControls() {
@@ -452,14 +665,18 @@ export class SettingsManager {
     }
 
     renderSettingsForm() {
-        if (!this.elements.settingsEditor) return;
+        const container = this.elements.mpvSettingsForm;
+        const advBtn = this.elements.btnMpvAdvanced;
+        if (!container) return;
 
-        this.elements.settingsEditor.innerHTML = '';
+        container.innerHTML = '';
 
         if (!this.state.settingsSchema || Object.keys(this.state.settingsSchema).length === 0) {
-            this.elements.settingsEditor.innerHTML = '<p class="text-muted">No settings schema available</p>';
+            if (advBtn) advBtn.hidden = true;
             return;
         }
+
+        if (advBtn) advBtn.hidden = false;
 
         for (const [key, setting] of Object.entries(this.state.settingsSchema)) {
             if (!setting || typeof setting !== 'object') continue;
@@ -473,16 +690,22 @@ export class SettingsManager {
             wrapper.appendChild(label);
 
             let input;
-            const currentValue = this.state.currentSettings[key] ?? setting.default;
+            let currentValue = this.state.currentSettings[key] ?? setting.default;
+            if (setting.type === 'number' && (currentValue === '' || currentValue === undefined)) {
+                currentValue = setting.default ?? '';
+            }
 
             switch (setting.type) {
                 case 'select':
                     input = document.createElement('select');
                     if (Array.isArray(setting.options)) {
+                        const labels = setting.option_labels && typeof setting.option_labels === 'object'
+                            ? setting.option_labels
+                            : {};
                         setting.options.forEach(opt => {
                             const option = document.createElement('option');
                             option.value = opt;
-                            option.textContent = opt;
+                            option.textContent = labels[opt] != null ? String(labels[opt]) : String(opt);
                             option.selected = opt === currentValue;
                             input.appendChild(option);
                         });
@@ -495,43 +718,79 @@ export class SettingsManager {
                     input.checked = Boolean(currentValue);
                     break;
 
-                case 'range':
+                case 'range': {
                     input = document.createElement('input');
                     input.type = 'range';
                     input.min = setting.min || 0;
                     input.max = setting.max || 100;
                     input.step = setting.step || 1;
-                    input.value = currentValue;
+                    const rv =
+                        currentValue != null && currentValue !== ''
+                            ? currentValue
+                            : (setting.default ?? setting.min ?? 0);
+                    input.value = rv;
 
                     const valueLabel = document.createElement('span');
                     valueLabel.className = 'range-value';
-                    valueLabel.textContent = currentValue;
+                    valueLabel.textContent = rv;
                     input.addEventListener('input', () => {
                         valueLabel.textContent = input.value;
                     });
                     wrapper.appendChild(valueLabel);
                     break;
+                }
 
                 default:
                     input = document.createElement('input');
                     input.type = 'text';
-                    input.value = currentValue || '';
+                    input.value =
+                        currentValue != null && currentValue !== '' ? String(currentValue) : '';
             }
 
             input.id = `setting-${key}`;
             input.dataset.settingKey = key;
+            if (setting.type === 'number') {
+                input.type = 'number';
+            }
             wrapper.appendChild(input);
-            this.elements.settingsEditor.appendChild(wrapper);
+            container.appendChild(wrapper);
         }
+    }
+
+    _closeMpvAdvancedModal() {
+        const bd = this.elements.mpvAdvancedBackdrop;
+        if (bd) bd.hidden = true;
+        document.removeEventListener('keydown', this._mpvAdvancedEscHandler);
+    }
+
+    async _openMpvAdvancedModal() {
+        await this.loadCurrentSettings().catch(() => {});
+        this.applyGlobalSettingsToControls();
+        this.renderSettingsForm();
+        const bd = this.elements.mpvAdvancedBackdrop;
+        if (bd) bd.hidden = false;
+        this._mpvAdvancedEscHandler = (ev) => {
+            if (ev.key === 'Escape') this._closeMpvAdvancedModal();
+        };
+        document.addEventListener('keydown', this._mpvAdvancedEscHandler);
     }
 
     // Event handlers
     setupEventListeners() {
-        this.elements.mpvSettingsForm?.addEventListener('submit', (e) => this.handleMpvSettingsSubmit(e));
+        this.elements.mpvSettingsForm?.addEventListener('submit', (e) => e.preventDefault());
+
+        this.elements.btnMpvAdvanced?.addEventListener('click', () => {
+            this._openMpvAdvancedModal().catch((err) => console.error(err));
+        });
+        this.elements.mpvAdvancedCancel?.addEventListener('click', () => this._closeMpvAdvancedModal());
+        this.elements.mpvAdvancedClose?.addEventListener('click', () => this._closeMpvAdvancedModal());
+        this.elements.mpvAdvancedSave?.addEventListener('click', () => this.handleMpvAdvancedSave());
+
+        this.elements.mpvAdvancedBackdrop?.addEventListener('click', (e) => {
+            if (e.target === this.elements.mpvAdvancedBackdrop) this._closeMpvAdvancedModal();
+        });
+
         this.elements.applyDisplayModeBtn?.addEventListener('click', () => this.handleApplyDisplayMode());
-        this.elements.applyPreviewAutoBtn?.addEventListener('click', () => this.handleApplyPreviewAuto());
-        this.elements.applyTranscodeBtn?.addEventListener('click', () => this.handleApplyTranscode());
-        this.elements.applyIdleLogoRotateBtn?.addEventListener('click', () => this.handleApplyIdleLogoRotate());
 
         document.addEventListener('click', (e) => {
             const segBtn = e.target?.closest?.('.segmented-btn');
@@ -541,22 +800,18 @@ export class SettingsManager {
                     this._handleSegmentedGlobal(seg, segBtn);
                     return;
                 }
-                if (seg?.dataset?.ov === 'out') {
-                    this._handleSegmentedOverrideOut(seg, segBtn);
+                const plId = seg?.dataset?.playlistId;
+                if (seg?.dataset?.ov && plId) {
+                    this._setSegmentedValue(seg, segBtn.dataset.value);
+                    this._schedulePlaylistOverrideSave(Number(plId));
                     return;
                 }
             }
-            if (e.target?.dataset?.k === 'audioApply') {
-                this.handleApplyAudioFromDashboard();
-            }
-            if (e.target.classList.contains('btn-save')) {
-                this.handleSaveOverride(e);
-            }
-            
+
             if (e.target.classList.contains('btn-edit')) {
                 this.handleEditProfile(e);
             }
-            
+
             if (e.target.classList.contains('btn-delete')) {
                 this.handleDeleteProfile(e);
             }
@@ -581,88 +836,86 @@ export class SettingsManager {
         if (key === 'transcode_target_fps' && this.elements.transcodeFps) this.elements.transcodeFps.value = String(value);
         if (key === 'hdmi_mode_preset' && this.elements.displayModeSelect) this.elements.displayModeSelect.value = String(value);
         if (key === 'idle_logo_rotate' && this.elements.idleLogoRotate) this.elements.idleLogoRotate.value = String(value);
-    }
 
-    _handleSegmentedOverrideOut(segEl, btn) {
-        this._setSegmentedValue(segEl, btn.dataset.value);
-    }
-
-    async handleSaveOverride(e) {
-        const btn = e.target;
-        const playlistId = Number(btn?.dataset?.playlistId);
-        if (!playlistId) return;
-        try {
-            btn.disabled = true;
-            btn.textContent = 'Saving…';
-
-            const enabled = Boolean(document.querySelector(`.ov-enabled[data-playlist-id="${playlistId}"]`)?.checked);
-            const rotate = Number(document.querySelector(`.ov-rotate[data-playlist-id="${playlistId}"]`)?.value || 0);
-            const panscan = Number(document.querySelector(`.ov-fit[data-playlist-id="${playlistId}"]`)?.value || 0);
-            const mute = Boolean(document.querySelector(`.ov-mute[data-playlist-id="${playlistId}"]`)?.checked);
-            const outSeg = document.querySelector(`.segmented[data-ov="out"][data-playlist-id="${playlistId}"]`);
-            const outVal = outSeg?.querySelector('.segmented-btn.is-active')?.dataset?.value || 'auto';
-            const outMap = {
-                auto: { dwidth: null, dheight: null },
-                '1080p': { dwidth: 1920, dheight: 1080 },
-                '720p': { dwidth: 1280, dheight: 720 },
-            };
-            const out = outMap[outVal] || outMap.auto;
-
-            const resp = await fetch('/api/playlists/overrides', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': getCSRFToken()
-                },
-                credentials: 'include',
-                body: JSON.stringify({
-                    playlist_id: playlistId,
-                    enabled,
-                    video_rotate: rotate,
-                    panscan,
-                    mute,
-                    dwidth: out.dwidth,
-                    dheight: out.dheight,
-                })
-            });
-            const data = await resp.json().catch(() => ({}));
-            if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
-
-            showAlert('Overrides saved', 'success');
-            await this.loadPlaylistOverrides();
-            this.renderPlaylistOverrides();
-        } catch (err) {
-            console.error('Override save failed:', err);
-            showAlert(err.message || 'Failed to save overrides', 'error');
-        } finally {
-            if (btn) {
-                btn.disabled = false;
-                btn.textContent = 'Apply';
-            }
+        if (key === 'preview_auto_interval_sec') this._debounceAutosavePreview();
+        if (key === 'auto_transcode_videos' || key === 'transcode_target_resolution' || key === 'transcode_target_fps') {
+            this._debounceAutosaveTranscode();
         }
+        if (key === 'idle_logo_rotate') this._debounceAutosaveIdle();
     }
 
-    async handleApplyAudioFromDashboard() {
+    _debounceAutosavePreview() {
+        clearTimeout(this._autosavePreviewT);
+        this._autosavePreviewT = setTimeout(() => this._savePreviewAutoSilent(), 650);
+    }
+
+    _debounceAutosaveTranscode() {
+        clearTimeout(this._autosaveTranscodeT);
+        this._autosaveTranscodeT = setTimeout(() => this._saveTranscodeSilent(), 650);
+    }
+
+    _debounceAutosaveIdle() {
+        clearTimeout(this._autosaveIdleT);
+        this._autosaveIdleT = setTimeout(() => this._saveIdleRotationSilent(), 650);
+    }
+
+    async _savePreviewAutoSilent() {
+        const intervalSec = Number(this.elements.previewAutoSelect?.value || 0);
         try {
-            const slider = this._qsDashboard('audioSlider');
-            const mute = this._qsDashboard('audioMute');
-            const volume = slider ? Number(slider.value) : null;
-            const muted = mute ? Boolean(mute.checked) : null;
-            const resp = await fetch('/api/system/audio', {
+            const response = await fetch('/api/settings/preview/auto', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCSRFToken() },
                 credentials: 'include',
-                body: JSON.stringify({ volume_percent: volume, muted })
+                body: JSON.stringify({ interval_sec: intervalSec }),
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) throw new Error(result.error || 'Failed');
+            await this.loadCurrentSettings();
+            this.applyGlobalSettingsToControls();
+        } catch (e) {
+            console.error(e);
+            showAlert(e.message || 'Preview auto-save failed', 'error');
+        }
+    }
+
+    async _saveTranscodeSilent() {
+        const enabledRaw = this.elements.transcodeEnabled?.value;
+        const enabled = enabledRaw === 'true' || enabledRaw === true;
+        const resolution = String(this.elements.transcodeResolution?.value || '1920x1080');
+        const fps = Number(this.elements.transcodeFps?.value || 25);
+        try {
+            const response = await fetch('/api/settings/transcode/apply', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCSRFToken() },
+                credentials: 'include',
+                body: JSON.stringify({ enabled, resolution, fps }),
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) throw new Error(result.error || 'Failed');
+            await this.loadCurrentSettings();
+            this.applyGlobalSettingsToControls();
+        } catch (e) {
+            console.error(e);
+            showAlert(e.message || 'Transcode auto-save failed', 'error');
+        }
+    }
+
+    async _saveIdleRotationSilent() {
+        const val = Number(this.elements.idleLogoRotate?.value || 0);
+        try {
+            const resp = await fetch('/api/media/idle_logo_rotation', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCSRFToken() },
+                credentials: 'include',
+                body: JSON.stringify({ rotate: val }),
             });
             const data = await resp.json().catch(() => ({}));
-            if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
-            this.state.systemStatus = this.state.systemStatus || {};
-            this.state.systemStatus.audio = data.audio || data.audio?.audio || data.audio;
-            await this.refreshSystemStatus().catch(() => {});
-            showAlert('Audio updated', 'success');
-        } catch (err) {
-            console.error('Audio update failed:', err);
-            showAlert(err.message || 'Failed to update audio', 'error');
+            if (!resp.ok || !data.success) throw new Error(data.error || 'Failed');
+            await this.loadCurrentSettings();
+            this.applyGlobalSettingsToControls();
+        } catch (e) {
+            console.error(e);
+            showAlert(e.message || 'Idle rotation save failed', 'error');
         }
     }
 
@@ -844,38 +1097,36 @@ export class SettingsManager {
         }
     }
 
-    async handleMpvSettingsSubmit(e) {
-        e.preventDefault();
+    async handleMpvAdvancedSave() {
         try {
-            const formData = new FormData(this.elements.mpvSettingsForm);
-            const settings = Object.fromEntries(formData.entries());
-            
-            const response = await fetch('/api/settings/update', {
+            const settings = this.collectSettingsFromForm();
+            const response = await fetch('/api/settings/mpv/global', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-CSRFToken': getCSRFToken()
+                    'X-CSRFToken': getCSRFToken(),
                 },
-                body: JSON.stringify(settings)
+                credentials: 'include',
+                body: JSON.stringify(settings),
             });
-            
-            const result = await response.json();
-            if (result.success) {
-                showAlert('Settings updated successfully', 'success');
-                await this.loadCurrentSettings();
-                this.applyGlobalSettingsToControls();
-            } else {
-                throw new Error(result.error || 'Failed to update settings');
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) {
+                throw new Error(result.error || `HTTP ${response.status}`);
             }
+            showAlert('Global MPV options saved', 'success');
+            await this.loadCurrentSettings();
+            this.applyGlobalSettingsToControls();
+            this.renderSettingsForm();
+            this._closeMpvAdvancedModal();
         } catch (error) {
-            console.error('Error updating settings:', error);
-            showAlert(error.message, 'error');
+            console.error('Error saving global MPV settings:', error);
+            showAlert(error.message || 'Failed to save', 'error');
         }
     }
 
     collectSettingsFromForm() {
         const settings = {};
-        const inputs = this.elements.settingsEditor?.querySelectorAll('[data-setting-key]') || [];
+        const inputs = this.elements.mpvSettingsForm?.querySelectorAll('[data-setting-key]') || [];
 
         inputs.forEach(input => {
             const key = input.dataset.settingKey;
@@ -923,7 +1174,7 @@ export class SettingsManager {
 
     async handleApplyPreviewAuto() {
         const intervalSec = Number(this.elements.previewAutoSelect?.value || 0);
-        const label = this.elements.previewAutoSelect?.selectedOptions?.[0]?.textContent || `${intervalSec}s`;
+        const label = `${intervalSec}s`;
         if (!confirm(`Apply auto preview: ${label}?`)) return;
 
         try {
@@ -964,7 +1215,8 @@ export class SettingsManager {
             this.elements.applyTranscodeBtn.disabled = true;
             this.elements.applyTranscodeBtn.textContent = 'Applying…';
 
-            const enabled = Boolean(this.elements.transcodeEnabled?.checked);
+            const enabledRaw = this.elements.transcodeEnabled?.value;
+            const enabled = enabledRaw === 'true' || enabledRaw === true;
             const resolution = String(this.elements.transcodeResolution?.value || '1920x1080');
             const fps = Number(this.elements.transcodeFps?.value || 25);
 
