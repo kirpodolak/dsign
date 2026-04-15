@@ -1420,7 +1420,10 @@ def init_api_routes(api_bp, services):
             return jsonify({"success": True, "skipped": False})
 
         except subprocess.TimeoutExpired as e:
-            current_app.logger.error(f"Service timeout: {e.stderr}")
+            msg = (getattr(e, "stderr", None) or getattr(e, "stdout", None) or "").strip()
+            if not msg:
+                msg = str(e) or "timeout"
+            current_app.logger.error(f"Service timeout: {msg}")
             return jsonify({"success": False, "error": "Service timeout"}), 500
     
         except subprocess.CalledProcessError as e:
