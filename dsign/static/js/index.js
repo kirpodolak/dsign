@@ -585,9 +585,10 @@ const handlers = {
             }
 
             ui.updateLogo(settings.display?.logo);
-            // Initial paint: load current preview image without implying a fresh capture
-            // (avoid updating "Last updated" from background GET refresh).
-            ui.updatePreviewImage({ updateTimestamp: false });
+            // Initial paint: if Auto preview is enabled, show that preview is refreshing.
+            // Otherwise keep the timestamp unchanged to avoid implying background capture.
+            const initPreviewAutoSec = Number(settings?.display?.preview_auto_interval_sec || 0);
+            ui.updatePreviewImage({ updateTimestamp: initPreviewAutoSec > 0 });
 
             this.setupEventListeners();
             this.startAutoRefresh();
@@ -875,7 +876,7 @@ const handlers = {
             // Do not trigger expensive capture here; only refresh the <img> src.
             // Also avoid hammering the browser cache if the user just requested a manual capture.
             if (Date.now() < (state.previewCaptureCooldownUntil || 0)) return;
-            ui.updatePreviewImage({ updateTimestamp: false });
+            ui.updatePreviewImage({ updateTimestamp: true });
         }, intervalMs);
     },
 
