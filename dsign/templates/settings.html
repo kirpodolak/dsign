@@ -8,7 +8,10 @@
 <div class="settings-container">
     <!-- Status + quick controls (todo: dashboard) -->
     <div class="settings-panel current-settings-panel">
-        <h2>Status</h2>
+        <div class="settings-panel-heading-row">
+            <h2>Status</h2>
+            <button type="button" id="btn-mpv-advanced" class="btn-mpv-advanced">Advanced MPV…</button>
+        </div>
         <div id="current-profile-indicator" class="profile-indicator" hidden></div>
         <div id="system-dashboard" class="status-dashboard">
             <!-- Filled by JS -->
@@ -25,10 +28,7 @@
                     <button type="button" class="segmented-btn" data-value="900">15m</button>
                 </div>
                 <input type="hidden" id="preview-auto-select" value="0">
-                <div class="tile-actions">
-                    <button id="apply-preview-auto" class="submit-btn" type="button">Apply</button>
-                </div>
-                <p class="text-muted">Background capture job (keep Off on Pi 3B+).</p>
+                <p class="text-muted">Background capture job (keep Off on Pi 3B+). Saves automatically.</p>
             </div>
 
             <div class="settings-tile">
@@ -52,10 +52,7 @@
                 </div>
                 <input type="hidden" id="transcode-fps" value="25">
 
-                <div class="tile-actions">
-                    <button id="apply-transcode" class="submit-btn" type="button">Apply</button>
-                </div>
-                <p class="text-muted">FFmpeg can be very slow on Pi. Use PC (HandBrake) when possible.</p>
+                <p class="text-muted">FFmpeg can be very slow on Pi. Saves automatically.</p>
             </div>
 
             <div class="settings-tile">
@@ -83,26 +80,36 @@
                     <button type="button" class="segmented-btn" data-value="270">270°</button>
                 </div>
                 <input type="hidden" id="idle-logo-rotate" value="0">
-                <div class="tile-actions">
-                    <button id="apply-idle-logo-rotate" class="submit-btn" type="button">Apply</button>
-                </div>
-                <p class="text-muted">Applies to the idle logo only.</p>
+                <p class="text-muted">Idle logo rotation. Saves automatically.</p>
             </div>
         </div>
-        
-        <!-- MPV Settings Form -->
-        <form id="mpv-settings-form">
-            <!-- Will be populated dynamically -->
-        </form>
+    </div>
+
+    <div id="mpv-advanced-backdrop" class="mpv-advanced-backdrop" hidden>
+        <div class="mpv-advanced-dialog" role="dialog" aria-modal="true" aria-labelledby="mpv-advanced-title">
+            <button type="button" class="mpv-advanced-close" id="mpv-advanced-close" aria-label="Close">&times;</button>
+            <h3 id="mpv-advanced-title">Global MPV options</h3>
+            <p class="mpv-advanced-warn">
+                Experimental options applied to the running player (global). Wrong values can break video or audio.
+                Use at your own risk. Volume is controlled from the Status card, not here.
+            </p>
+            <form id="mpv-settings-form">
+                <!-- Populated dynamically -->
+            </form>
+            <div class="mpv-advanced-actions">
+                <button type="button" id="mpv-advanced-save" class="submit-btn">Save &amp; close</button>
+                <button type="button" id="mpv-advanced-cancel" class="submit-btn submit-btn--secondary">Cancel</button>
+            </div>
+        </div>
     </div>
 
     <!-- Playlist playback settings (overrides) -->
     <div class="settings-panel playlist-overrides-panel">
         <h2>Playlist playback settings</h2>
         <p class="text-muted">
-            Use <strong>Override</strong> to enable custom playback options per playlist. Turn it off and press <strong>Apply</strong> to go back to Default.
+            Toggle <strong>Override</strong> to customize playback per playlist. Changes save automatically. Turn Override off to return to Default.
         </p>
-        <div id="playlist-overrides" class="assignment-grid">
+        <div id="playlist-overrides" class="playlist-overrides">
             <!-- Filled by JS -->
         </div>
     </div>
