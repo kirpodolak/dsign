@@ -1,135 +1,45 @@
-MPV_SETTINGS_SCHEMA = {
-    # Аудио
-    "ao": {
-        "label": "Аудиовыход (ao)",
-        "type": "select",
-        "options": ["auto", "alsa", "pulse", "jack", "sdl", "openal"]
-    },
-    "audio-device": {
-        "label": "Аудиоустройство",
-        "type": "select",
-        "options": ["auto"]  # Список можно динамически заполнять из audio-device-list
-    },
-    "volume": {
-        "label": "Громкость",
-        "type": "range",
-        "min": 0,
-        "max": 100,
-        "step": 1
-    },
-    "ao-volume": {
-        "label": "Громкость аудиовыхода",
-        "type": "range",
-        "min": 0,
-        "max": 100,
-        "step": 1
-    },
-    "mute": {
-        "label": "Без звука",
-        "type": "boolean"
-    },
+# MPV options exposed in Settings → Advanced (digital signage).
+# Global volume is controlled from the Status dashboard (amixer), not here.
+# Per-playlist rotation / mute / output use playlist overrides.
 
-    # Видео
-    "vo": {
-        "label": "Видеовыход (vo)",
+MPV_SETTINGS_SCHEMA = {
+    "audio-route": {
+        "label": "Куда выводить звук",
         "type": "select",
-        "options": ["gpu", "xv", "sdl", "drm", "vdpau", "vaapi"]
+        "options": ["auto", "hdmi", "headphones"],
+        "option_labels": {
+            "auto": "По умолчанию (система)",
+            "hdmi": "HDMI",
+            "headphones": "Аналог 3.5 мм",
+        },
     },
     "video-aspect": {
         "label": "Соотношение сторон",
         "type": "select",
-        "options": ["16:9", "4:3", "1.85:1", "2.35:1", "-1"]  # -1 для автоматического
-    },
-    "video-aspect-override": {
-        "label": "Переопределение соотношения",
-        "type": "select",
-        "options": ["no", "16:9", "4:3", "1.85:1"]
-    },
-    "video-rotate": {
-        "label": "Поворот видео",
-        "type": "select",
-        "options": [0, 90, 180, 270]
-    },
-    "dwidth": {
-        "label": "Ширина вывода",
-        "type": "number"
-    },
-    "dheight": {
-        "label": "Высота вывода",
-        "type": "number"
-    },
-    "video-scale-x": {
-        "label": "Масштаб по X",
-        "type": "range",
-        "min": 0.1,
-        "max": 10,
-        "step": 0.1
-    },
-    "video-scale-y": {
-        "label": "Масштаб по Y",
-        "type": "range",
-        "min": 0.1,
-        "max": 10,
-        "step": 0.1
-    },
-    "video-zoom": {
-        "label": "Зум видео",
-        "type": "range",
-        "min": 0.1,
-        "max": 10,
-        "step": 0.1
-    },
-    "fullscreen": {
-        "label": "Полноэкранный режим",
-        "type": "boolean"
+        "options": ["16:9", "4:3", "1.85:1", "2.35:1", "-1"],
     },
     "panscan": {
-        "label": "Panscan: 0 — вписать в экран, 1 — заполнить с обрезкой краёв",
+        "label": "Panscan (0 — вписать, 1 — заполнить с обрезкой)",
         "type": "range",
         "min": 0,
         "max": 1,
         "step": 0.05,
         "default": 0,
     },
-    "sub-visibility": {
-        "label": "Показывать субтитры",
-        "type": "boolean"
-    },
-
-    # Цветокоррекция
-    "brightness": {
-        "label": "Яркость",
+    "video-zoom": {
+        "label": "Зум видео",
         "type": "range",
-        "min": -100,
-        "max": 100,
-        "step": 1
+        "min": 0,
+        "max": 10,
+        "step": 0.1,
+        "default": 0,
     },
-    "contrast": {
-        "label": "Контраст",
-        "type": "range",
-        "min": -100,
-        "max": 100,
-        "step": 1
+    "dwidth": {
+        "label": "Ширина вывода (px, нестандартные экраны)",
+        "type": "number",
     },
-    "saturation": {
-        "label": "Насыщенность",
-        "type": "range",
-        "min": -100,
-        "max": 100,
-        "step": 1
+    "dheight": {
+        "label": "Высота вывода (px)",
+        "type": "number",
     },
-    "gamma": {
-        "label": "Гамма",
-        "type": "range",
-        "min": -100,
-        "max": 100,
-        "step": 1
-    },
-    "hue": {
-        "label": "Оттенок",
-        "type": "range",
-        "min": -100,
-        "max": 100,
-        "step": 1
-    }
 }
