@@ -228,7 +228,9 @@ export class PlaylistManager {
 
     // Предпросмотр изображений
     _getPreviewUrl(file) {
-        return `/api/media/thumbnail/${encodeURIComponent(file.filename)}`;
+        // Cache-bust slightly so if backend generates thumbnail later,
+        // the browser will eventually re-request and show it.
+        return `/api/media/thumbnail/${encodeURIComponent(file.filename)}?v=${Date.now()}`;
     }
 
     _ensureThumbObserver() {
@@ -274,9 +276,24 @@ export class PlaylistManager {
 
             const previewUrl = this._getPreviewUrl(file);
             img.dataset.src = previewUrl;
+            img.dataset.thumbRetries = '0';
             img.onerror = function () {
-                this.onerror = null;
+                const maxRetries = 6;
+                const cur = parseInt(this.dataset.thumbRetries || '0', 10) || 0;
+                if (cur >= maxRetries) {
+                    this.src = '/static/images/default-preview.jpg';
+                    return;
+                }
+                this.dataset.thumbRetries = String(cur + 1);
+                // Exponential-ish backoff: 0.8s, 1.6s, 3.2s, ...
+                const delay = Math.min(15000, Math.round(800 * Math.pow(2, cur)));
                 this.src = '/static/images/default-preview.jpg';
+                setTimeout(() => {
+                    const base = this.dataset.src || '';
+                    if (!base) return;
+                    const joiner = base.includes('?') ? '&' : '?';
+                    this.src = `${base}${joiner}r=${Date.now()}`;
+                }, delay);
             };
         
             const isVideo = file.is_video || ['.mp4', '.avi', '.mov', '.mkv'].some(ext => file.filename.toLowerCase().endsWith(ext));
@@ -312,7 +329,11 @@ export class PlaylistManager {
             this.fileListEl.appendChild(row);
 
             // Observe for lazy-load (fallback to immediate if not supported).
-            if (this._thumbObserver) {
+            // Always trigger requests for the first visible-ish chunk so user sees activity,
+            // then rely on IntersectionObserver for the rest.
+            if (index < 24) {
+                img.src = `${previewUrl}&init=1`;
+            } else if (this._thumbObserver) {
                 this._thumbObserver.observe(img);
             } else {
                 img.src = previewUrl;
