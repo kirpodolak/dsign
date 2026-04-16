@@ -902,6 +902,24 @@ const handlers = {
     }
 };
 
+// Lightweight startup timing diagnostics.
+if (typeof window !== 'undefined') {
+    const sinceNavStart = () => {
+        const nav = performance.getEntriesByType('navigation')?.[0];
+        if (nav?.startTime != null) {
+            return Math.round(performance.now() - nav.startTime);
+        }
+        return Math.round(performance.now());
+    };
+    window.addEventListener('load', () => {
+        const rowsRendered = document.querySelectorAll('#playlist-table-body tr').length;
+        console.info('[Perf][index] startup', {
+            msSinceNavigationStart: sinceNavStart(),
+            rowsRendered
+        });
+    }, { once: true });
+}
+
 // Initialize the application when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     handlers.init();

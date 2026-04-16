@@ -135,6 +135,9 @@ class PlaylistUI {
 // Основной класс плейлиста
 export class PlaylistManager {
     constructor() {
+        if (window.App?.PlaylistManager) {
+            return window.App.PlaylistManager;
+        }
         this.playlistId = getPlaylistId();
         this.fileListEl = document.getElementById('file-list');
         this.saveBtn = document.getElementById('save-playlist');
@@ -485,11 +488,12 @@ export class PlaylistManager {
 
 // Инициализация при загрузке DOM
 document.addEventListener('DOMContentLoaded', () => {
+    window.App = window.App || {};
+    if (window.App.PlaylistManager) return;
     const playlistManager = new PlaylistManager();
     
     // Для обратной совместимости
-    window.App = window.App || {};
     window.App.PlaylistManager = playlistManager;
-});
+}, { once: true });
 
 export default PlaylistManager;
