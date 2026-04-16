@@ -66,7 +66,9 @@ const state = {
     fallbackLogoUsed: false,
     fallbackPreviewUsed: false,
     isPreviewRefreshing: false,
-    previewCaptureCooldownUntil: 0
+    previewCaptureCooldownUntil: 0,
+    initStarted: false,
+    initialized: false
 };
 
 // API functions
@@ -547,6 +549,11 @@ const ui = {
 // Event handlers
 const handlers = {
     async init() {
+        if (state.initStarted || state.initialized) {
+            console.debug('Index handlers already initialized, skipping duplicate init');
+            return;
+        }
+        state.initStarted = true;
         try {
             console.log('Initializing application...');
             
@@ -593,10 +600,12 @@ const handlers = {
             this.setupEventListeners();
             this.startAutoRefresh();
             this.startPreviewRefresh(settings);
+            state.initialized = true;
 
         } catch (error) {
             console.error('Initialization failed:', error);
             showError('Failed to initialize application');
+            state.initStarted = false;
         }
     },
 
@@ -896,7 +905,7 @@ const handlers = {
 // Initialize the application when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     handlers.init();
-});
+}, { once: true });
 
 // Cleanup when page unloads
 window.addEventListener('beforeunload', () => {
