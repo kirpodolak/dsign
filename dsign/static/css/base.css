@@ -293,3 +293,86 @@ select:focus {
   color: var(--text-primary);
   box-shadow: 0 10px 30px rgba(0,0,0,0.18);
 }
+
+/* Startup network assistant (shown only when internet is offline at boot) */
+#startup-ip-badge {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 1100;
+  background: rgba(17, 24, 39, 0.92);
+  color: #fff;
+  border-radius: 10px;
+  padding: 10px 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  font-size: 0.95rem;
+}
+
+.startup-ip-label {
+  opacity: 0.85;
+  margin-right: 6px;
+}
+
+.startup-ip-value {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+#startup-network-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.startup-network-modal {
+  width: min(640px, 96vw);
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
+  padding: 16px;
+}
+
+.startup-network-modal h2 {
+  margin: 0 0 8px;
+  font-size: 1.2rem;
+}
+
+.startup-network-subtitle {
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+}
+
+#startup-network-status {
+  margin: 0 0 12px;
+  color: var(--text-secondary);
+}
+
+.startup-network-hidden-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 12px;
+  color: var(--text-secondary);
+}
+
+.startup-network-hidden-toggle input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
+#startup-network-manual-wrap {
+  margin-bottom: 8px;
+}
+
+.startup-network-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
