@@ -124,6 +124,7 @@ class SystemHandlers:
         self.socket_auth_timeout = 30  # seconds
         self.clients_lock = Lock()
         self.connected_clients = {}
+        self._app = getattr(socket_service, 'app', None)
 
     def setup_connection_handler(self):
         """Setup global connection handler"""
@@ -337,7 +338,11 @@ class SystemHandlers:
             while True:
                 self.socket_service.socketio.sleep(self.activity_check_interval)
                 try:
-                    self._check_inactive_clients()
+                    if self._app:
+                        with self._app.app_context():
+                            self._check_inactive_clients()
+                    else:
+                        self._check_inactive_clients()
                 except Exception as e:
                     self.logger.error('Activity check failed', {'error': str(e)})
 
@@ -373,15 +378,27 @@ class SystemHandlers:
             while True:
                 self.socket_service.socketio.sleep(300)  # 5 minutes
                 try:
-                    with self.clients_lock:
-                        active_sids = [sid for sid, client in self.connected_clients.items() 
-                                     if client.get('authenticated')]
-                    
-                    for sid in active_sids:
-                        self.socket_service.socketio.emit('server_version', {
-                            'version': self.server_version,
-                            'timestamp': datetime.utcnow().isoformat()
-                        }, room=sid)
+                    if self._app:
+                        with self._app.app_context():
+                            with self.clients_lock:
+                                active_sids = [sid for sid, client in self.connected_clients.items() 
+                                             if client.get('authenticated')]
+                            
+                            for sid in active_sids:
+                                self.socket_service.socketio.emit('server_version', {
+                                    'version': self.server_version,
+                                    'timestamp': datetime.utcnow().isoformat()
+                                }, room=sid)
+                    else:
+                        with self.clients_lock:
+                            active_sids = [sid for sid, client in self.connected_clients.items() 
+                                         if client.get('authenticated')]
+                        
+                        for sid in active_sids:
+                            self.socket_service.socketio.emit('server_version', {
+                                'version': self.server_version,
+                                'timestamp': datetime.utcnow().isoformat()
+                            }, room=sid)
                 except Exception as e:
                     self.logger.error('Version broadcast failed', {'error': str(e)})
 

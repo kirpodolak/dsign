@@ -74,6 +74,9 @@ export class SettingsManager {
             settingsSchema: {},
             systemStatus: null,
             systemPollTimer: null,
+            systemStatusLoading: false,
+            initStarted: false,
+            initialized: false,
             /** Local audio state during drag (0–100, muted) */
             audioLocal: { volume: null, muted: null },
             _overrideSaveTimers: new Map(),
@@ -84,6 +87,10 @@ export class SettingsManager {
     }
 
     async init() {
+        if (this.state.initStarted || this.state.initialized) {
+            return;
+        }
+        this.state.initStarted = true;
         try {
             await this.loadPlaylistOverrides().catch(() => []);
             this.renderPlaylistOverrides();
@@ -99,10 +106,13 @@ export class SettingsManager {
             this._bindVolumeKnob();
             this.renderSettingsForm();
             this.setupEventListeners();
+            this.startSystemPolling();
+            this.state.initialized = true;
 
         } catch (error) {
             console.error('Initialization error:', error);
             showAlert('Failed to initialize settings. Please try again.', 'error');
+            this.state.initStarted = false;
         }
     }
 
@@ -285,24 +295,56 @@ export class SettingsManager {
         return this.elements.systemDashboard?.querySelector(`[data-k="${k}"]`);
     }
 
-    async refreshSystemStatus({ startPolling = false } = {}) {
-        const resp = await fetch('/api/system/status', { credentials: 'include' });
-        if (!resp.ok) throw new Error('Failed to load system status');
-        const data = await resp.json();
-        if (!data.success) throw new Error(data.error || 'Invalid system status data');
-        this.state.systemStatus = data.status || null;
-        this.applyNonAudioStatusToDashboard();
-        const audioIdle =
-            this.state.audioLocal.volume == null && this.state.audioLocal.muted == null;
-        if (audioIdle) {
-            this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
-        }
+    startSystemPolling() {
+        if (this.state.systemPollTimer) return;
+        this.state.systemPollTimer = setInterval(() => {
+            if (document.hidden || this.state.systemStatusLoading) {
+                return;
+            }
+            this.refreshSystemStatus().catch(() => {});
+        }, 10000);
+    }
 
-        if (startPolling && !this.state.systemPollTimer) {
-            this.state.systemPollTimer = setInterval(() => {
-                this.refreshSystemStatus().catch(() => {});
-            }, 2000);
+    stopSystemPolling() {
+        if (this.state.systemPollTimer) {
+            clearInterval(this.state.systemPollTimer);
+            this.state.systemPollTimer = null;
         }
+    }
+
+    async refreshSystemStatus({ startPolling = false } = {}) {
+        if (startPolling) {
+            this.startSystemPolling();
+        }
+        if (this.state.systemStatusLoading) {
+            return;
+        }
+        this.state.systemStatusLoading = true;
+        try {
+            const resp = await fetch('/api/system/status', { credentials: 'include' });
+            if (!resp.ok) throw new Error('Failed to load system status');
+            const data = await resp.json();
+            if (!data.success) throw new Error(data.error || 'Invalid system status data');
+            this.state.systemStatus = data.status || null;
+            this.applyNonAudioStatusToDashboard();
+            const audioIdle =
+                this.state.audioLocal.volume == null && this.state.audioLocal.muted == null;
+            if (audioIdle) {
+                this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
+            }
+        } finally {
+            this.state.systemStatusLoading = false;
+        }
+    }
+
+    cleanup() {
+        this.stopSystemPolling();
+        clearTimeout(this._audioPostTimer);
+        clearTimeout(this._autosavePreviewT);
+        clearTimeout(this._autosaveTranscodeT);
+        clearTimeout(this._autosaveIdleT);
+        this.state._overrideSaveTimers.forEach((timerId) => clearTimeout(timerId));
+        this.state._overrideSaveTimers.clear();
     }
 
     _applyAudioToDashboard(audio) {
@@ -1251,5 +1293,9 @@ export class SettingsManager {
 
 // Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
-    new SettingsManager();
-});
+    window.App = window.App || {};
+    if (window.App.SettingsManagerInstance) return;
+    const manager = new SettingsManager();
+    window.App.SettingsManagerInstance = manager;
+    window.addEventListener('beforeunload', () => manager.cleanup(), { once: true });
+}, { once: true });
