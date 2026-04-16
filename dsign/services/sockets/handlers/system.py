@@ -513,7 +513,9 @@ class SystemHandlers:
             ValueError: If user doesn't exist or is not active
         """
         try:
-            from ..models import User  # Ленивый импорт для избежания циклических зависимостей
+            # Import from top-level models module; relative `..models` resolves to
+            # dsign.services.sockets.models which does not exist.
+            from dsign.models import User
             
             # 1. Проверка существования пользователя
             user = self.db.session.get(User, user_id)
@@ -522,21 +524,28 @@ class SystemHandlers:
                 return False
                 
             # 2. Проверка активности аккаунта
-            if not user.is_active:
+            if not getattr(user, 'is_active', True):
                 self.logger.warning(f"Inactive user attempt", extra={'user_id': user_id})
                 return False
                 
             # 3. Проверка блокировки/бана
-            if user.is_blocked:
+            if getattr(user, 'is_blocked', False):
                 self.logger.warning(f"Blocked user attempt", extra={'user_id': user_id})
                 return False
                 
             # 4. Проверка ролей/прав (пример)
-            required_roles = {'user', 'admin'}
-            if not set(user.roles) & required_roles:
-                self.logger.warning(f"Access denied - insufficient privileges", 
-                                  extra={'user_id': user_id, 'roles': user.roles})
-                return False
+            # Legacy/current User model has `is_admin` but may not define `roles`.
+            # Enforce role checks only when roles are explicitly provided.
+            roles = getattr(user, 'roles', None)
+            if roles:
+                required_roles = {'user', 'admin'}
+                normalized_roles = set(roles) if isinstance(roles, (list, tuple, set)) else {str(roles)}
+                if not normalized_roles & required_roles:
+                    self.logger.warning(
+                        "Access denied - insufficient privileges",
+                        extra={'user_id': user_id, 'roles': list(normalized_roles)}
+                    )
+                    return False
                 
             # 5. Дополнительные кастомные проверки
             if not self._check_connection_quota(user_id):
