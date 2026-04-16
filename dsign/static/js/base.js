@@ -136,6 +136,31 @@ class AppCore {
         this.onReadyCallbacks = [];
     }
 
+    resolveSocketConnection(socketUrl) {
+        const fallbackPath = this.config.socketEndpoint || '/socket.io';
+        const rawUrl = typeof socketUrl === 'string' ? socketUrl.trim() : '';
+        if (!rawUrl) {
+            return {
+                uri: window.location.origin,
+                path: fallbackPath
+            };
+        }
+
+        try {
+            const parsed = new URL(rawUrl, window.location.origin);
+            return {
+                uri: `${parsed.protocol}//${parsed.host}`,
+                path: parsed.pathname || fallbackPath
+            };
+        } catch (error) {
+            this.logger.warn('Invalid socket URL from server, using default socket path', { socketUrl: rawUrl });
+            return {
+                uri: window.location.origin,
+                path: fallbackPath
+            };
+        }
+    }
+
     async initializeWebSockets() {
         if (this.state.socketInitialized) return;
         
@@ -150,19 +175,23 @@ class AppCore {
             
             // Get fresh socket token with retry logic
             let socketToken;
+            let socketConnection = this.resolveSocketConnection(this.config.socketEndpoint);
             try {
                 const result = await this.auth.getSocketToken();
                 socketToken = result.token;
+                socketConnection = this.resolveSocketConnection(result.socket_url);
             } catch (error) {
                 this.logger.error('Failed to get socket token:', error);
                 // Refresh is cookie-based; retry once
                 await this.auth.refreshToken().catch(() => {});
                 const result = await this.auth.getSocketToken();
                 socketToken = result.token;
+                socketConnection = this.resolveSocketConnection(result.socket_url);
             }
             
             // Initialize socket connection
-            const socket = io(this.config.socketEndpoint, {
+            const socket = io(socketConnection.uri, {
+                path: socketConnection.path,
                 auth: { token: socketToken },
                 reconnection: true,
                 reconnectionAttempts: this.config.maxSocketRetries,
@@ -210,7 +239,8 @@ class AppCore {
 
         socket.on('connect_error', (error) => {
             this.logger.error('WebSocket connection error:', error);
-            if (error.message.includes('auth') || error.message.includes('token')) {
+            const message = String(error?.message || '').toLowerCase();
+            if (message.includes('auth') || message.includes('token')) {
                 this.auth.handleUnauthorized();
             }
         });
@@ -218,7 +248,8 @@ class AppCore {
 
     handleSocketError(error) {
         this.logger.error('WebSocket initialization failed:', error);
-        if (error.message.includes('auth') || error.message.includes('token')) {
+        const message = String(error?.message || '').toLowerCase();
+        if (message.includes('auth') || message.includes('token')) {
             this.auth.handleUnauthorized();
         } else {
             setTimeout(() => this.initializeWebSockets(), 5000);

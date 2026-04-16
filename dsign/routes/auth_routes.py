@@ -407,15 +407,16 @@ def get_socket_token():
 
         # Generate token with additional security claims
         payload = {
-            'sub': current_user.id,
+            'sub': str(current_user.id),
             # Backward compatibility: some socket handlers expect user_id (not sub)
             'user_id': current_user.id,
             # Required by SocketService validator (prevents token confusion with other JWT types)
-            'purpose': 'socket',
+            'purpose': 'socket_connection',
             'ip': request.remote_addr or 'unknown',
             'user_agent': request.user_agent.string[:200],
+            'iat': datetime.utcnow(),
             'exp': datetime.utcnow() + timedelta(minutes=SOCKET_TOKEN_EXPIRATION),
-            'iss': current_app.config.get('JWT_ISSUER', 'digital-signage-socket'),
+            'iss': current_app.config.get('SOCKET_JWT_ISSUER', 'media-server'),
             'aud': 'socket-client',
             'jti': os.urandom(16).hex()
         }
