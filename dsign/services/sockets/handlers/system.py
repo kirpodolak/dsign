@@ -338,6 +338,8 @@ class SystemHandlers:
             while True:
                 self.socket_service.socketio.sleep(self.activity_check_interval)
                 try:
+                    if self._app is None:
+                        self._app = getattr(self.socket_service, 'app', None)
                     if self._app:
                         with self._app.app_context():
                             self._check_inactive_clients()
@@ -378,6 +380,8 @@ class SystemHandlers:
             while True:
                 self.socket_service.socketio.sleep(300)  # 5 minutes
                 try:
+                    if self._app is None:
+                        self._app = getattr(self.socket_service, 'app', None)
                     if self._app:
                         with self._app.app_context():
                             with self.clients_lock:

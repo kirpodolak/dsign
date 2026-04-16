@@ -30,6 +30,17 @@ class AppCore {
         this.syncGlobalAppContext();
     }
 
+    isAuthPage() {
+        const path = window.location.pathname || '';
+        return path.startsWith('/api/auth/');
+    }
+
+    shouldInitializeSockets() {
+        if (this.isAuthPage()) return false;
+        const path = window.location.pathname || '';
+        return path === '/' || path.startsWith('/playlist/');
+    }
+
     onReady(callback) {
         if (this.initialized && typeof callback === 'function') {
             try {
@@ -114,8 +125,10 @@ class AppCore {
                 return;
             }
 
-            // Initialize WebSocket with delay
-            setTimeout(() => this.initializeWebSockets(), 500);
+            // Initialize WebSocket only on pages that currently use realtime updates.
+            if (this.shouldInitializeSockets()) {
+                setTimeout(() => this.initializeWebSockets(), 500);
+            }
             
             // Set up periodic auth checks for non-login pages
             if (!isLoginPage) {
