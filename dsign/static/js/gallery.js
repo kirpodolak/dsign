@@ -55,6 +55,9 @@ const GALLERY_CONFIG = {
 
 class MediaGallery {
   constructor(config = GALLERY_CONFIG) {
+    if (MediaGallery.instance) {
+      return MediaGallery.instance;
+    }
     this.config = config;
     this.elements = {};
     this.currentFiles = [];
@@ -65,6 +68,7 @@ class MediaGallery {
     this.initElements();
     this.initEventListeners();
     this.loadMediaFiles();
+    MediaGallery.instance = this;
   }
 
   initElements() {
@@ -765,6 +769,9 @@ class MediaGallery {
 // Initialize the gallery
 function initializeGallery() {
   try {
+    if (window.App?.MediaGallery) {
+      return window.App.MediaGallery;
+    }
     const gallery = new MediaGallery();
     window.App = window.App || {};
     window.App.MediaGallery = gallery;
