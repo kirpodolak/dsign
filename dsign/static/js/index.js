@@ -66,7 +66,9 @@ const state = {
     fallbackLogoUsed: false,
     fallbackPreviewUsed: false,
     isPreviewRefreshing: false,
-    previewCaptureCooldownUntil: 0
+    previewCaptureCooldownUntil: 0,
+    initStarted: false,
+    initialized: false
 };
 
 // API functions
@@ -547,6 +549,11 @@ const ui = {
 // Event handlers
 const handlers = {
     async init() {
+        if (state.initStarted || state.initialized) {
+            console.debug('Index handlers already initialized, skipping duplicate init');
+            return;
+        }
+        state.initStarted = true;
         try {
             console.log('Initializing application...');
             
@@ -593,10 +600,12 @@ const handlers = {
             this.setupEventListeners();
             this.startAutoRefresh();
             this.startPreviewRefresh(settings);
+            state.initialized = true;
 
         } catch (error) {
             console.error('Initialization failed:', error);
             showError('Failed to initialize application');
+            state.initStarted = false;
         }
     },
 
@@ -893,10 +902,28 @@ const handlers = {
     }
 };
 
+// Lightweight startup timing diagnostics.
+if (typeof window !== 'undefined') {
+    const sinceNavStart = () => {
+        const nav = performance.getEntriesByType('navigation')?.[0];
+        if (nav?.startTime != null) {
+            return Math.round(performance.now() - nav.startTime);
+        }
+        return Math.round(performance.now());
+    };
+    window.addEventListener('load', () => {
+        const rowsRendered = document.querySelectorAll('#playlist-table-body tr').length;
+        console.info('[Perf][index] startup', {
+            msSinceNavigationStart: sinceNavStart(),
+            rowsRendered
+        });
+    }, { once: true });
+}
+
 // Initialize the application when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     handlers.init();
-});
+}, { once: true });
 
 // Cleanup when page unloads
 window.addEventListener('beforeunload', () => {
