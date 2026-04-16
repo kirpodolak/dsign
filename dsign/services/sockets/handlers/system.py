@@ -518,7 +518,10 @@ class SystemHandlers:
             from dsign.models import User
             
             # 1. Проверка существования пользователя
-            user = self.db.session.get(User, user_id)
+            db_handle = getattr(self.socket_service, 'db', None)
+            if db_handle is None or not hasattr(db_handle, 'session'):
+                raise ValueError('Database session unavailable')
+            user = db_handle.session.get(User, user_id)
             if not user:
                 self.logger.warning(f"User not found", extra={'user_id': user_id})
                 return False
