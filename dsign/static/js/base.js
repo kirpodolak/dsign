@@ -11,6 +11,7 @@ class AppCore {
     constructor() {
         this.initializationStarted = false;
         this.initialized = false;
+        this.socketClientLoaderPromise = null;
         this.onReadyCallbacks = [];
         this.config = {
             debug: window.location.hostname === 'localhost',
@@ -45,6 +46,29 @@ class AppCore {
     shouldRunPeriodicAuthChecks() {
         // Keep periodic auth checks only where they are truly needed.
         return this.shouldInitializeSockets();
+    }
+
+    async ensureSocketClientLoaded() {
+        if (typeof window.io === 'function') {
+            return true;
+        }
+        if (!this.socketClientLoaderPromise) {
+            this.socketClientLoaderPromise = import('./utils/socket.io.esm.min.js')
+                .then((module) => {
+                    const socketIoFactory = module?.io || module?.default?.io || module?.default;
+                    if (typeof socketIoFactory !== 'function') {
+                        throw new Error('Socket.IO module does not export io factory');
+                    }
+                    window.io = socketIoFactory;
+                    return true;
+                })
+                .catch((error) => {
+                    this.logger.error('Failed to load Socket.IO client:', error);
+                    this.socketClientLoaderPromise = null;
+                    return false;
+                });
+        }
+        return this.socketClientLoaderPromise;
     }
 
     onReady(callback) {
@@ -225,8 +249,9 @@ class AppCore {
         if (this.state.socketInitialized) return;
         
         try {
-            if (typeof window.io !== 'function') {
-                this.logger.warn('Socket.IO client not ready, delaying websocket init');
+            const socketClientReady = await this.ensureSocketClientLoaded();
+            if (!socketClientReady || typeof window.io !== 'function') {
+                this.logger.warn('Socket.IO client unavailable, skipping websocket init');
                 setTimeout(() => this.initializeWebSockets(), 500);
                 return;
             }
