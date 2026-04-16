@@ -124,6 +124,7 @@ class SystemHandlers:
         self.socket_auth_timeout = 30  # seconds
         self.clients_lock = Lock()
         self.connected_clients = {}
+        self._app = getattr(socket_service, 'app', None)
 
     def setup_connection_handler(self):
         """Setup global connection handler"""
@@ -254,8 +255,13 @@ class SystemHandlers:
         })
         self.cleanup_client(sid)
 
-    def cleanup_client(self, sid: str):
-        """Clean up client resources"""
+    def cleanup_client(self, sid: str, disconnect_socket: bool = False, namespace: Optional[str] = None):
+        """Clean up client resources.
+
+        `flask_socketio.disconnect()` depends on request context and cannot be used
+        from background tasks. Use the underlying server disconnect API when needed.
+        """
+        client_info = None
         with self.clients_lock:
             if sid in self.connected_clients:
                 client_info = self.connected_clients[sid]
@@ -265,7 +271,16 @@ class SystemHandlers:
                     'duration': (datetime.utcnow() - client_info['connected_at']).total_seconds()
                 })
                 del self.connected_clients[sid]
-                disconnect(sid)
+        if disconnect_socket:
+            ns = namespace or (client_info or {}).get('namespace') or '/'
+            try:
+                self.socket_service.socketio.server.disconnect(sid, namespace=ns)
+            except Exception as e:
+                self.logger.warning('Socket disconnect failed during cleanup', {
+                    'sid': sid,
+                    'namespace': ns,
+                    'error': str(e)
+                })
 
     def handle_ping(self, data=None):
         """Handle ping request"""
@@ -337,7 +352,13 @@ class SystemHandlers:
             while True:
                 self.socket_service.socketio.sleep(self.activity_check_interval)
                 try:
-                    self._check_inactive_clients()
+                    if self._app is None:
+                        self._app = getattr(self.socket_service, 'app', None)
+                    if self._app:
+                        with self._app.app_context():
+                            self._check_inactive_clients()
+                    else:
+                        self._check_inactive_clients()
                 except Exception as e:
                     self.logger.error('Activity check failed', {'error': str(e)})
 
@@ -365,7 +386,7 @@ class SystemHandlers:
                 'message': reason,
                 'timestamp': now.isoformat()
             }, room=sid)
-            self.cleanup_client(sid)
+            self.cleanup_client(sid, disconnect_socket=True)
 
     def start_version_broadcaster(self):
         """Start periodic version broadcasting"""
@@ -373,15 +394,29 @@ class SystemHandlers:
             while True:
                 self.socket_service.socketio.sleep(300)  # 5 minutes
                 try:
-                    with self.clients_lock:
-                        active_sids = [sid for sid, client in self.connected_clients.items() 
-                                     if client.get('authenticated')]
-                    
-                    for sid in active_sids:
-                        self.socket_service.socketio.emit('server_version', {
-                            'version': self.server_version,
-                            'timestamp': datetime.utcnow().isoformat()
-                        }, room=sid)
+                    if self._app is None:
+                        self._app = getattr(self.socket_service, 'app', None)
+                    if self._app:
+                        with self._app.app_context():
+                            with self.clients_lock:
+                                active_sids = [sid for sid, client in self.connected_clients.items() 
+                                             if client.get('authenticated')]
+                            
+                            for sid in active_sids:
+                                self.socket_service.socketio.emit('server_version', {
+                                    'version': self.server_version,
+                                    'timestamp': datetime.utcnow().isoformat()
+                                }, room=sid)
+                    else:
+                        with self.clients_lock:
+                            active_sids = [sid for sid, client in self.connected_clients.items() 
+                                         if client.get('authenticated')]
+                        
+                        for sid in active_sids:
+                            self.socket_service.socketio.emit('server_version', {
+                                'version': self.server_version,
+                                'timestamp': datetime.utcnow().isoformat()
+                            }, room=sid)
                 except Exception as e:
                     self.logger.error('Version broadcast failed', {'error': str(e)})
 
@@ -513,30 +548,42 @@ class SystemHandlers:
             ValueError: If user doesn't exist or is not active
         """
         try:
-            from ..models import User  # Ленивый импорт для избежания циклических зависимостей
+            # Import from top-level models module; relative `..models` resolves to
+            # dsign.services.sockets.models which does not exist.
+            from dsign.models import User
             
             # 1. Проверка существования пользователя
-            user = self.db.session.get(User, user_id)
+            db_handle = getattr(self.socket_service, 'db', None)
+            if db_handle is None or not hasattr(db_handle, 'session'):
+                raise ValueError('Database session unavailable')
+            user = db_handle.session.get(User, user_id)
             if not user:
                 self.logger.warning(f"User not found", extra={'user_id': user_id})
                 return False
                 
             # 2. Проверка активности аккаунта
-            if not user.is_active:
+            if not getattr(user, 'is_active', True):
                 self.logger.warning(f"Inactive user attempt", extra={'user_id': user_id})
                 return False
                 
             # 3. Проверка блокировки/бана
-            if user.is_blocked:
+            if getattr(user, 'is_blocked', False):
                 self.logger.warning(f"Blocked user attempt", extra={'user_id': user_id})
                 return False
                 
             # 4. Проверка ролей/прав (пример)
-            required_roles = {'user', 'admin'}
-            if not set(user.roles) & required_roles:
-                self.logger.warning(f"Access denied - insufficient privileges", 
-                                  extra={'user_id': user_id, 'roles': user.roles})
-                return False
+            # Legacy/current User model has `is_admin` but may not define `roles`.
+            # Enforce role checks only when roles are explicitly provided.
+            roles = getattr(user, 'roles', None)
+            if roles:
+                required_roles = {'user', 'admin'}
+                normalized_roles = set(roles) if isinstance(roles, (list, tuple, set)) else {str(roles)}
+                if not normalized_roles & required_roles:
+                    self.logger.warning(
+                        "Access denied - insufficient privileges",
+                        extra={'user_id': user_id, 'roles': list(normalized_roles)}
+                    )
+                    return False
                 
             # 5. Дополнительные кастомные проверки
             if not self._check_connection_quota(user_id):
