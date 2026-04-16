@@ -11,6 +11,7 @@ class AppCore {
     constructor() {
         this.initializationStarted = false;
         this.initialized = false;
+        this.socketClientLoaderPromise = null;
         this.onReadyCallbacks = [];
         this.config = {
             debug: window.location.hostname === 'localhost',
@@ -23,6 +24,7 @@ class AppCore {
         this.state = {
             navigationInProgress: false,
             authChecked: false,
+            isAuthenticated: null,
             socketInitialized: false,
             socketConnected: false
         };
@@ -39,6 +41,34 @@ class AppCore {
         if (this.isAuthPage()) return false;
         const path = window.location.pathname || '';
         return path === '/' || path.startsWith('/playlist/');
+    }
+
+    shouldRunPeriodicAuthChecks() {
+        // Keep periodic auth checks only where they are truly needed.
+        return this.shouldInitializeSockets();
+    }
+
+    async ensureSocketClientLoaded() {
+        if (typeof window.io === 'function') {
+            return true;
+        }
+        if (!this.socketClientLoaderPromise) {
+            this.socketClientLoaderPromise = import('./utils/socket.io.esm.min.js')
+                .then((module) => {
+                    const socketIoFactory = module?.io || module?.default?.io || module?.default;
+                    if (typeof socketIoFactory !== 'function') {
+                        throw new Error('Socket.IO module does not export io factory');
+                    }
+                    window.io = socketIoFactory;
+                    return true;
+                })
+                .catch((error) => {
+                    this.logger.error('Failed to load Socket.IO client:', error);
+                    this.socketClientLoaderPromise = null;
+                    return false;
+                });
+        }
+        return this.socketClientLoaderPromise;
     }
 
     onReady(callback) {
@@ -119,6 +149,8 @@ class AppCore {
             // Check authentication state
             const isLoginPage = window.location.pathname.includes('/api/auth/login');
             const isAuth = await this.auth.checkAuth().catch(() => false);
+            this.state.authChecked = true;
+            this.state.isAuthenticated = isAuth;
             if (!isAuth && !isLoginPage) {
                 this.logger.warn('Not authenticated - redirecting to login');
                 this.auth.handleUnauthorized();
@@ -130,8 +162,8 @@ class AppCore {
                 setTimeout(() => this.initializeWebSockets(), 500);
             }
             
-            // Set up periodic auth checks for non-login pages
-            if (!isLoginPage) {
+            // Set up periodic auth checks only for realtime pages.
+            if (!isLoginPage && this.shouldRunPeriodicAuthChecks()) {
                 this.logger.debug('Setting up periodic auth checks');
                 
                 setInterval(async () => {
@@ -217,8 +249,20 @@ class AppCore {
         if (this.state.socketInitialized) return;
         
         try {
-            const isAuth = await this.auth.checkAuth();
-            if (!isAuth) {
+            const socketClientReady = await this.ensureSocketClientLoaded();
+            if (!socketClientReady || typeof window.io !== 'function') {
+                this.logger.warn('Socket.IO client unavailable, skipping websocket init');
+                setTimeout(() => this.initializeWebSockets(), 500);
+                return;
+            }
+
+            if (!this.state.authChecked) {
+                const isAuth = await this.auth.checkAuth();
+                this.state.authChecked = true;
+                this.state.isAuthenticated = isAuth;
+            }
+
+            if (this.state.isAuthenticated === false) {
                 this.logger.warn('WebSocket init aborted - not authenticated');
                 return;
             }
@@ -312,21 +356,101 @@ class AppCore {
 class AuthService {
     constructor() {
         this.logger = new AppLogger('AuthService');
+        this._authCacheTtlMs = 15000;
+        this._authCacheStorageKey = 'dsign_auth_status_cache';
+        this._authCheckPromise = null;
+        this._authCache = {
+            value: null,
+            timestamp: 0
+        };
     }
 
     getApiClient() {
         return window.App?.API || window.App?.api || null;
     }
 
-    async checkAuth() {
+    getCachedAuthFromStorage() {
         try {
-            const apiClient = this.getApiClient();
-            if (!apiClient || typeof apiClient.fetch !== 'function') {
-                throw new Error('API client not available');
+            const raw = sessionStorage.getItem(this._authCacheStorageKey);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (typeof parsed?.value !== 'boolean' || typeof parsed?.timestamp !== 'number') {
+                return null;
             }
-            const response = await apiClient.fetch('/api/auth/status', { method: 'GET' });
-            const data = await response.json().catch(() => ({}));
-            return Boolean(data?.authenticated);
+            return parsed;
+        } catch {
+            return null;
+        }
+    }
+
+    setCachedAuth(value) {
+        const entry = {
+            value: Boolean(value),
+            timestamp: Date.now()
+        };
+        this._authCache = entry;
+        try {
+            sessionStorage.setItem(this._authCacheStorageKey, JSON.stringify(entry));
+        } catch {
+            // ignore storage failures (private mode / quota)
+        }
+    }
+
+    clearCachedAuth() {
+        this._authCache = { value: null, timestamp: 0 };
+        try {
+            sessionStorage.removeItem(this._authCacheStorageKey);
+        } catch {
+            // ignore storage failures
+        }
+    }
+
+    async checkAuth() {
+        const now = Date.now();
+        const isMemoryCacheFresh =
+            this._authCache.timestamp &&
+            (now - this._authCache.timestamp) < this._authCacheTtlMs &&
+            typeof this._authCache.value === 'boolean';
+        if (isMemoryCacheFresh) {
+            return this._authCache.value;
+        }
+
+        const storedCache = this.getCachedAuthFromStorage();
+        const isStorageCacheFresh =
+            storedCache &&
+            (now - storedCache.timestamp) < this._authCacheTtlMs &&
+            typeof storedCache.value === 'boolean';
+        if (isStorageCacheFresh) {
+            this._authCache = storedCache;
+            return storedCache.value;
+        }
+
+        if (this._authCheckPromise) {
+            return this._authCheckPromise;
+        }
+
+        this._authCheckPromise = (async () => {
+            try {
+                const apiClient = this.getApiClient();
+                if (!apiClient || typeof apiClient.fetch !== 'function') {
+                    throw new Error('API client not available');
+                }
+                const response = await apiClient.fetch('/api/auth/status', { method: 'GET' });
+                const data = await response.json().catch(() => ({}));
+                const isAuthenticated = Boolean(data?.authenticated);
+                this.setCachedAuth(isAuthenticated);
+                return isAuthenticated;
+            } catch (error) {
+                this.setCachedAuth(false);
+                this.logger.warn('Auth check failed:', error);
+                return false;
+            } finally {
+                this._authCheckPromise = null;
+            }
+        })();
+
+        try {
+            return await this._authCheckPromise;
         } catch (error) {
             this.logger.warn('Auth check failed:', error);
             return false;
@@ -346,6 +470,7 @@ class AuthService {
             
             if (!response.ok) throw new Error('Token refresh failed');
             await response.json().catch(() => ({}));
+            this.setCachedAuth(true);
             return true;
         } catch (error) {
             this.logger.error('Token refresh failed:', error);
@@ -365,6 +490,7 @@ class AuthService {
         if (appState.navigationInProgress) return;
         
         appState.navigationInProgress = true;
+        this.clearCachedAuth();
         clearToken();
         
         if (window.appSocket) {
