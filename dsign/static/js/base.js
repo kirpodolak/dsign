@@ -55,6 +55,17 @@ class AppCore {
             this.api = new APIService();
             this.auth = new AuthService();
             this.alerts = new AlertSystem();
+
+            // Ensure legacy globals exist before any service calls.
+            // Some modules access window.App.config/state/auth directly.
+            window.App = window.App || {};
+            window.App.config = window.App.config || this.config;
+            window.App.state = window.App.state || this.state;
+            window.App.API = window.App.API || this.api;
+            window.App.Auth = window.App.Auth || this.auth;
+            window.App.auth = window.App.auth || this.auth;
+            window.App.Alerts = window.App.Alerts || this.alerts;
+            window.App.alerts = window.App.alerts || this.alerts;
             
             // Wait for essential services to be ready
             await this.waitForDependencies();
@@ -209,16 +220,18 @@ class AppCore {
         });
 
         socket.on('connect_error', (error) => {
-            this.logger.error('WebSocket connection error:', error);
-            if (error.message.includes('auth') || error.message.includes('token')) {
+            const msg = error?.message || String(error || '');
+            this.logger.error('WebSocket connection error:', { message: msg });
+            if (msg.includes('auth') || msg.includes('token') || msg.includes('Unauthorized') || msg.includes('401')) {
                 this.auth.handleUnauthorized();
             }
         });
     }
 
     handleSocketError(error) {
-        this.logger.error('WebSocket initialization failed:', error);
-        if (error.message.includes('auth') || error.message.includes('token')) {
+        const msg = error?.message || String(error || '');
+        this.logger.error('WebSocket initialization failed:', { message: msg });
+        if (msg.includes('auth') || msg.includes('token') || msg.includes('Unauthorized') || msg.includes('401')) {
             this.auth.handleUnauthorized();
         } else {
             setTimeout(() => this.initializeWebSockets(), 5000);
@@ -259,8 +272,9 @@ class AuthService {
     }
 
     handleUnauthorized() {
-        if (window.App?.state?.navigationInProgress) return;
-        
+        window.App = window.App || {};
+        window.App.state = window.App.state || {};
+        if (window.App.state.navigationInProgress) return;
         window.App.state.navigationInProgress = true;
         clearToken();
         
@@ -341,7 +355,7 @@ class APIService {
     async fetch(url, options = {}) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 
-            options.timeout || window.App.config.apiTimeout);
+            options.timeout || window.App?.config?.apiTimeout || 30000);
         
         const requestId = Math.random().toString(36).substring(2, 9);
         const startTime = performance.now();
@@ -375,7 +389,7 @@ class APIService {
 
             if (response.status === 401) {
                 this.logger.warn('Authentication expired', { url });
-                window.App.auth.handleUnauthorized();
+                (window.App?.auth || window.App?.Auth)?.handleUnauthorized?.();
                 throw new Error('Authentication required');
             }
 
@@ -401,17 +415,13 @@ class APIService {
     }
 }
 
-// Initialize and export the App instance
-const App = new AppCore();
-App.logger = new AppLogger('App');
-App.auth = new AuthService();
-App.alerts = new AlertSystem();
-App.api = new APIService();
+// Initialize and export a singleton App instance.
+// Guard against double-loading (e.g., script included twice).
+const App = window.__DSIGN_APP__ || new AppCore();
+window.__DSIGN_APP__ = App;
+App.logger = App.logger || new AppLogger('App');
 
-// Initialize when DOM is ready
-document.addEventListener('DOMContentLoaded', () => {
-    App.initialize();
-});
+// Note: App.initialize() is called from the base template once DOM is ready.
 
 // Global error handling
 window.addEventListener('error', (event) => {
