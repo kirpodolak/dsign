@@ -135,6 +135,9 @@ class PlaylistUI {
 // Основной класс плейлиста
 export class PlaylistManager {
     constructor() {
+        if (window.App?.PlaylistManager) {
+            return window.App.PlaylistManager;
+        }
         this.playlistId = getPlaylistId();
         this.fileListEl = document.getElementById('file-list');
         this.saveBtn = document.getElementById('save-playlist');
@@ -228,9 +231,7 @@ export class PlaylistManager {
 
     // Предпросмотр изображений
     _getPreviewUrl(file) {
-        // Cache-bust slightly so if backend generates thumbnail later,
-        // the browser will eventually re-request and show it.
-        return `/api/media/thumbnail/${encodeURIComponent(file.filename)}?v=${Date.now()}`;
+        return `/api/media/thumbnail/${encodeURIComponent(file.filename)}`;
     }
 
     _ensureThumbObserver() {
@@ -332,7 +333,7 @@ export class PlaylistManager {
             // Always trigger requests for the first visible-ish chunk so user sees activity,
             // then rely on IntersectionObserver for the rest.
             if (index < 24) {
-                img.src = `${previewUrl}&init=1`;
+                img.src = previewUrl;
             } else if (this._thumbObserver) {
                 this._thumbObserver.observe(img);
             } else {
@@ -487,11 +488,12 @@ export class PlaylistManager {
 
 // Инициализация при загрузке DOM
 document.addEventListener('DOMContentLoaded', () => {
+    window.App = window.App || {};
+    if (window.App.PlaylistManager) return;
     const playlistManager = new PlaylistManager();
     
     // Для обратной совместимости
-    window.App = window.App || {};
     window.App.PlaylistManager = playlistManager;
-});
+}, { once: true });
 
 export default PlaylistManager;
