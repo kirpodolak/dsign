@@ -9,6 +9,7 @@ import { AppLogger } from './utils/logging.js';
 
 class AppCore {
     constructor() {
+        this.initializationStarted = false;
         this.initialized = false;
         this.onReadyCallbacks = [];
         this.config = {
@@ -26,6 +27,18 @@ class AppCore {
             socketConnected: false
         };
         this.logger = new AppLogger('AppCore');
+        this.syncGlobalAppContext();
+    }
+
+    isAuthPage() {
+        const path = window.location.pathname || '';
+        return path.startsWith('/api/auth/');
+    }
+
+    shouldInitializeSockets() {
+        if (this.isAuthPage()) return false;
+        const path = window.location.pathname || '';
+        return path === '/' || path.startsWith('/playlist/');
     }
 
     onReady(callback) {
@@ -47,7 +60,41 @@ class AppCore {
         }
     }
 
+    syncGlobalAppContext() {
+        if (typeof window === 'undefined') return;
+        const globalApp = window.App && typeof window.App === 'object' ? window.App : {};
+        window.App = globalApp;
+
+        const existingConfig = globalApp.config && typeof globalApp.config === 'object'
+            ? globalApp.config
+            : {};
+        const existingState = globalApp.state && typeof globalApp.state === 'object'
+            ? globalApp.state
+            : {};
+
+        globalApp.config = { ...this.config, ...existingConfig };
+        globalApp.state = { ...this.state, ...existingState };
+
+        if (this.api) {
+            globalApp.api = this.api;
+            globalApp.API = this.api;
+        }
+        if (this.auth) {
+            globalApp.auth = this.auth;
+            globalApp.Auth = this.auth;
+        }
+        if (this.alerts) {
+            globalApp.alerts = this.alerts;
+            globalApp.Alerts = this.alerts;
+        }
+    }
+
     async initialize() {
+        if (this.initializationStarted) {
+            this.logger.debug('Initialization already started, skipping duplicate call');
+            return;
+        }
+        this.initializationStarted = true;
         this.logger.info('Starting application initialization');
 
         try {
@@ -55,17 +102,7 @@ class AppCore {
             this.api = new APIService();
             this.auth = new AuthService();
             this.alerts = new AlertSystem();
-
-            // Ensure legacy globals exist before any service calls.
-            // Some modules access window.App.config/state/auth directly.
-            window.App = window.App || {};
-            window.App.config = window.App.config || this.config;
-            window.App.state = window.App.state || this.state;
-            window.App.API = window.App.API || this.api;
-            window.App.Auth = window.App.Auth || this.auth;
-            window.App.auth = window.App.auth || this.auth;
-            window.App.Alerts = window.App.Alerts || this.alerts;
-            window.App.alerts = window.App.alerts || this.alerts;
+            this.syncGlobalAppContext();
             
             // Wait for essential services to be ready
             await this.waitForDependencies();
@@ -88,8 +125,10 @@ class AppCore {
                 return;
             }
 
-            // Initialize WebSocket with delay
-            setTimeout(() => this.initializeWebSockets(), 500);
+            // Initialize WebSocket only on pages that currently use realtime updates.
+            if (this.shouldInitializeSockets()) {
+                setTimeout(() => this.initializeWebSockets(), 500);
+            }
             
             // Set up periodic auth checks for non-login pages
             if (!isLoginPage) {
@@ -128,7 +167,9 @@ class AppCore {
         const delay = 500;
         
         for (let i = 0; i < maxAttempts; i++) {
-            if (window.App?.API && window.App?.Auth) {
+            const hasApi = Boolean(window.App?.API || window.App?.api || this.api);
+            const hasAuth = Boolean(window.App?.Auth || window.App?.auth || this.auth);
+            if (hasApi && hasAuth) {
                 return;
             }
             await new Promise(resolve => setTimeout(resolve, delay));
@@ -147,6 +188,31 @@ class AppCore {
         this.onReadyCallbacks = [];
     }
 
+    resolveSocketConnection(socketUrl) {
+        const fallbackPath = this.config.socketEndpoint || '/socket.io';
+        const rawUrl = typeof socketUrl === 'string' ? socketUrl.trim() : '';
+        if (!rawUrl) {
+            return {
+                uri: window.location.origin,
+                path: fallbackPath
+            };
+        }
+
+        try {
+            const parsed = new URL(rawUrl, window.location.origin);
+            return {
+                uri: `${parsed.protocol}//${parsed.host}`,
+                path: parsed.pathname || fallbackPath
+            };
+        } catch (error) {
+            this.logger.warn('Invalid socket URL from server, using default socket path', { socketUrl: rawUrl });
+            return {
+                uri: window.location.origin,
+                path: fallbackPath
+            };
+        }
+    }
+
     async initializeWebSockets() {
         if (this.state.socketInitialized) return;
         
@@ -161,19 +227,23 @@ class AppCore {
             
             // Get fresh socket token with retry logic
             let socketToken;
+            let socketConnection = this.resolveSocketConnection(this.config.socketEndpoint);
             try {
                 const result = await this.auth.getSocketToken();
                 socketToken = result.token;
+                socketConnection = this.resolveSocketConnection(result.socket_url);
             } catch (error) {
                 this.logger.error('Failed to get socket token:', error);
                 // Refresh is cookie-based; retry once
                 await this.auth.refreshToken().catch(() => {});
                 const result = await this.auth.getSocketToken();
                 socketToken = result.token;
+                socketConnection = this.resolveSocketConnection(result.socket_url);
             }
             
             // Initialize socket connection
-            const socket = io(this.config.socketEndpoint, {
+            const socket = io(socketConnection.uri, {
+                path: socketConnection.path,
                 auth: { token: socketToken },
                 reconnection: true,
                 reconnectionAttempts: this.config.maxSocketRetries,
@@ -220,18 +290,18 @@ class AppCore {
         });
 
         socket.on('connect_error', (error) => {
-            const msg = error?.message || String(error || '');
-            this.logger.error('WebSocket connection error:', { message: msg });
-            if (msg.includes('auth') || msg.includes('token') || msg.includes('Unauthorized') || msg.includes('401')) {
+            this.logger.error('WebSocket connection error:', error);
+            const message = String(error?.message || '').toLowerCase();
+            if (message.includes('auth') || message.includes('token')) {
                 this.auth.handleUnauthorized();
             }
         });
     }
 
     handleSocketError(error) {
-        const msg = error?.message || String(error || '');
-        this.logger.error('WebSocket initialization failed:', { message: msg });
-        if (msg.includes('auth') || msg.includes('token') || msg.includes('Unauthorized') || msg.includes('401')) {
+        this.logger.error('WebSocket initialization failed:', error);
+        const message = String(error?.message || '').toLowerCase();
+        if (message.includes('auth') || message.includes('token')) {
             this.auth.handleUnauthorized();
         } else {
             setTimeout(() => this.initializeWebSockets(), 5000);
@@ -244,9 +314,17 @@ class AuthService {
         this.logger = new AppLogger('AuthService');
     }
 
+    getApiClient() {
+        return window.App?.API || window.App?.api || null;
+    }
+
     async checkAuth() {
         try {
-            const response = await window.App.API.fetch('/api/auth/status', { method: 'GET' });
+            const apiClient = this.getApiClient();
+            if (!apiClient || typeof apiClient.fetch !== 'function') {
+                throw new Error('API client not available');
+            }
+            const response = await apiClient.fetch('/api/auth/status', { method: 'GET' });
             const data = await response.json().catch(() => ({}));
             return Boolean(data?.authenticated);
         } catch (error) {
@@ -257,7 +335,11 @@ class AuthService {
 
     async refreshToken() {
         try {
-            const response = await window.App.API.fetch('/api/auth/refresh-token', {
+            const apiClient = this.getApiClient();
+            if (!apiClient || typeof apiClient.fetch !== 'function') {
+                throw new Error('API client not available');
+            }
+            const response = await apiClient.fetch('/api/auth/refresh-token', {
                 method: 'POST',
                 credentials: 'include'
             });
@@ -272,10 +354,17 @@ class AuthService {
     }
 
     handleUnauthorized() {
-        window.App = window.App || {};
-        window.App.state = window.App.state || {};
-        if (window.App.state.navigationInProgress) return;
-        window.App.state.navigationInProgress = true;
+        const appState = (() => {
+            const globalApp = window.App && typeof window.App === 'object' ? window.App : {};
+            window.App = globalApp;
+            if (!globalApp.state || typeof globalApp.state !== 'object') {
+                globalApp.state = {};
+            }
+            return globalApp.state;
+        })();
+        if (appState.navigationInProgress) return;
+        
+        appState.navigationInProgress = true;
         clearToken();
         
         if (window.appSocket) {
@@ -302,7 +391,11 @@ class AuthService {
 
     async getSocketToken() {
         try {
-            const response = await window.App.API.fetch('/api/auth/socket-token', { credentials: 'include' });
+            const apiClient = this.getApiClient();
+            if (!apiClient || typeof apiClient.fetch !== 'function') {
+                throw new Error('API client not available');
+            }
+            const response = await apiClient.fetch('/api/auth/socket-token', { credentials: 'include' });
             
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
@@ -354,8 +447,9 @@ class APIService {
 
     async fetch(url, options = {}) {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 
-            options.timeout || window.App?.config?.apiTimeout || 30000);
+        const defaultTimeout = Number(window.App?.config?.apiTimeout) || 30000;
+        const timeoutMs = Number(options.timeout) || defaultTimeout;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
         
         const requestId = Math.random().toString(36).substring(2, 9);
         const startTime = performance.now();
@@ -389,7 +483,11 @@ class APIService {
 
             if (response.status === 401) {
                 this.logger.warn('Authentication expired', { url });
-                (window.App?.auth || window.App?.Auth)?.handleUnauthorized?.();
+                if (window.App?.auth?.handleUnauthorized) {
+                    window.App.auth.handleUnauthorized();
+                } else if (window.App?.Auth?.handleUnauthorized) {
+                    window.App.Auth.handleUnauthorized();
+                }
                 throw new Error('Authentication required');
             }
 
@@ -415,13 +513,19 @@ class APIService {
     }
 }
 
-// Initialize and export a singleton App instance.
-// Guard against double-loading (e.g., script included twice).
-const App = window.__DSIGN_APP__ || new AppCore();
-window.__DSIGN_APP__ = App;
-App.logger = App.logger || new AppLogger('App');
+// Initialize and export the App instance
+const existingApp = typeof window !== 'undefined' && window.App instanceof AppCore ? window.App : null;
+const App = existingApp || new AppCore();
+App.logger = new AppLogger('App');
+App.auth = new AuthService();
+App.alerts = new AlertSystem();
+App.api = new APIService();
+App.syncGlobalAppContext();
 
-// Note: App.initialize() is called from the base template once DOM is ready.
+// Initialize when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+    App.initialize();
+});
 
 // Global error handling
 window.addEventListener('error', (event) => {
