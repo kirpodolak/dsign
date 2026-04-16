@@ -312,6 +312,11 @@ class AppCore {
 class AuthService {
     constructor() {
         this.logger = new AppLogger('AuthService');
+        this._authCacheTtlMs = 15000;
+        this._authCache = {
+            value: null,
+            timestamp: 0
+        };
     }
 
     getApiClient() {
@@ -320,14 +325,25 @@ class AuthService {
 
     async checkAuth() {
         try {
+            const now = Date.now();
+            if (
+                this._authCache.timestamp &&
+                (now - this._authCache.timestamp) < this._authCacheTtlMs &&
+                typeof this._authCache.value === 'boolean'
+            ) {
+                return this._authCache.value;
+            }
             const apiClient = this.getApiClient();
             if (!apiClient || typeof apiClient.fetch !== 'function') {
                 throw new Error('API client not available');
             }
             const response = await apiClient.fetch('/api/auth/status', { method: 'GET' });
             const data = await response.json().catch(() => ({}));
-            return Boolean(data?.authenticated);
+            const isAuthenticated = Boolean(data?.authenticated);
+            this._authCache = { value: isAuthenticated, timestamp: now };
+            return isAuthenticated;
         } catch (error) {
+            this._authCache = { value: false, timestamp: Date.now() };
             this.logger.warn('Auth check failed:', error);
             return false;
         }
@@ -365,6 +381,7 @@ class AuthService {
         if (appState.navigationInProgress) return;
         
         appState.navigationInProgress = true;
+        this._authCache = { value: false, timestamp: Date.now() };
         clearToken();
         
         if (window.appSocket) {

@@ -228,9 +228,7 @@ export class PlaylistManager {
 
     // Предпросмотр изображений
     _getPreviewUrl(file) {
-        // Cache-bust slightly so if backend generates thumbnail later,
-        // the browser will eventually re-request and show it.
-        return `/api/media/thumbnail/${encodeURIComponent(file.filename)}?v=${Date.now()}`;
+        return `/api/media/thumbnail/${encodeURIComponent(file.filename)}`;
     }
 
     _ensureThumbObserver() {
@@ -332,7 +330,7 @@ export class PlaylistManager {
             // Always trigger requests for the first visible-ish chunk so user sees activity,
             // then rely on IntersectionObserver for the rest.
             if (index < 24) {
-                img.src = `${previewUrl}&init=1`;
+                img.src = previewUrl;
             } else if (this._thumbObserver) {
                 this._thumbObserver.observe(img);
             } else {
