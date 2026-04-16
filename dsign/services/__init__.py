@@ -239,7 +239,7 @@ class ServiceFactory:
         try:
             logger.info('Initializing SocketService')
             from .sockets import SocketService
-            return SocketService(socketio, db, logger)
+            return SocketService(socketio, db_session=db, logger=logger)
         except Exception as e:
             logger.error('SocketService initialization failed', {
                 'error': str(e),
