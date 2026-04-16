@@ -9,6 +9,7 @@ import { AppLogger } from './utils/logging.js';
 
 class AppCore {
     constructor() {
+        this.initializationStarted = false;
         this.initialized = false;
         this.onReadyCallbacks = [];
         this.config = {
@@ -26,6 +27,7 @@ class AppCore {
             socketConnected: false
         };
         this.logger = new AppLogger('AppCore');
+        this.syncGlobalAppContext();
     }
 
     onReady(callback) {
@@ -47,7 +49,41 @@ class AppCore {
         }
     }
 
+    syncGlobalAppContext() {
+        if (typeof window === 'undefined') return;
+        const globalApp = window.App && typeof window.App === 'object' ? window.App : {};
+        window.App = globalApp;
+
+        const existingConfig = globalApp.config && typeof globalApp.config === 'object'
+            ? globalApp.config
+            : {};
+        const existingState = globalApp.state && typeof globalApp.state === 'object'
+            ? globalApp.state
+            : {};
+
+        globalApp.config = { ...this.config, ...existingConfig };
+        globalApp.state = { ...this.state, ...existingState };
+
+        if (this.api) {
+            globalApp.api = this.api;
+            globalApp.API = this.api;
+        }
+        if (this.auth) {
+            globalApp.auth = this.auth;
+            globalApp.Auth = this.auth;
+        }
+        if (this.alerts) {
+            globalApp.alerts = this.alerts;
+            globalApp.Alerts = this.alerts;
+        }
+    }
+
     async initialize() {
+        if (this.initializationStarted) {
+            this.logger.debug('Initialization already started, skipping duplicate call');
+            return;
+        }
+        this.initializationStarted = true;
         this.logger.info('Starting application initialization');
 
         try {
@@ -55,6 +91,7 @@ class AppCore {
             this.api = new APIService();
             this.auth = new AuthService();
             this.alerts = new AlertSystem();
+            this.syncGlobalAppContext();
             
             // Wait for essential services to be ready
             await this.waitForDependencies();
@@ -117,7 +154,9 @@ class AppCore {
         const delay = 500;
         
         for (let i = 0; i < maxAttempts; i++) {
-            if (window.App?.API && window.App?.Auth) {
+            const hasApi = Boolean(window.App?.API || window.App?.api || this.api);
+            const hasAuth = Boolean(window.App?.Auth || window.App?.auth || this.auth);
+            if (hasApi && hasAuth) {
                 return;
             }
             await new Promise(resolve => setTimeout(resolve, delay));
@@ -262,9 +301,17 @@ class AuthService {
         this.logger = new AppLogger('AuthService');
     }
 
+    getApiClient() {
+        return window.App?.API || window.App?.api || null;
+    }
+
     async checkAuth() {
         try {
-            const response = await window.App.API.fetch('/api/auth/status', { method: 'GET' });
+            const apiClient = this.getApiClient();
+            if (!apiClient || typeof apiClient.fetch !== 'function') {
+                throw new Error('API client not available');
+            }
+            const response = await apiClient.fetch('/api/auth/status', { method: 'GET' });
             const data = await response.json().catch(() => ({}));
             return Boolean(data?.authenticated);
         } catch (error) {
@@ -275,7 +322,11 @@ class AuthService {
 
     async refreshToken() {
         try {
-            const response = await window.App.API.fetch('/api/auth/refresh-token', {
+            const apiClient = this.getApiClient();
+            if (!apiClient || typeof apiClient.fetch !== 'function') {
+                throw new Error('API client not available');
+            }
+            const response = await apiClient.fetch('/api/auth/refresh-token', {
                 method: 'POST',
                 credentials: 'include'
             });
@@ -290,9 +341,17 @@ class AuthService {
     }
 
     handleUnauthorized() {
-        if (window.App?.state?.navigationInProgress) return;
+        const appState = (() => {
+            const globalApp = window.App && typeof window.App === 'object' ? window.App : {};
+            window.App = globalApp;
+            if (!globalApp.state || typeof globalApp.state !== 'object') {
+                globalApp.state = {};
+            }
+            return globalApp.state;
+        })();
+        if (appState.navigationInProgress) return;
         
-        window.App.state.navigationInProgress = true;
+        appState.navigationInProgress = true;
         clearToken();
         
         if (window.appSocket) {
@@ -319,7 +378,11 @@ class AuthService {
 
     async getSocketToken() {
         try {
-            const response = await window.App.API.fetch('/api/auth/socket-token', { credentials: 'include' });
+            const apiClient = this.getApiClient();
+            if (!apiClient || typeof apiClient.fetch !== 'function') {
+                throw new Error('API client not available');
+            }
+            const response = await apiClient.fetch('/api/auth/socket-token', { credentials: 'include' });
             
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
@@ -371,8 +434,9 @@ class APIService {
 
     async fetch(url, options = {}) {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 
-            options.timeout || window.App.config.apiTimeout);
+        const defaultTimeout = Number(window.App?.config?.apiTimeout) || 30000;
+        const timeoutMs = Number(options.timeout) || defaultTimeout;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
         
         const requestId = Math.random().toString(36).substring(2, 9);
         const startTime = performance.now();
@@ -406,7 +470,11 @@ class APIService {
 
             if (response.status === 401) {
                 this.logger.warn('Authentication expired', { url });
-                window.App.auth.handleUnauthorized();
+                if (window.App?.auth?.handleUnauthorized) {
+                    window.App.auth.handleUnauthorized();
+                } else if (window.App?.Auth?.handleUnauthorized) {
+                    window.App.Auth.handleUnauthorized();
+                }
                 throw new Error('Authentication required');
             }
 
@@ -433,11 +501,13 @@ class APIService {
 }
 
 // Initialize and export the App instance
-const App = new AppCore();
+const existingApp = typeof window !== 'undefined' && window.App instanceof AppCore ? window.App : null;
+const App = existingApp || new AppCore();
 App.logger = new AppLogger('App');
 App.auth = new AuthService();
 App.alerts = new AlertSystem();
 App.api = new APIService();
+App.syncGlobalAppContext();
 
 // Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
