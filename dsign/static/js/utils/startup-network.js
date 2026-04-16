@@ -7,27 +7,26 @@ export class StartupNetworkAssistant {
         this.ipDisplayMs = Math.max(5000, Number(ipDisplayMs) || 60000);
         this.promptAutoHideMs = Math.max(10000, Number(promptAutoHideMs) || 120000);
         this.isAuthPage = (window.location.pathname || '').startsWith('/api/auth/');
-        this.isUserInteracting = false;
         this.overlayVisible = false;
         this.hideTimerId = null;
         this.connecting = false;
-        this.visibilityHandler = () => {
-            this.isUserInteracting = !document.hidden;
+        this.storageKeys = {
+            overlayShown: 'dsign_startup_network_overlay_shown',
+            ipBadgeShown: 'dsign_startup_ip_badge_shown',
         };
     }
 
     async init() {
         if (this.isAuthPage) return;
-        this.isUserInteracting = !document.hidden;
-        document.addEventListener('visibilitychange', this.visibilityHandler);
         const status = await this.getNetworkStatus();
         if (!status) return;
 
-        if (status.primary_ip) {
+        if (status.primary_ip && !this.hasSessionFlag(this.storageKeys.ipBadgeShown)) {
             this.showStartupIpBadge(status.primary_ip);
         }
 
-        if (!status.internet_online) {
+        if (!status.internet_online && !this.hasSessionFlag(this.storageKeys.overlayShown)) {
+            this.setSessionFlag(this.storageKeys.overlayShown);
             await this.showNetworkOverlay();
             await this.refreshWifiList();
         }
@@ -35,6 +34,22 @@ export class StartupNetworkAssistant {
 
     getElement(id) {
         return document.getElementById(id);
+    }
+
+    hasSessionFlag(key) {
+        try {
+            return sessionStorage.getItem(key) === '1';
+        } catch {
+            return false;
+        }
+    }
+
+    setSessionFlag(key) {
+        try {
+            sessionStorage.setItem(key, '1');
+        } catch {
+            // Ignore storage failures (private mode / quota)
+        }
     }
 
     getCsrfToken() {
@@ -245,6 +260,7 @@ export class StartupNetworkAssistant {
         const badge = this.getElement('startup-ip-badge');
         const valueNode = this.getElement('startup-ip-value');
         if (!badge || !valueNode) return;
+        this.setSessionFlag(this.storageKeys.ipBadgeShown);
         valueNode.textContent = ip;
         badge.hidden = false;
         window.setTimeout(() => {
