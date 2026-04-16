@@ -1,8 +1,45 @@
 /**
- * Authentication service module
- * @module AuthService
+ * App initialization helper.
+ * This module is imported by `static/js/base.js` and must export `AppInitializer`.
  */
 import { getCookie } from './helpers.js';
+
+/**
+ * Bootstrap helper that wires core services onto `window.App`.
+ * The project uses a mix of legacy globals and ES modules; this keeps them consistent.
+ */
+export class AppInitializer {
+    constructor({ api = null, auth = null, alerts = null, logger = null, sockets = null, helpers = null } = {}) {
+        this.api = api;
+        this.auth = auth;
+        this.alerts = alerts;
+        this.logger = logger;
+        this.sockets = sockets;
+        this.helpers = helpers;
+    }
+
+    async init() {
+        if (typeof window === 'undefined') return;
+        window.App = window.App || {};
+
+        if (this.logger) window.App.logger = this.logger;
+        if (this.api) window.App.API = this.api;
+        if (this.auth) window.App.Auth = this.auth;
+        if (this.alerts) window.App.Alerts = this.alerts;
+        if (this.sockets) window.App.Sockets = this.sockets;
+        if (this.helpers) window.App.Helpers = this.helpers;
+
+        // Best-effort async init hooks (if services expose them).
+        const maybe = async (svc) => {
+            try {
+                if (svc && typeof svc.init === 'function') await svc.init();
+            } catch {
+                // ignore to avoid blocking app boot
+            }
+        };
+        await Promise.all([maybe(this.api), maybe(this.auth), maybe(this.alerts), maybe(this.sockets), maybe(this.helpers)]);
+    }
+}
 
 /**
  * Service for handling authentication, tokens and authorization state
