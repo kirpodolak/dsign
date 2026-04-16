@@ -42,6 +42,11 @@ class AppCore {
         return path === '/' || path.startsWith('/playlist/');
     }
 
+    shouldRunPeriodicAuthChecks() {
+        // Keep periodic auth checks only where they are truly needed.
+        return this.shouldInitializeSockets();
+    }
+
     onReady(callback) {
         if (this.initialized && typeof callback === 'function') {
             try {
@@ -133,8 +138,8 @@ class AppCore {
                 setTimeout(() => this.initializeWebSockets(), 500);
             }
             
-            // Set up periodic auth checks for non-login pages
-            if (!isLoginPage) {
+            // Set up periodic auth checks only for realtime pages.
+            if (!isLoginPage && this.shouldRunPeriodicAuthChecks()) {
                 this.logger.debug('Setting up periodic auth checks');
                 
                 setInterval(async () => {
@@ -220,6 +225,12 @@ class AppCore {
         if (this.state.socketInitialized) return;
         
         try {
+            if (typeof window.io !== 'function') {
+                this.logger.warn('Socket.IO client not ready, delaying websocket init');
+                setTimeout(() => this.initializeWebSockets(), 500);
+                return;
+            }
+
             if (!this.state.authChecked) {
                 const isAuth = await this.auth.checkAuth();
                 this.state.authChecked = true;
