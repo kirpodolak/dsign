@@ -255,8 +255,13 @@ class SystemHandlers:
         })
         self.cleanup_client(sid)
 
-    def cleanup_client(self, sid: str):
-        """Clean up client resources"""
+    def cleanup_client(self, sid: str, disconnect_socket: bool = False, namespace: Optional[str] = None):
+        """Clean up client resources.
+
+        `flask_socketio.disconnect()` depends on request context and cannot be used
+        from background tasks. Use the underlying server disconnect API when needed.
+        """
+        client_info = None
         with self.clients_lock:
             if sid in self.connected_clients:
                 client_info = self.connected_clients[sid]
@@ -266,7 +271,16 @@ class SystemHandlers:
                     'duration': (datetime.utcnow() - client_info['connected_at']).total_seconds()
                 })
                 del self.connected_clients[sid]
-                disconnect(sid)
+        if disconnect_socket:
+            ns = namespace or (client_info or {}).get('namespace') or '/'
+            try:
+                self.socket_service.socketio.server.disconnect(sid, namespace=ns)
+            except Exception as e:
+                self.logger.warning('Socket disconnect failed during cleanup', {
+                    'sid': sid,
+                    'namespace': ns,
+                    'error': str(e)
+                })
 
     def handle_ping(self, data=None):
         """Handle ping request"""
@@ -372,7 +386,7 @@ class SystemHandlers:
                 'message': reason,
                 'timestamp': now.isoformat()
             }, room=sid)
-            self.cleanup_client(sid)
+            self.cleanup_client(sid, disconnect_socket=True)
 
     def start_version_broadcaster(self):
         """Start periodic version broadcasting"""
