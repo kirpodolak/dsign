@@ -1336,9 +1336,27 @@ def init_api_routes(api_bp, services):
             if not data or 'files' not in data:
                 return jsonify({"success": False, "error": "Missing files data"}), 400
 
-            current_app.logger.debug(f"Updating files for playlist {playlist_id} with {len(data.get('files', []))} files")
+            files_payload = data.get('files', []) or []
+            # High-signal debug: helps verify what UI actually sends (durations/orders) vs what ends up in DB.
+            try:
+                sample = [
+                    {
+                        "file_name": f.get("file_name"),
+                        "duration": f.get("duration"),
+                        "order": f.get("order"),
+                        "muted": f.get("muted"),
+                    }
+                    for f in files_payload[:30]
+                ]
+            except Exception:
+                sample = []
 
-            result = playlist_service.update_playlist_files(playlist_id, data.get('files', []))
+            current_app.logger.debug(
+                f"Updating files for playlist {playlist_id} with {len(files_payload)} files",
+                extra={"playlist_id": playlist_id, "files_sample": sample},
+            )
+
+            result = playlist_service.update_playlist_files(playlist_id, files_payload)
             
             if not result.get('success'):
                 current_app.logger.error(f"Playlist files update failed: {result.get('error')}")
