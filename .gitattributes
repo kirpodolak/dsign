@@ -1,0 +1,6 @@
+* text=auto
+
+# Keep shell/service files LF-only for Linux execution.
+*.sh text eol=lf
+*.service text eol=lf
+usr/local/bin/* text eol=lf

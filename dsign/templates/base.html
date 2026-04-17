@@ -12,6 +12,44 @@
     {% block styles %}{% endblock %}
 </head>
 <body class="{% block body_class %}{% endblock %}">
+    <div id="startup-ip-badge" class="startup-ip-badge" hidden>
+        <span class="startup-ip-label">Device IP:</span>
+        <span id="startup-ip-value" class="startup-ip-value"></span>
+    </div>
+
+    <div id="startup-network-overlay" class="startup-network-overlay" hidden>
+        <div class="startup-network-modal" role="dialog" aria-modal="true" aria-labelledby="startup-network-title">
+            <h2 id="startup-network-title">Network connection required</h2>
+            <p class="startup-network-subtitle">
+                Internet is unavailable. Select a Wi-Fi network to connect.
+            </p>
+            <p id="startup-network-status" class="startup-network-status"></p>
+
+            <label for="startup-network-ssid">Available Wi-Fi</label>
+            <select id="startup-network-ssid"></select>
+
+            <label class="startup-network-hidden-toggle">
+                <input id="startup-network-hidden-toggle" type="checkbox">
+                <span>Connect to hidden network</span>
+            </label>
+
+            <div id="startup-network-manual-wrap" hidden>
+                <label for="startup-network-manual-ssid">Hidden Wi-Fi name (SSID)</label>
+                <input id="startup-network-manual-ssid" type="text" autocomplete="off">
+            </div>
+
+            <label for="startup-network-password">Wi-Fi password</label>
+            <input id="startup-network-password" type="password" autocomplete="off">
+
+            <div class="startup-network-actions">
+                <button id="startup-network-scan" type="button" class="btn outline">Scan</button>
+                <button id="startup-network-retry" type="button" class="btn outline">Retry internet check</button>
+                <button id="startup-network-connect" type="button" class="btn primary">Connect</button>
+                <button id="startup-network-close" type="button" class="btn secondary">Close</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Page loader -->
     <div id="page-loader">
         <div class="loader-content">
