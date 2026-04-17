@@ -355,6 +355,7 @@ export class PlaylistManager {
             const rows = Array.from(document.querySelectorAll('#file-list tr'));
             const selectedFiles = [];
             let hasErrors = false;
+            let selectedOrder = 0;
 
             for (const [index, row] of rows.entries()) {
                 try {
@@ -384,7 +385,9 @@ export class PlaylistManager {
                         file_name: filename,
                         duration: isVideo ? 0 : duration,
                         muted: isVideo ? Boolean(row.querySelector('.mute-checkbox')?.checked) : false,
-                        order: index + 1
+                        // Order must be dense (1..N) for selected items.
+                        // Using the table row index creates gaps when some items are unchecked.
+                        order: (selectedOrder += 1)
                     });
 
                 } catch (error) {
