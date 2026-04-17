@@ -149,7 +149,9 @@ class PlaylistManager:
                 # NOTE: if MPV is under load, short timeouts cause broken pipes and retry storms.
                 try:
                     self._mpv_manager._send_command(
-                        {"command": ["set_property", "loop-file", "no" if is_video else "inf"]},
+                        # Do NOT loop files. We control the loop at application level,
+                        # and looping still images can cause visible "blink" on some builds.
+                        {"command": ["set_property", "loop-file", "no"]},
                         timeout=5.0,
                     )
                 except Exception:
@@ -303,8 +305,9 @@ class PlaylistManager:
             # Show first item immediately for responsiveness
             first = items[0]
             try:
+                # Do NOT loop the file at MPV level; the app controls looping.
                 self._mpv_manager._send_command(
-                    {"command": ["set_property", "loop-file", "no" if first["is_video"] else "inf"]},
+                    {"command": ["set_property", "loop-file", "no"]},
                     timeout=2.0,
                 )
             except Exception:
