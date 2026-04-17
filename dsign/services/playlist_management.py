@@ -38,6 +38,19 @@ class PlaylistManager:
         self._stop_event.clear()
         self._active_playlist_id = None
 
+    def _send_slideshow_command(self, command: dict, timeout: float = 1.0, retries: int = 2):
+        """
+        Slideshow IPC profile:
+        - short retries (not 5s backoff) to keep timing stable
+        - still more tolerant than pure single-shot fail-fast
+        """
+        return self._mpv_manager._send_command(
+            command,
+            timeout=timeout,
+            retries=max(1, int(retries)),
+            retry_delay=0.15,
+        )
+
     def _manual_slideshow_loop(self, playlist_id: int, items: list[dict]):
         """
         Manual playback loop that enforces per-item durations for images and plays videos to EOF.
@@ -57,54 +70,90 @@ class PlaylistManager:
                 duration = item.get("duration") or default_duration
                 muted = bool(item.get("muted", False))
 
-                # Apply per-item settings (best-effort, longer timeout to avoid IPC churn on Pi 3B+).
-                # NOTE: if MPV is under load, short timeouts cause broken pipes and retry storms.
+                # Apply per-item settings for slideshow path with bounded retries.
                 try:
-                    self._mpv_manager._send_command(
+                    self._send_slideshow_command(
                         {"command": ["set_property", "loop-file", "no" if is_video else "inf"]},
-                        timeout=5.0,
+                        timeout=0.8,
+                        retries=2,
                     )
                 except Exception:
                     pass
 
                 try:
-                    self._mpv_manager._send_command(
+                    self._send_slideshow_command(
                         {"command": ["set_property", "mute", "yes" if muted else "no"]},
-                        timeout=5.0,
+                        timeout=0.8,
+                        retries=2,
                     )
                 except Exception:
                     pass
 
-                # Load next media file
-                self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
-                self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
+                # Load next media file with short retries.
+                load_resp = self._send_slideshow_command(
+                    {"command": ["loadfile", path, "replace"]},
+                    timeout=2.5,
+                    retries=2,
+                )
+                if not load_resp or load_resp.get("error") != "success":
+                    self.logger.warning(
+                        "Loadfile failed in slideshow loop; keeping cadence and continuing",
+                        extra={"playlist_id": playlist_id, "path": path},
+                    )
+                    # Keep timing cadence instead of rapid-skip flicker.
+                    if not is_video:
+                        target_sec = max(1.0, float(duration))
+                        end_at = time.monotonic() + target_sec
+                        while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
+                            remaining = end_at - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            time.sleep(min(0.2, remaining))
+                    else:
+                        time.sleep(0.5)
+                    continue
+
+                # Ensure playback continues after replace.
+                self._send_slideshow_command(
+                    {"command": ["set_property", "pause", "no"]},
+                    timeout=0.8,
+                    retries=1,
+                )
 
                 if is_video:
                     # Wait until playback ends
-                    start = time.time()
+                    start = time.monotonic()
                     while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
                         # `eof-reached` is the most reliable signal for local files.
-                        resp = self._mpv_manager._send_command(
+                        resp = self._send_slideshow_command(
                             {"command": ["get_property", "eof-reached"]},
-                            timeout=5.0,
+                            timeout=0.8,
+                            retries=1,
                         )
                         if resp and resp.get("error") == "success" and resp.get("data") is True:
                             break
 
                         # Fallback for unusual states: if mpv goes idle, treat as ended
-                        resp = self._mpv_manager._send_command(
+                        resp = self._send_slideshow_command(
                             {"command": ["get_property", "idle-active"]},
-                            timeout=5.0
+                            timeout=0.8,
+                            retries=1,
                         )
                         if resp and resp.get("error") == "success" and resp.get("data") is True:
                             break
                         # prevent stuck forever: 6 hours max video
-                        if time.time() - start > 6 * 3600:
+                        if time.monotonic() - start > 6 * 3600:
                             break
-                        time.sleep(1.0)
+                        time.sleep(0.35)
                 else:
-                    # Show image for its duration
-                    time.sleep(max(1, int(duration)))
+                    # Show image for exact duration while staying interruptible.
+                    target_sec = max(1.0, float(duration))
+                    end_at = time.monotonic() + target_sec
+                    while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
+                        remaining = end_at - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        time.sleep(min(0.2, remaining))
 
     def play(self, playlist_id: int) -> bool:
         """Play playlist with profile support"""
@@ -173,25 +222,6 @@ class PlaylistManager:
                 )
 
             self._active_playlist_id = playlist_id
-
-            # Show first item immediately for responsiveness
-            first = items[0]
-            try:
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "loop-file", "no" if first["is_video"] else "inf"]},
-                    timeout=2.0,
-                )
-            except Exception:
-                pass
-            try:
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "mute", "yes" if bool(first.get("muted")) else "no"]},
-                    timeout=2.0,
-                )
-            except Exception:
-                pass
-            self._mpv_manager._send_command({"command": ["loadfile", first["path"], "replace"]}, timeout=10.0)
-            self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
 
             # Update playback status (single-row table; keep id=1 stable)
             playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
