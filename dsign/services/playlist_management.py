@@ -27,6 +27,10 @@ class PlaylistManager:
         self._stop_event = Event()
         self._active_playlist_id: Optional[int] = None
 
+    def _mono_ms(self) -> int:
+        """Monotonic timestamp in milliseconds for reliable interval diagnostics."""
+        return int(time.monotonic() * 1000)
+
     def _wait_for_mpv_loaded_path(self, expected_path: str, timeout: float = 10.0) -> bool:
         """
         Wait until MPV reports the expected `path` as loaded.
@@ -166,7 +170,8 @@ class PlaylistManager:
                     pass
 
                 # Load next media file
-                load_started = time.monotonic()
+                load_started_mono = time.monotonic()
+                load_started_ms = self._mono_ms()
                 load_resp = self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
                 self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
                 if not load_resp or load_resp.get("error") != "success":
@@ -213,13 +218,17 @@ class PlaylistManager:
 
                     # Deterministic image timer:
                     # wait until MPV loaded the file *and* VO is configured, then start countdown.
+                    wait_begin_ms = self._mono_ms()
                     loaded = self._wait_for_mpv_loaded_path(path, timeout=15.0)
+                    loaded_ms = self._mono_ms()
                     vo_ready = self._wait_for_mpv_vo_configured(timeout=5.0)
-                    timer_start = time.monotonic()
-                    load_wait_sec = round(timer_start - load_started, 3)
+                    vo_ready_ms = self._mono_ms()
+                    timer_start_mono = time.monotonic()
+                    timer_start_ms = self._mono_ms()
+                    load_wait_sec = round(timer_start_mono - load_started_mono, 3)
 
                     dur_sec = max(1, int(duration))
-                    switch_at = timer_start + dur_sec
+                    switch_at = timer_start_mono + dur_sec
                     self.logger.debug(
                         "Image timer scheduled",
                         extra={
@@ -228,9 +237,28 @@ class PlaylistManager:
                             "loaded_confirmed": loaded,
                             "vo_configured": vo_ready,
                             "load_wait_sec": load_wait_sec,
+                            # Monotonic timestamps for interval reconstruction (journald timestamps can drift/buffer).
+                            "t_loadfile_sent_ms": load_started_ms,
+                            "t_wait_begin_ms": wait_begin_ms,
+                            "t_loaded_ms": loaded_ms,
+                            "t_vo_configured_ms": vo_ready_ms,
+                            "t_timer_start_ms": timer_start_ms,
                         },
                     )
-                    self._sleep_until(switch_at, step=0.2)
+                    sleep_ok = self._sleep_until(switch_at, step=0.2)
+                    timer_end_ms = self._mono_ms()
+                    oversleep_ms = timer_end_ms - (timer_start_ms + dur_sec * 1000)
+                    self.logger.debug(
+                        "Image timer elapsed",
+                        extra={
+                            "path": path,
+                            "duration_sec": dur_sec,
+                            "sleep_reached_deadline": bool(sleep_ok),
+                            "t_timer_start_ms": timer_start_ms,
+                            "t_timer_end_ms": timer_end_ms,
+                            "oversleep_ms": int(oversleep_ms),
+                        },
+                    )
 
     def play(self, playlist_id: int) -> bool:
         """Play playlist with profile support"""
