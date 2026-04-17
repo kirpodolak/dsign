@@ -239,7 +239,8 @@ udevadm control --reload-rules
 udevadm trigger
 
 systemctl daemon-reload
-systemctl enable digital-signage.service dsign-mpv.service dsign-network-assistant.service dsign-show-startup-ip.service
+systemctl enable digital-signage.service dsign-mpv.service dsign-network-assistant.service
+systemctl disable dsign-show-startup-ip.service || true
 systemctl start dsign-network-assistant.service dsign-mpv.service digital-signage.service
 
 # Настройка Nginx
