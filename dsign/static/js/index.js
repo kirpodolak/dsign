@@ -40,6 +40,7 @@ const CONFIG = {
         currentSettings: '#current-settings',
         loadingIndicator: '#loading-indicator',
         logoFileInput: '#logo-upload-form input[type="file"]',
+        logoSelectedFile: '#logo-selected-file',
         refreshPreviewBtn: '#refresh-mpv-preview',
         mpvLastUpdate: '#mpv-last-update'
     },
@@ -690,6 +691,17 @@ const ui = {
             showError('Failed to preview logo file');
         };
         reader.readAsDataURL(file);
+    },
+
+    updateLogoFileSelection(file) {
+        const selectedLabel = elements.logoSelectedFile;
+        if (selectedLabel) {
+            selectedLabel.textContent = file ? file.name : 'No file selected';
+        }
+
+        if (elements.uploadLogoBtn) {
+            elements.uploadLogoBtn.disabled = !file;
+        }
     }
 };
 
@@ -878,6 +890,7 @@ const handlers = {
                 showAlert('Logo updated successfully', 'success');
                 
                 fileInput.value = '';
+                ui.updateLogoFileSelection(null);
                 
                 const settings = await api.getSettings();
                 state.currentSettings = settings;
@@ -900,9 +913,9 @@ const handlers = {
 
         // Logo file preview
         elements.logoFileInput?.addEventListener('change', (e) => {
-            if (e.target.files && e.target.files[0]) {
-                ui.previewLogo(e.target.files[0]);
-            }
+            const file = e.target.files && e.target.files[0] ? e.target.files[0] : null;
+            ui.updateLogoFileSelection(file);
+            if (file) ui.previewLogo(file);
         });
 
         // Refresh preview button
