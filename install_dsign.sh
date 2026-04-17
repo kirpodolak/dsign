@@ -240,7 +240,7 @@ udevadm trigger
 
 systemctl daemon-reload
 systemctl enable digital-signage.service dsign-mpv.service dsign-network-assistant.service dsign-show-startup-ip.service
-systemctl start digital-signage.service dsign-mpv.service dsign-network-assistant.service dsign-show-startup-ip.service
+systemctl start dsign-network-assistant.service dsign-mpv.service digital-signage.service
 
 # Настройка Nginx
 cat > /etc/nginx/sites-available/dsign <<EOL
