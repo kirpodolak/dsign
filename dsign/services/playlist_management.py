@@ -57,54 +57,71 @@ class PlaylistManager:
                 duration = item.get("duration") or default_duration
                 muted = bool(item.get("muted", False))
 
-                # Apply per-item settings (best-effort, longer timeout to avoid IPC churn on Pi 3B+).
-                # NOTE: if MPV is under load, short timeouts cause broken pipes and retry storms.
+                # Apply per-item settings for slideshow path.
+                # Use fast IPC mode here so slide timing is not stretched by retry backoff.
                 try:
-                    self._mpv_manager._send_command(
+                    self._mpv_manager._send_command_fast(
                         {"command": ["set_property", "loop-file", "no" if is_video else "inf"]},
-                        timeout=5.0,
+                        timeout=0.6,
                     )
                 except Exception:
                     pass
 
                 try:
-                    self._mpv_manager._send_command(
+                    self._mpv_manager._send_command_fast(
                         {"command": ["set_property", "mute", "yes" if muted else "no"]},
-                        timeout=5.0,
+                        timeout=0.6,
                     )
                 except Exception:
                     pass
 
-                # Load next media file
-                self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
-                self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
+                # Load next media file (fail-fast for slideshow timing consistency).
+                load_resp = self._mpv_manager._send_command_fast(
+                    {"command": ["loadfile", path, "replace"]},
+                    timeout=1.5,
+                )
+                if not load_resp or load_resp.get("error") != "success":
+                    self.logger.warning(
+                        "Skipping item due to loadfile failure",
+                        extra={"playlist_id": playlist_id, "path": path},
+                    )
+                    continue
+
+                # Ensure playback continues after replace.
+                self._mpv_manager._send_command_fast({"command": ["set_property", "pause", "no"]}, timeout=0.8)
 
                 if is_video:
                     # Wait until playback ends
-                    start = time.time()
+                    start = time.monotonic()
                     while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
                         # `eof-reached` is the most reliable signal for local files.
-                        resp = self._mpv_manager._send_command(
+                        resp = self._mpv_manager._send_command_fast(
                             {"command": ["get_property", "eof-reached"]},
-                            timeout=5.0,
+                            timeout=0.8,
                         )
                         if resp and resp.get("error") == "success" and resp.get("data") is True:
                             break
 
                         # Fallback for unusual states: if mpv goes idle, treat as ended
-                        resp = self._mpv_manager._send_command(
+                        resp = self._mpv_manager._send_command_fast(
                             {"command": ["get_property", "idle-active"]},
-                            timeout=5.0
+                            timeout=0.8
                         )
                         if resp and resp.get("error") == "success" and resp.get("data") is True:
                             break
                         # prevent stuck forever: 6 hours max video
-                        if time.time() - start > 6 * 3600:
+                        if time.monotonic() - start > 6 * 3600:
                             break
-                        time.sleep(1.0)
+                        time.sleep(0.35)
                 else:
-                    # Show image for its duration
-                    time.sleep(max(1, int(duration)))
+                    # Show image for exact duration while staying interruptible.
+                    target_sec = max(1.0, float(duration))
+                    end_at = time.monotonic() + target_sec
+                    while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
+                        remaining = end_at - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        time.sleep(min(0.2, remaining))
 
     def play(self, playlist_id: int) -> bool:
         """Play playlist with profile support"""
@@ -177,21 +194,21 @@ class PlaylistManager:
             # Show first item immediately for responsiveness
             first = items[0]
             try:
-                self._mpv_manager._send_command(
+                self._mpv_manager._send_command_fast(
                     {"command": ["set_property", "loop-file", "no" if first["is_video"] else "inf"]},
-                    timeout=2.0,
+                    timeout=0.8,
                 )
             except Exception:
                 pass
             try:
-                self._mpv_manager._send_command(
+                self._mpv_manager._send_command_fast(
                     {"command": ["set_property", "mute", "yes" if bool(first.get("muted")) else "no"]},
-                    timeout=2.0,
+                    timeout=0.8,
                 )
             except Exception:
                 pass
-            self._mpv_manager._send_command({"command": ["loadfile", first["path"], "replace"]}, timeout=10.0)
-            self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
+            self._mpv_manager._send_command_fast({"command": ["loadfile", first["path"], "replace"]}, timeout=1.5)
+            self._mpv_manager._send_command_fast({"command": ["set_property", "pause", "no"]}, timeout=0.8)
 
             # Update playback status (single-row table; keep id=1 stable)
             playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)

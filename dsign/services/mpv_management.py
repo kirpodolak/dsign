@@ -272,11 +272,23 @@ class MPVManager:
         )
         return False
 
-    def _send_command(self, command: Dict[str, Any], timeout: float = 5.0) -> Optional[Dict[str, Any]]:
+    def _send_command(
+        self,
+        command: Dict[str, Any],
+        timeout: float = 5.0,
+        retries: Optional[int] = None,
+        retry_delay: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Отправка команды в MPV. Успехи — только DEBUG (слайдшоу иначе забивает journal)."""
         command_name = command.get("command", ["unknown"])[0]
         ipc_request_id = int(time.time() * 1_000_000) & 0x7FFFFFFF
         start_time = time.time()
+        max_attempts = max(1, int(retries if retries is not None else PlaybackConstants.MAX_RETRIES))
+        delay_between_attempts = (
+            max(0.0, float(retry_delay))
+            if retry_delay is not None
+            else PlaybackConstants.RETRY_DELAY
+        )
 
         self.logger.debug(
             "MPVCommand started",
@@ -287,7 +299,7 @@ class MPVManager:
             },
         )
 
-        for attempt in range(PlaybackConstants.MAX_RETRIES):
+        for attempt in range(max_attempts):
             try:
                 with self._ipc_lock, \
                      socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
@@ -380,8 +392,8 @@ class MPVManager:
                         "duration_sec": round(time.time() - start_time, 3)
                     }
                 )
-                if attempt < PlaybackConstants.MAX_RETRIES - 1:
-                    time.sleep(PlaybackConstants.RETRY_DELAY)
+                if attempt < max_attempts - 1:
+                    time.sleep(delay_between_attempts)
                 continue
         
         self.logger.error(
@@ -390,11 +402,18 @@ class MPVManager:
                 "operation": "MPVCommand",
                 "command": command_name,
                 "request_id": ipc_request_id,
-                "max_attempts": PlaybackConstants.MAX_RETRIES,
+                "max_attempts": max_attempts,
                 "duration_sec": round(time.time() - start_time, 3)
             }
         )
         return None
+
+    def _send_command_fast(self, command: Dict[str, Any], timeout: float = 1.0) -> Optional[Dict[str, Any]]:
+        """
+        Fast-path IPC command for slideshow loops.
+        Single attempt + no retry backoff prevents duration drift on image playlists.
+        """
+        return self._send_command(command, timeout=timeout, retries=1, retry_delay=0.0)
 
     def initialize(self) -> bool:
         """Инициализация MPV с повторами"""
