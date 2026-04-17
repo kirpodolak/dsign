@@ -1,1144 +1,728 @@
-import { showAlert, showError } from './utils/alerts.js';
-import { toggleButtonState } from './utils/helpers.js';
-import { fetchAPI, getCSRFToken } from './utils/api.js';
-
-// Application configuration
-const CONFIG = {
-    api: {
-        baseUrl: '',
-        endpoints: {
-            settings: '/api/settings/current',
-            playlists: '/api/playlists',
-            playback: '/api/playback',
-            systemStatus: '/api/system/status',
-            networkStatus: '/api/system/network/status',
-            uploadLogo: '/api/media/upload_logo',
-            media: '/api/media/files',
-            mediaUpload: '/api/media/upload',
-            serveMedia: '/api/media',
-            previewImage: '/api/media/mpv_screenshot'
-        },
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('meta[name="csrf-token"]')?.content || 
-                          document.cookie.match(/csrf_token=([^;]+)/)?.[1] || ''                
-        }
-    },
-    selectors: {
-        playlistTable: '#playlist-table',
-        playlistTableBody: '#playlist-table-body',
-        createPlaylistBtn: '#create-playlist-btn',
-        modal: '#create-playlist-modal',
-        modalClose: '.modal .close',
-        playlistForm: '#create-playlist-form',
-        statusIndicator: '#playlist-status',
-        uploadLogoBtn: '#upload-logo-btn',
-        logoForm: '#logo-upload-form',
-        settingsPanel: '.info-panel .info-card',
-        logoImage: '#idle-logo',
-        previewImage: '#mpv-preview-image',
-        currentSettings: '#current-settings',
-        loadingIndicator: '#loading-indicator',
-        logoFileInput: '#logo-upload-form input[type="file"]',
-        refreshPreviewBtn: '#refresh-mpv-preview',
-        mpvLastUpdate: '#mpv-last-update'
-    },
-    defaultLogo: '/static/images/default-logo.jpg',
-    defaultPreview: '/static/images/default-preview.jpg',
-    // Match Settings page status polling cadence for near-real-time metrics.
-    refreshInterval: 2000,
-    previewRefreshInterval: 15000,
-    maxImageLoadAttempts: 3
-};
-
-// Initialize DOM elements
-const elements = Object.fromEntries(
-    Object.entries(CONFIG.selectors)
-        .map(([key, selector]) => [key, document.querySelector(selector)])
-);
-
-// Application state
-const state = {
-    playlists: [],
-    currentSettings: {},
-    playbackStatus: null,
-    refreshIntervalId: null,
-    previewRefreshId: null,
-    logoLoadAttempts: 0,
-    previewLoadAttempts: 0,
-    fallbackLogoUsed: false,
-    fallbackPreviewUsed: false,
-    isPreviewRefreshing: false,
-    previewCaptureCooldownUntil: 0
-};
-
-// API functions
-const api = {
-    async request(url, options = {}) {
-        const { showLoading = true, ...fetchOptions } = options || {};
-        try {
-            // Avoid blocking UI for background polling / image refreshes.
-            if (showLoading && elements.loadingIndicator) {
-                elements.loadingIndicator.style.display = 'block';
-            }
-
-            const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || 
-                            document.cookie.match(/csrf_token=([^;]+)/)?.[1] || 
-                            '';
-
-            const response = await fetch(`${CONFIG.api.baseUrl}${url}`, {
-                ...fetchOptions,
-                headers: {
-                    ...CONFIG.api.headers,
-                    'X-CSRFToken': csrfToken,
-                    ...(fetchOptions.headers || {})
-                },
-                credentials: 'include' // Ensure cookies are sent with requests
-            });
-
-            if (!response.ok) {
-                let errorDetails = '';
-                try {
-                    const errorResponse = await response.json();
-                    errorDetails = errorResponse.message || JSON.stringify(errorResponse);
-                } catch (e) {
-                    errorDetails = await response.text();
-                }
-                
-                const error = new Error(`HTTP error! status: ${response.status}. Details: ${errorDetails}`);
-                error.status = response.status;
-                error.details = errorDetails;
-                throw error;
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error(`API request failed: ${url}`, error);
-            throw error;
-        } finally {
-            if (showLoading && elements.loadingIndicator) {
-                elements.loadingIndicator.style.display = 'none';
-            }
-        }
-    },
-
-    async getSettings() {
-        const resp = await this.request(CONFIG.api.endpoints.settings);
-        // API may return wrapper: { success, settings, profile }
-        if (resp && typeof resp === 'object' && !Array.isArray(resp) && resp.settings) {
-            return resp.settings;
-        }
-        return resp;
-    },
-
-    async getPlaylists() {
-        const response = await this.request(CONFIG.api.endpoints.playlists);
-        const playlists = Array.isArray(response) ? response : (response.playlists || []);
-        // Ensure customer is always a string (even empty)
-        return playlists.map(playlist => ({
-            ...playlist,
-            customer: playlist.customer || ''
-        }));
-    },
-
-    async createPlaylist(data) {
-        const response = await this.request(CONFIG.api.endpoints.playlists, {
-            method: 'POST',
-            body: JSON.stringify({
-                ...data,
-                customer: data.customer || '' // Always send string
-            })
-        });
-        return response;
-    },
-
-    async deletePlaylist(id) {
-        return this.request(`${CONFIG.api.endpoints.playlists}/${id}`, {
-            method: 'DELETE'
-        });
-    },
-
-    async startPlayback(playlistId) {
-        return this.request(`${CONFIG.api.endpoints.playback}/play`, {
-            method: 'POST',
-            body: JSON.stringify({ playlist_id: playlistId })
-        });
-    },
-
-    async stopPlayback() {
-        return this.request(`${CONFIG.api.endpoints.playback}/stop`, {
-            method: 'POST'
-        });
-    },
-
-    async getPlaybackStatus() {
-        return this.request(`${CONFIG.api.endpoints.playback}/status`, { showLoading: false });
-    },
-
-    async getSystemStatus() {
-        return this.request(CONFIG.api.endpoints.systemStatus, { showLoading: false });
-    },
-
-    async getNetworkStatus() {
-        return this.request(CONFIG.api.endpoints.networkStatus, { showLoading: false });
-    },
-
-    async uploadLogo(formData) {
-        try {
-            const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || 
-                            document.cookie.match(/csrf_token=([^;]+)/)?.[1] || '';
-            
-            const response = await fetch(`${CONFIG.api.baseUrl}${CONFIG.api.endpoints.uploadLogo}`, {
-                method: 'POST',
-                headers: {
-                    'X-CSRFToken': csrfToken
-                },
-                body: formData,
-                credentials: 'include'
-            });
-
-            if (!response.ok) {
-                let errorDetails = '';
-                try {
-                    const errorResponse = await response.json();
-                    errorDetails = errorResponse.message || JSON.stringify(errorResponse);
-                } catch (e) {
-                    errorDetails = await response.text();
-                }
-                
-                throw new Error(`Logo upload failed: ${errorDetails}`);
-            }
-
-            const result = await response.json();
-            
-            // Update application state
-            state.fallbackLogoUsed = false;
-            state.logoLoadAttempts = 0;
-            
-            return result;
-        } catch (error) {
-            console.error('Logo upload error:', error);
-            showError(`Failed to upload logo: ${error.message}`);
-            throw error;
-        }
-    },
-
-    async uploadMediaFiles(formData) {
-        try {
-            const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || 
-                            document.cookie.match(/csrf_token=([^;]+)/)?.[1] || 
-                            '';
-            
-            const response = await fetch(`${CONFIG.api.baseUrl}${CONFIG.api.endpoints.mediaUpload}`, {
-                method: 'POST',
-                headers: {
-                    'X-CSRFToken': csrfToken
-                },
-                body: formData,
-                credentials: 'include'
-            });
-
-            if (!response.ok) {
-                let errorDetails = '';
-                try {
-                    const errorResponse = await response.json();
-                    errorDetails = errorResponse.message || JSON.stringify(errorResponse);
-                } catch (e) {
-                    errorDetails = await response.text();
-                }
-                throw new Error(`Media upload failed: ${errorDetails}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error('Media upload error:', error);
-            throw error;
-        }
-    },
-
-    async refreshPreview() {
-        try {
-            state.isPreviewRefreshing = true;
-            const result = await this.request(`${CONFIG.api.endpoints.previewImage}/capture`, {
-                method: 'POST',
-                headers: {
-                    // Explicitly mark this as a user-initiated capture (manual click).
-                    // Server may reject background/implicit captures when Auto preview is Off.
-                    'X-DSIGN-Preview-Intent': 'manual'
-                }
-            });
-            return result && typeof result === 'object' ? result : { success: true };
-        } catch (error) {
-            console.warn('Preview refresh failed:', error);
-            return { success: false, error };
-        } finally {
-            state.isPreviewRefreshing = false;
-        }
-    }
-};
-
-// UI functions
-const ui = {
-    showAlert(message, type = 'info', duration = 3000) {
-        showAlert(message, type, duration);
-    },
-
-    getAlertColor(type) {
-        const colors = {
-            success: '#28a745',
-            error: '#dc3545',
-            warning: '#ffc107',
-            info: '#17a2b8'
-        };
-        return colors[type] || colors.info;
-    },
-
-    updateStatus(message, type = 'info') {
-        if (elements.statusIndicator) {
-            elements.statusIndicator.textContent = message;
-            elements.statusIndicator.className = `status-${type}`;
-        }
-    },
-
-    updatePreviewAutoStatus(settings) {
-        const el = document.querySelector('#mpv-auto-refresh-status');
-        if (!el) return;
-        const sec = Number(settings?.display?.preview_auto_interval_sec || 0);
-        if (!sec) {
-            el.innerHTML = [
-                '<span class="mpv-auto-refresh-line"><strong>Auto preview:</strong> Off</span>',
-                '<span class="mpv-auto-refresh-line">Background capture is blocked. Use the Refresh button.</span>'
-            ].join('');
-            el.classList.add('is-off');
-        } else {
-            const mins = Math.round(sec / 60);
-            el.innerHTML = [
-                `<span class="mpv-auto-refresh-line"><strong>Auto preview:</strong> Every ${mins} min</span>`,
-                '<span class="mpv-auto-refresh-line">Tip: On Pi 3B+ use Off or infrequent.</span>'
-            ].join('');
-            el.classList.remove('is-off');
-        }
-    },
-
-    _clampPercent(value) {
-        const num = Number(value);
-        if (!Number.isFinite(num)) return null;
-        return Math.max(0, Math.min(100, num));
-    },
-
-    _barClass(percent) {
-        if (percent === null) return 'is-ok';
-        if (percent < 50) return 'is-ok';
-        if (percent < 80) return 'is-warn';
-        return 'is-danger';
-    },
-
-    _formatBytes(bytes) {
-        const value = Number(bytes);
-        if (!Number.isFinite(value) || value < 0) return 'N/A';
-        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-        let idx = 0;
-        let size = value;
-        while (size >= 1024 && idx < units.length - 1) {
-            size /= 1024;
-            idx += 1;
-        }
-        const precision = idx <= 1 ? 0 : 1;
-        return `${size.toFixed(precision)} ${units[idx]}`;
-    },
-
-    _truncateText(input, maxLen = 28) {
-        const text = String(input ?? '').trim();
-        if (!text) return '';
-        if (text.length <= maxLen) return text;
-        return `${text.slice(0, maxLen - 3)}...`;
-    },
-
-    _renderMetricBar(percent) {
-        if (percent === null) return '';
-        const safePercent = this._clampPercent(percent);
-        if (safePercent === null) return '';
-        return `
-            <div class="metric-bar">
-                <div class="metric-bar__fill ${this._barClass(safePercent)}" style="width: ${safePercent}%;"></div>
-            </div>
-        `;
-    },
-
-    _resolveScreenValue(settings, systemStatus = {}) {
-        const actualMode = String(systemStatus?.display?.current_resolution || '').trim();
-        if (actualMode) return actualMode;
-        const preset = String(settings?.display?.hdmi_mode_preset || '').trim().toLowerCase();
-        if (preset === '1080p60') return '1920x1080';
-        if (preset === '4k30') return '3840x2160';
-        const explicitResolution = String(settings?.resolution || '').trim();
-        if (explicitResolution) return explicitResolution;
-        return preset === 'auto' ? 'Auto' : 'N/A';
-    },
-
-    renderSettings(settings, runtime = {}) {
-        if (!elements.settingsPanel) return;
-
-        const playlists = Array.isArray(runtime.playlists) ? runtime.playlists : [];
-        const playbackStatus = runtime.playbackStatus || {};
-        const systemStatus = runtime.systemStatus || {};
-        const networkStatus = runtime.networkStatus || {};
-
-        const screenResolution = this._resolveScreenValue(settings, systemStatus);
-
-        const systemAudio = systemStatus?.audio || {};
-        const audioAvailable = Boolean(systemAudio?.available);
-        const systemMuted = systemAudio?.muted;
-        const settingsMuted = settings?.mute;
-        const isMuted = typeof systemMuted === 'boolean'
-            ? systemMuted
-            : (typeof settingsMuted === 'boolean' ? settingsMuted : false);
-        const systemVolumeNum = Number(systemAudio?.volume_percent);
-        const settingsVolumeNum = Number(settings?.volume);
-        const volumeNum = audioAvailable && Number.isFinite(systemVolumeNum)
-            ? systemVolumeNum
-            : (Number.isFinite(settingsVolumeNum) ? settingsVolumeNum : null);
-        const volumeValue = isMuted
-            ? 'Mute'
-            : (volumeNum !== null ? `${Math.max(0, Math.min(100, Math.round(volumeNum)))}%` : 'N/A');
-
-        const playbackState = String(playbackStatus?.status || '').toLowerCase();
-        const activePlaylistId = playbackStatus?.playlist_id;
-        const activePlaylist = playlists.find((item) => String(item.id) === String(activePlaylistId));
-        const broadcastRaw = playbackState === 'playing'
-            ? (activePlaylist?.name || `Playlist #${activePlaylistId ?? ''}`.trim() || 'Playlist')
-            : 'Logo';
-        const broadcastValue = this._truncateText(broadcastRaw, 32);
-
-        const storageData = systemStatus?.storage?.media || systemStatus?.storage?.root || null;
-        const storagePercent = this._clampPercent(storageData?.used_percent);
-        const storageValue = storagePercent !== null
-            ? `${Math.round(storagePercent)}% (${this._formatBytes(storageData.used)} / ${this._formatBytes(storageData.total)})`
-            : 'N/A';
-
-        const cpuTempRaw = Number(systemStatus?.cpu?.temp_c);
-        const cpuTemp = Number.isFinite(cpuTempRaw) ? cpuTempRaw : null;
-        const cpuTempPercent = cpuTemp === null ? null : this._clampPercent(cpuTemp);
-        const cpuTempValue = cpuTemp === null ? 'N/A' : `${cpuTemp.toFixed(1)}°C`;
-
-        const cpuLoadRaw = Number(systemStatus?.cpu?.usage_percent ?? systemStatus?.cpu?.load_percent);
-        const cpuLoad = Number.isFinite(cpuLoadRaw) ? this._clampPercent(cpuLoadRaw) : null;
-        const cpuLoadValue = cpuLoad === null ? 'N/A' : `${cpuLoad.toFixed(1)}%`;
-
-        const transcodeEnabledRaw = settings?.display?.auto_transcode_videos;
-        const transcodeEnabled = transcodeEnabledRaw === true || String(transcodeEnabledRaw).toLowerCase() === 'true';
-        const transcodeValue = transcodeEnabled ? 'On' : 'Off';
-
-        const ipValue = networkStatus?.primary_ip || 'N/A';
-
-        const html = `
-            <div class="settings-section">
-                <h3>Operational Metrics</h3>
-                <div class="metrics-grid">
-                    <div class="metric-item">
-                        <div class="metric-label">Screen</div>
-                        <div class="metric-value">${this.escapeHtml(screenResolution)}</div>
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">Volume</div>
-                        <div class="metric-value">${this.escapeHtml(volumeValue)}</div>
-                    </div>
-                    <div class="metric-item metric-item--full">
-                        <div class="metric-label">Broadcast</div>
-                        <div class="metric-value">${this.escapeHtml(broadcastValue)}</div>
-                    </div>
-                    <div class="metric-item metric-item--full">
-                        <div class="metric-label">Storage</div>
-                        <div class="metric-value">${this.escapeHtml(storageValue)}</div>
-                        ${this._renderMetricBar(storagePercent)}
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">CPU Temperature</div>
-                        <div class="metric-value">${this.escapeHtml(cpuTempValue)}</div>
-                        ${this._renderMetricBar(cpuTempPercent)}
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">CPU Load</div>
-                        <div class="metric-value">${this.escapeHtml(cpuLoadValue)}</div>
-                        ${this._renderMetricBar(cpuLoad)}
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">Video Optimization</div>
-                        <div class="metric-value">${this.escapeHtml(transcodeValue)}</div>
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">Current IP Address</div>
-                        <div class="metric-value">${this.escapeHtml(ipValue)}</div>
-                    </div>
-                </div>
-            </div>
-        `;
-        elements.settingsPanel.innerHTML = html;
-        this.updatePreviewAutoStatus(settings);
-    },
-
-    renderPlaylists(playlists) {
-        let tableBody = document.querySelector('#playlist-table-body');
-        if (!tableBody) {
-            const table = document.querySelector('#playlist-table');
-            if (table) {
-                tableBody = document.createElement('tbody');
-                tableBody.id = 'playlist-table-body';
-                table.appendChild(tableBody);
-            } else {
-                console.error('Playlist table not found');
-                return;
-            }
-        }
-
-        const playlistsArray = Array.isArray(playlists) ? playlists : [];
+/* Унифицированный index.css */
+:root {
+    --space-xs: 0.25rem;
+    --space-sm: 0.5rem;
+    --space-md: 1rem;
+    --space-lg: 1.5rem;
+    --space-xl: 2rem;
     
-        console.log('Rendering playlists with customer data:', playlistsArray.map(p => ({
-            id: p.id,
-            name: p.name,
-            customer: p.customer,
-            files_count: p.files_count
-        })));
-
-        tableBody.innerHTML = playlistsArray.map(playlist => `
-            <tr data-id="${playlist.id}">
-                <td class="playlist-td-name">${this.escapeHtml(playlist.name || 'Unnamed')}</td>
-                <td class="playlist-td-customer">${this.escapeHtml(playlist.customer)}</td>
-                <td class="playlist-td-files">${playlist.files_count || 0}</td>
-                <td class="playlist-td-status">
-                    <div class="playlist-td-inner">
-                        <span class="status-badge"></span>
-                    </div>
-                </td>
-                <td class="playlist-td-actions">
-                    <div class="playlist-td-inner">
-                        <div class="actions">
-                        <button class="btn play" data-id="${playlist.id}" title="Play">
-                            <i class="fas fa-play"></i>
-                        </button>
-                        <button class="btn stop" data-id="${playlist.id}" title="Stop" disabled>
-                            <i class="fas fa-stop"></i>
-                        </button>
-                        <button class="btn edit" data-id="${playlist.id}" title="Edit">
-                            <i class="fas fa-edit"></i>
-                        </button>
-                        <button class="btn delete" data-id="${playlist.id}" title="Delete">
-                            <i class="fas fa-trash"></i>
-                        </button>
-                        </div>
-                    </div>
-                </td>
-            </tr>
-        `).join('');
-    },
-
-    escapeHtml(unsafe) {
-        if (unsafe === null || unsafe === undefined) return '';
-        return unsafe.toString()
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&#039;");
-    },
-
-    /**
-     * @param {string|number} playlistId
-     * @param {'playing'|'stopped'|'idle'} mode
-     */
-    setPlaybackRowState(playlistId, mode) {
-        const rows = document.querySelectorAll(`tr[data-id="${playlistId}"]`);
-        if (!rows.length) return;
-
-        rows.forEach((row) => {
-            const playBtn = row.querySelector('.play');
-            const stopBtn = row.querySelector('.stop');
-            const statusBadge = row.querySelector('.status-badge');
-            if (!playBtn || !stopBtn || !statusBadge) return;
-
-            if (mode === 'playing') {
-                playBtn.disabled = true;
-                stopBtn.disabled = false;
-                statusBadge.textContent = 'Playing';
-                statusBadge.className = 'status-badge active playing';
-            } else if (mode === 'stopped') {
-                playBtn.disabled = false;
-                stopBtn.disabled = true;
-                statusBadge.textContent = 'Stopped';
-                statusBadge.className = 'status-badge stopped';
-            } else {
-                playBtn.disabled = false;
-                stopBtn.disabled = true;
-                statusBadge.textContent = 'Idle';
-                statusBadge.className = 'status-badge idle';
-            }
-        });
-    },
-
-    /**
-     * Sets Playing / Stopped on the matching playlist and Idle on all others.
-     * @param {object|null|undefined} statusPayload - { status, playlist_id } from API or local state
-     * @param {Array<{id:number}>} playlists - current list (defaults to state.playlists)
-     */
-    applyPlaybackStatusFromServer(statusPayload, playlists) {
-        const list = playlists && playlists.length ? playlists : state.playlists || [];
-        const ids = list.map((p) => String(p.id));
-        if (!ids.length) return;
-
-        const rawPid = statusPayload && statusPayload.playlist_id;
-        const pid =
-            rawPid != null && rawPid !== '' ? String(rawPid) : null;
-        const st = String(statusPayload?.status || '').toLowerCase();
-
-        ids.forEach((id) => {
-            if (pid === id && st === 'playing') {
-                this.setPlaybackRowState(id, 'playing');
-            } else if (pid === id && st === 'stopped') {
-                this.setPlaybackRowState(id, 'stopped');
-            } else {
-                this.setPlaybackRowState(id, 'idle');
-            }
-        });
-    },
-
-    updateLogo(logoPath) {
-        if (!elements.logoImage) return;
-        // The active logo is stored as a canonical file (idle_logo.jpg).
-        // Do not trust settings.display.logo here (profiles may override display).
-        if (logoPath) {
-            state.fallbackLogoUsed = false;
-            state.logoLoadAttempts = 0;
-        }
-
-        const basePath = state.fallbackLogoUsed
-            ? CONFIG.defaultLogo
-            : `${CONFIG.api.endpoints.serveMedia}/idle_logo.jpg`;
-
-        const newSrc = `${basePath}?t=${Date.now()}`;
-
-        elements.logoImage.onload = function() {
-            this.style.display = 'block';
-            state.logoLoadAttempts = 0;
-        };
-
-        elements.logoImage.onerror = function() {
-            state.logoLoadAttempts++;
-            
-            if (state.logoLoadAttempts >= CONFIG.maxImageLoadAttempts && !state.fallbackLogoUsed) {
-                console.warn('Max logo load attempts reached, using fallback');
-                state.fallbackLogoUsed = true;
-                this.src = `${CONFIG.defaultLogo}?t=${Date.now()}`;
-            } else if (!state.fallbackLogoUsed) {
-                setTimeout(() => {
-                    this.src = `${CONFIG.api.endpoints.serveMedia}/idle_logo.jpg?t=${Date.now()}`;
-                }, 2000);
-            }
-        };
-        
-        elements.logoImage.src = newSrc;
-        elements.logoImage.style.display = 'none';
-    },
-
-    updatePreviewImage(options = {}) {
-        if (!elements.previewImage) return;
-
-        const { updateTimestamp = true } = options || {};
-        const newSrc = `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
-
-        elements.previewImage.onload = function() {
-            this.style.display = 'block';
-            state.previewLoadAttempts = 0;
-            if (updateTimestamp && elements.mpvLastUpdate) {
-                elements.mpvLastUpdate.textContent = new Date().toLocaleTimeString();
-            }
-        };
-
-        elements.previewImage.onerror = function() {
-            state.previewLoadAttempts++;
-            
-            if (state.previewLoadAttempts >= CONFIG.maxImageLoadAttempts && !state.fallbackPreviewUsed) {
-                console.warn('Max preview load attempts reached, using fallback');
-                state.fallbackPreviewUsed = true;
-                this.src = `${CONFIG.defaultPreview}?t=${Date.now()}`;
-            } else if (!state.fallbackPreviewUsed) {
-                setTimeout(() => {
-                    this.src = `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
-                }, 3000);
-            }
-        };
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
     
-        elements.previewImage.style.display = 'none';
-        elements.previewImage.src = newSrc;
-    },
+    --shadow-sm: 0 1px 3px rgba(0,0,0,0.12);
+    --shadow-md: 0 4px 6px rgba(0,0,0,0.1);
+    
+    --surface-color: #ffffff;
+    --border-color: #e0e0e0;
+    --zebra-stripe: #f5f5f5;
+    --hover-bg: #f0f0f0;
+    --active-bg: #e3f2fd;
+    --active-text: #1565c0;
+    
+    --primary-accent: #5c6bc0;
+    --danger-accent: #ef5350;
+    --success-color: #66bb6a;
+    --warning-accent: #ffa726;
+    --text-secondary: #757575;
+    --text-muted: #6b7280;
+    --text-sm: 0.8125rem;
+    --table-header: #4f46e5;
+    --table-row-alt: #f8fafc;
+    --table-border: #e2e8f0;
+}
 
-    toggleModal(show = true) {
-        if (elements.modal) {
-            elements.modal.style.display = show ? 'block' : 'none';
-        }
-    },
+.info-panel {
+    display: flex;
+    justify-content: space-around;
+    margin-bottom: var(--space-xl);
+    flex-wrap: nowrap;
+    gap: var(--space-lg);
+}
 
-    previewLogo(file) {
-        if (!file) return;
+.info-card {
+    background: var(--surface-color);
+    padding: var(--space-lg);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+    min-width: 250px;
+    border-left: 4px solid var(--primary-accent);
+    flex: 1 1 0;
+}
 
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            elements.logoImage.src = e.target.result;
-            elements.logoImage.style.display = 'block';
-        };
-        reader.onerror = (e) => {
-            console.error('FileReader error:', e);
-            showError('Failed to preview logo file');
-        };
-        reader.readAsDataURL(file);
+.info-card--metrics {
+    background: linear-gradient(180deg, rgba(248, 250, 255, 0.95) 0%, rgba(255, 255, 255, 0.98) 100%);
+    border: 1px solid rgba(74, 107, 255, 0.16);
+    border-left: 4px solid #4a6bff;
+    box-shadow: 0 10px 22px rgba(49, 69, 168, 0.12);
+}
+
+.settings-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.settings-section h3 {
+    margin: 0;
+    font-size: 1.06rem;
+    font-weight: 700;
+    color: #24324a;
+}
+
+.metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.metric-item {
+    border: 1px solid rgba(74, 107, 255, 0.12);
+    border-radius: 12px;
+    padding: 10px 12px;
+    background: rgba(255, 255, 255, 0.9);
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+}
+
+.metric-item--full {
+    grid-column: 1 / -1;
+}
+
+.metric-label {
+    font-size: 0.76rem;
+    color: #6b7280;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.metric-value {
+    font-size: 0.98rem;
+    font-weight: 650;
+    color: #1f2937;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.metric-bar {
+    position: relative;
+    width: 100%;
+    height: 10px;
+    border-radius: 999px;
+    background: #e5e7eb;
+    overflow: hidden;
+    margin-top: 8px;
+}
+
+.metric-bar__fill {
+    height: 100%;
+    width: 0%;
+    border-radius: inherit;
+    transition: width 0.25s ease, background-color 0.25s ease;
+}
+
+.metric-bar__fill.is-ok {
+    background: #22c55e;
+}
+
+.metric-bar__fill.is-warn {
+    background: #f59e0b;
+}
+
+.metric-bar__fill.is-danger {
+    background: #ef4444;
+}
+
+.mpv-preview {
+    background: var(--surface-color);
+    padding: var(--space-lg);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+    border-left: 4px solid var(--warning-accent);
+    flex: 1 1 0;
+    min-width: 300px;
+}
+
+.mpv-preview-container {
+    position: relative;
+    margin-top: var(--space-md);
+}
+
+.mpv-preview-image {
+    max-width: 100%;
+    max-height: 200px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    display: block;
+}
+
+.mpv-refresh-btn {
+    position: absolute;
+    top: var(--space-sm);
+    right: var(--space-sm);
+    background: rgba(0,0,0,0.7);
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 32px;
+    height: 32px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s;
+}
+
+.mpv-refresh-btn:hover {
+    background: rgba(0,0,0,0.9);
+}
+
+.mpv-status {
+    margin-top: var(--space-sm);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+}
+
+.mpv-auto-refresh-status {
+    display: block;
+    margin-top: var(--space-xs);
+    color: var(--text-muted);
+    padding: 0.5rem 0.65rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(226, 232, 240, 0.9);
+    background: rgba(248, 250, 252, 0.9);
+}
+
+.mpv-auto-refresh-status.is-off {
+    border-color: rgba(253, 230, 138, 0.9);
+    background: rgba(255, 251, 235, 0.85);
+    color: #854d0e;
+}
+
+.logo-preview {
+    background: var(--surface-color);
+    padding: var(--space-lg);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+    border-left: 4px solid var(--danger-accent);
+    flex: 1 1 0;
+    min-width: 250px;
+    border: 1px solid rgba(239, 83, 80, 0.16);
+}
+
+.mpv-auto-refresh-line {
+    display: block;
+    line-height: 1.35;
+}
+
+.logo-preview img {
+    max-width: 300px;
+    max-height: 150px;
+    object-fit: contain;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    margin: 0 auto;
+    display: block;
+}
+
+.logo-upload {
+    margin-top: var(--space-lg);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.logo-upload-input {
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+    pointer-events: none;
+}
+
+.logo-upload-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.logo-btn {
+    appearance: none;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    line-height: 1.2;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    cursor: pointer;
+    transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+    text-align: center;
+}
+
+.logo-btn:hover {
+    transform: translateY(-1px);
+}
+
+.logo-btn--choose {
+    background: rgba(74, 107, 255, 0.12);
+    border-color: rgba(74, 107, 255, 0.35);
+    color: #1f3fc5;
+}
+
+.logo-btn--choose:hover {
+    background: rgba(74, 107, 255, 0.18);
+}
+
+.logo-btn--apply {
+    background: #4a6bff;
+    border-color: #4a6bff;
+    color: #fff;
+}
+
+.logo-btn--apply:hover:not(:disabled) {
+    background: #3a5bef;
+    border-color: #3a5bef;
+}
+
+.logo-btn--apply:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none;
+}
+
+.logo-selected-file {
+    margin: 2px 2px 0;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    min-height: 1.1rem;
+}
+
+.playlist-section {
+    margin: var(--space-xl) 0;
+    background: var(--surface-color);
+    padding: var(--space-lg);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-md);
+}
+
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: var(--space-md);
+    flex-wrap: wrap;
+    gap: var(--space-md);
+}
+
+.section-header h2 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #1e293b;
+}
+
+/* Wrapper: rounded card, horizontal scroll on narrow screens */
+.playlist-table-wrap {
+    margin-top: var(--space-md);
+    overflow-x: auto;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--table-border);
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+}
+
+.playlist-table {
+    width: 100%;
+    min-width: 640px;
+    border-collapse: separate;
+    border-spacing: 0;
+    table-layout: fixed;
+}
+
+.playlist-col-name {
+    width: 22%;
+}
+
+.playlist-col-customer {
+    width: 22%;
+}
+
+.playlist-col-files {
+    width: 10%;
+}
+
+.playlist-col-status {
+    width: 18%;
+}
+
+.playlist-col-actions {
+    width: 28%;
+}
+
+.playlist-table thead th {
+    background: linear-gradient(180deg, var(--table-header) 0%, #4338ca 100%);
+    color: #fff;
+    font-weight: 600;
+    font-size: var(--text-sm);
+    letter-spacing: 0.02em;
+    text-transform: none;
+    padding: 0.75rem 1rem;
+    border: none;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.playlist-table thead th:first-child {
+    border-radius: var(--radius-md) 0 0 0;
+}
+
+.playlist-table thead th:last-child {
+    border-radius: 0 var(--radius-md) 0 0;
+}
+
+.playlist-table tbody td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--table-border);
+    vertical-align: middle;
+    font-size: var(--text-sm);
+    color: #334155;
+    line-height: 1.45;
+}
+
+/* Name & customer: larger, readable typography */
+.playlist-table tbody td.playlist-td-name {
+    font-size: 1.0625rem;
+    font-weight: 600;
+    color: #0f172a;
+    letter-spacing: -0.015em;
+    line-height: 1.4;
+}
+
+.playlist-table tbody td.playlist-td-customer {
+    font-size: 1rem;
+    font-weight: 500;
+    color: #334155;
+    line-height: 1.45;
+}
+
+.playlist-table tbody td.playlist-td-files {
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
+    color: #475569;
+}
+
+/* Status & actions: inner flex avoids display:flex on <td> (table layout quirks) */
+.playlist-table tbody td.playlist-td-status,
+.playlist-table tbody td.playlist-td-actions {
+    padding: 0;
+    vertical-align: middle;
+}
+
+.playlist-table .playlist-td-inner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 3.25rem;
+    padding: 0.65rem 0.75rem;
+    box-sizing: border-box;
+}
+
+.playlist-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.playlist-table tbody tr:nth-child(even) {
+    background-color: var(--table-row-alt);
+}
+
+.playlist-table tbody tr:hover {
+    background-color: #f1f5f9;
+}
+
+.playlist-table tbody tr.active_playlist {
+    background-color: var(--active-bg);
+    font-weight: 600;
+    color: var(--active-text);
+}
+
+/* Name & customer: left */
+.playlist-table th:nth-child(1),
+.playlist-table td:nth-child(1),
+.playlist-table th:nth-child(2),
+.playlist-table td:nth-child(2) {
+    text-align: left;
+}
+
+/* Files, status, actions: centered */
+.playlist-table th:nth-child(3),
+.playlist-table td:nth-child(3),
+.playlist-table th:nth-child(4),
+.playlist-table td:nth-child(4),
+.playlist-table th:nth-child(5),
+.playlist-table td:nth-child(5) {
+    text-align: center;
+}
+
+.playlist-table td.playlist-td-name,
+.playlist-table td.playlist-td-customer {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.playlist-table .status-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.4rem 0.85rem;
+    border-radius: 999px;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.25;
+    min-width: 4.75rem;
+    max-width: 100%;
+    white-space: nowrap;
+    box-sizing: border-box;
+    flex-shrink: 0;
+}
+
+.status-badge.inactive {
+    background-color: var(--danger-accent);
+    color: white;
+}
+
+.status-badge.active,
+.status-badge.playing {
+    background-color: var(--success-color);
+    color: white;
+}
+
+.status-badge.stopped {
+    background-color: #6c757d;
+    color: white;
+}
+
+.status-badge.idle {
+    background-color: #f1f5f9;
+    color: var(--text-muted);
+    border: 1px solid var(--table-border);
+}
+
+/* Action buttons inside playlist table: fixed size, no overlap */
+.playlist-table .actions {
+    display: flex;
+    flex-wrap: nowrap;
+    justify-content: center;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 0;
+}
+
+.playlist-table .actions .btn {
+    width: 2.25rem;
+    height: 2.25rem;
+    min-width: 2.25rem;
+    min-height: 2.25rem;
+    padding: 0;
+    flex-shrink: 0;
+    border-radius: var(--radius-md);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    border: 1px solid transparent;
+    background: #f8fafc;
+    color: #475569;
+    transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+.playlist-table .actions .btn:hover:not(:disabled) {
+    background: #e2e8f0;
+    color: #1e293b;
+}
+
+.playlist-table .actions .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.playlist-table .actions .btn.play {
+    color: #15803d;
+    border-color: #bbf7d0;
+    background: #f0fdf4;
+}
+
+.playlist-table .actions .btn.play:hover:not(:disabled) {
+    background: #dcfce7;
+}
+
+.playlist-table .actions .btn.stop {
+    color: #b91c1c;
+    border-color: #fecaca;
+    background: #fef2f2;
+}
+
+.playlist-table .actions .btn.stop:hover:not(:disabled) {
+    background: #fee2e2;
+}
+
+.playlist-table .actions .btn.edit {
+    color: #1d4ed8;
+    border-color: #bfdbfe;
+    background: #eff6ff;
+}
+
+.playlist-table .actions .btn.edit:hover:not(:disabled) {
+    background: #dbeafe;
+}
+
+.playlist-table .actions .btn.delete {
+    color: #b45309;
+    border-color: #fde68a;
+    background: #fffbeb;
+}
+
+.playlist-table .actions .btn.delete:hover:not(:disabled) {
+    background: #fef3c7;
+}
+
+/* Кнопки */
+.btn {
+    padding: var(--space-sm) var(--space-md);
+    border: none;
+    border-radius: var(--radius-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+}
+
+.btn.primary {
+    background-color: var(--primary-accent);
+    color: white;
+}
+
+.btn.primary:hover {
+    background-color: #3949ab;
+}
+
+.btn.small {
+    padding: var(--space-xs) var(--space-sm);
+    font-size: var(--text-sm);
+}
+
+/* Модальное окно */
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0,0,0,0.5);
+}
+
+.modal-content {
+    background-color: var(--surface-color);
+    margin: 10% auto;
+    padding: var(--space-lg);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+    width: 80%;
+    max-width: 500px;
+    position: relative;
+}
+
+.close {
+    position: absolute;
+    right: var(--space-md);
+    top: var(--space-md);
+    font-size: 1.5rem;
+    cursor: pointer;
+}
+
+.form-group {
+    margin-bottom: var(--space-md);
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: var(--space-xs);
+}
+
+.form-group input {
+    width: 100%;
+    padding: var(--space-sm);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+}
+
+.loading-spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-radius: 50%;
+    border-top-color: white;
+    animation: spin 1s ease-in-out infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Адаптивность */
+@media (max-width: 768px) {
+    .info-panel {
+        flex-direction: column;
+        flex-wrap: wrap;
     }
-};
-
-// Event handlers
-const handlers = {
-    async init() {
-        try {
-            console.log('Initializing application...');
-            
-            await this.ensureTableBodyExists();
-            console.log('Playlist table element found:', elements.playlistTableBody);
-
-            const [settings, playlists, playbackStatusResp, systemStatusResp, networkStatusResp] = await Promise.all([
-                api.getSettings(),
-                api.getPlaylists(),
-                api.getPlaybackStatus().catch((e) => {
-                    console.warn('Failed to load playback status:', e);
-                    return null;
-                }),
-                api.getSystemStatus().catch((e) => {
-                    console.warn('Failed to load system status:', e);
-                    return null;
-                }),
-                api.getNetworkStatus().catch((e) => {
-                    console.warn('Failed to load network status:', e);
-                    return null;
-                }),
-            ]);
-
-            console.log('Received playlists:', playlists);
-
-            state.currentSettings = settings;
-            state.playlists = playlists;
-            const innerStatus =
-                playbackStatusResp &&
-                typeof playbackStatusResp.status === 'object' &&
-                playbackStatusResp.status !== null &&
-                !Array.isArray(playbackStatusResp.status)
-                    ? playbackStatusResp.status
-                    : null;
-            state.playbackStatus = innerStatus;
-            state.systemStatus =
-                systemStatusResp &&
-                typeof systemStatusResp.status === 'object' &&
-                systemStatusResp.status !== null &&
-                !Array.isArray(systemStatusResp.status)
-                    ? systemStatusResp.status
-                    : null;
-            state.networkStatus =
-                networkStatusResp &&
-                typeof networkStatusResp.network === 'object' &&
-                networkStatusResp.network !== null &&
-                !Array.isArray(networkStatusResp.network)
-                    ? networkStatusResp.network
-                    : null;
-
-            ui.renderSettings(settings, {
-                playlists: state.playlists,
-                playbackStatus: state.playbackStatus,
-                systemStatus: state.systemStatus,
-                networkStatus: state.networkStatus,
-            });
-            ui.renderPlaylists(playlists);
-
-            try {
-                ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
-            } catch (e) {
-                console.warn('Failed to apply playback status to UI:', e);
-            }
-
-            ui.updateLogo(settings.display?.logo);
-            // Initial paint: if Auto preview is enabled, show that preview is refreshing.
-            // Otherwise keep the timestamp unchanged to avoid implying background capture.
-            const initPreviewAutoSec = Number(settings?.display?.preview_auto_interval_sec || 0);
-            ui.updatePreviewImage({ updateTimestamp: initPreviewAutoSec > 0 });
-
-            this.setupEventListeners();
-            this.startAutoRefresh();
-            this.startPreviewRefresh(settings);
-
-        } catch (error) {
-            console.error('Initialization failed:', error);
-            showError('Failed to initialize application');
-        }
-    },
-
-    async ensureTableBodyExists() {
-        return new Promise((resolve) => {
-            const checkTableBody = () => {
-                if (elements.playlistTableBody) {
-                    resolve();
-                } else {
-                    const table = document.querySelector('#playlist-table');
-                    if (table) {
-                        const tableBody = document.createElement('tbody');
-                        tableBody.id = 'playlist-table-body';
-                        table.appendChild(tableBody);
-                        elements.playlistTableBody = tableBody;
-                        resolve();
-                    } else {
-                        setTimeout(checkTableBody, 100);
-                    }
-                }
-            };
-            checkTableBody();
-        });
-    },
-
-    setupEventListeners() {
-        // Playlist modal
-        elements.createPlaylistBtn?.addEventListener('click', () => {
-            ui.toggleModal(true);
-        });
-
-        elements.modalClose?.addEventListener('click', () => {
-            ui.toggleModal(false);
-        });
-
-        window.addEventListener('click', (e) => {
-            if (e.target === elements.modal) {
-                ui.toggleModal(false);
-            }
-        });
-
-        // Create playlist form
-        elements.playlistForm?.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const formData = new FormData(elements.playlistForm);
-            
-            try {
-                const response = await api.createPlaylist({
-                    name: formData.get('name'),
-                    customer: formData.get('customer') || ''
-                });
-
-                state.playlists = [...state.playlists, {
-                    id: response.playlist_id,
-                    name: formData.get('name'),
-                    customer: formData.get('customer') || '',
-                    files_count: 0
-                }];
-                
-                ui.renderPlaylists(state.playlists);
-                ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
-                ui.toggleModal(false);
-                elements.playlistForm.reset();
-                showAlert('Playlist created successfully', 'success');
-            } catch (error) {
-                showError('Failed to create playlist: ' + error.message);
-            }
-        });
-
-        // Logo upload
-        elements.uploadLogoBtn?.addEventListener('click', async () => {
-            const fileInput = elements.logoFileInput;
-            if (!fileInput.files || fileInput.files.length === 0) {
-                showError('Please select a logo file first');
-                return;
-            }
-
-            const file = fileInput.files[0];
-            if (!file.type.match('image.*')) {
-                showError('Only image files are allowed');
-                return;
-            }
-
-            if (file.size > 5 * 1024 * 1024) {
-                showError('File size should be less than 5MB');
-                return;
-            }
-
-            const btnText = elements.uploadLogoBtn.querySelector('.btn-text');
-            const spinner = elements.uploadLogoBtn.querySelector('.loading-spinner');
-            btnText.style.display = 'none';
-            spinner.style.display = 'inline-block';
-            elements.uploadLogoBtn.disabled = true;
-
-            try {
-                const formData = new FormData(elements.logoForm);
-                const result = await api.uploadLogo(formData);
-                
-                state.fallbackLogoUsed = false;
-                state.logoLoadAttempts = 0;
-                
-                ui.updateLogo(result.filename);
-                showAlert('Logo updated successfully', 'success');
-                
-                fileInput.value = '';
-                
-                const settings = await api.getSettings();
-                state.currentSettings = settings;
-                ui.renderSettings(settings, {
-                    playlists: state.playlists,
-                    playbackStatus: state.playbackStatus,
-                    systemStatus: state.systemStatus,
-                    networkStatus: state.networkStatus,
-                });
-            } catch (error) {
-                console.error('Logo upload failed:', error);
-                showError('Failed to upload logo: ' + error.message);
-                ui.updateLogo(state.currentSettings.display?.logo);
-            } finally {
-                btnText.style.display = 'inline-block';
-                spinner.style.display = 'none';
-                elements.uploadLogoBtn.disabled = false;
-            }
-        });
-
-        // Logo file preview
-        elements.logoFileInput?.addEventListener('change', (e) => {
-            if (e.target.files && e.target.files[0]) {
-                ui.previewLogo(e.target.files[0]);
-            }
-        });
-
-        // Refresh preview button
-        elements.refreshPreviewBtn?.addEventListener('click', async () => {
-            if (state.isPreviewRefreshing) return;
-            
-            try {
-                elements.refreshPreviewBtn.disabled = true;
-                const icon = elements.refreshPreviewBtn.querySelector('i');
-                if (icon) {
-                    icon.className = 'fas fa-spinner fa-spin';
-                }
-                
-                const r = await api.refreshPreview();
-                const now = Date.now();
-                const retryMs = Math.max(0, Math.round((r?.retry_in_sec || 0) * 1000));
-                if (r?.skipped) {
-                    // Capture was throttled on server; just reload existing image and inform user.
-                    state.previewCaptureCooldownUntil = now + retryMs;
-                    ui.updatePreviewImage({ updateTimestamp: false });
-                    showAlert('Preview is up to date', 'info');
-                } else if (r?.success) {
-                    // Service may still be writing the file; reload after a short delay.
-                    setTimeout(() => ui.updatePreviewImage({ updateTimestamp: true }), 1200);
-                    showAlert('Preview refreshed', 'success');
-                } else {
-                    throw new Error(r?.error || 'Preview refresh failed');
-                }
-            } catch (error) {
-                console.warn('Failed to refresh preview:', error);
-                showError('Failed to refresh preview');
-            } finally {
-                elements.refreshPreviewBtn.disabled = false;
-                const icon = elements.refreshPreviewBtn.querySelector('i');
-                if (icon) {
-                    icon.className = 'fas fa-sync-alt';
-                }
-            }
-        });
-
-        // Playlist actions
-        elements.playlistTable?.addEventListener('click', async (e) => {
-            const btn = e.target.closest('button');
-            if (!btn || !btn.dataset.id) return;
-
-            const playlistId = btn.dataset.id;
-            
-            try {
-                if (btn.classList.contains('play')) {
-                    await api.startPlayback(playlistId);
-                    state.playbackStatus = {
-                        status: 'playing',
-                        playlist_id: Number(playlistId)
-                    };
-                    ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
-                    ui.renderSettings(state.currentSettings, {
-                        playlists: state.playlists,
-                        playbackStatus: state.playbackStatus,
-                        systemStatus: state.systemStatus,
-                        networkStatus: state.networkStatus,
-                    });
-                    showAlert('Playback started', 'success');
-                    
-                } else if (btn.classList.contains('stop')) {
-                    await api.stopPlayback();
-                    state.playbackStatus = {
-                        status: 'stopped',
-                        playlist_id: Number(playlistId)
-                    };
-                    ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
-                    ui.renderSettings(state.currentSettings, {
-                        playlists: state.playlists,
-                        playbackStatus: state.playbackStatus,
-                        systemStatus: state.systemStatus,
-                        networkStatus: state.networkStatus,
-                    });
-                    showAlert('Playback stopped', 'info');
-                    
-                } else if (btn.classList.contains('edit')) {
-                    window.location.href = `/playlist/${playlistId}`;
-                    
-                } else if (btn.classList.contains('delete')) {
-                    if (confirm('Are you sure you want to delete this playlist?')) {
-                        try {
-                            // Show loading state
-                            const icon = btn.querySelector('i');
-                            if (icon) {
-                                icon.className = 'fas fa-spinner fa-spin';
-                            }
-                            btn.disabled = true;
-
-                            const delResult = await api.deletePlaylist(playlistId);
-                            if (delResult && typeof delResult === 'object' && delResult.success === false) {
-                                throw new Error(delResult.error || 'Delete failed');
-                            }
-                            
-                            // Remove the playlist row immediately
-                            const row = document.querySelector(`tr[data-id="${playlistId}"]`);
-                            if (row) {
-                                row.remove();
-                            }
-                            
-                            // Update state
-                            state.playlists = state.playlists.filter(p => p.id !== playlistId);
-                            if (
-                                state.playbackStatus &&
-                                String(state.playbackStatus.playlist_id) === String(playlistId)
-                            ) {
-                                state.playbackStatus = null;
-                            }
-                            ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
-                            showAlert('Playlist deleted', 'info');
-                        } catch (error) {
-                            console.error('Delete failed:', error);
-                            showError('Failed to delete playlist: ' + (error.details || error.message));
-                            
-                            // Reset button state
-                            const icon = btn.querySelector('i');
-                            if (icon) {
-                                icon.className = 'fas fa-trash';
-                            }
-                            btn.disabled = false;
-                        }
-                    }
-                }
-            } catch (error) {
-                console.error('Action failed:', error);
-                showError(error.status === 403 ? 
-                    'Permission denied' : 'Action failed: ' + error.message);
-            }
-        });
-    },
-
-    startAutoRefresh() {
-        if (state.refreshIntervalId) {
-            clearInterval(state.refreshIntervalId);
-        }
-
-        state.refreshIntervalId = setInterval(async () => {
-            try {
-                const [settings, playbackStatusResp, systemStatusResp, networkStatusResp] = await Promise.all([
-                    api.getSettings(),
-                    api.getPlaybackStatus().catch(() => null),
-                    api.getSystemStatus().catch(() => null),
-                    api.getNetworkStatus().catch(() => null),
-                ]);
-
-                const latestPlaybackStatus =
-                    playbackStatusResp &&
-                    typeof playbackStatusResp.status === 'object' &&
-                    playbackStatusResp.status !== null &&
-                    !Array.isArray(playbackStatusResp.status)
-                        ? playbackStatusResp.status
-                        : state.playbackStatus;
-                const latestSystemStatus =
-                    systemStatusResp &&
-                    typeof systemStatusResp.status === 'object' &&
-                    systemStatusResp.status !== null &&
-                    !Array.isArray(systemStatusResp.status)
-                        ? systemStatusResp.status
-                        : state.systemStatus;
-                const latestNetworkStatus =
-                    networkStatusResp &&
-                    typeof networkStatusResp.network === 'object' &&
-                    networkStatusResp.network !== null &&
-                    !Array.isArray(networkStatusResp.network)
-                        ? networkStatusResp.network
-                        : state.networkStatus;
-
-                const settingsChanged = JSON.stringify(state.currentSettings) !== JSON.stringify(settings);
-                const playbackChanged = JSON.stringify(state.playbackStatus) !== JSON.stringify(latestPlaybackStatus);
-                const systemChanged = JSON.stringify(state.systemStatus) !== JSON.stringify(latestSystemStatus);
-                const networkChanged = JSON.stringify(state.networkStatus) !== JSON.stringify(latestNetworkStatus);
-
-                if (settingsChanged) {
-                    state.currentSettings = settings;
-                    ui.updateLogo(settings.display?.logo);
-                    // If Auto preview interval changed in Settings, reflect it here.
-                    this.startPreviewRefresh(settings);
-                }
-                state.playbackStatus = latestPlaybackStatus;
-                state.systemStatus = latestSystemStatus;
-                state.networkStatus = latestNetworkStatus;
-
-                if (settingsChanged || playbackChanged || systemChanged || networkChanged) {
-                    ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
-                    ui.renderSettings(state.currentSettings, {
-                        playlists: state.playlists,
-                        playbackStatus: state.playbackStatus,
-                        systemStatus: state.systemStatus,
-                        networkStatus: state.networkStatus,
-                    });
-                }
-            } catch (error) {
-                console.error('Auto-refresh failed:', error);
-            }
-        }, CONFIG.refreshInterval);
-    },
-
-    startPreviewRefresh(settings) {
-        if (state.previewRefreshId) {
-            clearInterval(state.previewRefreshId);
-            state.previewRefreshId = null;
-        }
-
-        const intervalSec = Number(settings?.display?.preview_auto_interval_sec || 0);
-        // If Auto preview is Off, do not background-refresh the preview image.
-        if (!intervalSec) return;
-
-        const intervalMs = Math.max(15000, intervalSec * 1000);
-        state.previewRefreshId = setInterval(() => {
-            // Do not trigger expensive capture here; only refresh the <img> src.
-            // Also avoid hammering the browser cache if the user just requested a manual capture.
-            if (Date.now() < (state.previewCaptureCooldownUntil || 0)) return;
-            ui.updatePreviewImage({ updateTimestamp: true });
-        }, intervalMs);
-    },
-
-    cleanup() {
-        if (state.refreshIntervalId) {
-            clearInterval(state.refreshIntervalId);
-        }
-        if (state.previewRefreshId) {
-            clearInterval(state.previewRefreshId);
-        }
+    
+    .info-card,
+    .mpv-preview,
+    .logo-preview {
+        width: 100%;
+        min-width: auto;
     }
-};
 
-// Initialize the application when DOM is ready
-document.addEventListener('DOMContentLoaded', () => {
-    handlers.init();
-});
+    .playlist-section {
+        padding: var(--space-md);
+    }
 
-// Cleanup when page unloads
-window.addEventListener('beforeunload', () => {
-    handlers.cleanup();
-});
+    .playlist-table tbody td,
+    .playlist-table thead th {
+        padding: 0.5rem 0.65rem;
+    }
+    
+    .modal-content {
+        width: 90%;
+        margin: 20% auto;
+    }
 
-export { api, ui, handlers, CONFIG, state, elements };
+    .metrics-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .logo-upload-controls {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 1100px) {
+    .info-panel {
+        flex-wrap: wrap;
+    }
+}
+
+/* #playlist-table is the <table> element — must stay display: table */
+#playlist-table {
+    display: table;
+}
