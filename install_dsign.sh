@@ -193,6 +193,7 @@ install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/
 sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
+chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip
 
 cat > /etc/systemd/system/dsign-network-assistant.service <<EOL
 [Unit]
@@ -212,6 +213,22 @@ Environment=DSIGN_NETWORK_PROMPT_TIMEOUT_SEC=120
 WantedBy=multi-user.target
 EOL
 
+cat > /etc/systemd/system/dsign-show-startup-ip.service <<EOL
+[Unit]
+Description=Digital Signage Startup IP OSD helper
+After=dsign-mpv.service dsign-network-assistant.service
+Wants=dsign-network-assistant.service
+
+[Service]
+Type=oneshot
+User=$DSIGN_USER
+Group=$DSIGN_USER
+ExecStart=/usr/local/bin/dsign-show-startup-ip
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
 # Настройка прав на DRI устройства
 cat > /etc/udev/rules.d/99-dsign.rules <<EOL
 KERNEL=="card0", GROUP="video", MODE="0660"
@@ -222,8 +239,8 @@ udevadm control --reload-rules
 udevadm trigger
 
 systemctl daemon-reload
-systemctl enable digital-signage.service dsign-mpv.service dsign-network-assistant.service
-systemctl start digital-signage.service dsign-mpv.service dsign-network-assistant.service
+systemctl enable digital-signage.service dsign-mpv.service dsign-network-assistant.service dsign-show-startup-ip.service
+systemctl start digital-signage.service dsign-mpv.service dsign-network-assistant.service dsign-show-startup-ip.service
 
 # Настройка Nginx
 cat > /etc/nginx/sites-available/dsign <<EOL

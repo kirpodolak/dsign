@@ -34,7 +34,9 @@ persist_startup_ip() {
   ip_addr="$(primary_ip || true)"
   if [ -n "$ip_addr" ]; then
     printf '%s\n' "$ip_addr" >"$STARTUP_IP_FILE" 2>/dev/null || true
-    chmod 644 "$STARTUP_IP_FILE" 2>/dev/null || true
+    # ExecStartPost helper runs as dsign user; keep file removable by that user.
+    chown dsign:dsign "$STARTUP_IP_FILE" 2>/dev/null || true
+    chmod 664 "$STARTUP_IP_FILE" 2>/dev/null || true
     log "Saved startup IP: $ip_addr"
   else
     rm -f "$STARTUP_IP_FILE"
