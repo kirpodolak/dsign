@@ -178,7 +178,7 @@ ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --no-ytdl --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --log-file=/var/log/dsign/mpv.log
-ExecStartPost=/usr/bin/bash -lc 'if [ -r /tmp/dsign-startup-ip.txt ] && [ -S /var/lib/dsign/mpv/socket ]; then ip="$(cat /tmp/dsign-startup-ip.txt 2>/dev/null | tr -d "\r\n")"; if [ -n "$ip" ]; then printf "{\"command\":[\"show-text\",\"IP: %s\",60000]}\n" "$ip" | socat - /var/lib/dsign/mpv/socket >/dev/null 2>&1 || true; fi; rm -f /tmp/dsign-startup-ip.txt; fi'
+ExecStartPost=/usr/local/bin/dsign-show-startup-ip
 Restart=always
 RestartSec=5s
 StartLimitInterval=60s
@@ -191,6 +191,8 @@ EOL
 # Network assistant helper (OSD on content screen via MPV IPC)
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/bin/dsign-network-assistant
 sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
+sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
 
 cat > /etc/systemd/system/dsign-network-assistant.service <<EOL
 [Unit]

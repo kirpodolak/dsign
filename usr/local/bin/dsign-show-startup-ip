@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -u
+
+STARTUP_IP_FILE="${DSIGN_STARTUP_IP_FILE:-/tmp/dsign-startup-ip.txt}"
+MPV_SOCKET="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
+SHOW_DURATION_MS="${DSIGN_STARTUP_IP_DURATION_MS:-60000}"
+
+if [ ! -r "$STARTUP_IP_FILE" ] || [ ! -S "$MPV_SOCKET" ]; then
+  exit 0
+fi
+
+ip_addr="$(tr -d '\r\n' < "$STARTUP_IP_FILE" 2>/dev/null || true)"
+if [ -z "$ip_addr" ]; then
+  rm -f "$STARTUP_IP_FILE"
+  exit 0
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  payload="$(
+    python3 - "$ip_addr" "$SHOW_DURATION_MS" <<'PY'
+import json
+import sys
+
+ip = sys.argv[1]
+duration_ms = int(sys.argv[2]) if len(sys.argv) > 2 else 60000
+print(json.dumps({"command": ["show-text", f"IP: {ip}", duration_ms]}, ensure_ascii=False))
+PY
+  )"
+  printf '%s\n' "$payload" | socat - "$MPV_SOCKET" >/dev/null 2>&1 || true
+else
+  printf '{"command":["show-text","IP: %s",%s]}\n' "$ip_addr" "$SHOW_DURATION_MS" | socat - "$MPV_SOCKET" >/dev/null 2>&1 || true
+fi
+
+rm -f "$STARTUP_IP_FILE"
