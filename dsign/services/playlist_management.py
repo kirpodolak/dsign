@@ -27,6 +27,53 @@ class PlaylistManager:
         self._stop_event = Event()
         self._active_playlist_id: Optional[int] = None
 
+    def _wait_for_mpv_loaded_path(self, expected_path: str, timeout: float = 10.0) -> bool:
+        """
+        Wait until MPV reports the expected `path` as loaded.
+
+        We intentionally start the "virtual timer" after MPV has actually switched to the file,
+        otherwise slow IO/decoding makes per-item durations feel random.
+        """
+        if not expected_path:
+            return False
+
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        last_seen = None
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            try:
+                resp = self._mpv_manager._send_command(
+                    {"command": ["get_property", "path"]},
+                    timeout=2.0,
+                )
+                if resp and resp.get("error") == "success":
+                    last_seen = resp.get("data")
+                    if last_seen == expected_path:
+                        return True
+            except Exception:
+                pass
+            # small poll interval; keep it low but not busy-loop
+            time.sleep(0.1)
+
+        self.logger.debug(
+            "MPV did not confirm loaded path within timeout",
+            extra={"expected_path": expected_path, "last_seen_path": last_seen, "timeout_sec": timeout},
+        )
+        return False
+
+    def _sleep_until(self, deadline_monotonic: float, step: float = 0.2) -> bool:
+        """Sleep until deadline or stop event; returns True if reached deadline."""
+        step = max(0.05, float(step))
+        while True:
+            if self._stop_event.is_set():
+                return False
+            now = time.monotonic()
+            remaining = deadline_monotonic - now
+            if remaining <= 0:
+                return True
+            self._stop_event.wait(timeout=min(step, remaining))
+
     def _stop_play_thread(self):
         if self._play_thread and self._play_thread.is_alive():
             self._stop_event.set()
@@ -54,7 +101,9 @@ class PlaylistManager:
 
                 path = item["path"]
                 is_video = item["is_video"]
-                duration = item.get("duration") or default_duration
+                raw_duration = item.get("duration")
+                # Only images use duration. Treat 0/None as "missing" for images.
+                duration = raw_duration if (raw_duration is not None and int(raw_duration) >= 1) else default_duration
                 muted = bool(item.get("muted", False))
 
                 # Apply per-item settings (best-effort, longer timeout to avoid IPC churn on Pi 3B+).
@@ -76,6 +125,7 @@ class PlaylistManager:
                     pass
 
                 # Load next media file
+                load_started = time.monotonic()
                 self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
                 self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
 
@@ -103,8 +153,24 @@ class PlaylistManager:
                             break
                         time.sleep(1.0)
                 else:
-                    # Show image for its duration
-                    time.sleep(max(1, int(duration)))
+                    # Deterministic image timer:
+                    # wait until MPV actually loaded the file, then start countdown.
+                    loaded = self._wait_for_mpv_loaded_path(path, timeout=15.0)
+                    timer_start = time.monotonic()
+                    load_wait_sec = round(timer_start - load_started, 3)
+
+                    dur_sec = max(1, int(duration))
+                    switch_at = timer_start + dur_sec
+                    self.logger.debug(
+                        "Image timer scheduled",
+                        extra={
+                            "path": path,
+                            "duration_sec": dur_sec,
+                            "loaded_confirmed": loaded,
+                            "load_wait_sec": load_wait_sec,
+                        },
+                    )
+                    self._sleep_until(switch_at, step=0.2)
 
     def play(self, playlist_id: int) -> bool:
         """Play playlist with profile support"""
