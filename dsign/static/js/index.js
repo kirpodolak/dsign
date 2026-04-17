@@ -10,6 +10,8 @@ const CONFIG = {
             settings: '/api/settings/current',
             playlists: '/api/playlists',
             playback: '/api/playback',
+            systemStatus: '/api/system/status',
+            networkStatus: '/api/system/network/status',
             uploadLogo: '/api/media/upload_logo',
             media: '/api/media/files',
             mediaUpload: '/api/media/upload',
@@ -43,7 +45,8 @@ const CONFIG = {
     },
     defaultLogo: '/static/images/default-logo.jpg',
     defaultPreview: '/static/images/default-preview.jpg',
-    refreshInterval: 10000,
+    // Match Settings page status polling cadence for near-real-time metrics.
+    refreshInterval: 2000,
     previewRefreshInterval: 15000,
     maxImageLoadAttempts: 3
 };
@@ -66,9 +69,7 @@ const state = {
     fallbackLogoUsed: false,
     fallbackPreviewUsed: false,
     isPreviewRefreshing: false,
-    previewCaptureCooldownUntil: 0,
-    initStarted: false,
-    initialized: false
+    previewCaptureCooldownUntil: 0
 };
 
 // API functions
@@ -172,6 +173,14 @@ const api = {
 
     async getPlaybackStatus() {
         return this.request(`${CONFIG.api.endpoints.playback}/status`, { showLoading: false });
+    },
+
+    async getSystemStatus() {
+        return this.request(CONFIG.api.endpoints.systemStatus, { showLoading: false });
+    },
+
+    async getNetworkStatus() {
+        return this.request(CONFIG.api.endpoints.networkStatus, { showLoading: false });
     },
 
     async uploadLogo(formData) {
@@ -311,19 +320,157 @@ const ui = {
         }
     },
 
-    renderSettings(settings) {
+    _clampPercent(value) {
+        const num = Number(value);
+        if (!Number.isFinite(num)) return null;
+        return Math.max(0, Math.min(100, num));
+    },
+
+    _barClass(percent) {
+        if (percent === null) return 'is-ok';
+        if (percent < 50) return 'is-ok';
+        if (percent < 80) return 'is-warn';
+        return 'is-danger';
+    },
+
+    _formatBytes(bytes) {
+        const value = Number(bytes);
+        if (!Number.isFinite(value) || value < 0) return 'N/A';
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let idx = 0;
+        let size = value;
+        while (size >= 1024 && idx < units.length - 1) {
+            size /= 1024;
+            idx += 1;
+        }
+        const precision = idx <= 1 ? 0 : 1;
+        return `${size.toFixed(precision)} ${units[idx]}`;
+    },
+
+    _truncateText(input, maxLen = 28) {
+        const text = String(input ?? '').trim();
+        if (!text) return '';
+        if (text.length <= maxLen) return text;
+        return `${text.slice(0, maxLen - 3)}...`;
+    },
+
+    _renderMetricBar(percent) {
+        if (percent === null) return '';
+        const safePercent = this._clampPercent(percent);
+        if (safePercent === null) return '';
+        return `
+            <div class="metric-bar">
+                <div class="metric-bar__fill ${this._barClass(safePercent)}" style="width: ${safePercent}%;"></div>
+            </div>
+        `;
+    },
+
+    _resolveScreenValue(settings, systemStatus = {}) {
+        const actualMode = String(systemStatus?.display?.current_resolution || '').trim();
+        if (actualMode) return actualMode;
+        const preset = String(settings?.display?.hdmi_mode_preset || '').trim().toLowerCase();
+        if (preset === '1080p60') return '1920x1080';
+        if (preset === '4k30') return '3840x2160';
+        const explicitResolution = String(settings?.resolution || '').trim();
+        if (explicitResolution) return explicitResolution;
+        return preset === 'auto' ? 'Auto' : 'N/A';
+    },
+
+    renderSettings(settings, runtime = {}) {
         if (!elements.settingsPanel) return;
+
+        const playlists = Array.isArray(runtime.playlists) ? runtime.playlists : [];
+        const playbackStatus = runtime.playbackStatus || {};
+        const systemStatus = runtime.systemStatus || {};
+        const networkStatus = runtime.networkStatus || {};
+
+        const screenResolution = this._resolveScreenValue(settings, systemStatus);
+
+        const systemAudio = systemStatus?.audio || {};
+        const audioAvailable = Boolean(systemAudio?.available);
+        const systemMuted = systemAudio?.muted;
+        const settingsMuted = settings?.mute;
+        const isMuted = typeof systemMuted === 'boolean'
+            ? systemMuted
+            : (typeof settingsMuted === 'boolean' ? settingsMuted : false);
+        const systemVolumeNum = Number(systemAudio?.volume_percent);
+        const settingsVolumeNum = Number(settings?.volume);
+        const volumeNum = audioAvailable && Number.isFinite(systemVolumeNum)
+            ? systemVolumeNum
+            : (Number.isFinite(settingsVolumeNum) ? settingsVolumeNum : null);
+        const volumeValue = isMuted
+            ? 'Mute'
+            : (volumeNum !== null ? `${Math.max(0, Math.min(100, Math.round(volumeNum)))}%` : 'N/A');
+
+        const playbackState = String(playbackStatus?.status || '').toLowerCase();
+        const activePlaylistId = playbackStatus?.playlist_id;
+        const activePlaylist = playlists.find((item) => String(item.id) === String(activePlaylistId));
+        const broadcastRaw = playbackState === 'playing'
+            ? (activePlaylist?.name || `Playlist #${activePlaylistId ?? ''}`.trim() || 'Playlist')
+            : 'Logo';
+        const broadcastValue = this._truncateText(broadcastRaw, 32);
+
+        const storageData = systemStatus?.storage?.media || systemStatus?.storage?.root || null;
+        const storagePercent = this._clampPercent(storageData?.used_percent);
+        const storageValue = storagePercent !== null
+            ? `${Math.round(storagePercent)}% (${this._formatBytes(storageData.used)} / ${this._formatBytes(storageData.total)})`
+            : 'N/A';
+
+        const cpuTempRaw = Number(systemStatus?.cpu?.temp_c);
+        const cpuTemp = Number.isFinite(cpuTempRaw) ? cpuTempRaw : null;
+        const cpuTempPercent = cpuTemp === null ? null : this._clampPercent(cpuTemp);
+        const cpuTempValue = cpuTemp === null ? 'N/A' : `${cpuTemp.toFixed(1)}°C`;
+
+        const cpuLoadRaw = Number(systemStatus?.cpu?.usage_percent ?? systemStatus?.cpu?.load_percent);
+        const cpuLoad = Number.isFinite(cpuLoadRaw) ? this._clampPercent(cpuLoadRaw) : null;
+        const cpuLoadValue = cpuLoad === null ? 'N/A' : `${cpuLoad.toFixed(1)}%`;
+
+        const transcodeEnabledRaw = settings?.display?.auto_transcode_videos;
+        const transcodeEnabled = transcodeEnabledRaw === true || String(transcodeEnabledRaw).toLowerCase() === 'true';
+        const transcodeValue = transcodeEnabled ? 'On' : 'Off';
+
+        const ipValue = networkStatus?.primary_ip || 'N/A';
 
         const html = `
             <div class="settings-section">
-                <h3>Current Settings</h3>
-                <p><strong>Resolution:</strong> ${settings.resolution || 'N/A'}</p>
-                <p><strong>Aspect Ratio:</strong> ${settings.aspect_ratio || 'N/A'}</p>
-                <p><strong>Rotation:</strong> ${settings.rotation || 0}°</p>
-                <p><strong>Overscan:</strong> ${settings.overscan ? 'Enabled' : 'Disabled'}</p>
-                <p><strong>Volume:</strong> ${settings.volume || 100}%</p>
-                <p><strong>Mute:</strong> ${settings.mute ? 'On' : 'Off'}</p>
-                ${settings.display?.logo ? `<p><strong>Current Logo:</strong> ${settings.display.logo}</p>` : ''}
+                <h3>Operational Metrics</h3>
+                <div class="metrics-grid">
+                    <div class="metric-item">
+                        <div class="metric-label">Screen</div>
+                        <div class="metric-value">${this.escapeHtml(screenResolution)}</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">Volume</div>
+                        <div class="metric-value">${this.escapeHtml(volumeValue)}</div>
+                    </div>
+                    <div class="metric-item metric-item--full">
+                        <div class="metric-label">Broadcast</div>
+                        <div class="metric-value">${this.escapeHtml(broadcastValue)}</div>
+                    </div>
+                    <div class="metric-item metric-item--full">
+                        <div class="metric-label">Storage</div>
+                        <div class="metric-value">${this.escapeHtml(storageValue)}</div>
+                        ${this._renderMetricBar(storagePercent)}
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">CPU Temperature</div>
+                        <div class="metric-value">${this.escapeHtml(cpuTempValue)}</div>
+                        ${this._renderMetricBar(cpuTempPercent)}
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">CPU Load</div>
+                        <div class="metric-value">${this.escapeHtml(cpuLoadValue)}</div>
+                        ${this._renderMetricBar(cpuLoad)}
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">Video Optimization</div>
+                        <div class="metric-value">${this.escapeHtml(transcodeValue)}</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">Current IP Address</div>
+                        <div class="metric-value">${this.escapeHtml(ipValue)}</div>
+                    </div>
+                </div>
             </div>
         `;
         elements.settingsPanel.innerHTML = html;
@@ -549,24 +696,27 @@ const ui = {
 // Event handlers
 const handlers = {
     async init() {
-        if (state.initStarted || state.initialized) {
-            console.debug('Index handlers already initialized, skipping duplicate init');
-            return;
-        }
-        state.initStarted = true;
         try {
             console.log('Initializing application...');
             
             await this.ensureTableBodyExists();
             console.log('Playlist table element found:', elements.playlistTableBody);
 
-            const [settings, playlists, playbackStatusResp] = await Promise.all([
+            const [settings, playlists, playbackStatusResp, systemStatusResp, networkStatusResp] = await Promise.all([
                 api.getSettings(),
                 api.getPlaylists(),
                 api.getPlaybackStatus().catch((e) => {
                     console.warn('Failed to load playback status:', e);
                     return null;
-                })
+                }),
+                api.getSystemStatus().catch((e) => {
+                    console.warn('Failed to load system status:', e);
+                    return null;
+                }),
+                api.getNetworkStatus().catch((e) => {
+                    console.warn('Failed to load network status:', e);
+                    return null;
+                }),
             ]);
 
             console.log('Received playlists:', playlists);
@@ -581,8 +731,27 @@ const handlers = {
                     ? playbackStatusResp.status
                     : null;
             state.playbackStatus = innerStatus;
+            state.systemStatus =
+                systemStatusResp &&
+                typeof systemStatusResp.status === 'object' &&
+                systemStatusResp.status !== null &&
+                !Array.isArray(systemStatusResp.status)
+                    ? systemStatusResp.status
+                    : null;
+            state.networkStatus =
+                networkStatusResp &&
+                typeof networkStatusResp.network === 'object' &&
+                networkStatusResp.network !== null &&
+                !Array.isArray(networkStatusResp.network)
+                    ? networkStatusResp.network
+                    : null;
 
-            ui.renderSettings(settings);
+            ui.renderSettings(settings, {
+                playlists: state.playlists,
+                playbackStatus: state.playbackStatus,
+                systemStatus: state.systemStatus,
+                networkStatus: state.networkStatus,
+            });
             ui.renderPlaylists(playlists);
 
             try {
@@ -600,12 +769,10 @@ const handlers = {
             this.setupEventListeners();
             this.startAutoRefresh();
             this.startPreviewRefresh(settings);
-            state.initialized = true;
 
         } catch (error) {
             console.error('Initialization failed:', error);
             showError('Failed to initialize application');
-            state.initStarted = false;
         }
     },
 
@@ -714,7 +881,12 @@ const handlers = {
                 
                 const settings = await api.getSettings();
                 state.currentSettings = settings;
-                ui.renderSettings(settings);
+                ui.renderSettings(settings, {
+                    playlists: state.playlists,
+                    playbackStatus: state.playbackStatus,
+                    systemStatus: state.systemStatus,
+                    networkStatus: state.networkStatus,
+                });
             } catch (error) {
                 console.error('Logo upload failed:', error);
                 showError('Failed to upload logo: ' + error.message);
@@ -786,6 +958,12 @@ const handlers = {
                         playlist_id: Number(playlistId)
                     };
                     ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
+                    ui.renderSettings(state.currentSettings, {
+                        playlists: state.playlists,
+                        playbackStatus: state.playbackStatus,
+                        systemStatus: state.systemStatus,
+                        networkStatus: state.networkStatus,
+                    });
                     showAlert('Playback started', 'success');
                     
                 } else if (btn.classList.contains('stop')) {
@@ -795,6 +973,12 @@ const handlers = {
                         playlist_id: Number(playlistId)
                     };
                     ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
+                    ui.renderSettings(state.currentSettings, {
+                        playlists: state.playlists,
+                        playbackStatus: state.playbackStatus,
+                        systemStatus: state.systemStatus,
+                        networkStatus: state.networkStatus,
+                    });
                     showAlert('Playback stopped', 'info');
                     
                 } else if (btn.classList.contains('edit')) {
@@ -859,13 +1043,58 @@ const handlers = {
 
         state.refreshIntervalId = setInterval(async () => {
             try {
-                const settings = await api.getSettings();
-                if (JSON.stringify(state.currentSettings) !== JSON.stringify(settings)) {
+                const [settings, playbackStatusResp, systemStatusResp, networkStatusResp] = await Promise.all([
+                    api.getSettings(),
+                    api.getPlaybackStatus().catch(() => null),
+                    api.getSystemStatus().catch(() => null),
+                    api.getNetworkStatus().catch(() => null),
+                ]);
+
+                const latestPlaybackStatus =
+                    playbackStatusResp &&
+                    typeof playbackStatusResp.status === 'object' &&
+                    playbackStatusResp.status !== null &&
+                    !Array.isArray(playbackStatusResp.status)
+                        ? playbackStatusResp.status
+                        : state.playbackStatus;
+                const latestSystemStatus =
+                    systemStatusResp &&
+                    typeof systemStatusResp.status === 'object' &&
+                    systemStatusResp.status !== null &&
+                    !Array.isArray(systemStatusResp.status)
+                        ? systemStatusResp.status
+                        : state.systemStatus;
+                const latestNetworkStatus =
+                    networkStatusResp &&
+                    typeof networkStatusResp.network === 'object' &&
+                    networkStatusResp.network !== null &&
+                    !Array.isArray(networkStatusResp.network)
+                        ? networkStatusResp.network
+                        : state.networkStatus;
+
+                const settingsChanged = JSON.stringify(state.currentSettings) !== JSON.stringify(settings);
+                const playbackChanged = JSON.stringify(state.playbackStatus) !== JSON.stringify(latestPlaybackStatus);
+                const systemChanged = JSON.stringify(state.systemStatus) !== JSON.stringify(latestSystemStatus);
+                const networkChanged = JSON.stringify(state.networkStatus) !== JSON.stringify(latestNetworkStatus);
+
+                if (settingsChanged) {
                     state.currentSettings = settings;
-                    ui.renderSettings(settings);
                     ui.updateLogo(settings.display?.logo);
                     // If Auto preview interval changed in Settings, reflect it here.
                     this.startPreviewRefresh(settings);
+                }
+                state.playbackStatus = latestPlaybackStatus;
+                state.systemStatus = latestSystemStatus;
+                state.networkStatus = latestNetworkStatus;
+
+                if (settingsChanged || playbackChanged || systemChanged || networkChanged) {
+                    ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
+                    ui.renderSettings(state.currentSettings, {
+                        playlists: state.playlists,
+                        playbackStatus: state.playbackStatus,
+                        systemStatus: state.systemStatus,
+                        networkStatus: state.networkStatus,
+                    });
                 }
             } catch (error) {
                 console.error('Auto-refresh failed:', error);
@@ -902,28 +1131,10 @@ const handlers = {
     }
 };
 
-// Lightweight startup timing diagnostics.
-if (typeof window !== 'undefined') {
-    const sinceNavStart = () => {
-        const nav = performance.getEntriesByType('navigation')?.[0];
-        if (nav?.startTime != null) {
-            return Math.round(performance.now() - nav.startTime);
-        }
-        return Math.round(performance.now());
-    };
-    window.addEventListener('load', () => {
-        const rowsRendered = document.querySelectorAll('#playlist-table-body tr').length;
-        console.info('[Perf][index] startup', {
-            msSinceNavigationStart: sinceNavStart(),
-            rowsRendered
-        });
-    }, { once: true });
-}
-
 // Initialize the application when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     handlers.init();
-}, { once: true });
+});
 
 // Cleanup when page unloads
 window.addEventListener('beforeunload', () => {
