@@ -365,7 +365,9 @@ const ui = {
         `;
     },
 
-    _resolveScreenValue(settings) {
+    _resolveScreenValue(settings, systemStatus = {}) {
+        const actualMode = String(systemStatus?.display?.current_resolution || '').trim();
+        if (actualMode) return actualMode;
         const preset = String(settings?.display?.hdmi_mode_preset || '').trim().toLowerCase();
         if (preset === '1080p60') return '1920x1080';
         if (preset === '4k30') return '3840x2160';
@@ -382,7 +384,7 @@ const ui = {
         const systemStatus = runtime.systemStatus || {};
         const networkStatus = runtime.networkStatus || {};
 
-        const screenResolution = this._resolveScreenValue(settings);
+        const screenResolution = this._resolveScreenValue(settings, systemStatus);
 
         const systemAudio = systemStatus?.audio || {};
         const audioAvailable = Boolean(systemAudio?.available);

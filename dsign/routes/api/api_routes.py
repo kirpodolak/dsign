@@ -106,6 +106,58 @@ def init_api_routes(api_bp, services):
         except Exception:
             return None
 
+    def _read_display_status() -> dict:
+        """
+        Read actual DRM/KMS output mode from Linux sysfs.
+        Returns best-effort data for dashboard display metrics.
+        """
+        result = {
+            "current_resolution": None,
+            "connector": None,
+            "connected": False,
+        }
+        try:
+            drm_root = Path("/sys/class/drm")
+            if not drm_root.exists():
+                return result
+
+            connectors = [
+                p for p in drm_root.glob("card*-*")
+                if p.is_dir() and (p / "status").exists()
+            ]
+            connectors.sort(key=lambda p: ("HDMI" not in p.name.upper(), p.name))
+
+            for conn in connectors:
+                try:
+                    status = (conn / "status").read_text(encoding="utf-8", errors="ignore").strip().lower()
+                except Exception:
+                    status = ""
+                if status != "connected":
+                    continue
+
+                result["connected"] = True
+                result["connector"] = conn.name
+
+                mode = ""
+                try:
+                    mode = (conn / "mode").read_text(encoding="utf-8", errors="ignore").strip()
+                except Exception:
+                    mode = ""
+                if mode:
+                    result["current_resolution"] = mode
+                    return result
+
+                try:
+                    modes = (conn / "modes").read_text(encoding="utf-8", errors="ignore").splitlines()
+                    if modes:
+                        result["current_resolution"] = modes[0].strip() or None
+                except Exception:
+                    pass
+                return result
+        except Exception:
+            return result
+        return result
+
     def _amixer_available() -> bool:
         try:
             subprocess.run(["amixer", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
@@ -215,6 +267,7 @@ def init_api_routes(api_bp, services):
                             "usage_percent": _read_cpu_percent_procstat(),
                             "load_percent": _read_cpu_load_percent(),
                         },
+                        "display": _read_display_status(),
                         "audio": _audio_get(),
                     },
                 }
