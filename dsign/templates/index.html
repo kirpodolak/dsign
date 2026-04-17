@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block styles %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}?v={{ timestamp }}">
 {% endblock %}
 
 {% block content %}
@@ -110,5 +110,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="{{ url_for('static', filename='js/index.js') }}"></script>
+<script type="module" src="{{ url_for('static', filename='js/index.js') }}?v={{ timestamp }}"></script>
 {% endblock %}
