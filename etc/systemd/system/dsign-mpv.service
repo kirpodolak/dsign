@@ -4,7 +4,7 @@ Description=MPV Player for Digital Signage
 # Requires=dsign-mpv — получится цикл «multi-user → signage → mpv → после multi-user».
 # MPV with DRM/KMS needs a controlling TTY/VT. Pi 3B+: --vo=drm is lighter than --vo=gpu.
 After=network.target getty@tty1.service dsign-network-assistant.service
-Requires=dsign-network-assistant.service
+Wants=dsign-network-assistant.service
 Conflicts=getty@tty1.service
 
 [Service]

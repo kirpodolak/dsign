@@ -112,7 +112,6 @@ cat > /etc/systemd/system/digital-signage.service <<EOL
 [Unit]
 Description=Digital Signage Service (DRM)
 After=graphical.target dsign-network-assistant.service dsign-mpv.service
-Requires=dsign-network-assistant.service dsign-mpv.service
 Wants=dsign-network-assistant.service
 Wants=dsign-mpv.service
 Requires=dev-dri-card0.device
