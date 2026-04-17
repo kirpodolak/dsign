@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -u
+
+TTY_DEVICE="/dev/tty1"
+STARTUP_IP_FILE="${DSIGN_STARTUP_IP_FILE:-/tmp/dsign-startup-ip.txt}"
+PROMPT_TIMEOUT_SEC="${DSIGN_NETWORK_PROMPT_TIMEOUT_SEC:-120}"
+
+log() {
+  logger -t dsign-network-assistant "$*"
+}
+
+tty_ready() {
+  [ -c "$TTY_DEVICE" ] && [ -r "$TTY_DEVICE" ] && [ -w "$TTY_DEVICE" ]
+}
+
+tty_write() {
+  if tty_ready; then
+    printf '%s\r\n' "$*" >"$TTY_DEVICE" 2>/dev/null || true
+  fi
+}
+
+clear_tty() {
+  if tty_ready; then
+    printf '\033c' >"$TTY_DEVICE" 2>/dev/null || true
+  fi
+}
+
+primary_ip() {
+  ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}'
+}
+
+persist_startup_ip() {
+  local ip_addr
+  ip_addr="$(primary_ip || true)"
+  if [ -n "$ip_addr" ]; then
+    printf '%s\n' "$ip_addr" >"$STARTUP_IP_FILE" 2>/dev/null || true
+    # ExecStartPost helper runs as dsign user; keep file removable by that user.
+    chown dsign:dsign "$STARTUP_IP_FILE" 2>/dev/null || true
+    chmod 664 "$STARTUP_IP_FILE" 2>/dev/null || true
+    log "Saved startup IP: $ip_addr"
+  else
+    rm -f "$STARTUP_IP_FILE"
+  fi
+}
+
+has_internet() {
+  timeout 2 bash -c 'exec 3<>/dev/tcp/1.1.1.1/53' >/dev/null 2>&1 && return 0
+  timeout 2 bash -c 'exec 3<>/dev/tcp/8.8.8.8/53' >/dev/null 2>&1 && return 0
+  return 1
+}
+
+has_ip_link() {
+  [ -n "$(primary_ip || true)" ]
+}
+
+run_nmtui_once() {
+  local remaining="$1"
+  timeout --foreground "${remaining}" nmtui-connect <"$TTY_DEVICE" >"$TTY_DEVICE" 2>"$TTY_DEVICE" || true
+}
+
+main() {
+  rm -f "$STARTUP_IP_FILE"
+
+  if has_internet; then
+    log "Internet already available at startup"
+    persist_startup_ip
+    return 0
+  fi
+
+  # Some networks block outbound DNS probes (1.1.1.1/8.8.8.8) but still provide
+  # local connectivity and valid IP. In that case skip interactive Wi-Fi prompt.
+  if has_ip_link; then
+    log "IP link is already up (external internet probe failed), skipping Wi-Fi setup"
+    persist_startup_ip
+    return 0
+  fi
+
+  if ! command -v nmcli >/dev/null 2>&1; then
+    log "nmcli is unavailable, cannot run network assistant"
+    persist_startup_ip
+    return 0
+  fi
+
+  if ! command -v nmtui-connect >/dev/null 2>&1; then
+    log "nmtui-connect is unavailable, cannot run interactive setup"
+    persist_startup_ip
+    return 0
+  fi
+
+  if ! tty_ready; then
+    log "tty1 is unavailable, skipping interactive setup"
+    persist_startup_ip
+    return 0
+  fi
+
+  log "Internet is offline, opening interactive Wi-Fi setup on tty1"
+  chvt 1 >/dev/null 2>&1 || true
+  clear_tty
+  tty_write "Digital Signage: network connection required."
+  tty_write "Select Wi-Fi (hidden SSID supported in nmtui) and enter password."
+  tty_write "Assistant timeout: ${PROMPT_TIMEOUT_SEC}s"
+  tty_write ""
+
+  local start_ts now elapsed remaining
+  start_ts="$(date +%s)"
+
+  while true; do
+    now="$(date +%s)"
+    elapsed=$((now - start_ts))
+    remaining=$((PROMPT_TIMEOUT_SEC - elapsed))
+    if [ "$remaining" -le 0 ]; then
+      break
+    fi
+
+    run_nmtui_once "$remaining"
+    if has_internet || has_ip_link; then
+      break
+    fi
+    tty_write "Still offline. Retry Wi-Fi selection..."
+    sleep 1
+  done
+
+  if has_internet || has_ip_link; then
+    persist_startup_ip
+    tty_write ""
+    tty_write "Network connected. Starting content..."
+    sleep 1
+    return 0
+  fi
+
+  log "Interactive setup finished without internet connectivity"
+  persist_startup_ip
+  tty_write ""
+  tty_write "No internet connection. Starting content mode."
+  sleep 1
+  return 0
+}
+
+main "$@"
