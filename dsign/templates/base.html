@@ -1,108 +1,114 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="csrf-token" content="{{ csrf_token() }}">
-    <title>{% block title %}Digital Signage{% endblock %}</title>
-    
-    <!-- CSS -->
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    {% block styles %}{% endblock %}
-</head>
-<body class="{% block body_class %}{% endblock %}">
-    <div id="startup-ip-badge" class="startup-ip-badge" hidden>
-        <span class="startup-ip-label">Device IP:</span>
-        <span id="startup-ip-value" class="startup-ip-value"></span>
+{% extends "base.html" %}
+
+{% block styles %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}?v={{ timestamp }}">
+{% endblock %}
+
+{% block content %}
+<h1>Digital Signage Control Panel</h1>
+
+<div class="info-panel">
+    <div id="settings-container" class="info-card">
+        <h3>Current Settings</h3>
+        <!-- Данные настроек будут загружены через JS -->
     </div>
 
-    <div id="startup-network-overlay" class="startup-network-overlay" hidden>
-        <div class="startup-network-modal" role="dialog" aria-modal="true" aria-labelledby="startup-network-title">
-            <h2 id="startup-network-title">Network connection required</h2>
-            <p class="startup-network-subtitle">
-                Internet is unavailable. Select a Wi-Fi network to connect.
-            </p>
-            <p id="startup-network-status" class="startup-network-status"></p>
-
-            <label for="startup-network-ssid">Available Wi-Fi</label>
-            <select id="startup-network-ssid"></select>
-
-            <label class="startup-network-hidden-toggle">
-                <input id="startup-network-hidden-toggle" type="checkbox">
-                <span>Connect to hidden network</span>
-            </label>
-
-            <div id="startup-network-manual-wrap" hidden>
-                <label for="startup-network-manual-ssid">Hidden Wi-Fi name (SSID)</label>
-                <input id="startup-network-manual-ssid" type="text" autocomplete="off">
-            </div>
-
-            <label for="startup-network-password">Wi-Fi password</label>
-            <input id="startup-network-password" type="password" autocomplete="off">
-
-            <div class="startup-network-actions">
-                <button id="startup-network-scan" type="button" class="btn outline">Scan</button>
-                <button id="startup-network-retry" type="button" class="btn outline">Retry internet check</button>
-                <button id="startup-network-connect" type="button" class="btn primary">Connect</button>
-                <button id="startup-network-close" type="button" class="btn secondary">Close</button>
-            </div>
+    <div class="mpv-preview">
+        <h3>MPV Player Preview</h3>
+        <div class="mpv-preview-container">
+            <img id="mpv-preview-image" 
+                 src="{{ url_for('api.get_mpv_screenshot') }}" 
+                 class="mpv-preview-image"
+                 style="display: none;"
+                 onload="this.style.display='block'"
+                 onerror="this.onerror=null;this.src='{{ url_for('static', filename='images/default-preview.jpg') }}?t='+Date.now()">
+            <button id="refresh-mpv-preview" class="mpv-refresh-btn" title="Refresh Preview">
+                <i class="fas fa-sync-alt"></i>
+            </button>
+        </div>
+        <div class="mpv-status">
+            Last updated: <span id="mpv-last-update">Never</span>
+            <span id="mpv-auto-refresh-status" class="mpv-auto-refresh-status"></span>
         </div>
     </div>
 
-    <!-- Page loader -->
-    <div id="page-loader">
-        <div class="loader-content">
-            <i class="fas fa-spinner fa-spin"></i>
-            <span>Loading...</span>
-        </div>
+    <div class="logo-preview">
+        <h3>Current Logo</h3>
+        <img id="idle-logo"
+             src="{{ url_for('api.serve_media', filename='idle_logo.jpg') }}"
+             style="display: none;"
+             onload="this.style.display='block'"
+             onerror="this.onerror=null;this.src='{{ url_for('static', filename='default-logo.jpg') }}?t={{ default_logo_cache_buster }}'">
+
+        <form id="logo-upload-form" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="logo-upload">
+                <input type="file" id="logo-upload" name="logo" accept="image/jpeg, image/png" required>
+                <button type="button" id="upload-logo-btn" class="btn small">
+                    <span class="btn-text">Update Logo</span>
+                    <span class="loading-spinner" style="display:none;"></span>
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="playlist-section">
+    <div class="section-header">
+        <h2>Playlists</h2>
+        <button id="create-playlist-btn" class="btn primary">
+            <i class="fas fa-plus"></i> New Playlist
+        </button>
     </div>
 
-    {% block site_nav %}
-    <nav>
-        <a href="{{ url_for('main.index') }}" class="{% if request.endpoint == 'main.index' %}active{% endif %}">
-            <i class="fas fa-home"></i> Home
-        </a>
-        <a href="{{ url_for('main.gallery') }}" class="{% if request.endpoint == 'main.gallery' %}active{% endif %}">
-            <i class="fas fa-images"></i> Gallery
-        </a>
-        <a href="{{ url_for('main.settings') }}" class="{% if request.endpoint == 'main.settings' %}active{% endif %}">
-            <i class="fas fa-cog"></i> Settings
-        </a>
-        <a href="{{ url_for('auth.logout') }}">
-            <i class="fas fa-sign-out-alt"></i> Logout
-        </a>
-    </nav>
-    {% endblock %}
+    <div id="playlist-status"></div>
 
-    <!-- Main content -->
-    <main>
-        {% block content %}{% endblock %}
-    </main>
+    <div class="playlist-table-wrap">
+        <table class="playlist-table" id="playlist-table">
+            <colgroup>
+                <col class="playlist-col-name">
+                <col class="playlist-col-customer">
+                <col class="playlist-col-files">
+                <col class="playlist-col-status">
+                <col class="playlist-col-actions">
+            </colgroup>
+            <thead>
+                <tr>
+                    <th scope="col">Name</th>
+                    <th scope="col">Customer</th>
+                    <th scope="col">Files</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="playlist-table-body">
+                <!-- Filled by JavaScript -->
+            </tbody>
+        </table>
+    </div>
+</div>
 
-    <!-- Notification container -->
-    <div id="notification-container"></div>
+<!-- Модальное окно создания плейлиста -->
+<div id="create-playlist-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>Create New Playlist</h2>
+        <form id="create-playlist-form" method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-group">
+                <label for="playlist-name">Playlist Name:</label>
+                <input type="text" id="playlist-name" name="name" required>
+            </div>
+            <div class="form-group">
+                <label for="playlist-customer">Customer:</label>
+                <input type="text" id="playlist-customer" name="customer" required>
+            </div>
+            <button type="submit" class="btn primary">Create</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
 
-    <!-- External dependencies -->
-    <!-- Socket.IO client is loaded lazily from local static module in base.js. -->
-    <script async src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
-
-    <!-- Main app initialization -->
-    <script type="module" src="{{ url_for('static', filename='js/base.js') }}"></script>
-
-    <!-- Safety: never leave loader stuck visible -->
-    <script>
-        (function () {
-            function hide() {
-                const el = document.getElementById('page-loader');
-                if (el) el.style.display = 'none';
-            }
-            document.addEventListener('DOMContentLoaded', hide);
-            window.addEventListener('load', hide);
-            setTimeout(hide, 8000);
-        })();
-    </script>
-    
-    {% block scripts %}{% endblock %}
-</body>
-</html>
+{% block scripts %}
+<script type="module" src="{{ url_for('static', filename='js/index.js') }}?v={{ timestamp }}"></script>
+{% endblock %}
