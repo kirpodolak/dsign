@@ -33,6 +33,7 @@ apt-get install -y \
     python3-pip python3-venv python3-dev \
     sqlite3 libsqlite3-dev \
     mpv ffmpeg \
+    socat \
     nginx git \
     acl libdrm-dev \
     xauth  # Для X11 авторизации

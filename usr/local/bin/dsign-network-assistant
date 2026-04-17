@@ -47,6 +47,10 @@ has_internet() {
   return 1
 }
 
+has_ip_link() {
+  [ -n "$(primary_ip || true)" ]
+}
+
 run_nmtui_once() {
   local remaining="$1"
   timeout --foreground "${remaining}" nmtui-connect <"$TTY_DEVICE" >"$TTY_DEVICE" 2>"$TTY_DEVICE" || true
@@ -57,6 +61,14 @@ main() {
 
   if has_internet; then
     log "Internet already available at startup"
+    persist_startup_ip
+    return 0
+  fi
+
+  # Some networks block outbound DNS probes (1.1.1.1/8.8.8.8) but still provide
+  # local connectivity and valid IP. In that case skip interactive Wi-Fi prompt.
+  if has_ip_link; then
+    log "IP link is already up (external internet probe failed), skipping Wi-Fi setup"
     persist_startup_ip
     return 0
   fi
@@ -99,14 +111,14 @@ main() {
     fi
 
     run_nmtui_once "$remaining"
-    if has_internet; then
+    if has_internet || has_ip_link; then
       break
     fi
     tty_write "Still offline. Retry Wi-Fi selection..."
     sleep 1
   done
 
-  if has_internet; then
+  if has_internet || has_ip_link; then
     persist_startup_ip
     tty_write ""
     tty_write "Network connected. Starting content..."
