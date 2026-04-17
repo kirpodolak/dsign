@@ -85,7 +85,7 @@ class PlaylistManager:
         self._stop_event.clear()
         self._active_playlist_id = None
 
-    def _manual_slideshow_loop(self, playlist_id: int, items: list[dict]):
+    def _manual_slideshow_loop(self, playlist_id: int, items: list[dict], start_index: int = 0):
         """
         Manual playback loop that enforces per-item durations for images and plays videos to EOF.
         Runs in a background thread; advances images by sleeping for their duration and videos by
@@ -93,9 +93,18 @@ class PlaylistManager:
         """
         self.logger.info("Starting manual playback loop", extra={"playlist_id": playlist_id, "items_count": len(items)})
 
+        if not items:
+            return
+
+        start_index = int(start_index or 0)
+        if start_index < 0 or start_index >= len(items):
+            start_index = 0
+
         default_duration = 10
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
-            for item in items:
+            # Iterate cyclically starting from start_index.
+            for offset in range(len(items)):
+                item = items[(start_index + offset) % len(items)]
                 if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                     break
 
@@ -126,8 +135,15 @@ class PlaylistManager:
 
                 # Load next media file
                 load_started = time.monotonic()
-                self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
+                load_resp = self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
                 self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
+                if not load_resp or load_resp.get("error") != "success":
+                    self.logger.warning(
+                        "MPV loadfile failed",
+                        extra={"path": path, "mpv_response": load_resp},
+                    )
+                    # Skip to next item; avoid getting stuck on a bad file.
+                    continue
 
                 if is_video:
                     # Wait until playback ends
@@ -214,7 +230,9 @@ class PlaylistManager:
             # where ffconcat timing is inconsistent for images and mixed media.
             items = []
             missing = []
-            for pf in (playlist.files or []):
+            # Enforce stable playback order (PlaylistFiles.order in DB).
+            files = sorted((playlist.files or []), key=lambda x: int(getattr(x, "order", 0) or 0))
+            for pf in files:
                 file_path = self.upload_folder / pf.file_name
                 if not file_path.exists():
                     missing.append(str(file_path))
@@ -266,10 +284,11 @@ class PlaylistManager:
             self.db_session.add(playback)
             self.db_session.commit()
 
-            # Start background loop to enforce durations and EOF waits
+            # Start background loop to enforce durations and EOF waits.
+            # IMPORTANT: start from the *next* item, because we already loaded the first one above.
             self._play_thread = Thread(
                 target=self._manual_slideshow_loop,
-                args=(playlist_id, items),
+                args=(playlist_id, items, 1),
                 daemon=True,
             )
             self._play_thread.start()
