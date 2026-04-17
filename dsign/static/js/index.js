@@ -59,6 +59,8 @@ const state = {
     playlists: [],
     currentSettings: {},
     playbackStatus: null,
+    systemStatus: null,
+    networkStatus: null,
     refreshIntervalId: null,
     previewRefreshId: null,
     logoLoadAttempts: 0,
