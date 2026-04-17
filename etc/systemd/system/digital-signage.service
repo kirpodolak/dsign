@@ -1,7 +1,8 @@
 [Unit]
 Description=Digital Signage Controller
-After=network.target dsign-mpv.service
+After=network.target dsign-mpv.service dsign-network-assistant.service
 Requires=dsign-mpv.service
+Wants=dsign-network-assistant.service
 StartLimitIntervalSec=60
 StartLimitBurst=3
 
