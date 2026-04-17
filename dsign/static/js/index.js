@@ -45,7 +45,8 @@ const CONFIG = {
     },
     defaultLogo: '/static/images/default-logo.jpg',
     defaultPreview: '/static/images/default-preview.jpg',
-    refreshInterval: 10000,
+    // Match Settings page status polling cadence for near-real-time metrics.
+    refreshInterval: 2000,
     previewRefreshInterval: 15000,
     maxImageLoadAttempts: 3
 };
@@ -364,6 +365,15 @@ const ui = {
         `;
     },
 
+    _resolveScreenValue(settings) {
+        const preset = String(settings?.display?.hdmi_mode_preset || '').trim().toLowerCase();
+        if (preset === '1080p60') return '1920x1080';
+        if (preset === '4k30') return '3840x2160';
+        const explicitResolution = String(settings?.resolution || '').trim();
+        if (explicitResolution) return explicitResolution;
+        return preset === 'auto' ? 'Auto' : 'N/A';
+    },
+
     renderSettings(settings, runtime = {}) {
         if (!elements.settingsPanel) return;
 
@@ -372,18 +382,23 @@ const ui = {
         const systemStatus = runtime.systemStatus || {};
         const networkStatus = runtime.networkStatus || {};
 
-        const screenResolution = settings?.resolution || 'N/A';
+        const screenResolution = this._resolveScreenValue(settings);
 
-        const settingsMuted = settings?.mute;
         const systemAudio = systemStatus?.audio || {};
-        const isMuted = typeof settingsMuted === 'boolean'
-            ? settingsMuted
-            : Boolean(systemAudio?.muted);
-        const volumeRaw = settings?.volume ?? systemAudio?.volume_percent;
-        const volumeNum = Number(volumeRaw);
+        const audioAvailable = Boolean(systemAudio?.available);
+        const systemMuted = systemAudio?.muted;
+        const settingsMuted = settings?.mute;
+        const isMuted = typeof systemMuted === 'boolean'
+            ? systemMuted
+            : (typeof settingsMuted === 'boolean' ? settingsMuted : false);
+        const systemVolumeNum = Number(systemAudio?.volume_percent);
+        const settingsVolumeNum = Number(settings?.volume);
+        const volumeNum = audioAvailable && Number.isFinite(systemVolumeNum)
+            ? systemVolumeNum
+            : (Number.isFinite(settingsVolumeNum) ? settingsVolumeNum : null);
         const volumeValue = isMuted
             ? 'Mute'
-            : (Number.isFinite(volumeNum) ? `${Math.max(0, Math.min(100, Math.round(volumeNum)))}%` : 'N/A');
+            : (volumeNum !== null ? `${Math.max(0, Math.min(100, Math.round(volumeNum)))}%` : 'N/A');
 
         const playbackState = String(playbackStatus?.status || '').toLowerCase();
         const activePlaylistId = playbackStatus?.playlist_id;
@@ -416,7 +431,7 @@ const ui = {
 
         const html = `
             <div class="settings-section">
-                <h3>Current Settings</h3>
+                <h3>Operational Metrics</h3>
                 <div class="metrics-grid">
                     <div class="metric-item">
                         <div class="metric-label">Screen</div>
