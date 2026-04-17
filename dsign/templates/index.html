@@ -1,15 +1,15 @@
 {% extends "base.html" %}
 
 {% block styles %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}?v={{ timestamp }}">
 {% endblock %}
 
 {% block content %}
 <h1>Digital Signage Control Panel</h1>
 
 <div class="info-panel">
-    <div id="settings-container" class="info-card">
-        <h3>Current Settings</h3>
+    <div id="settings-container" class="info-card info-card--metrics">
+        <h3>Operational Metrics</h3>
         <!-- Данные настроек будут загружены через JS -->
     </div>
 
@@ -43,11 +43,18 @@
         <form id="logo-upload-form" enctype="multipart/form-data">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="logo-upload">
-                <input type="file" id="logo-upload" name="logo" accept="image/jpeg, image/png" required>
-                <button type="button" id="upload-logo-btn" class="btn small">
-                    <span class="btn-text">Update Logo</span>
-                    <span class="loading-spinner" style="display:none;"></span>
-                </button>
+                <input type="file" id="logo-upload" class="logo-upload-input" name="logo" accept="image/jpeg, image/png" required>
+                <div class="logo-upload-controls">
+                    <label for="logo-upload" class="logo-btn logo-btn--choose">
+                        <i class="fas fa-folder-open"></i>
+                        <span>Choose File</span>
+                    </label>
+                    <button type="button" id="upload-logo-btn" class="logo-btn logo-btn--apply" disabled>
+                        <span class="btn-text">Apply Logo</span>
+                        <span class="loading-spinner" style="display:none;"></span>
+                    </button>
+                </div>
+                <p id="logo-selected-file" class="logo-selected-file">No file selected</p>
             </div>
         </form>
     </div>
@@ -110,5 +117,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="{{ url_for('static', filename='js/index.js') }}"></script>
+<script type="module" src="{{ url_for('static', filename='js/index.js') }}?v={{ timestamp }}"></script>
 {% endblock %}
