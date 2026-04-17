@@ -189,6 +189,7 @@ EOL
 
 # Network assistant helper (OSD on content screen via MPV IPC)
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/bin/dsign-network-assistant
+sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
 
 cat > /etc/systemd/system/dsign-network-assistant.service <<EOL
 [Unit]
