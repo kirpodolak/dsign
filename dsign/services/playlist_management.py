@@ -27,6 +27,87 @@ class PlaylistManager:
         self._stop_event = Event()
         self._active_playlist_id: Optional[int] = None
 
+    def _mono_ms(self) -> int:
+        """Monotonic timestamp in milliseconds for reliable interval diagnostics."""
+        return int(time.monotonic() * 1000)
+
+    def _wait_for_mpv_loaded_path(self, expected_path: str, timeout: float = 10.0) -> bool:
+        """
+        Wait until MPV reports the expected `path` as loaded.
+
+        We intentionally start the "virtual timer" after MPV has actually switched to the file,
+        otherwise slow IO/decoding makes per-item durations feel random.
+        """
+        if not expected_path:
+            return False
+
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        last_seen = None
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            try:
+                resp = self._mpv_manager._send_command(
+                    {"command": ["get_property", "path"]},
+                    timeout=2.0,
+                )
+                if resp and resp.get("error") == "success":
+                    last_seen = resp.get("data")
+                    if last_seen == expected_path:
+                        return True
+            except Exception:
+                pass
+            # small poll interval; keep it low but not busy-loop
+            time.sleep(0.1)
+
+        self.logger.debug(
+            "MPV did not confirm loaded path within timeout",
+            extra={"expected_path": expected_path, "last_seen_path": last_seen, "timeout_sec": timeout},
+        )
+        return False
+
+    def _wait_for_mpv_vo_configured(self, timeout: float = 5.0) -> bool:
+        """
+        Wait until MPV reports `vo-configured=true`.
+
+        On DRM/KMS, `path` may switch before the frame is actually presented. Waiting for
+        vo-configured helps reduce visible flicker / "blink" between images.
+        """
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        last_val = None
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            try:
+                resp = self._mpv_manager._send_command(
+                    {"command": ["get_property", "vo-configured"]},
+                    timeout=2.0,
+                )
+                if resp and resp.get("error") == "success":
+                    last_val = resp.get("data")
+                    if last_val is True:
+                        return True
+            except Exception:
+                pass
+            time.sleep(0.1)
+        self.logger.debug(
+            "MPV vo-configured did not become true within timeout",
+            extra={"timeout_sec": timeout, "last_value": last_val},
+        )
+        return False
+
+    def _sleep_until(self, deadline_monotonic: float, step: float = 0.2) -> bool:
+        """Sleep until deadline or stop event; returns True if reached deadline."""
+        step = max(0.05, float(step))
+        while True:
+            if self._stop_event.is_set():
+                return False
+            now = time.monotonic()
+            remaining = deadline_monotonic - now
+            if remaining <= 0:
+                return True
+            self._stop_event.wait(timeout=min(step, remaining))
+
     def _stop_play_thread(self):
         if self._play_thread and self._play_thread.is_alive():
             self._stop_event.set()
@@ -38,7 +119,7 @@ class PlaylistManager:
         self._stop_event.clear()
         self._active_playlist_id = None
 
-    def _manual_slideshow_loop(self, playlist_id: int, items: list[dict]):
+    def _manual_slideshow_loop(self, playlist_id: int, items: list[dict], start_index: int = 0):
         """
         Manual playback loop that enforces per-item durations for images and plays videos to EOF.
         Runs in a background thread; advances images by sleeping for their duration and videos by
@@ -46,22 +127,35 @@ class PlaylistManager:
         """
         self.logger.info("Starting manual playback loop", extra={"playlist_id": playlist_id, "items_count": len(items)})
 
+        if not items:
+            return
+
+        start_index = int(start_index or 0)
+        if start_index < 0 or start_index >= len(items):
+            start_index = 0
+
         default_duration = 10
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
-            for item in items:
+            # Iterate cyclically starting from start_index.
+            for offset in range(len(items)):
+                item = items[(start_index + offset) % len(items)]
                 if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                     break
 
                 path = item["path"]
                 is_video = item["is_video"]
-                duration = item.get("duration") or default_duration
+                raw_duration = item.get("duration")
+                # Only images use duration. Treat 0/None as "missing" for images.
+                duration = raw_duration if (raw_duration is not None and int(raw_duration) >= 1) else default_duration
                 muted = bool(item.get("muted", False))
 
                 # Apply per-item settings (best-effort, longer timeout to avoid IPC churn on Pi 3B+).
                 # NOTE: if MPV is under load, short timeouts cause broken pipes and retry storms.
                 try:
                     self._mpv_manager._send_command(
-                        {"command": ["set_property", "loop-file", "no" if is_video else "inf"]},
+                        # Do NOT loop files. We control the loop at application level,
+                        # and looping still images can cause visible "blink" on some builds.
+                        {"command": ["set_property", "loop-file", "no"]},
                         timeout=5.0,
                     )
                 except Exception:
@@ -76,8 +170,17 @@ class PlaylistManager:
                     pass
 
                 # Load next media file
-                self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
+                load_started_mono = time.monotonic()
+                load_started_ms = self._mono_ms()
+                load_resp = self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
                 self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
+                if not load_resp or load_resp.get("error") != "success":
+                    self.logger.warning(
+                        "MPV loadfile failed",
+                        extra={"path": path, "mpv_response": load_resp},
+                    )
+                    # Skip to next item; avoid getting stuck on a bad file.
+                    continue
 
                 if is_video:
                     # Wait until playback ends
@@ -103,8 +206,59 @@ class PlaylistManager:
                             break
                         time.sleep(1.0)
                 else:
-                    # Show image for its duration
-                    time.sleep(max(1, int(duration)))
+                    # For still images, keep the frame open to avoid quick close/reopen churn.
+                    # (Videos should not be kept open; they are EOF-driven here.)
+                    try:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "keep-open", "yes"]},
+                            timeout=2.0,
+                        )
+                    except Exception:
+                        pass
+
+                    # Deterministic image timer:
+                    # wait until MPV loaded the file *and* VO is configured, then start countdown.
+                    wait_begin_ms = self._mono_ms()
+                    loaded = self._wait_for_mpv_loaded_path(path, timeout=15.0)
+                    loaded_ms = self._mono_ms()
+                    vo_ready = self._wait_for_mpv_vo_configured(timeout=5.0)
+                    vo_ready_ms = self._mono_ms()
+                    timer_start_mono = time.monotonic()
+                    timer_start_ms = self._mono_ms()
+                    load_wait_sec = round(timer_start_mono - load_started_mono, 3)
+
+                    dur_sec = max(1, int(duration))
+                    switch_at = timer_start_mono + dur_sec
+                    self.logger.debug(
+                        "Image timer scheduled",
+                        extra={
+                            "path": path,
+                            "duration_sec": dur_sec,
+                            "loaded_confirmed": loaded,
+                            "vo_configured": vo_ready,
+                            "load_wait_sec": load_wait_sec,
+                            # Monotonic timestamps for interval reconstruction (journald timestamps can drift/buffer).
+                            "t_loadfile_sent_ms": load_started_ms,
+                            "t_wait_begin_ms": wait_begin_ms,
+                            "t_loaded_ms": loaded_ms,
+                            "t_vo_configured_ms": vo_ready_ms,
+                            "t_timer_start_ms": timer_start_ms,
+                        },
+                    )
+                    sleep_ok = self._sleep_until(switch_at, step=0.2)
+                    timer_end_ms = self._mono_ms()
+                    oversleep_ms = timer_end_ms - (timer_start_ms + dur_sec * 1000)
+                    self.logger.debug(
+                        "Image timer elapsed",
+                        extra={
+                            "path": path,
+                            "duration_sec": dur_sec,
+                            "sleep_reached_deadline": bool(sleep_ok),
+                            "t_timer_start_ms": timer_start_ms,
+                            "t_timer_end_ms": timer_end_ms,
+                            "oversleep_ms": int(oversleep_ms),
+                        },
+                    )
 
     def play(self, playlist_id: int) -> bool:
         """Play playlist with profile support"""
@@ -148,7 +302,9 @@ class PlaylistManager:
             # where ffconcat timing is inconsistent for images and mixed media.
             items = []
             missing = []
-            for pf in (playlist.files or []):
+            # Enforce stable playback order (PlaylistFiles.order in DB).
+            files = sorted((playlist.files or []), key=lambda x: int(getattr(x, "order", 0) or 0))
+            for pf in files:
                 file_path = self.upload_folder / pf.file_name
                 if not file_path.exists():
                     missing.append(str(file_path))
@@ -174,25 +330,6 @@ class PlaylistManager:
 
             self._active_playlist_id = playlist_id
 
-            # Show first item immediately for responsiveness
-            first = items[0]
-            try:
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "loop-file", "no" if first["is_video"] else "inf"]},
-                    timeout=2.0,
-                )
-            except Exception:
-                pass
-            try:
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "mute", "yes" if bool(first.get("muted")) else "no"]},
-                    timeout=2.0,
-                )
-            except Exception:
-                pass
-            self._mpv_manager._send_command({"command": ["loadfile", first["path"], "replace"]}, timeout=10.0)
-            self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
-
             # Update playback status (single-row table; keep id=1 stable)
             playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
             playback.playlist_id = playlist_id
@@ -200,10 +337,11 @@ class PlaylistManager:
             self.db_session.add(playback)
             self.db_session.commit()
 
-            # Start background loop to enforce durations and EOF waits
+            # Start background loop to enforce durations and EOF waits.
+            # IMPORTANT: start from the first item so image durations apply to item #1 as well.
             self._play_thread = Thread(
                 target=self._manual_slideshow_loop,
-                args=(playlist_id, items),
+                args=(playlist_id, items, 0),
                 daemon=True,
             )
             self._play_thread.start()
