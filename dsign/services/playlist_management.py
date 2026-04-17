@@ -330,26 +330,6 @@ class PlaylistManager:
 
             self._active_playlist_id = playlist_id
 
-            # Show first item immediately for responsiveness
-            first = items[0]
-            try:
-                # Do NOT loop the file at MPV level; the app controls looping.
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "loop-file", "no"]},
-                    timeout=2.0,
-                )
-            except Exception:
-                pass
-            try:
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "mute", "yes" if bool(first.get("muted")) else "no"]},
-                    timeout=2.0,
-                )
-            except Exception:
-                pass
-            self._mpv_manager._send_command({"command": ["loadfile", first["path"], "replace"]}, timeout=10.0)
-            self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
-
             # Update playback status (single-row table; keep id=1 stable)
             playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
             playback.playlist_id = playlist_id
@@ -358,10 +338,10 @@ class PlaylistManager:
             self.db_session.commit()
 
             # Start background loop to enforce durations and EOF waits.
-            # IMPORTANT: start from the *next* item, because we already loaded the first one above.
+            # IMPORTANT: start from the first item so image durations apply to item #1 as well.
             self._play_thread = Thread(
                 target=self._manual_slideshow_loop,
-                args=(playlist_id, items, 1),
+                args=(playlist_id, items, 0),
                 daemon=True,
             )
             self._play_thread.start()
