@@ -2,6 +2,7 @@ from threading import Lock
 import os
 import shutil
 import subprocess
+import socket
 import traceback
 import time
 from pathlib import Path 
@@ -248,6 +249,193 @@ def init_api_routes(api_bp, services):
             subprocess.run(["amixer", "-c", str(card), "sset", ctl, "mute" if muted else "unmute"], check=False)
         return _audio_get()
 
+    def _is_nmcli_available() -> bool:
+        return shutil.which("nmcli") is not None
+
+    def _run_nmcli(args: list[str], timeout_sec: int = 20) -> tuple[bool, str, str]:
+        if not _is_nmcli_available():
+            return False, "", "nmcli is not available"
+        try:
+            result = subprocess.run(
+                ["nmcli", *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+                check=False,
+            )
+            return (
+                result.returncode == 0,
+                (result.stdout or "").strip(),
+                (result.stderr or "").strip(),
+            )
+        except subprocess.TimeoutExpired:
+            return False, "", "nmcli command timed out"
+        except Exception as e:
+            return False, "", str(e)
+
+    def _split_nmcli_terse_line(line: str) -> list[str]:
+        r"""
+        Parse nmcli terse output where ':' is a delimiter and may be escaped as '\:'.
+        """
+        parts: list[str] = []
+        current: list[str] = []
+        escaped = False
+        for ch in line:
+            if escaped:
+                current.append(ch)
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == ":":
+                parts.append("".join(current))
+                current = []
+                continue
+            current.append(ch)
+        parts.append("".join(current))
+        return parts
+
+    def _get_wifi_device_info() -> dict | None:
+        ok, out, _ = _run_nmcli(["-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"])
+        if not ok and not out:
+            return None
+        for raw_line in out.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = _split_nmcli_terse_line(line)
+            while len(parts) < 4:
+                parts.append("")
+            device, dev_type, state, connection = parts[:4]
+            if dev_type == "wifi":
+                return {
+                    "device": device.strip(),
+                    "state": state.strip(),
+                    "connection": connection.strip(),
+                }
+        return None
+
+    def _get_ipv4_addresses() -> list[dict]:
+        try:
+            out = subprocess.check_output(
+                ["ip", "-4", "-o", "addr", "show", "scope", "global"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return []
+
+        addresses: list[dict] = []
+        for line in out.splitlines():
+            # Example: "2: eth0    inet 192.168.1.20/24 brd ..."
+            match = re.match(r"^\d+:\s+(\S+)\s+inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)", line.strip())
+            if not match:
+                continue
+            iface, ip_addr, prefix = match.groups()
+            addresses.append(
+                {
+                    "interface": iface,
+                    "ip": ip_addr,
+                    "prefix": int(prefix),
+                }
+            )
+        return addresses
+
+    def _has_internet_connectivity(timeout_sec: float = 1.5) -> bool:
+        # Fast outbound connectivity probe. If any public DNS endpoint is reachable, assume internet is up.
+        probes = (("1.1.1.1", 53), ("8.8.8.8", 53), ("9.9.9.9", 53))
+        for host, port in probes:
+            try:
+                with socket.create_connection((host, port), timeout=timeout_sec):
+                    return True
+            except OSError:
+                continue
+        return False
+
+    def _collect_network_status() -> dict:
+        wifi_info = _get_wifi_device_info()
+        ip_addresses = _get_ipv4_addresses()
+        primary_ip = next((item["ip"] for item in ip_addresses if item.get("ip")), None)
+        has_ip = bool(primary_ip)
+        internet_online = _has_internet_connectivity() if has_ip else False
+        wifi_ssid = None
+        if wifi_info:
+            connection_name = wifi_info.get("connection")
+            if connection_name and connection_name not in ("--", "N/A"):
+                wifi_ssid = connection_name
+        return {
+            "internet_online": internet_online,
+            "has_ip": has_ip,
+            "primary_ip": primary_ip,
+            "ip_addresses": ip_addresses,
+            "wifi_supported": _is_nmcli_available(),
+            "wifi_device": wifi_info.get("device") if wifi_info else None,
+            "wifi_state": wifi_info.get("state") if wifi_info else None,
+            "wifi_connected_ssid": wifi_ssid,
+            "timestamp": int(time.time()),
+        }
+
+    def _scan_wifi_networks() -> list[dict]:
+        ok, out, err = _run_nmcli(
+            ["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "device", "wifi", "list", "--rescan", "auto"],
+            timeout_sec=25,
+        )
+        if not ok and not out:
+            raise RuntimeError(err or "Failed to scan Wi-Fi networks")
+
+        dedup: dict[str, dict] = {}
+        for raw_line in out.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = _split_nmcli_terse_line(line)
+            while len(parts) < 4:
+                parts.append("")
+            in_use_raw, ssid_raw, signal_raw, security_raw = parts[:4]
+            ssid = ssid_raw.strip()
+            if not ssid:
+                continue
+            try:
+                signal = int(signal_raw)
+            except Exception:
+                signal = 0
+            security = security_raw.strip()
+            if security in ("", "--"):
+                security = "open"
+            candidate = {
+                "ssid": ssid,
+                "signal": max(0, min(signal, 100)),
+                "security": security,
+                "in_use": in_use_raw.strip() == "*",
+            }
+            existing = dedup.get(ssid)
+            if (
+                existing is None
+                or candidate["in_use"] and not existing["in_use"]
+                or candidate["signal"] > existing["signal"]
+            ):
+                dedup[ssid] = candidate
+
+        networks = list(dedup.values())
+        networks.sort(key=lambda item: (not item["in_use"], -item["signal"], item["ssid"].lower()))
+        return networks
+
+    def _connect_wifi(ssid: str, password: str | None = None, hidden: bool = False) -> tuple[bool, str]:
+        command = ["device", "wifi", "connect", ssid]
+        if password:
+            command.extend(["password", password])
+        if hidden:
+            command.extend(["hidden", "yes"])
+        wifi_info = _get_wifi_device_info()
+        wifi_device = (wifi_info or {}).get("device")
+        if wifi_device:
+            command.extend(["ifname", wifi_device])
+
+        ok, out, err = _run_nmcli(command, timeout_sec=45)
+        message = out or err or "Failed to connect Wi-Fi network"
+        return ok, message
+
     @api_bp.route('/system/status', methods=['GET'])
     @login_required
     def get_system_status():
@@ -274,6 +462,78 @@ def init_api_routes(api_bp, services):
             )
         except Exception as e:
             current_app.logger.error(f"Error getting system status: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/system/network/status', methods=['GET'])
+    @login_required
+    def get_network_status():
+        try:
+            return jsonify({
+                "success": True,
+                "network": _collect_network_status(),
+            })
+        except Exception as e:
+            current_app.logger.error(f"Error getting network status: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/system/network/wifi/scan', methods=['GET'])
+    @login_required
+    def scan_wifi_networks():
+        if not _is_nmcli_available():
+            return jsonify({
+                "success": False,
+                "error": "Wi-Fi management is unavailable on this device",
+            }), 501
+        try:
+            networks = _scan_wifi_networks()
+            return jsonify({
+                "success": True,
+                "networks": networks,
+                "supports_hidden_network": True,
+            })
+        except Exception as e:
+            current_app.logger.error(f"Error scanning Wi-Fi networks: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/system/network/wifi/connect', methods=['POST'])
+    @login_required
+    def connect_wifi_network():
+        if not _is_nmcli_available():
+            return jsonify({
+                "success": False,
+                "error": "Wi-Fi management is unavailable on this device",
+            }), 501
+
+        try:
+            data = request.get_json(silent=True) or {}
+            ssid = str(data.get("ssid", "")).strip()
+            password_raw = data.get("password")
+            password = str(password_raw) if password_raw is not None else None
+            hidden = bool(data.get("hidden", False))
+
+            if not ssid:
+                return jsonify({
+                    "success": False,
+                    "error": "SSID is required",
+                }), 400
+
+            ok, message = _connect_wifi(ssid=ssid, password=password, hidden=hidden)
+            if not ok:
+                return jsonify({
+                    "success": False,
+                    "error": message,
+                }), 400
+
+            # Give NetworkManager a moment to apply IP and routes.
+            time.sleep(1.0)
+            status = _collect_network_status()
+            return jsonify({
+                "success": True,
+                "message": message,
+                "network": status,
+            })
+        except Exception as e:
+            current_app.logger.error(f"Error connecting Wi-Fi: {str(e)}")
             return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/system/audio', methods=['POST'])
