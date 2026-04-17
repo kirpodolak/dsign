@@ -111,7 +111,9 @@ rm "$PROJECT_DIR/init_db.py"
 cat > /etc/systemd/system/digital-signage.service <<EOL
 [Unit]
 Description=Digital Signage Service (DRM)
-After=graphical.target
+After=graphical.target dsign-network-assistant.service dsign-mpv.service
+Requires=dsign-network-assistant.service dsign-mpv.service
+Wants=dsign-network-assistant.service
 Wants=dsign-mpv.service
 Requires=dev-dri-card0.device
 ConditionPathExists=/dev/dri/card0
@@ -153,20 +155,55 @@ EOL
 cat > /etc/systemd/system/dsign-mpv.service <<EOL
 [Unit]
 Description=Digital Signage MPV Player
-After=digital-signage.service
-Requires=digital-signage.service
+After=network.target getty@tty1.service
+Conflicts=getty@tty1.service
 
 [Service]
 User=$DSIGN_USER
-Group=www-data
+Group=video
 Type=simple
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/dsign/.Xauthority
-Environment="XDG_RUNTIME_DIR=/run/user/$(id -u $DSIGN_USER)"
+SupplementaryGroups=tty
+PermissionsStartOnly=true
+Environment="TERM=linux"
+WorkingDirectory=/home/dsign
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
 UMask=0002
-ExecStart=/usr/bin/mpv --player-operation-mode=pseudo-gui --input-ipc-server=/tmp/mpv-socket --idle=yes --loop-playlist=inf
-Restart=on-failure
-RestartSec=5
+ExecStartPre=/bin/chvt 1
+ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv
+ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv
+ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
+ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
+ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --no-ytdl --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --log-file=/var/log/dsign/mpv.log
+ExecStartPost=/usr/bin/bash -lc 'if [ -r /tmp/dsign-startup-ip.txt ] && [ -S /var/lib/dsign/mpv/socket ]; then ip="$(cat /tmp/dsign-startup-ip.txt 2>/dev/null | tr -d "\r\n")"; if [ -n "$ip" ]; then printf "{\"command\":[\"show-text\",\"IP: %s\",60000]}\n" "$ip" | socat - /var/lib/dsign/mpv/socket >/dev/null 2>&1 || true; fi; rm -f /tmp/dsign-startup-ip.txt; fi'
+Restart=always
+RestartSec=5s
+StartLimitInterval=60s
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+# Network assistant helper (OSD on content screen via MPV IPC)
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/bin/dsign-network-assistant
+
+cat > /etc/systemd/system/dsign-network-assistant.service <<EOL
+[Unit]
+Description=Digital Signage Network Assistant (OSD)
+After=network.target
+Before=digital-signage.service dsign-mpv.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/bin/dsign-network-assistant
+Environment=DSIGN_NETWORK_PROMPT_TIMEOUT_SEC=120
 
 [Install]
 WantedBy=multi-user.target
@@ -182,8 +219,8 @@ udevadm control --reload-rules
 udevadm trigger
 
 systemctl daemon-reload
-systemctl enable digital-signage.service dsign-mpv.service
-systemctl start digital-signage.service dsign-mpv.service
+systemctl enable digital-signage.service dsign-mpv.service dsign-network-assistant.service
+systemctl start digital-signage.service dsign-mpv.service dsign-network-assistant.service
 
 # Настройка Nginx
 cat > /etc/nginx/sites-available/dsign <<EOL
