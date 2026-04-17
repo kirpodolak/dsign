@@ -62,6 +62,36 @@ class PlaylistManager:
         )
         return False
 
+    def _wait_for_mpv_vo_configured(self, timeout: float = 5.0) -> bool:
+        """
+        Wait until MPV reports `vo-configured=true`.
+
+        On DRM/KMS, `path` may switch before the frame is actually presented. Waiting for
+        vo-configured helps reduce visible flicker / "blink" between images.
+        """
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        last_val = None
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            try:
+                resp = self._mpv_manager._send_command(
+                    {"command": ["get_property", "vo-configured"]},
+                    timeout=2.0,
+                )
+                if resp and resp.get("error") == "success":
+                    last_val = resp.get("data")
+                    if last_val is True:
+                        return True
+            except Exception:
+                pass
+            time.sleep(0.1)
+        self.logger.debug(
+            "MPV vo-configured did not become true within timeout",
+            extra={"timeout_sec": timeout, "last_value": last_val},
+        )
+        return False
+
     def _sleep_until(self, deadline_monotonic: float, step: float = 0.2) -> bool:
         """Sleep until deadline or stop event; returns True if reached deadline."""
         step = max(0.05, float(step))
@@ -169,9 +199,20 @@ class PlaylistManager:
                             break
                         time.sleep(1.0)
                 else:
+                    # For still images, keep the frame open to avoid quick close/reopen churn.
+                    # (Videos should not be kept open; they are EOF-driven here.)
+                    try:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "keep-open", "yes"]},
+                            timeout=2.0,
+                        )
+                    except Exception:
+                        pass
+
                     # Deterministic image timer:
-                    # wait until MPV actually loaded the file, then start countdown.
+                    # wait until MPV loaded the file *and* VO is configured, then start countdown.
                     loaded = self._wait_for_mpv_loaded_path(path, timeout=15.0)
+                    vo_ready = self._wait_for_mpv_vo_configured(timeout=5.0)
                     timer_start = time.monotonic()
                     load_wait_sec = round(timer_start - load_started, 3)
 
@@ -183,6 +224,7 @@ class PlaylistManager:
                             "path": path,
                             "duration_sec": dur_sec,
                             "loaded_confirmed": loaded,
+                            "vo_configured": vo_ready,
                             "load_wait_sec": load_wait_sec,
                         },
                     )
