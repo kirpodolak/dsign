@@ -6,6 +6,7 @@
 import { AppInitializer } from './utils/app-init.js';
 import { clearToken } from './utils/helpers.js';
 import { AppLogger } from './utils/logging.js';
+import { StartupNetworkAssistant } from './utils/startup-network.js';
 
 class AppCore {
     constructor() {
@@ -13,13 +14,16 @@ class AppCore {
         this.initialized = false;
         this.socketClientLoaderPromise = null;
         this.onReadyCallbacks = [];
+        this.startupNetworkAssistant = null;
         this.config = {
             debug: window.location.hostname === 'localhost',
             socketReconnectDelay: 1000,
             maxSocketRetries: 5,
             authCheckInterval: 60000,
             apiTimeout: 30000,
-            socketEndpoint: '/socket.io'
+            socketEndpoint: '/socket.io',
+            startupIpDisplayMs: 60000,
+            startupNetworkPromptMs: 120000
         };
         this.state = {
             navigationInProgress: false,
@@ -157,6 +161,8 @@ class AppCore {
                 return;
             }
 
+            await this.initializeStartupNetworkAssistant();
+
             // Initialize WebSocket only on pages that currently use realtime updates.
             if (this.shouldInitializeSockets()) {
                 setTimeout(() => this.initializeWebSockets(), 500);
@@ -191,6 +197,21 @@ class AppCore {
                     error
                 );
             }
+        }
+    }
+
+    async initializeStartupNetworkAssistant() {
+        if (this.startupNetworkAssistant) return;
+        try {
+            this.startupNetworkAssistant = new StartupNetworkAssistant({
+                api: this.api,
+                logger: this.logger,
+                ipDisplayMs: Number(this.config.startupIpDisplayMs) || 60000,
+                promptAutoHideMs: Number(this.config.startupNetworkPromptMs) || 120000,
+            });
+            await this.startupNetworkAssistant.init();
+        } catch (error) {
+            this.logger.warn('Startup network assistant initialization skipped', error);
         }
     }
 
