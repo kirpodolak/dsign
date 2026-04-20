@@ -3,7 +3,7 @@ import subprocess
 import traceback
 import time
 from threading import Event, Thread
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from pathlib import Path
 
 from .playback_constants import PlaybackConstants
@@ -26,6 +26,45 @@ class PlaylistManager:
         self._play_thread: Optional[Thread] = None
         self._stop_event = Event()
         self._active_playlist_id: Optional[int] = None
+        # External media resolver is optional; attached lazily to avoid tight coupling.
+        self._external_media_service = None
+
+    def set_external_media_service(self, service) -> None:
+        """Attach external media resolver service (optional)."""
+        self._external_media_service = service
+
+    def _resolve_playlist_item_path(self, file_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Convert a playlist file_name into a playback dict: {path,is_video,duration,muted}.
+        Supports both local filenames and synthetic external keys ext-<id>.
+        """
+        if not file_name:
+            return None
+
+        # External media key: ext-<id>
+        if str(file_name).startswith("ext-"):
+            svc = self._external_media_service
+            if not svc:
+                # If service isn't attached, fallback to the raw key (will fail to loadfile).
+                return {"path": str(file_name), "is_video": True}
+            row = svc.get_by_key(str(file_name))
+            if not row:
+                return None
+            url = svc.ensure_fresh_resolved_url(row)
+            return {
+                "key": str(file_name),
+                "path": url,
+                "is_video": True,
+                "http_headers": (getattr(row, "http_headers", None) or {}),
+            }
+
+        # Local file
+        file_path = self.upload_folder / str(file_name)
+        if not file_path.exists():
+            return None
+        ext = file_path.suffix.lower()
+        is_video = ext in (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
+        return {"path": str(file_path), "is_video": is_video}
 
     def _wait_for_mpv_loaded_path(self, expected_path: str, timeout: float = 10.0) -> bool:
         """
@@ -140,6 +179,8 @@ class PlaylistManager:
 
                 path = item["path"]
                 is_video = item["is_video"]
+                media_key = str(item.get("key") or path)
+                http_headers = item.get("http_headers") or {}
                 raw_duration = item.get("duration")
                 # Only images use duration. Treat 0/None as "missing" for images.
                 duration = raw_duration if (raw_duration is not None and int(raw_duration) >= 1) else default_duration
@@ -167,6 +208,26 @@ class PlaylistManager:
 
                 # Load next media file
                 load_started = time.monotonic()
+                # If this is an external stream requiring headers, apply them before loadfile.
+                # MPV expects a single string of "Key: Value\r\nKey2: Value2" for http-header-fields.
+                if http_headers and isinstance(http_headers, dict):
+                    try:
+                        header_lines = []
+                        for k, v in http_headers.items():
+                            if k is None or v is None:
+                                continue
+                            ks = str(k).strip()
+                            vs = str(v).strip()
+                            if not ks or not vs:
+                                continue
+                            header_lines.append(f"{ks}: {vs}")
+                        if header_lines:
+                            self._mpv_manager._send_command(
+                                {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
+                                timeout=5.0,
+                            )
+                    except Exception:
+                        pass
                 load_resp = self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
                 self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
                 if not load_resp or load_resp.get("error") != "success":
@@ -277,16 +338,15 @@ class PlaylistManager:
             # Enforce stable playback order (PlaylistFiles.order in DB).
             files = sorted((playlist.files or []), key=lambda x: int(getattr(x, "order", 0) or 0))
             for pf in files:
-                file_path = self.upload_folder / pf.file_name
-                if not file_path.exists():
-                    missing.append(str(file_path))
+                resolved = self._resolve_playlist_item_path(getattr(pf, "file_name", None))
+                if not resolved or not resolved.get("path"):
+                    missing.append(str(getattr(pf, "file_name", "")))
                     continue
 
-                ext = file_path.suffix.lower()
-                is_video = ext in (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
+                is_video = bool(resolved.get("is_video"))
                 items.append(
                     {
-                        "path": str(file_path),
+                        "path": resolved["path"],
                         "duration": int(getattr(pf, "duration", 0) or 0),
                         "is_video": is_video,
                         "muted": bool(getattr(pf, "muted", False)) if is_video else False,
