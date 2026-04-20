@@ -73,6 +73,7 @@ class PlaylistManager:
         """
         deadline = time.monotonic() + max(0.1, float(timeout))
         saw_nonidle = False
+        time_pos_supported: Optional[bool] = None
         last = {"idle_active": None, "core_idle": None, "time_pos": None}
 
         while time.monotonic() < deadline:
@@ -96,22 +97,32 @@ class PlaylistManager:
                 pass
 
             # time-pos (float) advances when playback actually runs.
+            # Some mpv builds return "property unavailable" for time-pos; treat it as optional.
             try:
                 r = self._mpv_manager._send_command({"command": ["get_property", "time-pos"]}, timeout=2.0)
                 if r and r.get("error") == "success":
+                    time_pos_supported = True
                     last["time_pos"] = r.get("data")
+                elif r and r.get("error") == "property unavailable":
+                    time_pos_supported = False
             except Exception:
                 pass
 
             if last["idle_active"] is False or last["core_idle"] is False:
                 saw_nonidle = True
 
-            tp = last.get("time_pos")
-            try:
-                if tp is not None and float(tp) >= 0.2:
+            if time_pos_supported is True:
+                tp = last.get("time_pos")
+                try:
+                    if tp is not None and float(tp) >= 0.2:
+                        return True
+                except Exception:
+                    pass
+            elif time_pos_supported is False:
+                # Fallback: if we saw MPV become non-idle, assume playback started.
+                # (Not perfect, but prevents immediate "idle-active => ended" loops on streams that never start.)
+                if saw_nonidle:
                     return True
-            except Exception:
-                pass
 
             # If MPV goes idle without ever showing signs of life, it likely failed to start.
             if saw_nonidle and (last["idle_active"] is True or last["core_idle"] is True):

@@ -283,6 +283,11 @@ class PlaylistService:
             for file in sorted(playlist.files, key=lambda x: x.order):
                 if not file.file_name:
                     continue
+
+                # External media keys (ext-<id>) are not real files on disk and are not exported to M3U.
+                # They are resolved and played by the app/MPV directly.
+                if str(file.file_name).startswith("ext-"):
+                    continue
                 
                 file_path = os.path.join(config['MEDIA_ROOT'], file.file_name)
                 if not os.path.exists(file_path):
