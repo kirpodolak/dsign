@@ -297,7 +297,11 @@ export class PlaylistManager {
                 }, delay);
             };
         
-            const isVideo = file.is_video || ['.mp4', '.avi', '.mov', '.mkv'].some(ext => file.filename.toLowerCase().endsWith(ext));
+            const isVideo =
+                Boolean(file.is_video) ||
+                Boolean(file.is_external) ||
+                String(file.filename || '').startsWith('ext-') ||
+                ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v'].some(ext => String(file.filename || '').toLowerCase().endsWith(ext));
 
             // Use DB duration when present (avoid `|| 10` which treats 0 as missing).
             const imageSeconds = (() => {
@@ -367,8 +371,10 @@ export class PlaylistManager {
                         throw new Error(`Некорректное имя файла в строке ${index + 1}`);
                     }
 
-                    const fileExt = filename.toLowerCase().split('.').pop();
-                    const isVideo = ['mp4', 'avi', 'mov', 'mkv'].includes(fileExt);
+                    const lower = String(filename || '').toLowerCase();
+                    const isExternal = lower.startsWith('ext-');
+                    const fileExt = lower.includes('.') ? lower.split('.').pop() : '';
+                    const isVideo = isExternal || ['mp4', 'avi', 'mov', 'mkv', 'webm', 'm4v'].includes(fileExt);
                     const isImage = ['jpg', 'jpeg', 'png'].includes(fileExt);
 
                     let duration = 10;

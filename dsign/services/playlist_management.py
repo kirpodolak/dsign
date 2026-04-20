@@ -3,7 +3,7 @@ import subprocess
 import traceback
 import time
 from threading import Event, Thread
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from pathlib import Path
 
 from .playback_constants import PlaybackConstants
@@ -26,6 +26,40 @@ class PlaylistManager:
         self._play_thread: Optional[Thread] = None
         self._stop_event = Event()
         self._active_playlist_id: Optional[int] = None
+        # External media resolver is optional; attached lazily to avoid tight coupling.
+        self._external_media_service = None
+
+    def set_external_media_service(self, service) -> None:
+        """Attach external media resolver service (optional)."""
+        self._external_media_service = service
+
+    def _resolve_playlist_item_path(self, file_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Convert a playlist file_name into a playback dict: {path,is_video,duration,muted}.
+        Supports both local filenames and synthetic external keys ext-<id>.
+        """
+        if not file_name:
+            return None
+
+        # External media key: ext-<id>
+        if str(file_name).startswith("ext-"):
+            svc = self._external_media_service
+            if not svc:
+                # If service isn't attached, fallback to the raw key (will fail to loadfile).
+                return {"path": str(file_name), "is_video": True}
+            row = svc.get_by_key(str(file_name))
+            if not row:
+                return None
+            url = svc.ensure_fresh_resolved_url(row)
+            return {"path": url, "is_video": True}
+
+        # Local file
+        file_path = self.upload_folder / str(file_name)
+        if not file_path.exists():
+            return None
+        ext = file_path.suffix.lower()
+        is_video = ext in (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
+        return {"path": str(file_path), "is_video": is_video}
 
     def _wait_for_mpv_loaded_path(self, expected_path: str, timeout: float = 10.0) -> bool:
         """
@@ -277,16 +311,15 @@ class PlaylistManager:
             # Enforce stable playback order (PlaylistFiles.order in DB).
             files = sorted((playlist.files or []), key=lambda x: int(getattr(x, "order", 0) or 0))
             for pf in files:
-                file_path = self.upload_folder / pf.file_name
-                if not file_path.exists():
-                    missing.append(str(file_path))
+                resolved = self._resolve_playlist_item_path(getattr(pf, "file_name", None))
+                if not resolved or not resolved.get("path"):
+                    missing.append(str(getattr(pf, "file_name", "")))
                     continue
 
-                ext = file_path.suffix.lower()
-                is_video = ext in (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
+                is_video = bool(resolved.get("is_video"))
                 items.append(
                     {
-                        "path": str(file_path),
+                        "path": resolved["path"],
                         "duration": int(getattr(pf, "duration", 0) or 0),
                         "is_video": is_video,
                         "muted": bool(getattr(pf, "muted", False)) if is_video else False,

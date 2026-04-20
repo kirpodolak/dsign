@@ -247,6 +247,24 @@ class ServiceFactory:
             })
             return None
 
+    @staticmethod
+    def create_external_media_service(db_session, logger=None) -> Optional[Any]:
+        logger = logger or setup_logger('ExternalMediaService')
+        try:
+            from .external_media_service import ExternalMediaService
+            from dsign.config.config import Config
+            return ExternalMediaService(
+                db_session=db_session,
+                thumbnail_folder=str(getattr(Config, "THUMBNAIL_FOLDER", "/var/lib/dsign/media/thumbnails")),
+                logger=logger,
+            )
+        except Exception as e:
+            logger.error('ExternalMediaService initialization failed', {
+                'error': str(e),
+                'stack': True
+            })
+            return None
+
 def init_services(
     config: Dict[str, Any], 
     db, 
@@ -447,7 +465,8 @@ def init_services(
                 config['UPLOAD_FOLDER'],
                 logger
             )),
-            ('auth_service', lambda: ServiceFactory.create_auth_service(config['SECRET_KEY'], logger))
+            ('auth_service', lambda: ServiceFactory.create_auth_service(config['SECRET_KEY'], logger)),
+            ('external_media_service', lambda: ServiceFactory.create_external_media_service(db.session, logger)),
         ]
 
         for name, factory in optional_services:
