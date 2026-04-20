@@ -93,7 +93,6 @@ class MediaGallery {
   isExternalFile(file) {
     return Boolean(file?.is_external || (file?.external && typeof file.external === 'object'));
   }
-
   initElements() {
     for (const [key, selector] of Object.entries(this.config)) {
       this.elements[key] = document.querySelector(selector);
@@ -138,7 +137,7 @@ class MediaGallery {
         type: file.type || getFileExtension(file.filename),
         date: file.modified || Date.now(),
         size: file.size || 0,
-        path: this.getMediaUrl(file.filename),
+        path: `/api/media/${encodeURIComponent(file.filename)}`,
         mimetype: file.mimetype,
         included: file.included || false,
         is_video: file.is_video || false,
@@ -278,11 +277,10 @@ class MediaGallery {
       if (ALLOWED_IMAGE_TYPES.includes(file.type) && !isExternal) {
         previewContainer.classList.add('file-preview-container');
         const img = document.createElement('img');
-        img.src = this.getThumbnailUrl(file.name);
+        img.src = `/api/media/${encodeURIComponent(file.name)}?${Date.now()}`;
         img.alt = file.name;
         img.classList.add('file-preview');
         img.loading = 'lazy';
-        img.decoding = 'async';
         img.onerror = () => {
           img.src = PLACEHOLDER_IMAGE;
           img.style.opacity = '0.7';
@@ -325,7 +323,7 @@ class MediaGallery {
         if (e.target?.tagName !== 'INPUT' && e.target?.tagName !== 'LABEL') {
           this.showPreview({
             ...file,
-            path: this.getMediaUrl(file.name)
+            path: `/api/media/${encodeURIComponent(file.name)}`
           });
         }
       });
@@ -774,10 +772,10 @@ class MediaGallery {
       this.elements.uploadBtn.addEventListener('click', this.uploadMedia.bind(this));
     }
 
-    const addLinkBtn = document.querySelector('#external-add-btn');
+    const addLinkBtn = document.querySelector('#add-external-btn');
     const linkInput = document.querySelector('#external-url');
     if (addLinkBtn && linkInput) {
-      const submit = async () => {
+      addLinkBtn.addEventListener('click', async () => {
         const url = String(linkInput.value || '').trim();
         if (!url) {
           window.App?.Alerts?.show?.('Please paste a VK Video or Rutube link', 'warning');
@@ -805,14 +803,6 @@ class MediaGallery {
           window.App?.Alerts?.show?.(`Failed to add link: ${e.message}`, 'error');
         } finally {
           addLinkBtn.disabled = false;
-        }
-      };
-
-      addLinkBtn.addEventListener('click', submit);
-      linkInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          submit();
         }
       });
     }
