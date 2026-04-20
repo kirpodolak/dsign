@@ -7,6 +7,7 @@ import { AppInitializer } from './utils/app-init.js';
 import { clearToken } from './utils/helpers.js';
 import { AppLogger } from './utils/logging.js';
 import { StartupNetworkAssistant } from './utils/startup-network.js';
+import { createSocketAdapter } from './utils/sockets.js';
 
 class AppCore {
     constructor() {
@@ -323,6 +324,12 @@ class AppCore {
 
             // Setup event handlers
             this.setupSocketHandlers(socket);
+            
+            // Expose unified socket adapter for pages (prevents multiple parallel Socket.IO clients).
+            window.App = window.App || {};
+            if (!window.App.Sockets || typeof window.App.Sockets.on !== 'function') {
+                window.App.Sockets = createSocketAdapter(() => window.appSocket);
+            }
             
             // Expose socket interface
             this.sockets = {
