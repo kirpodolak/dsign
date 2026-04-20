@@ -48,16 +48,9 @@ class PlaybackService:
             self._mpv_manager, 
             self._logo_manager
         )
-
-        # Optional: external media resolver (Rutube/VK links) for playlist items like "ext-<id>".
-        try:
-            from flask import current_app
-            ext_svc = getattr(current_app, "external_media_service", None)
-            if ext_svc:
-                self._playlist_manager.set_external_media_service(ext_svc)
-        except Exception:
-            # Best-effort; playback still works for local files.
-            pass
+        # External media resolver is injected by the Flask app after services are attached.
+        # Do not rely on `current_app` here: at startup the service graph is constructed before
+        # attributes like `app.external_media_service` are attached.
         
         self.logo_manager = LogoManager(
             logger=self.logger,
@@ -69,6 +62,13 @@ class PlaybackService:
         
         # Initialize with retry
         self._init_with_retry()
+
+    def set_external_media_service(self, service) -> None:
+        """Attach external media resolver for playlist items like `ext-<id>`."""
+        try:
+            self._playlist_manager.set_external_media_service(service)
+        except Exception:
+            pass
 
     def display_idle_logo(self):
         return self.logo_manager.display_idle_logo()

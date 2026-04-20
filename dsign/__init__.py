@@ -111,6 +111,17 @@ def create_app(config_class: Config = config) -> Flask:
                 setattr(app, name, service)
                 app.logger.debug(f"Service attached: {name}")
 
+            # Wire optional services into mandatory ones (avoid relying on current_app during constructors).
+            # This ensures external media keys (ext-<id>) can be resolved during playback.
+            try:
+                playback_service = getattr(app, "playback_service", None)
+                external_media_service = getattr(app, "external_media_service", None)
+                if playback_service and external_media_service and hasattr(playback_service, "set_external_media_service"):
+                    playback_service.set_external_media_service(external_media_service)
+                    app.logger.info("External media service wired into playback service")
+            except Exception as e:
+                app.logger.warning(f"Failed to wire external media into playback service: {str(e)}")
+
         # Проверка обязательных сервисов
         required_services = [
             'playback_service',
