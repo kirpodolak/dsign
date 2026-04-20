@@ -15,7 +15,10 @@ const CONFIG = {
     TOKEN_MAX_ATTEMPTS: 10,
     TOKEN_REFRESH_THRESHOLD: 300000, // 5 minutes before expiration
     MAX_EVENT_QUEUE: 50,
-    CONNECTION_TIMEOUT: 10000
+    CONNECTION_TIMEOUT: 10000,
+    // Avoid hammering /auth/socket-token on reconnect storms.
+    // Token is short-lived; keep cache conservative and per-tab.
+    SOCKET_TOKEN_CACHE_MS: 30000
 };
 
 /**
@@ -59,6 +62,14 @@ export class SocketManager {
         this.onError = options.onError || this.defaultErrorHandler;
         this.onTokenRefresh = options.onTokenRefresh || this.defaultTokenRefreshHandler;
         this.onReconnect = options.onReconnect || null;
+
+        // Token cache (per JS context / tab).
+        this._cachedSocketToken = null;
+        this._cachedSocketTokenTs = 0;
+        this._socketTokenPromise = null;
+
+        // Prevent multiple overlapping init flows.
+        this._initInFlight = false;
         
         // Initialize connection
         this.initWithTokenCheck();
@@ -129,6 +140,8 @@ export class SocketManager {
      * @private
      */
     async initWithTokenCheck() {
+        if (this._initInFlight) return;
+        this._initInFlight = true;
         try {
             console.debug('[Socket] Starting connection with token check');
             
@@ -141,6 +154,8 @@ export class SocketManager {
         } catch (error) {
             console.error('[Socket] Initialization error:', error);
             this.handleRetry(error);
+        } finally {
+            this._initInFlight = false;
         }
     }
 
@@ -150,16 +165,36 @@ export class SocketManager {
      * @returns {Promise<string|null>} Authentication token or null
      */
     async getSocketToken() {
-        try {
-            const data = await window.App.API.fetch('/auth/socket-token', { credentials: 'include' });
-            if (!data?.token) {
-                throw new Error('No token in response');
-            }
-            return data.token;
-        } catch (error) {
-            console.error('[Socket] Token fetch error:', error);
-            throw error;
+        const now = Date.now();
+        if (this._cachedSocketToken && (now - this._cachedSocketTokenTs) < CONFIG.SOCKET_TOKEN_CACHE_MS) {
+            return this._cachedSocketToken;
         }
+
+        if (this._socketTokenPromise) {
+            return this._socketTokenPromise;
+        }
+
+        this._socketTokenPromise = (async () => {
+            try {
+                const data = await window.App.API.fetch('/auth/socket-token', { credentials: 'include' });
+                if (!data?.token) {
+                    throw new Error('No token in response');
+                }
+                this._cachedSocketToken = data.token;
+                this._cachedSocketTokenTs = Date.now();
+                return data.token;
+            } catch (error) {
+                console.error('[Socket] Token fetch error:', error);
+                // Don't keep a bad promise around.
+                this._cachedSocketToken = null;
+                this._cachedSocketTokenTs = 0;
+                throw error;
+            } finally {
+                this._socketTokenPromise = null;
+            }
+        })();
+
+        return this._socketTokenPromise;
     }
 	
     async waitForAPI(maxAttempts = 5, delay = 500) {
@@ -465,23 +500,12 @@ export class SocketManager {
      */
     handleError(error) {
         console.error('[Socket] Connection error:', error);
+        // IMPORTANT: Socket.IO already handles reconnection when `reconnection: true`.
+        // Do NOT start a parallel reconnect loop here (it can create token-fetch storms
+        // and elevated CPU usage on the server).
         this.reconnectAttempts++;
-        
-        // Exponential backoff with jitter
-        this.reconnectDelay = Math.min(
-            this.reconnectDelay * 2 + Math.random() * 1000,
-            CONFIG.MAX_RETRY_DELAY
-        );
-        
         if (this.reconnectAttempts >= CONFIG.MAX_RETRIES) {
-            this.showAlert(
-                'error', 
-                'Connection Error', 
-                'Real-time updates disabled. Please refresh the page.'
-            );
-        } else {
-            console.log(`[Socket] Retrying in ${Math.round(this.reconnectDelay/1000)} sec...`);
-            setTimeout(() => this.init(), this.reconnectDelay);
+            this.showAlert('error', 'Connection Error', 'Real-time updates disabled. Please refresh the page.');
         }
     }
 
@@ -615,9 +639,16 @@ export class SocketManager {
             return;
         }
         
+        // Single retry path: initWithTokenCheck(). Avoid layering another reconnect loop
+        // on top of Socket.IO's own reconnection mechanism.
         console.log(`[Socket] Retrying connection (attempt ${this.reconnectAttempts + 1}/${CONFIG.MAX_RETRIES})...`);
-        setTimeout(() => this.initWithTokenCheck(), this.reconnectDelay);
         this.reconnectAttempts++;
+        const delay = Math.min(
+            this.reconnectDelay * 2 + Math.random() * 1000,
+            CONFIG.MAX_RETRY_DELAY
+        );
+        this.reconnectDelay = delay;
+        setTimeout(() => this.initWithTokenCheck(), delay);
     }
 
     /**
