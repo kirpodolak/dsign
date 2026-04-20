@@ -288,4 +288,3 @@ class ExternalMediaService:
             return None
         p = self._thumb_path_for(media_id)
         return p if p.exists() else None
-
