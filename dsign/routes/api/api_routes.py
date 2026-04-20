@@ -36,6 +36,19 @@ def init_api_routes(api_bp, services):
     # ======================
     # System status / audio (dashboard)
     # ======================
+    # These endpoints may be polled from multiple pages and/or multiple open tabs.
+    # On Raspberry Pi, spawning subprocesses (amixer/nmcli/ip) can be expensive, so cache results briefly.
+    _system_status_cache: dict = {"ts": 0.0, "payload": None}
+    _system_status_cache_lock = Lock()
+    _system_status_cache_ttl_sec: float = 2.0
+
+    _network_status_cache: dict = {"ts": 0.0, "payload": None}
+    _network_status_cache_lock = Lock()
+    _network_status_cache_ttl_sec: float = 5.0
+
+    _amixer_pick_cache: dict = {"ts": 0.0, "value": None}
+    _amixer_pick_cache_lock = Lock()
+    _amixer_pick_cache_ttl_sec: float = 60.0
     def _read_cpu_temp_c() -> float | None:
         # Raspberry Pi / Linux common path
         for p in (
@@ -171,7 +184,18 @@ def init_api_routes(api_bp, services):
         Pick a reasonable ALSA simple control for volume/mute.
         Different images/cards expose different names (e.g. Master, PCM, Headphone).
         """
+        now = time.time()
+        with _amixer_pick_cache_lock:
+            if (
+                _amixer_pick_cache["value"] is not None
+                and (now - float(_amixer_pick_cache["ts"] or 0.0)) < _amixer_pick_cache_ttl_sec
+            ):
+                return _amixer_pick_cache["value"]
+
         if not _amixer_available():
+            with _amixer_pick_cache_lock:
+                _amixer_pick_cache["value"] = None
+                _amixer_pick_cache["ts"] = now
             return None
         try:
             # Try default card first, then a few numeric cards.
@@ -199,18 +223,32 @@ def init_api_routes(api_bp, services):
                     continue
 
             if not candidates:
+                with _amixer_pick_cache_lock:
+                    _amixer_pick_cache["value"] = None
+                    _amixer_pick_cache["ts"] = now
                 return None
 
             # Prefer cards with preferred control names.
             for p in preferred:
                 for card, names in candidates:
                     if p in names:
-                        return (card if card >= 0 else 0, p) if card == -1 else (card, p)
+                        picked = (card if card >= 0 else 0, p) if card == -1 else (card, p)
+                        with _amixer_pick_cache_lock:
+                            _amixer_pick_cache["value"] = picked
+                            _amixer_pick_cache["ts"] = now
+                        return picked
 
             # Fall back to first control on first candidate card.
             card, names = candidates[0]
-            return (card if card >= 0 else 0, names[0]) if names else None
+            picked = (card if card >= 0 else 0, names[0]) if names else None
+            with _amixer_pick_cache_lock:
+                _amixer_pick_cache["value"] = picked
+                _amixer_pick_cache["ts"] = now
+            return picked
         except Exception:
+            with _amixer_pick_cache_lock:
+                _amixer_pick_cache["value"] = None
+                _amixer_pick_cache["ts"] = now
             return None
 
     def _audio_get() -> dict:
@@ -440,26 +478,35 @@ def init_api_routes(api_bp, services):
     @login_required
     def get_system_status():
         try:
+            now = time.time()
+            with _system_status_cache_lock:
+                cached = _system_status_cache.get("payload")
+                ts = float(_system_status_cache.get("ts") or 0.0)
+                if cached is not None and (now - ts) < _system_status_cache_ttl_sec:
+                    return jsonify(cached)
+
             upload_folder = current_app.config.get("UPLOAD_FOLDER", "/var/lib/dsign/media")
-            return jsonify(
-                {
-                    "success": True,
-                    "status": {
-                        "storage": {
-                            "root": _disk_usage("/"),
-                            "media": _disk_usage(upload_folder),
-                        },
-                        "cpu": {
-                            "temp_c": _read_cpu_temp_c(),
-                            # Prefer procstat CPU% (delta) when available; fall back to loadavg-based estimate.
-                            "usage_percent": _read_cpu_percent_procstat(),
-                            "load_percent": _read_cpu_load_percent(),
-                        },
-                        "display": _read_display_status(),
-                        "audio": _audio_get(),
+            payload = {
+                "success": True,
+                "status": {
+                    "storage": {
+                        "root": _disk_usage("/"),
+                        "media": _disk_usage(upload_folder),
                     },
-                }
-            )
+                    "cpu": {
+                        "temp_c": _read_cpu_temp_c(),
+                        # Prefer procstat CPU% (delta) when available; fall back to loadavg-based estimate.
+                        "usage_percent": _read_cpu_percent_procstat(),
+                        "load_percent": _read_cpu_load_percent(),
+                    },
+                    "display": _read_display_status(),
+                    "audio": _audio_get(),
+                },
+            }
+            with _system_status_cache_lock:
+                _system_status_cache["payload"] = payload
+                _system_status_cache["ts"] = now
+            return jsonify(payload)
         except Exception as e:
             current_app.logger.error(f"Error getting system status: {str(e)}")
             return jsonify({"success": False, "error": str(e)}), 500
@@ -468,10 +515,21 @@ def init_api_routes(api_bp, services):
     @login_required
     def get_network_status():
         try:
-            return jsonify({
+            now = time.time()
+            with _network_status_cache_lock:
+                cached = _network_status_cache.get("payload")
+                ts = float(_network_status_cache.get("ts") or 0.0)
+                if cached is not None and (now - ts) < _network_status_cache_ttl_sec:
+                    return jsonify(cached)
+
+            payload = {
                 "success": True,
                 "network": _collect_network_status(),
-            })
+            }
+            with _network_status_cache_lock:
+                _network_status_cache["payload"] = payload
+                _network_status_cache["ts"] = now
+            return jsonify(payload)
         except Exception as e:
             current_app.logger.error(f"Error getting network status: {str(e)}")
             return jsonify({"success": False, "error": str(e)}), 500
