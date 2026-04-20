@@ -3,6 +3,7 @@ import os
 import json
 import logging
 import traceback
+import time
 from typing import Optional, Dict, Any, Union
 from pathlib import Path
 from datetime import datetime
@@ -57,6 +58,12 @@ class SettingsService:
         self._cached_current_settings_ts: float = 0.0
         self._current_settings_cache_ttl_sec: float = 1.0
 
+        # Cache for settings.json to avoid repeated disk I/O on frequent polling.
+        self._cached_file_settings: Optional[Dict[str, Any]] = None
+        self._cached_file_settings_mtime_ns: Optional[int] = None
+        self._cached_file_settings_ts: float = 0.0
+        self._file_settings_cache_ttl_sec: float = 0.5
+
     def _log_error(self, message: str, extra: Optional[Dict[str, Any]] = None):
         """Унифицированный метод для логирования ошибок"""
         extra_data = {'module': 'SettingsService'}
@@ -94,19 +101,54 @@ class SettingsService:
     def load_settings(self) -> Dict[str, Any]:
         """Загрузка настроек из файла"""
         try:
+            now = time.time()
+            if (
+                self._cached_file_settings is not None
+                and (now - self._cached_file_settings_ts) < self._file_settings_cache_ttl_sec
+            ):
+                return self._cached_file_settings
+
             if self.settings_file.exists():
+                try:
+                    st = self.settings_file.stat()
+                    mtime_ns = getattr(st, "st_mtime_ns", None) or int(st.st_mtime * 1_000_000_000)
+                except Exception:
+                    mtime_ns = None
+
+                if (
+                    self._cached_file_settings is not None
+                    and mtime_ns is not None
+                    and self._cached_file_settings_mtime_ns == mtime_ns
+                ):
+                    # File unchanged; refresh short TTL and avoid disk read.
+                    self._cached_file_settings_ts = now
+                    return self._cached_file_settings
+
                 with open(self.settings_file, "r") as f:
                     settings = json.load(f)
-                    self._log_info("Settings loaded from file", 
-                                 extra={'file_path': str(self.settings_file)})
+                    # Only log when file content likely changed (mtime differs) to reduce noise.
+                    self._log_info(
+                        "Settings loaded from file",
+                        extra={
+                            "file_path": str(self.settings_file),
+                            **({"mtime_ns": mtime_ns} if mtime_ns is not None else {}),
+                        },
+                    )
                     merged = {**self.DEFAULT_SETTINGS, **settings}
                     # Deep-merge display settings so new keys don't get lost.
                     file_display = settings.get("display") if isinstance(settings.get("display"), dict) else {}
                     merged["display"] = {**self.DEFAULT_SETTINGS.get("display", {}), **file_display}
+                    self._cached_file_settings = merged
+                    self._cached_file_settings_mtime_ns = mtime_ns
+                    self._cached_file_settings_ts = now
                     return merged
             self._log_info("Using default settings (file not found)", 
                          extra={'file_path': str(self.settings_file)})
-            return self.DEFAULT_SETTINGS
+            merged = dict(self.DEFAULT_SETTINGS)
+            self._cached_file_settings = merged
+            self._cached_file_settings_mtime_ns = None
+            self._cached_file_settings_ts = now
+            return merged
         except json.JSONDecodeError as e:
             self._log_error(f"Invalid settings file format: {str(e)}", 
                           extra={'action': 'load_settings'})
@@ -128,6 +170,11 @@ class SettingsService:
                 json.dump(to_save, f, indent=4)
             self._log_info("Settings saved successfully", 
                          extra={'file_path': str(self.settings_file)})
+
+            # Invalidate file cache (mtime will also change, but keep it explicit).
+            self._cached_file_settings = None
+            self._cached_file_settings_mtime_ns = None
+            self._cached_file_settings_ts = 0.0
         except Exception as e:
             self._log_error(f"Failed to save settings: {str(e)}", 
                           extra={'action': 'save_settings'})
