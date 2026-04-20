@@ -1368,8 +1368,9 @@ def init_api_routes(api_bp, services):
             return jsonify(result)
         
         except Exception as e:
-            current_app.logger.error(f"API error updating playlist files {playlist_id}: {str(e)}", exc_info=True)
-            return jsonify({"success": False, "error": "Internal server error"}), 500
+            # ServiceLogger may not support exc_info kwarg; keep logs simple and always return JSON.
+            current_app.logger.error(f"API error updating playlist files {playlist_id}: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
     
     # ======================
     # Media File Handling (/api/media)
