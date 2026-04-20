@@ -122,6 +122,10 @@ class SystemHandlers:
         self.server_version = "1.0.0"
         self.activity_check_interval = 15  # seconds
         self.socket_auth_timeout = 30  # seconds
+        # Authenticated clients should not be aggressively disconnected as "inactive".
+        # The browser may throttle background timers, and Socket.IO has its own ping/pong.
+        # Keep this high to avoid reconnect storms and CPU burn.
+        self.authenticated_inactive_timeout_sec = 30 * 60  # 30 minutes
         self.clients_lock = Lock()
         self.connected_clients = {}
         self._app = getattr(socket_service, 'app', None)
@@ -377,8 +381,11 @@ class SystemHandlers:
                     # Check authentication timeout
                     if (now - client['connected_at']).total_seconds() > self.socket_auth_timeout:
                         to_disconnect.append((sid, 'Authentication timeout'))
-                elif inactive_time > 60:  # 1 minute inactivity timeout
-                    to_disconnect.append((sid, f'Inactive for {inactive_time:.0f} seconds'))
+                else:
+                    # For authenticated clients, only disconnect after a long inactivity window.
+                    # This prevents constant reconnect loops when the browser throttles timers.
+                    if inactive_time > float(self.authenticated_inactive_timeout_sec):
+                        to_disconnect.append((sid, f'Inactive for {inactive_time:.0f} seconds'))
                     
         for sid, reason in to_disconnect:
             self.logger.warning('Disconnecting client', {'sid': sid, 'reason': reason})
