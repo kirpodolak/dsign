@@ -14,6 +14,7 @@ class ExternalMediaInfo:
     page_url: str
     thumbnail_url: Optional[str]
     resolved_url: Optional[str]
+    http_headers: Optional[Dict[str, str]]
 
 
 class ExternalMediaService:
@@ -94,6 +95,7 @@ class ExternalMediaService:
         title = None
         thumb = None
         resolved = None
+        http_headers: Optional[Dict[str, str]] = None
 
         try:
             info = self._yt_dlp_extract(url)
@@ -115,6 +117,11 @@ class ExternalMediaService:
                         best = f
                 if best:
                     resolved = best.get("url")
+
+            # Some providers require HTTP headers for playback (User-Agent/Referer/Cookie).
+            # yt-dlp exposes these in `http_headers`.
+            if isinstance(info.get("http_headers"), dict):
+                http_headers = {str(k): str(v) for k, v in info["http_headers"].items() if v is not None}
         except Exception as e:
             # Graceful fallback: still store the page URL and show as external media without thumb.
             self.logger.warning(
@@ -128,6 +135,7 @@ class ExternalMediaService:
             page_url=url,
             thumbnail_url=thumb,
             resolved_url=resolved,
+            http_headers=http_headers,
         )
 
     # -----------------------
@@ -180,6 +188,7 @@ class ExternalMediaService:
             thumbnail_url=info.thumbnail_url,
             resolved_url=info.resolved_url,
             resolved_at=now if info.resolved_url else None,
+            http_headers=info.http_headers,
             last_checked_at=now,
         )
         self.db_session.add(row)
@@ -243,6 +252,8 @@ class ExternalMediaService:
         if info.resolved_url:
             row.resolved_url = info.resolved_url
             row.resolved_at = now
+        if info.http_headers:
+            row.http_headers = info.http_headers
 
         self.db_session.add(row)
         self.db_session.commit()
@@ -257,6 +268,19 @@ class ExternalMediaService:
             pass
 
         return row.resolved_url or row.url
+
+    def ensure_fresh_playback(self, row: "ExternalMedia", max_age_sec: int = 3600) -> Dict[str, Any]:
+        """
+        Return playback details for MPV: {"url": ..., "http_headers": {...}}.
+        Refreshes resolved URL + headers periodically.
+        """
+        url = self.ensure_fresh_resolved_url(row, max_age_sec=max_age_sec)
+        headers = {}
+        try:
+            headers = dict(row.http_headers or {})
+        except Exception:
+            headers = {}
+        return {"url": url, "http_headers": headers}
 
     def get_cached_thumbnail_path(self, key: str) -> Optional[Path]:
         media_id = self._parse_ext_key(key)
