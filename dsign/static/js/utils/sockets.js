@@ -701,5 +701,8 @@ export function initializeSocketManager() {
 // For backward compatibility with global App object
 if (typeof window !== 'undefined') {
     window.App = window.App || {};
-    window.App.Sockets = window.App.Sockets || initializeSocketManager();
+    // IMPORTANT:
+    // Do NOT auto-initialize a second Socket.IO connection here.
+    // The app core (`static/js/base.js`) manages the actual Socket.IO connection as `window.appSocket`.
+    // Pages should attach an adapter to that single connection, rather than creating duplicate sockets.
 }
