@@ -28,6 +28,9 @@ class PlaylistManager:
         self._active_playlist_id: Optional[int] = None
         # External media resolver is optional; attached lazily to avoid tight coupling.
         self._external_media_service = None
+        # Per-media backoff state to avoid loadfile storms for non-playable URLs (e.g., dead external links).
+        # Keyed by playlist "file_name" (local filename or ext-<id>).
+        self._media_backoff: Dict[str, Dict[str, float]] = {}
 
     def set_external_media_service(self, service) -> None:
         """Attach external media resolver service (optional)."""
@@ -46,12 +49,12 @@ class PlaylistManager:
             svc = self._external_media_service
             if not svc:
                 # If service isn't attached, fallback to the raw key (will fail to loadfile).
-                return {"path": str(file_name), "is_video": True}
+                return {"key": str(file_name), "path": str(file_name), "is_video": True}
             row = svc.get_by_key(str(file_name))
             if not row:
                 return None
             url = svc.ensure_fresh_resolved_url(row)
-            return {"path": url, "is_video": True}
+            return {"key": str(file_name), "path": url, "is_video": True}
 
         # Local file
         file_path = self.upload_folder / str(file_name)
@@ -59,7 +62,69 @@ class PlaylistManager:
             return None
         ext = file_path.suffix.lower()
         is_video = ext in (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
-        return {"path": str(file_path), "is_video": is_video}
+        return {"key": str(file_name), "path": str(file_path), "is_video": is_video}
+
+    def _wait_for_mpv_video_started(self, timeout: float = 12.0) -> bool:
+        """
+        Wait for MPV to actually start video playback.
+
+        For some failing network streams, `loadfile` returns success but MPV immediately goes idle.
+        We treat "never left idle / time-pos never advanced" as a startup failure so we can back off.
+        """
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        saw_nonidle = False
+        last = {"idle_active": None, "core_idle": None, "time_pos": None}
+
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+
+            # idle-active (bool)
+            try:
+                r = self._mpv_manager._send_command({"command": ["get_property", "idle-active"]}, timeout=2.0)
+                if r and r.get("error") == "success":
+                    last["idle_active"] = r.get("data")
+            except Exception:
+                pass
+
+            # core-idle (bool) is a bit more indicative of actual playback core activity.
+            try:
+                r = self._mpv_manager._send_command({"command": ["get_property", "core-idle"]}, timeout=2.0)
+                if r and r.get("error") == "success":
+                    last["core_idle"] = r.get("data")
+            except Exception:
+                pass
+
+            # time-pos (float) advances when playback actually runs.
+            try:
+                r = self._mpv_manager._send_command({"command": ["get_property", "time-pos"]}, timeout=2.0)
+                if r and r.get("error") == "success":
+                    last["time_pos"] = r.get("data")
+            except Exception:
+                pass
+
+            if last["idle_active"] is False or last["core_idle"] is False:
+                saw_nonidle = True
+
+            tp = last.get("time_pos")
+            try:
+                if tp is not None and float(tp) >= 0.2:
+                    return True
+            except Exception:
+                pass
+
+            # If MPV goes idle without ever showing signs of life, it likely failed to start.
+            if saw_nonidle and (last["idle_active"] is True or last["core_idle"] is True):
+                # still allow a little time for buffering; keep waiting
+                pass
+
+            time.sleep(0.2)
+
+        self.logger.warning(
+            "MPV video did not start within timeout",
+            extra={"timeout_sec": timeout, **last},
+        )
+        return False
 
     def _wait_for_mpv_loaded_path(self, expected_path: str, timeout: float = 10.0) -> bool:
         """
@@ -174,10 +239,18 @@ class PlaylistManager:
 
                 path = item["path"]
                 is_video = item["is_video"]
+                media_key = str(item.get("key") or path)
                 raw_duration = item.get("duration")
                 # Only images use duration. Treat 0/None as "missing" for images.
                 duration = raw_duration if (raw_duration is not None and int(raw_duration) >= 1) else default_duration
                 muted = bool(item.get("muted", False))
+
+                # Backoff for repeated failures (avoid infinite loadfile loop storms).
+                state = self._media_backoff.get(media_key)
+                if state:
+                    not_before = float(state.get("not_before", 0.0) or 0.0)
+                    if time.monotonic() < not_before:
+                        continue
 
                 # Apply per-item settings (best-effort, longer timeout to avoid IPC churn on Pi 3B+).
                 # NOTE: if MPV is under load, short timeouts cause broken pipes and retry storms.
@@ -208,10 +281,30 @@ class PlaylistManager:
                         "MPV loadfile failed",
                         extra={"path": path, "mpv_response": load_resp},
                     )
+                    # Increase backoff for this media.
+                    s = self._media_backoff.get(media_key, {"failures": 0.0, "not_before": 0.0})
+                    failures = int(s.get("failures", 0.0) or 0) + 1
+                    delay = min(60.0, 2.0 ** min(failures, 5))  # 2,4,8,16,32,60...
+                    self._media_backoff[media_key] = {"failures": float(failures), "not_before": time.monotonic() + delay}
                     # Skip to next item; avoid getting stuck on a bad file.
                     continue
 
                 if is_video:
+                    # Ensure video actually starts; if it doesn't, treat it as a startup failure (common for dead streams).
+                    if not self._wait_for_mpv_video_started(timeout=12.0):
+                        s = self._media_backoff.get(media_key, {"failures": 0.0, "not_before": 0.0})
+                        failures = int(s.get("failures", 0.0) or 0) + 1
+                        delay = min(60.0, 2.0 ** min(failures, 5))
+                        self._media_backoff[media_key] = {"failures": float(failures), "not_before": time.monotonic() + delay}
+                        self.logger.warning(
+                            "Skipping video that did not start",
+                            extra={"path": path, "key": media_key, "backoff_sec": delay, "failures": failures},
+                        )
+                        continue
+                    # Reset backoff on successful start
+                    if media_key in self._media_backoff:
+                        self._media_backoff.pop(media_key, None)
+
                     # Wait until playback ends
                     start = time.time()
                     while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
@@ -319,6 +412,7 @@ class PlaylistManager:
                 is_video = bool(resolved.get("is_video"))
                 items.append(
                     {
+                        "key": resolved.get("key") or str(getattr(pf, "file_name", "")),
                         "path": resolved["path"],
                         "duration": int(getattr(pf, "duration", 0) or 0),
                         "is_video": is_video,
