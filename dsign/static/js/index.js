@@ -46,8 +46,9 @@ const CONFIG = {
     },
     defaultLogo: '/static/images/default-logo.jpg',
     defaultPreview: '/static/images/default-preview.jpg',
-    // Match Settings page status polling cadence for near-real-time metrics.
-    refreshInterval: 2000,
+    // Polling cadence. Even without sockets, keep idle/stopped light to avoid server/log spam.
+    refreshIntervalActiveMs: 2000,
+    refreshIntervalIdleMs: 30000,
     previewRefreshInterval: 15000,
     maxImageLoadAttempts: 3
 };
@@ -70,7 +71,9 @@ const state = {
     fallbackLogoUsed: false,
     fallbackPreviewUsed: false,
     isPreviewRefreshing: false,
-    previewCaptureCooldownUntil: 0
+    previewCaptureCooldownUntil: 0,
+    sockets: null,
+    usingSocketPush: false
 };
 
 // API functions
@@ -779,6 +782,7 @@ const handlers = {
             ui.updatePreviewImage({ updateTimestamp: initPreviewAutoSec > 0 });
 
             this.setupEventListeners();
+            this.setupSocketSubscriptions();
             this.startAutoRefresh();
             this.startPreviewRefresh(settings);
 
@@ -1049,11 +1053,43 @@ const handlers = {
         });
     },
 
+    setupSocketSubscriptions() {
+        // Socket manager is attached to window.App by base init.
+        const sockets = window.App?.Sockets;
+        if (!sockets || typeof sockets.on !== 'function') return;
+        state.sockets = sockets;
+
+        sockets.on('connect', () => {
+            state.usingSocketPush = true;
+            this.startAutoRefresh();
+        });
+        sockets.on('disconnect', () => {
+            state.usingSocketPush = false;
+            this.startAutoRefresh();
+        });
+        sockets.on('playback_update', (payload) => {
+            // payload: { status, playlist_id, timestamp }
+            state.playbackStatus = payload && typeof payload === 'object' ? payload : state.playbackStatus;
+            try {
+                ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
+                ui.renderSettings(state.currentSettings, {
+                    playlists: state.playlists,
+                    playbackStatus: state.playbackStatus,
+                    systemStatus: state.systemStatus,
+                    networkStatus: state.networkStatus,
+                });
+            } catch (e) {
+                console.warn('Failed to apply socket playback update:', e);
+            }
+        });
+    },
+
     startAutoRefresh() {
         if (state.refreshIntervalId) {
             clearInterval(state.refreshIntervalId);
         }
 
+        const intervalMs = state.usingSocketPush ? CONFIG.refreshIntervalFallbackMs : CONFIG.refreshInterval;
         state.refreshIntervalId = setInterval(async () => {
             try {
                 const [settings, playbackStatusResp, systemStatusResp, networkStatusResp] = await Promise.all([
@@ -1112,7 +1148,7 @@ const handlers = {
             } catch (error) {
                 console.error('Auto-refresh failed:', error);
             }
-        }, CONFIG.refreshInterval);
+        }, intervalMs);
     },
 
     startPreviewRefresh(settings) {
