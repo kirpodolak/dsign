@@ -339,11 +339,20 @@ class PlaylistManager:
             self._play_thread.start()
 
             # Notify clients
-            self.socketio.emit('playback_state', {
-                'status': 'playing',
-                'playlist': {'id': playlist.id, 'name': playlist.name},
-                'settings': profile_settings
-            })
+            try:
+                if self.socketio:
+                    self.socketio.emit(
+                        'playback_update',
+                        {
+                            'status': 'playing',
+                            'playlist_id': playlist.id,
+                            'playlist': {'id': playlist.id, 'name': playlist.name},
+                            'settings': profile_settings,
+                        },
+                    )
+            except Exception:
+                # Best-effort: playback must continue even if sockets are unavailable.
+                pass
         
             return True
 
@@ -395,6 +404,18 @@ class PlaylistManager:
             playback.playlist_id = last_playlist_id
             self.db_session.add(playback)
             self.db_session.commit()
+
+            try:
+                if self.socketio:
+                    self.socketio.emit(
+                        'playback_update',
+                        {
+                            'status': 'stopped',
+                            'playlist_id': last_playlist_id,
+                        },
+                    )
+            except Exception:
+                pass
             return ok
         except Exception as e:
             self.logger.error(
