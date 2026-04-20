@@ -698,6 +698,41 @@ export function initializeSocketManager() {
     return socketManagerInstance;
 }
 
+/**
+ * Create a lightweight adapter around an existing Socket.IO client instance.
+ * This is used by the app core (`static/js/base.js`) to expose a stable interface
+ * on `window.App.Sockets` without creating additional socket connections.
+ *
+ * @param {any} socket - A Socket.IO client instance (e.g. `window.appSocket`)
+ */
+export function createSocketAdapter(socket) {
+    const s = socket || null;
+    return {
+        socket: s,
+        on: (event, handler) => {
+            if (!s || typeof s.on !== 'function') return;
+            s.on(event, handler);
+        },
+        off: (event, handler) => {
+            if (!s || typeof s.off !== 'function') return;
+            s.off(event, handler);
+        },
+        emit: (event, data) => {
+            if (!s || typeof s.emit !== 'function') return;
+            s.emit(event, data);
+        },
+        isConnected: () => Boolean(s && s.connected),
+        connect: () => {
+            if (!s || typeof s.connect !== 'function') return;
+            s.connect();
+        },
+        disconnect: () => {
+            if (!s || typeof s.disconnect !== 'function') return;
+            s.disconnect();
+        }
+    };
+}
+
 // For backward compatibility with global App object
 if (typeof window !== 'undefined') {
     window.App = window.App || {};
