@@ -58,6 +58,9 @@ class SettingsService:
         self._cached_current_settings_ts: float = 0.0
         self._current_settings_cache_ttl_sec: float = 1.0
 
+        # Avoid noisy logs on frequent polling: only log profile selection when it changes.
+        self._last_logged_active_profile_key: Optional[str] = None
+
         # Cache for settings.json to avoid repeated disk I/O on frequent polling.
         self._cached_file_settings: Optional[Dict[str, Any]] = None
         self._cached_file_settings_mtime_ns: Optional[int] = None
@@ -240,10 +243,13 @@ class SettingsService:
                 if assignment:
                     profile = db.session.query(PlaybackProfile).get(assignment.profile_id)
                     if profile:
-                        self._log_info(
-                            "Using playlist profile settings",
-                            extra={'playlist_id': playback.playlist_id, 'profile_id': assignment.profile_id}
-                        )
+                        active_key = f"playlist:{playback.playlist_id}:profile:{assignment.profile_id}"
+                        if self._last_logged_active_profile_key != active_key:
+                            self._log_info(
+                                "Using playlist profile settings",
+                                extra={'playlist_id': playback.playlist_id, 'profile_id': assignment.profile_id}
+                            )
+                            self._last_logged_active_profile_key = active_key
                         profile_settings = profile.settings or {}
                         base_no_mpv = {k: v for k, v in base_settings.items() if k != "mpv"}
                         mpv_layer = dict(base_settings.get("mpv") or {}) if isinstance(base_settings.get("mpv"), dict) else {}
@@ -262,7 +268,10 @@ class SettingsService:
             ).order_by(PlaybackProfile.id.desc()).first()
             
             if idle_profile:
-                self._log_info("Using idle profile settings", extra={'profile_id': idle_profile.id})
+                active_key = f"idle:profile:{idle_profile.id}"
+                if self._last_logged_active_profile_key != active_key:
+                    self._log_info("Using idle profile settings", extra={'profile_id': idle_profile.id})
+                    self._last_logged_active_profile_key = active_key
                 profile_settings = idle_profile.settings or {}
                 base_no_mpv = {k: v for k, v in base_settings.items() if k != "mpv"}
                 mpv_layer = dict(base_settings.get("mpv") or {}) if isinstance(base_settings.get("mpv"), dict) else {}
