@@ -5,52 +5,68 @@
 {% endblock %}
 
 {% block content %}
-<h1>Media Gallery</h1>
+<section class="gallery-page">
+  <header class="gallery-page__header">
+    <h1 class="gallery-page__title">Media Gallery</h1>
+  </header>
 
-<div class="controls">
-  <div class="search-sort">
-    <input type="text" id="search-input" placeholder="Search files...">
-    <select id="sort-select">
-      <option value="name-asc">Name (A-Z)</option>
-      <option value="name-desc">Name (Z-A)</option>
-      <option value="date-newest">Date (Newest)</option>
-      <option value="date-oldest">Date (Oldest)</option>
-      <option value="type">File Type</option>
-    </select>
-    <select id="group-select">
-      <option value="none">No Grouping</option>
-      <option value="type">Group by Type</option>
-      <option value="date">Group by Date</option>
-    </select>
+  <div class="gallery-shell">
+    <div class="gallery-main">
+      <div class="gallery-actions" role="toolbar" aria-label="Gallery actions">
+        <button id="select-all" class="btn secondary">
+          <i class="fas fa-check-square"></i> Select All
+        </button>
+        <button id="delete-selected" class="btn danger">
+          <i class="fas fa-trash"></i> Delete Selected
+        </button>
+      </div>
+
+      <div class="gallery-grid-scroll" aria-label="Media files">
+        <div class="file-grid" id="media-gallery">
+          <!-- Media files will be rendered here -->
+        </div>
+      </div>
+    </div>
+
+    <aside class="gallery-side" aria-label="Gallery controls">
+      <div class="gallery-side__card">
+        <div class="gallery-side__title">Search & Sort</div>
+        <div class="controls controls--stack">
+          <input type="text" id="search-input" placeholder="Search files...">
+          <select id="sort-select" aria-label="Sort">
+            <option value="name-asc">Name (A-Z)</option>
+            <option value="name-desc">Name (Z-A)</option>
+            <option value="date-newest">Date (Newest)</option>
+            <option value="date-oldest">Date (Oldest)</option>
+            <option value="type">File Type</option>
+          </select>
+          <select id="group-select" aria-label="Group">
+            <option value="none">No Grouping</option>
+            <option value="type">Group by Type</option>
+            <option value="date">Group by Date</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="gallery-side__card">
+        <div class="gallery-side__title">Upload</div>
+        <form id="upload-form" enctype="multipart/form-data">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <div class="upload-container upload-container--stack">
+            <input type="file" id="file-upload" multiple accept=".jpg,.jpeg,.png,.gif,.mp4,.webm,.avi">
+            <button type="button" id="upload-btn" class="btn primary upload-btn" aria-live="polite">
+              <span class="upload-btn__track" aria-hidden="true"><span class="upload-btn__fill"></span></span>
+              <span class="upload-btn__content">
+                <i class="fas fa-upload upload-btn__icon" aria-hidden="true"></i>
+                <span class="upload-btn__text">Upload</span>
+              </span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </aside>
   </div>
-</div>
-
-<div class="file-grid" id="media-gallery">
-  <!-- Media files will be rendered here -->
-</div>
-
-<div class="actions">
-  <button id="select-all" class="btn secondary">
-    <i class="fas fa-check-square"></i> Select All
-  </button>
-  <button id="delete-selected" class="btn danger">
-    <i class="fas fa-trash"></i> Delete Selected
-  </button>
-</div>
-
-<form id="upload-form" enctype="multipart/form-data">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <div class="upload-container">
-    <input type="file" id="file-upload" multiple accept=".jpg,.jpeg,.png,.gif,.mp4,.webm,.avi">
-    <button type="button" id="upload-btn" class="btn primary upload-btn" aria-live="polite">
-      <span class="upload-btn__track" aria-hidden="true"><span class="upload-btn__fill"></span></span>
-      <span class="upload-btn__content">
-        <i class="fas fa-upload upload-btn__icon" aria-hidden="true"></i>
-        <span class="upload-btn__text">Upload</span>
-      </span>
-    </button>
-  </div>
-</form>
+</section>
 
 <!-- Preview: fixed overlay + centered dialog (styles in gallery.css) -->
 <div id="preview-modal" class="preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-filename" hidden>
