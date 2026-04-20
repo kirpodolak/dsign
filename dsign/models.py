@@ -231,6 +231,59 @@ class PlaybackProfile(db.Model):
         """Дата создания как datetime"""
         return datetime.fromtimestamp(self.created_at) if self.created_at else None
 
+class ExternalMedia(db.Model):
+    """
+    External media item referenced by URL (e.g., Rutube / VK Video).
+
+    Stored separately from local filesystem media so it can be shown in Gallery,
+    added to playlists, and resolved to a playback URL.
+    """
+    __tablename__ = 'external_media'
+
+    id = db.Column(db.Integer, primary_key=True)
+    url = db.Column(db.Text, nullable=False, unique=True)
+    provider = db.Column(db.String(32), nullable=False)  # 'rutube' | 'vkvideo' | 'unknown'
+
+    title = db.Column(db.String(255))
+    thumbnail_url = db.Column(db.Text)
+
+    # Optional: store resolved direct URL (may expire) + fetch time.
+    resolved_url = db.Column(db.Text)
+    resolved_at = db.Column(db.Integer)
+    # Optional: headers required to access resolved_url (some providers require UA/Referer/Cookie).
+    # Stored as JSON dict {header: value}.
+    http_headers = db.Column(db.JSON)
+
+    created_at = db.Column(db.Integer, default=lambda: int(time.time()), nullable=False)
+    last_checked_at = db.Column(db.Integer)
+
+    @property
+    def created_dt(self):
+        return datetime.fromtimestamp(self.created_at) if self.created_at else None
+
+    def to_media_file_dict(self) -> Dict:
+        """
+        Return a dict compatible with existing /api/media/files payload.
+        `filename` becomes a stable synthetic key: ext-<id>
+        """
+        return {
+            "filename": f"ext-{self.id}",
+            "path": self.url,
+            "size": 0,
+            "modified": float(self.created_at or int(time.time())),
+            "type": "external",
+            "mimetype": "video/external",
+            "is_video": True,
+            "is_external": True,
+            "external": {
+                "id": self.id,
+                "url": self.url,
+                "provider": self.provider,
+                "title": self.title,
+                "thumbnail_url": self.thumbnail_url,
+            },
+        }
+
 class PlaylistProfileAssignment(db.Model):
     """Связь плейлиста с профилем воспроизведения"""
     __tablename__ = 'playlist_profile_assignments'
