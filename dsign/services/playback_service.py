@@ -278,13 +278,19 @@ class PlaybackService:
         try:
             start_time = time.time()
             status = self._playlist_manager.get_status()
-            self._log_info(
-                "Retrieved playback status", 
-                extra={
-                    'action': 'get_status',
-                    'duration_sec': round(time.time() - start_time, 3)
-                }
-            )
+            # This endpoint is frequently polled by the UI (fallback mode / page open).
+            # Keep it at DEBUG to avoid flooding journal in idle.
+            try:
+                self._log_debug(
+                    "Retrieved playback status",
+                    extra={
+                        'action': 'get_status',
+                        'duration_sec': round(time.time() - start_time, 3)
+                    }
+                )
+            except Exception:
+                # Never fail status because of logging.
+                pass
             return status
         except Exception as e:
             self._log_error(
