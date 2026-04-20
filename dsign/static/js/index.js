@@ -46,9 +46,9 @@ const CONFIG = {
     },
     defaultLogo: '/static/images/default-logo.jpg',
     defaultPreview: '/static/images/default-preview.jpg',
-    // When sockets are healthy we prefer push updates; polling is fallback.
-    refreshInterval: 2000,
-    refreshIntervalFallbackMs: 30000,
+    // Polling cadence. Even without sockets, keep idle/stopped light to avoid server/log spam.
+    refreshIntervalActiveMs: 2000,
+    refreshIntervalIdleMs: 30000,
     previewRefreshInterval: 15000,
     maxImageLoadAttempts: 3
 };
