@@ -272,34 +272,32 @@ class MPVManager:
         )
         return False
 
-    def _send_command(
-        self,
-        command: Dict[str, Any],
-        timeout: float = 5.0,
-        retries: Optional[int] = None,
-        retry_delay: Optional[float] = None,
-    ) -> Optional[Dict[str, Any]]:
+    def _send_command(self, command: Dict[str, Any], timeout: float = 5.0) -> Optional[Dict[str, Any]]:
         """Отправка команды в MPV. Успехи — только DEBUG (слайдшоу иначе забивает journal)."""
-        command_name = command.get("command", ["unknown"])[0]
+        command_arr = command.get("command", ["unknown"])
+        command_name = command_arr[0] if isinstance(command_arr, list) and command_arr else "unknown"
+        # For get_property/set_property, include the property name in logs to make "property unavailable"
+        # actionable (and to distinguish normal mpv behavior from real errors).
+        prop_name: Optional[str] = None
+        if isinstance(command_arr, list) and len(command_arr) >= 2 and command_name in ("get_property", "set_property"):
+            try:
+                prop_name = str(command_arr[1])
+            except Exception:
+                prop_name = None
         ipc_request_id = int(time.time() * 1_000_000) & 0x7FFFFFFF
         start_time = time.time()
-        max_attempts = max(1, int(retries if retries is not None else PlaybackConstants.MAX_RETRIES))
-        delay_between_attempts = (
-            max(0.0, float(retry_delay))
-            if retry_delay is not None
-            else PlaybackConstants.RETRY_DELAY
-        )
 
         self.logger.debug(
             "MPVCommand started",
             extra={
                 "command": command_name,
+                **({"property": prop_name} if prop_name else {}),
                 "request_id": ipc_request_id,
                 "timeout": timeout,
             },
         )
 
-        for attempt in range(max_attempts):
+        for attempt in range(PlaybackConstants.MAX_RETRIES):
             try:
                 with self._ipc_lock, \
                      socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
@@ -354,12 +352,32 @@ class MPVManager:
                                 "MPVCommand completed",
                                 extra={
                                     "command": command_name,
+                                    **({"property": prop_name} if prop_name else {}),
                                     "request_id": ipc_request_id,
                                     "duration_sec": duration_sec,
                                     "attempt": attempt + 1,
                                 },
                             )
                         else:
+                            # For get_property, "property unavailable" is expected on some mpv builds / media types.
+                            # Treat it as a non-error and normalize to {"error":"success","data":None} so callers can
+                            # handle it without generating noisy logs.
+                            if command_name == "get_property" and err == "property unavailable":
+                                self.logger.debug(
+                                    "MPVCommand property unavailable",
+                                    extra={
+                                        "command": command_name,
+                                        **({"property": prop_name} if prop_name else {}),
+                                        "request_id": ipc_request_id,
+                                        "duration_sec": duration_sec,
+                                        "attempt": attempt + 1,
+                                    },
+                                )
+                                return {
+                                    "request_id": result.get("request_id", ipc_request_id),
+                                    "error": "success",
+                                    "data": None,
+                                }
                             # "property unavailable" is common on some mpv builds and is not actionable in production.
                             # Keep it at DEBUG to avoid log spam.
                             log_fn = self.logger.debug if err == "property unavailable" else self.logger.warning
@@ -367,6 +385,7 @@ class MPVManager:
                                 "MPVCommand error response",
                                 extra={
                                     "command": command_name,
+                                    **({"property": prop_name} if prop_name else {}),
                                     "request_id": ipc_request_id,
                                     "duration_sec": duration_sec,
                                     "attempt": attempt + 1,
@@ -392,8 +411,8 @@ class MPVManager:
                         "duration_sec": round(time.time() - start_time, 3)
                     }
                 )
-                if attempt < max_attempts - 1:
-                    time.sleep(delay_between_attempts)
+                if attempt < PlaybackConstants.MAX_RETRIES - 1:
+                    time.sleep(PlaybackConstants.RETRY_DELAY)
                 continue
         
         self.logger.error(
@@ -402,18 +421,11 @@ class MPVManager:
                 "operation": "MPVCommand",
                 "command": command_name,
                 "request_id": ipc_request_id,
-                "max_attempts": max_attempts,
+                "max_attempts": PlaybackConstants.MAX_RETRIES,
                 "duration_sec": round(time.time() - start_time, 3)
             }
         )
         return None
-
-    def _send_command_fast(self, command: Dict[str, Any], timeout: float = 1.0) -> Optional[Dict[str, Any]]:
-        """
-        Fast-path IPC command for slideshow loops.
-        Single attempt + no retry backoff prevents duration drift on image playlists.
-        """
-        return self._send_command(command, timeout=timeout, retries=1, retry_delay=0.0)
 
     def initialize(self) -> bool:
         """Инициализация MPV с повторами"""
