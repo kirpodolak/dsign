@@ -1491,6 +1491,11 @@ def init_api_routes(api_bp, services):
             if not url:
                 return jsonify({"success": False, "error": "Missing url"}), 400
 
+            current_app.logger.info(
+                "External media add requested",
+                extra={"url": url, "remote_addr": request.remote_addr},
+            )
+
             svc = getattr(current_app, "external_media_service", None)
             if not svc:
                 return jsonify({"success": False, "error": "external_media_service not available"}), 500

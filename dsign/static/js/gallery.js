@@ -774,10 +774,10 @@ class MediaGallery {
       this.elements.uploadBtn.addEventListener('click', this.uploadMedia.bind(this));
     }
 
-    const addLinkBtn = document.querySelector('#add-external-btn');
+    const addLinkBtn = document.querySelector('#external-add-btn');
     const linkInput = document.querySelector('#external-url');
     if (addLinkBtn && linkInput) {
-      addLinkBtn.addEventListener('click', async () => {
+      const submit = async () => {
         const url = String(linkInput.value || '').trim();
         if (!url) {
           window.App?.Alerts?.show?.('Please paste a VK Video or Rutube link', 'warning');
@@ -805,6 +805,14 @@ class MediaGallery {
           window.App?.Alerts?.show?.(`Failed to add link: ${e.message}`, 'error');
         } finally {
           addLinkBtn.disabled = false;
+        }
+      };
+
+      addLinkBtn.addEventListener('click', submit);
+      linkInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          submit();
         }
       });
     }
