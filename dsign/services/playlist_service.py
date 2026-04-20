@@ -283,6 +283,11 @@ class PlaylistService:
             for file in sorted(playlist.files, key=lambda x: x.order):
                 if not file.file_name:
                     continue
+
+                # External media keys (ext-<id>) are not real files on disk and are not exported to M3U.
+                # They are resolved and played by the app/MPV directly.
+                if str(file.file_name).startswith("ext-"):
+                    continue
                 
                 file_path = os.path.join(config['MEDIA_ROOT'], file.file_name)
                 if not os.path.exists(file_path):
@@ -450,14 +455,19 @@ class PlaylistService:
             for order, file_data in enumerate(files_data, start=1):
                 if not file_data.get('file_name'):
                     raise ValueError("Missing required field: file_name")
-                
-                file_path = os.path.join(current_app.config['MEDIA_ROOT'], file_data['file_name'])
-                if not os.path.exists(file_path):
-                    raise ValueError(f"File not found: {file_data['file_name']}")
+
+                file_name = str(file_data['file_name'])
+
+                # External media items are stored as synthetic keys ext-<id>.
+                # They are not expected to exist on disk.
+                if not file_name.startswith("ext-"):
+                    file_path = os.path.join(current_app.config['MEDIA_ROOT'], file_name)
+                    if not os.path.exists(file_path):
+                        raise ValueError(f"File not found: {file_name}")
             
                 new_file = PlaylistFiles(
                     playlist_id=playlist_id,
-                    file_name=file_data['file_name'],
+                    file_name=file_name,
                     duration=file_data.get('duration', 10),
                     muted=bool(file_data.get('muted', False)),
                     order=file_data.get('order', order)
