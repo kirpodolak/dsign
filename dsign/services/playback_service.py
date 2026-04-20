@@ -61,7 +61,17 @@ class PlaybackService:
         )
         
         # Initialize with retry
-        self._init_with_retry()
+        self._mpv_degraded = False
+        try:
+            self._init_with_retry()
+        except Exception as e:
+            # Do not crash the whole server if MPV IPC is temporarily dead.
+            # UI/API should still come up; playback attempts will retry initialization.
+            self._mpv_degraded = True
+            self._log_error(
+                "PlaybackService started in degraded mode (MPV unavailable)",
+                extra={"error": str(e), "type": type(e).__name__},
+            )
 
     def set_external_media_service(self, service) -> None:
         """Attach external media resolver for playlist items like `ext-<id>`."""
@@ -239,6 +249,19 @@ class PlaybackService:
     def play(self, playlist_id: int) -> bool:
         """Play specified playlist"""
         try:
+            # If MPV was unavailable during boot, retry initialization on first play.
+            if getattr(self, "_mpv_degraded", False):
+                try:
+                    self._init_with_retry()
+                    self._mpv_degraded = False
+                    self._log_info("MPV recovered from degraded mode", extra={"action": "play", "playlist_id": playlist_id})
+                except Exception as e:
+                    self._log_error(
+                        "Cannot start playback: MPV still unavailable",
+                        extra={"action": "play", "playlist_id": playlist_id, "error": str(e), "type": type(e).__name__},
+                    )
+                    return False
+
             start_time = time.time()
             result = self._playlist_manager.play(playlist_id)
             self._log_info(
