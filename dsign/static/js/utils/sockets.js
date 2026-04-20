@@ -65,6 +65,45 @@ export class SocketManager {
     }
 
     /**
+     * Subscribe to an application event coming from the socket layer.
+     * Supported events include:
+     * - connect, disconnect (socket lifecycle)
+     * - playback_update, playlist_update, system_notification (application)
+     * @param {string} event
+     * @param {(data:any)=>void} handler
+     */
+    on(event, handler) {
+        if (!event || typeof handler !== 'function') return;
+        const set = this.eventHandlers.get(event) || new Set();
+        set.add(handler);
+        this.eventHandlers.set(event, set);
+    }
+
+    /**
+     * Unsubscribe from an application event.
+     * @param {string} event
+     * @param {(data:any)=>void} handler
+     */
+    off(event, handler) {
+        const set = this.eventHandlers.get(event);
+        if (!set) return;
+        set.delete(handler);
+        if (set.size === 0) this.eventHandlers.delete(event);
+    }
+
+    _dispatch(event, data) {
+        const set = this.eventHandlers.get(event);
+        if (!set || set.size === 0) return;
+        for (const fn of set) {
+            try {
+                fn(data);
+            } catch (e) {
+                console.warn(`[Socket] Handler for ${event} failed`, e);
+            }
+        }
+    }
+
+    /**
      * Default error handler
      * @param {Error} error - Error object
      */
@@ -304,6 +343,21 @@ export class SocketManager {
         this.socket.on('reconnect_attempt', (attempt) => this.handleReconnectAttempt(attempt));
     }
 
+    handlePlaybackUpdate(data) {
+        this.lastActivity = Date.now();
+        this._dispatch('playback_update', data);
+    }
+
+    handlePlaylistUpdate(data) {
+        this.lastActivity = Date.now();
+        this._dispatch('playlist_update', data);
+    }
+
+    handleSystemNotification(data) {
+        this.lastActivity = Date.now();
+        this._dispatch('system_notification', data);
+    }
+
     /**
      * Handle connection established
      * @private
@@ -316,6 +370,9 @@ export class SocketManager {
         this.isConnected = true;
         this.reconnectAttempts = 0;
         this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
+
+        // Let pages switch from polling to push-driven updates.
+        this._dispatch('connect', { ts: Date.now() });
         
         this.startPingInterval();
         this.scheduleTokenRefresh();
@@ -389,6 +446,9 @@ export class SocketManager {
         this.isAuthenticated = false;
         this.connectionEstablished = false;
         this.cleanupTimers();
+
+        // Let pages fall back to polling when socket is down.
+        this._dispatch('disconnect', { reason, ts: Date.now() });
         
         if (reason !== 'io client disconnect') {
             const message = reason === 'io server disconnect' 
