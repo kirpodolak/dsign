@@ -49,6 +49,20 @@
       </div>
 
       <div class="gallery-side__card">
+        <div class="gallery-side__title">Add link</div>
+        <div class="controls controls--stack">
+          <input type="url" id="external-url" placeholder="Paste VK Video / Rutube link…">
+          <button type="button" id="external-add-btn" class="btn primary">
+            <i class="fas fa-link" aria-hidden="true"></i>
+            Add
+          </button>
+          <div id="external-add-hint" class="gallery-side__hint">
+            Supported: VK Video, Rutube
+          </div>
+        </div>
+      </div>
+
+      <div class="gallery-side__card">
         <div class="gallery-side__title">Upload</div>
         <form id="upload-form" enctype="multipart/form-data">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
