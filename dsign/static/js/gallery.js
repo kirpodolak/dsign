@@ -71,6 +71,18 @@ class MediaGallery {
     MediaGallery.instance = this;
   }
 
+  /**
+   * Gallery grid should be fast: use server-side cached thumbnails.
+   * Original media is used only in the preview modal.
+   */
+  getThumbnailUrl(filename) {
+    return `/api/media/thumbnail/${encodeURIComponent(filename)}`;
+  }
+
+  getMediaUrl(filename) {
+    return `/api/media/${encodeURIComponent(filename)}`;
+  }
+
   initElements() {
     for (const [key, selector] of Object.entries(this.config)) {
       this.elements[key] = document.querySelector(selector);
@@ -115,7 +127,7 @@ class MediaGallery {
         type: file.type || getFileExtension(file.filename),
         date: file.modified || Date.now(),
         size: file.size || 0,
-        path: `/api/media/${encodeURIComponent(file.filename)}`,
+        path: this.getMediaUrl(file.filename),
         mimetype: file.mimetype,
         included: file.included || false,
         is_video: file.is_video || false
@@ -250,10 +262,11 @@ class MediaGallery {
       if (ALLOWED_IMAGE_TYPES.includes(file.type)) {
         previewContainer.classList.add('file-preview-container');
         const img = document.createElement('img');
-        img.src = `/api/media/${encodeURIComponent(file.name)}?${Date.now()}`;
+        img.src = this.getThumbnailUrl(file.name);
         img.alt = file.name;
         img.classList.add('file-preview');
         img.loading = 'lazy';
+        img.decoding = 'async';
         img.onerror = () => {
           img.src = PLACEHOLDER_IMAGE;
           img.style.opacity = '0.7';
@@ -273,7 +286,7 @@ class MediaGallery {
         if (e.target?.tagName !== 'INPUT' && e.target?.tagName !== 'LABEL') {
           this.showPreview({
             ...file,
-            path: `/api/media/${encodeURIComponent(file.name)}`
+            path: this.getMediaUrl(file.name)
           });
         }
       });
