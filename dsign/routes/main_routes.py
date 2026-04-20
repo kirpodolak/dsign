@@ -32,18 +32,20 @@ def init_main_routes(main_bp: Blueprint, settings_service: SettingsService):
             
             # Get playlists with their assigned profiles
             playlists = db.session.query(Playlist).all()
-            playlist_data = []
-            
-            for playlist in playlists:
-                assignment = db.session.query(PlaylistProfileAssignment).filter_by(
-                    playlist_id=playlist.id
-                ).first()
-                
-                playlist_data.append({
+            assignments = (
+                db.session.query(PlaylistProfileAssignment.playlist_id, PlaylistProfileAssignment.profile_id)
+                .all()
+            )
+            assignments_by_playlist_id = {a.playlist_id: a.profile_id for a in assignments}
+
+            playlist_data = [
+                {
                     'id': playlist.id,
                     'name': playlist.name,
-                    'profile_id': assignment.profile_id if assignment else None
-                })
+                    'profile_id': assignments_by_playlist_id.get(playlist.id),
+                }
+                for playlist in playlists
+            ]
             
             # Get current profile
             current_profile = None

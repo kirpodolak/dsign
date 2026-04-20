@@ -81,6 +81,14 @@ def create_app(config_class: Config = config) -> Flask:
         # 3. Инициализация сервисов
         app.logger.debug("Initializing services...")
         with app.app_context():
+            # Ensure DB schema is up to date for new models (SQLite deployments typically rely on create_all).
+            # This is best-effort: if DB is read-only or corrupted we still want to surface the real error later.
+            try:
+                from . import models  # noqa: F401
+                db.create_all()
+            except Exception as e:
+                app.logger.warning(f"DB schema init (create_all) skipped/failed: {str(e)}")
+
             # Import here to avoid heavy side effects during module import
             # and to prevent circular imports when tooling/scripts import dsign.* modules.
             from dsign.services import init_services
@@ -102,6 +110,17 @@ def create_app(config_class: Config = config) -> Flask:
             for name, service in services.items():
                 setattr(app, name, service)
                 app.logger.debug(f"Service attached: {name}")
+
+            # Wire optional services into mandatory ones (avoid relying on current_app during constructors).
+            # This ensures external media keys (ext-<id>) can be resolved during playback.
+            try:
+                playback_service = getattr(app, "playback_service", None)
+                external_media_service = getattr(app, "external_media_service", None)
+                if playback_service and external_media_service and hasattr(playback_service, "set_external_media_service"):
+                    playback_service.set_external_media_service(external_media_service)
+                    app.logger.info("External media service wired into playback service")
+            except Exception as e:
+                app.logger.warning(f"Failed to wire external media into playback service: {str(e)}")
 
         # Проверка обязательных сервисов
         required_services = [

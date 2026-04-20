@@ -12,6 +12,7 @@ from datetime import datetime  # <-- Восстановленный импорт
 from flask import Flask
 import sys
 import os
+import traceback
 
 class ServiceLogger:
     def __init__(self, name: str, log_level: str = 'INFO', log_dir: Union[str, Path] = 'logs'):
@@ -72,19 +73,38 @@ class ServiceLogger:
             message_data.update(extra)
         return json.dumps(message_data, ensure_ascii=False)
 
-    def debug(self, msg: str, extra: Optional[Dict[str, Any]] = None):
+    def debug(self, msg: str, extra: Optional[Dict[str, Any]] = None, **kwargs):
+        # kwargs accepted for compatibility with logging.Logger
         self.logger.debug(self._format_message(msg, extra))
 
-    def info(self, msg: str, extra: Optional[Dict[str, Any]] = None):
+    def info(self, msg: str, extra: Optional[Dict[str, Any]] = None, **kwargs):
         self.logger.info(self._format_message(msg, extra))
 
-    def warning(self, msg: str, extra: Optional[Dict[str, Any]] = None):
+    def warning(self, msg: str, extra: Optional[Dict[str, Any]] = None, **kwargs):
         self.logger.warning(self._format_message(msg, extra))
 
-    def error(self, msg: str, extra: Optional[Dict[str, Any]] = None):
+    def error(self, msg: str, extra: Optional[Dict[str, Any]] = None, **kwargs):
+        """
+        Compatible with logging.Logger.error(..., exc_info=True).
+
+        Our JSON formatter doesn't have direct access to exception state, so if exc_info is requested,
+        we attach a best-effort formatted traceback into the JSON payload.
+        """
+        try:
+            if kwargs.get("exc_info"):
+                extra = dict(extra or {})
+                extra.setdefault("traceback", traceback.format_exc())
+        except Exception:
+            pass
         self.logger.error(self._format_message(msg, extra))
 
-    def critical(self, msg: str, extra: Optional[Dict[str, Any]] = None):
+    def critical(self, msg: str, extra: Optional[Dict[str, Any]] = None, **kwargs):
+        try:
+            if kwargs.get("exc_info"):
+                extra = dict(extra or {})
+                extra.setdefault("traceback", traceback.format_exc())
+        except Exception:
+            pass
         self.logger.critical(self._format_message(msg, extra))
 
     def exception(self, msg, *args, **kwargs):

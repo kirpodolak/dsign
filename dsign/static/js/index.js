@@ -46,8 +46,11 @@ const CONFIG = {
     },
     defaultLogo: '/static/images/default-logo.jpg',
     defaultPreview: '/static/images/default-preview.jpg',
-    // Match Settings page status polling cadence for near-real-time metrics.
-    refreshInterval: 2000,
+    // Polling strategy:
+    // - Playback can feel "real-time"
+    // - System/network should be slower (nmcli/procfs reads + DOM updates are noticeable on Pi)
+    refreshPlaybackInterval: 2000,
+    refreshSystemInterval: 10000,
     previewRefreshInterval: 15000,
     maxImageLoadAttempts: 3
 };
@@ -63,6 +66,9 @@ const state = {
     playlists: [],
     currentSettings: {},
     playbackStatus: null,
+    systemStatus: null,
+    networkStatus: null,
+    lastSystemRefreshAt: 0,
     refreshIntervalId: null,
     previewRefreshId: null,
     logoLoadAttempts: 0,
@@ -72,6 +78,22 @@ const state = {
     isPreviewRefreshing: false,
     previewCaptureCooldownUntil: 0
 };
+
+function stableStringify(value) {
+    try {
+        if (value === null || value === undefined) return '';
+        if (typeof value !== 'object') return String(value);
+        if (Array.isArray(value)) return JSON.stringify(value);
+        const keys = Object.keys(value).sort();
+        const out = {};
+        keys.forEach((k) => {
+            out[k] = value[k];
+        });
+        return JSON.stringify(out);
+    } catch {
+        return '';
+    }
+}
 
 // API functions
 const api = {
@@ -1056,12 +1078,19 @@ const handlers = {
 
         state.refreshIntervalId = setInterval(async () => {
             try {
-                const [settings, playbackStatusResp, systemStatusResp, networkStatusResp] = await Promise.all([
+                const now = Date.now();
+                const shouldRefreshSystem =
+                    !state.lastSystemRefreshAt ||
+                    (now - state.lastSystemRefreshAt) >= CONFIG.refreshSystemInterval;
+
+                const requests = [
                     api.getSettings(),
                     api.getPlaybackStatus().catch(() => null),
-                    api.getSystemStatus().catch(() => null),
-                    api.getNetworkStatus().catch(() => null),
-                ]);
+                    shouldRefreshSystem ? api.getSystemStatus().catch(() => null) : Promise.resolve(null),
+                    shouldRefreshSystem ? api.getNetworkStatus().catch(() => null) : Promise.resolve(null),
+                ];
+
+                const [settings, playbackStatusResp, systemStatusResp, networkStatusResp] = await Promise.all(requests);
 
                 const latestPlaybackStatus =
                     playbackStatusResp &&
@@ -1070,25 +1099,32 @@ const handlers = {
                     !Array.isArray(playbackStatusResp.status)
                         ? playbackStatusResp.status
                         : state.playbackStatus;
-                const latestSystemStatus =
+                const nextSystemStatus =
                     systemStatusResp &&
                     typeof systemStatusResp.status === 'object' &&
                     systemStatusResp.status !== null &&
                     !Array.isArray(systemStatusResp.status)
                         ? systemStatusResp.status
-                        : state.systemStatus;
-                const latestNetworkStatus =
+                        : null;
+                const nextNetworkStatus =
                     networkStatusResp &&
                     typeof networkStatusResp.network === 'object' &&
                     networkStatusResp.network !== null &&
                     !Array.isArray(networkStatusResp.network)
                         ? networkStatusResp.network
-                        : state.networkStatus;
+                        : null;
 
-                const settingsChanged = JSON.stringify(state.currentSettings) !== JSON.stringify(settings);
-                const playbackChanged = JSON.stringify(state.playbackStatus) !== JSON.stringify(latestPlaybackStatus);
-                const systemChanged = JSON.stringify(state.systemStatus) !== JSON.stringify(latestSystemStatus);
-                const networkChanged = JSON.stringify(state.networkStatus) !== JSON.stringify(latestNetworkStatus);
+                // Cheaper comparisons than repeated JSON.stringify on large nested objects.
+                const settingsChanged = stableStringify(state.currentSettings) !== stableStringify(settings);
+                const playbackChanged = stableStringify(state.playbackStatus) !== stableStringify(latestPlaybackStatus);
+                const systemChanged =
+                    shouldRefreshSystem &&
+                    nextSystemStatus &&
+                    stableStringify(state.systemStatus) !== stableStringify(nextSystemStatus);
+                const networkChanged =
+                    shouldRefreshSystem &&
+                    nextNetworkStatus &&
+                    stableStringify(state.networkStatus) !== stableStringify(nextNetworkStatus);
 
                 if (settingsChanged) {
                     state.currentSettings = settings;
@@ -1097,8 +1133,11 @@ const handlers = {
                     this.startPreviewRefresh(settings);
                 }
                 state.playbackStatus = latestPlaybackStatus;
-                state.systemStatus = latestSystemStatus;
-                state.networkStatus = latestNetworkStatus;
+                if (shouldRefreshSystem) {
+                    if (nextSystemStatus) state.systemStatus = nextSystemStatus;
+                    if (nextNetworkStatus) state.networkStatus = nextNetworkStatus;
+                    state.lastSystemRefreshAt = now;
+                }
 
                 if (settingsChanged || playbackChanged || systemChanged || networkChanged) {
                     ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
@@ -1112,7 +1151,7 @@ const handlers = {
             } catch (error) {
                 console.error('Auto-refresh failed:', error);
             }
-        }, CONFIG.refreshInterval);
+        }, CONFIG.refreshPlaybackInterval);
     },
 
     startPreviewRefresh(settings) {

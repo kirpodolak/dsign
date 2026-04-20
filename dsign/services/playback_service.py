@@ -48,6 +48,9 @@ class PlaybackService:
             self._mpv_manager, 
             self._logo_manager
         )
+        # External media resolver is injected by the Flask app after services are attached.
+        # Do not rely on `current_app` here: at startup the service graph is constructed before
+        # attributes like `app.external_media_service` are attached.
         
         self.logo_manager = LogoManager(
             logger=self.logger,
@@ -58,7 +61,24 @@ class PlaybackService:
         )
         
         # Initialize with retry
-        self._init_with_retry()
+        self._mpv_degraded = False
+        try:
+            self._init_with_retry()
+        except Exception as e:
+            # Do not crash the whole server if MPV IPC is temporarily dead.
+            # UI/API should still come up; playback attempts will retry initialization.
+            self._mpv_degraded = True
+            self._log_error(
+                "PlaybackService started in degraded mode (MPV unavailable)",
+                extra={"error": str(e), "type": type(e).__name__},
+            )
+
+    def set_external_media_service(self, service) -> None:
+        """Attach external media resolver for playlist items like `ext-<id>`."""
+        try:
+            self._playlist_manager.set_external_media_service(service)
+        except Exception:
+            pass
 
     def display_idle_logo(self):
         return self.logo_manager.display_idle_logo()
@@ -112,14 +132,19 @@ class PlaybackService:
         for attempt in range(max_attempts):
             try:
                 delay = min(initial_delay * (2 ** attempt), 30)
-                
-                # Используем метод health check из MPVManager
-                health = self._mpv_manager.check_health()
-                if not all(health.values()):
-                    raise RuntimeError(f"MPV health check failed: {health}")
-                
+
+                # Bring MPV to a responsive state first. Some builds expose the socket early but won't reply
+                # to IPC commands for a short period after boot.
                 if not self._mpv_manager.initialize():
                     raise RuntimeError("MPV initialization failed")
+
+                # Best-effort: log health after initialization for diagnostics, but don't fail startup on it.
+                try:
+                    health = self._mpv_manager.check_health()
+                    if not all(health.values()):
+                        self._log_warning("MPV health check not fully green after initialize", extra={"health": health})
+                except Exception:
+                    pass
                 
                 Thread(target=self._preload_resources).start()
                 return
@@ -224,6 +249,19 @@ class PlaybackService:
     def play(self, playlist_id: int) -> bool:
         """Play specified playlist"""
         try:
+            # If MPV was unavailable during boot, retry initialization on first play.
+            if getattr(self, "_mpv_degraded", False):
+                try:
+                    self._init_with_retry()
+                    self._mpv_degraded = False
+                    self._log_info("MPV recovered from degraded mode", extra={"action": "play", "playlist_id": playlist_id})
+                except Exception as e:
+                    self._log_error(
+                        "Cannot start playback: MPV still unavailable",
+                        extra={"action": "play", "playlist_id": playlist_id, "error": str(e), "type": type(e).__name__},
+                    )
+                    return False
+
             start_time = time.time()
             result = self._playlist_manager.play(playlist_id)
             self._log_info(
