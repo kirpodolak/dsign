@@ -71,6 +71,29 @@ class MediaGallery {
     MediaGallery.instance = this;
   }
 
+  /**
+   * Gallery grid should be fast: use server-side cached thumbnails.
+   * Original media is used only in the preview modal.
+   */
+  getThumbnailUrl(filename) {
+    return `/api/media/thumbnail/${encodeURIComponent(filename)}`;
+  }
+
+  getMediaUrl(filename) {
+    return `/api/media/${encodeURIComponent(filename)}`;
+  }
+
+  getExternalProvider(file) {
+    const provider = file?.external?.provider || '';
+    if (provider === 'vkvideo') return { key: 'vkvideo', label: 'VK Video' };
+    if (provider === 'rutube') return { key: 'rutube', label: 'Rutube' };
+    return provider ? { key: provider, label: provider } : null;
+  }
+
+  isExternalFile(file) {
+    return Boolean(file?.is_external || (file?.external && typeof file.external === 'object'));
+  }
+
   initElements() {
     for (const [key, selector] of Object.entries(this.config)) {
       this.elements[key] = document.querySelector(selector);
@@ -115,10 +138,12 @@ class MediaGallery {
         type: file.type || getFileExtension(file.filename),
         date: file.modified || Date.now(),
         size: file.size || 0,
-        path: `/api/media/${encodeURIComponent(file.filename)}`,
+        path: this.getMediaUrl(file.filename),
         mimetype: file.mimetype,
         included: file.included || false,
-        is_video: file.is_video || false
+        is_video: file.is_video || false,
+        is_external: Boolean(file.is_external),
+        external: file.external || null,
       }));
 
       // Merge transcode status (best-effort)
@@ -247,13 +272,17 @@ class MediaGallery {
 
       const previewContainer = document.createElement('div');
       
-      if (ALLOWED_IMAGE_TYPES.includes(file.type)) {
+      const isExternal = this.isExternalFile(file);
+      const provider = isExternal ? this.getExternalProvider(file) : null;
+
+      if (ALLOWED_IMAGE_TYPES.includes(file.type) && !isExternal) {
         previewContainer.classList.add('file-preview-container');
         const img = document.createElement('img');
-        img.src = `/api/media/${encodeURIComponent(file.name)}?${Date.now()}`;
+        img.src = this.getThumbnailUrl(file.name);
         img.alt = file.name;
         img.classList.add('file-preview');
         img.loading = 'lazy';
+        img.decoding = 'async';
         img.onerror = () => {
           img.src = PLACEHOLDER_IMAGE;
           img.style.opacity = '0.7';
@@ -264,16 +293,39 @@ class MediaGallery {
         previewContainer.appendChild(img);
       } else {
         previewContainer.classList.add('file-icon');
-        const icon = document.createElement('i');
-        icon.className = 'fas fa-file-video';
-        previewContainer.appendChild(icon);
+        // Use a thumbnail even for external videos if available.
+        if (isExternal) {
+          previewContainer.classList.add('file-preview-container');
+          const img = document.createElement('img');
+          img.src = this.getThumbnailUrl(file.name);
+          img.alt = file.external?.title || file.name;
+          img.classList.add('file-preview');
+          img.loading = 'lazy';
+          img.decoding = 'async';
+          img.onerror = () => {
+            img.src = PLACEHOLDER_IMAGE;
+            img.style.opacity = '0.7';
+          };
+          previewContainer.appendChild(img);
+        } else {
+          const icon = document.createElement('i');
+          icon.className = 'fas fa-file-video';
+          previewContainer.appendChild(icon);
+        }
+      }
+
+      if (provider) {
+        const badge = document.createElement('div');
+        badge.className = `provider-badge provider-badge--${provider.key}`;
+        badge.textContent = provider.label;
+        item.appendChild(badge);
       }
 
       previewContainer.addEventListener('click', (e) => {
         if (e.target?.tagName !== 'INPUT' && e.target?.tagName !== 'LABEL') {
           this.showPreview({
             ...file,
-            path: `/api/media/${encodeURIComponent(file.name)}`
+            path: this.getMediaUrl(file.name)
           });
         }
       });
@@ -300,7 +352,7 @@ class MediaGallery {
 
       const fileNameDiv = document.createElement('div');
       fileNameDiv.classList.add('file-name');
-      fileNameDiv.textContent = file.name;
+      fileNameDiv.textContent = (file.external?.title || file.name);
       item.appendChild(fileNameDiv);
 
       this.elements.container.appendChild(item);
@@ -720,6 +772,49 @@ class MediaGallery {
   initEventListeners() {
     if (this.elements.uploadBtn) {
       this.elements.uploadBtn.addEventListener('click', this.uploadMedia.bind(this));
+    }
+
+    const addLinkBtn = document.querySelector('#external-add-btn');
+    const linkInput = document.querySelector('#external-url');
+    if (addLinkBtn && linkInput) {
+      const submit = async () => {
+        const url = String(linkInput.value || '').trim();
+        if (!url) {
+          window.App?.Alerts?.show?.('Please paste a VK Video or Rutube link', 'warning');
+          return;
+        }
+        addLinkBtn.disabled = true;
+        try {
+          const resp = await fetch('/api/media/external', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-CSRFToken': document.querySelector('input[name="csrf_token"]')?.value
+            },
+            credentials: 'include',
+            body: JSON.stringify({ url }),
+          });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok || !data?.success) {
+            throw new Error(data?.error || `HTTP ${resp.status}`);
+          }
+          linkInput.value = '';
+          window.App?.Alerts?.show?.('Link added', 'success');
+          await this.loadMediaFiles();
+        } catch (e) {
+          window.App?.Alerts?.show?.(`Failed to add link: ${e.message}`, 'error');
+        } finally {
+          addLinkBtn.disabled = false;
+        }
+      };
+
+      addLinkBtn.addEventListener('click', submit);
+      linkInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          submit();
+        }
+      });
     }
     
     if (this.elements.deleteSelectedBtn) {
