@@ -27,10 +27,6 @@ class PlaylistManager:
         self._stop_event = Event()
         self._active_playlist_id: Optional[int] = None
 
-    def _mono_ms(self) -> int:
-        """Monotonic timestamp in milliseconds for reliable interval diagnostics."""
-        return int(time.monotonic() * 1000)
-
     def _wait_for_mpv_loaded_path(self, expected_path: str, timeout: float = 10.0) -> bool:
         """
         Wait until MPV reports the expected `path` as loaded.
@@ -170,8 +166,7 @@ class PlaylistManager:
                     pass
 
                 # Load next media file
-                load_started_mono = time.monotonic()
-                load_started_ms = self._mono_ms()
+                load_started = time.monotonic()
                 load_resp = self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
                 self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
                 if not load_resp or load_resp.get("error") != "success":
@@ -218,17 +213,13 @@ class PlaylistManager:
 
                     # Deterministic image timer:
                     # wait until MPV loaded the file *and* VO is configured, then start countdown.
-                    wait_begin_ms = self._mono_ms()
                     loaded = self._wait_for_mpv_loaded_path(path, timeout=15.0)
-                    loaded_ms = self._mono_ms()
                     vo_ready = self._wait_for_mpv_vo_configured(timeout=5.0)
-                    vo_ready_ms = self._mono_ms()
-                    timer_start_mono = time.monotonic()
-                    timer_start_ms = self._mono_ms()
-                    load_wait_sec = round(timer_start_mono - load_started_mono, 3)
+                    timer_start = time.monotonic()
+                    load_wait_sec = round(timer_start - load_started, 3)
 
                     dur_sec = max(1, int(duration))
-                    switch_at = timer_start_mono + dur_sec
+                    switch_at = timer_start + dur_sec
                     self.logger.debug(
                         "Image timer scheduled",
                         extra={
@@ -237,28 +228,9 @@ class PlaylistManager:
                             "loaded_confirmed": loaded,
                             "vo_configured": vo_ready,
                             "load_wait_sec": load_wait_sec,
-                            # Monotonic timestamps for interval reconstruction (journald timestamps can drift/buffer).
-                            "t_loadfile_sent_ms": load_started_ms,
-                            "t_wait_begin_ms": wait_begin_ms,
-                            "t_loaded_ms": loaded_ms,
-                            "t_vo_configured_ms": vo_ready_ms,
-                            "t_timer_start_ms": timer_start_ms,
                         },
                     )
-                    sleep_ok = self._sleep_until(switch_at, step=0.2)
-                    timer_end_ms = self._mono_ms()
-                    oversleep_ms = timer_end_ms - (timer_start_ms + dur_sec * 1000)
-                    self.logger.debug(
-                        "Image timer elapsed",
-                        extra={
-                            "path": path,
-                            "duration_sec": dur_sec,
-                            "sleep_reached_deadline": bool(sleep_ok),
-                            "t_timer_start_ms": timer_start_ms,
-                            "t_timer_end_ms": timer_end_ms,
-                            "oversleep_ms": int(oversleep_ms),
-                        },
-                    )
+                    self._sleep_until(switch_at, step=0.2)
 
     def play(self, playlist_id: int) -> bool:
         """Play playlist with profile support"""
@@ -330,6 +302,26 @@ class PlaylistManager:
 
             self._active_playlist_id = playlist_id
 
+            # Show first item immediately for responsiveness
+            first = items[0]
+            try:
+                # Do NOT loop the file at MPV level; the app controls looping.
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "loop-file", "no"]},
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "mute", "yes" if bool(first.get("muted")) else "no"]},
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
+            self._mpv_manager._send_command({"command": ["loadfile", first["path"], "replace"]}, timeout=10.0)
+            self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
+
             # Update playback status (single-row table; keep id=1 stable)
             playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
             playback.playlist_id = playlist_id
@@ -338,20 +330,29 @@ class PlaylistManager:
             self.db_session.commit()
 
             # Start background loop to enforce durations and EOF waits.
-            # IMPORTANT: start from the first item so image durations apply to item #1 as well.
+            # IMPORTANT: start from the *next* item, because we already loaded the first one above.
             self._play_thread = Thread(
                 target=self._manual_slideshow_loop,
-                args=(playlist_id, items, 0),
+                args=(playlist_id, items, 1),
                 daemon=True,
             )
             self._play_thread.start()
 
             # Notify clients
-            self.socketio.emit('playback_state', {
-                'status': 'playing',
-                'playlist': {'id': playlist.id, 'name': playlist.name},
-                'settings': profile_settings
-            })
+            try:
+                if self.socketio:
+                    self.socketio.emit(
+                        'playback_update',
+                        {
+                            'status': 'playing',
+                            'playlist_id': playlist.id,
+                            'playlist': {'id': playlist.id, 'name': playlist.name},
+                            'settings': profile_settings,
+                        },
+                    )
+            except Exception:
+                # Best-effort: playback must continue even if sockets are unavailable.
+                pass
         
             return True
 
@@ -403,6 +404,18 @@ class PlaylistManager:
             playback.playlist_id = last_playlist_id
             self.db_session.add(playback)
             self.db_session.commit()
+
+            try:
+                if self.socketio:
+                    self.socketio.emit(
+                        'playback_update',
+                        {
+                            'status': 'stopped',
+                            'playlist_id': last_playlist_id,
+                        },
+                    )
+            except Exception:
+                pass
             return ok
         except Exception as e:
             self.logger.error(
