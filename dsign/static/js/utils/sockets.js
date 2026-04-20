@@ -66,7 +66,9 @@ export class SocketManager {
 
     /**
      * Subscribe to an application event coming from the socket layer.
-     * Supported events include: playback_update, playlist_update, system_notification.
+     * Supported events include:
+     * - connect, disconnect (socket lifecycle)
+     * - playback_update, playlist_update, system_notification (application)
      * @param {string} event
      * @param {(data:any)=>void} handler
      */
@@ -368,6 +370,9 @@ export class SocketManager {
         this.isConnected = true;
         this.reconnectAttempts = 0;
         this.reconnectDelay = CONFIG.INITIAL_RETRY_DELAY;
+
+        // Let pages switch from polling to push-driven updates.
+        this._dispatch('connect', { ts: Date.now() });
         
         this.startPingInterval();
         this.scheduleTokenRefresh();
@@ -441,6 +446,9 @@ export class SocketManager {
         this.isAuthenticated = false;
         this.connectionEstablished = false;
         this.cleanupTimers();
+
+        // Let pages fall back to polling when socket is down.
+        this._dispatch('disconnect', { reason, ts: Date.now() });
         
         if (reason !== 'io client disconnect') {
             const message = reason === 'io server disconnect' 
