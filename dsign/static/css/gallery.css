@@ -211,13 +211,12 @@
     border-color: rgba(239, 68, 68, 0.35);
     background: rgba(254, 226, 226, 0.92);
 }
-
 .file-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
     gap: 20px;
-    margin: 0;
-    padding: 12px;
+    margin: 25px 0;
+    padding: 10px;
 }
 
 .file-item {
@@ -402,8 +401,8 @@
     display: flex;
     gap: 15px;
     align-items: center;
-    margin: 0;
-    padding: 0;
+    margin: 30px 0;
+    padding: 0 10px;
 }
 
 #file-upload {
@@ -541,24 +540,17 @@
 
 /* Адаптивность */
 @media (max-width: 768px) {
-    .gallery-shell {
-        grid-template-columns: 1fr;
-    }
-
-    .gallery-side {
-        position: static;
-        order: 0;
-    }
-
-    .gallery-grid-scroll {
-        height: auto;
-        min-height: 0;
-        max-height: none;
-    }
-
     .file-grid {
         grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
         gap: 15px;
+    }
+    
+    .upload-container {
+        flex-direction: column;
+    }
+    
+    #file-upload {
+        width: 100%;
     }
 }
 
