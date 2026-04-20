@@ -250,6 +250,9 @@ class ExternalMedia(db.Model):
     # Optional: store resolved direct URL (may expire) + fetch time.
     resolved_url = db.Column(db.Text)
     resolved_at = db.Column(db.Integer)
+    # Optional: headers required to access resolved_url (some providers require UA/Referer/Cookie).
+    # Stored as JSON dict {header: value}.
+    http_headers = db.Column(db.JSON)
 
     created_at = db.Column(db.Integer, default=lambda: int(time.time()), nullable=False)
     last_checked_at = db.Column(db.Integer)

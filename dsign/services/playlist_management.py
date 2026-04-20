@@ -51,7 +51,12 @@ class PlaylistManager:
             if not row:
                 return None
             url = svc.ensure_fresh_resolved_url(row)
-            return {"path": url, "is_video": True}
+            return {
+                "key": str(file_name),
+                "path": url,
+                "is_video": True,
+                "http_headers": (getattr(row, "http_headers", None) or {}),
+            }
 
         # Local file
         file_path = self.upload_folder / str(file_name)
@@ -174,6 +179,8 @@ class PlaylistManager:
 
                 path = item["path"]
                 is_video = item["is_video"]
+                media_key = str(item.get("key") or path)
+                http_headers = item.get("http_headers") or {}
                 raw_duration = item.get("duration")
                 # Only images use duration. Treat 0/None as "missing" for images.
                 duration = raw_duration if (raw_duration is not None and int(raw_duration) >= 1) else default_duration
@@ -201,6 +208,26 @@ class PlaylistManager:
 
                 # Load next media file
                 load_started = time.monotonic()
+                # If this is an external stream requiring headers, apply them before loadfile.
+                # MPV expects a single string of "Key: Value\r\nKey2: Value2" for http-header-fields.
+                if http_headers and isinstance(http_headers, dict):
+                    try:
+                        header_lines = []
+                        for k, v in http_headers.items():
+                            if k is None or v is None:
+                                continue
+                            ks = str(k).strip()
+                            vs = str(v).strip()
+                            if not ks or not vs:
+                                continue
+                            header_lines.append(f"{ks}: {vs}")
+                        if header_lines:
+                            self._mpv_manager._send_command(
+                                {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
+                                timeout=5.0,
+                            )
+                    except Exception:
+                        pass
                 load_resp = self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
                 self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
                 if not load_resp or load_resp.get("error") != "success":
