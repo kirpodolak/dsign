@@ -122,14 +122,19 @@ class PlaybackService:
         for attempt in range(max_attempts):
             try:
                 delay = min(initial_delay * (2 ** attempt), 30)
-                
-                # Используем метод health check из MPVManager
-                health = self._mpv_manager.check_health()
-                if not all(health.values()):
-                    raise RuntimeError(f"MPV health check failed: {health}")
-                
+
+                # Bring MPV to a responsive state first. Some builds expose the socket early but won't reply
+                # to IPC commands for a short period after boot.
                 if not self._mpv_manager.initialize():
                     raise RuntimeError("MPV initialization failed")
+
+                # Best-effort: log health after initialization for diagnostics, but don't fail startup on it.
+                try:
+                    health = self._mpv_manager.check_health()
+                    if not all(health.values()):
+                        self._log_warning("MPV health check not fully green after initialize", extra={"health": health})
+                except Exception:
+                    pass
                 
                 Thread(target=self._preload_resources).start()
                 return
