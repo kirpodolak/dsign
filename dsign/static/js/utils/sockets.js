@@ -582,9 +582,10 @@ export class SocketManager {
         this.pingInterval = setInterval(() => {
             if (this.isConnected) {
                 const start = Date.now();
-                this.socket.emit('ping', {}, () => {
-                    const latency = Date.now() - start;
-                    this.socket.emit('pong', latency);
+                // Use a dedicated heartbeat event for application-level liveness.
+                // Avoid event name "ping" which may conflict with Socket.IO internals.
+                this.socket.emit('heartbeat', { timestamp: start }, () => {
+                    // Best-effort: do not spam server; this callback may not fire depending on server handler.
                 });
             }
         }, CONFIG.PING_INTERVAL);
