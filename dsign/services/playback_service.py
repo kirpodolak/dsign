@@ -48,6 +48,16 @@ class PlaybackService:
             self._mpv_manager, 
             self._logo_manager
         )
+
+        # Optional: external media resolver (Rutube/VK links) for playlist items like "ext-<id>".
+        try:
+            from flask import current_app
+            ext_svc = getattr(current_app, "external_media_service", None)
+            if ext_svc:
+                self._playlist_manager.set_external_media_service(ext_svc)
+        except Exception:
+            # Best-effort; playback still works for local files.
+            pass
         
         self.logo_manager = LogoManager(
             logger=self.logger,
@@ -278,13 +288,19 @@ class PlaybackService:
         try:
             start_time = time.time()
             status = self._playlist_manager.get_status()
-            self._log_info(
-                "Retrieved playback status", 
-                extra={
-                    'action': 'get_status',
-                    'duration_sec': round(time.time() - start_time, 3)
-                }
-            )
+            # This endpoint is frequently polled by the UI (fallback mode / page open).
+            # Keep it at DEBUG to avoid flooding journal in idle.
+            try:
+                self._log_debug(
+                    "Retrieved playback status",
+                    extra={
+                        'action': 'get_status',
+                        'duration_sec': round(time.time() - start_time, 3)
+                    }
+                )
+            except Exception:
+                # Never fail status because of logging.
+                pass
             return status
         except Exception as e:
             self._log_error(

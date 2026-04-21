@@ -36,6 +36,19 @@ def init_api_routes(api_bp, services):
     # ======================
     # System status / audio (dashboard)
     # ======================
+    # These endpoints may be polled from multiple pages and/or multiple open tabs.
+    # On Raspberry Pi, spawning subprocesses (amixer/nmcli/ip) can be expensive, so cache results briefly.
+    _system_status_cache: dict = {"ts": 0.0, "payload": None}
+    _system_status_cache_lock = Lock()
+    _system_status_cache_ttl_sec: float = 2.0
+
+    _network_status_cache: dict = {"ts": 0.0, "payload": None}
+    _network_status_cache_lock = Lock()
+    _network_status_cache_ttl_sec: float = 5.0
+
+    _amixer_pick_cache: dict = {"ts": 0.0, "value": None}
+    _amixer_pick_cache_lock = Lock()
+    _amixer_pick_cache_ttl_sec: float = 60.0
     def _read_cpu_temp_c() -> float | None:
         # Raspberry Pi / Linux common path
         for p in (
@@ -171,7 +184,18 @@ def init_api_routes(api_bp, services):
         Pick a reasonable ALSA simple control for volume/mute.
         Different images/cards expose different names (e.g. Master, PCM, Headphone).
         """
+        now = time.time()
+        with _amixer_pick_cache_lock:
+            if (
+                _amixer_pick_cache["value"] is not None
+                and (now - float(_amixer_pick_cache["ts"] or 0.0)) < _amixer_pick_cache_ttl_sec
+            ):
+                return _amixer_pick_cache["value"]
+
         if not _amixer_available():
+            with _amixer_pick_cache_lock:
+                _amixer_pick_cache["value"] = None
+                _amixer_pick_cache["ts"] = now
             return None
         try:
             # Try default card first, then a few numeric cards.
@@ -199,18 +223,32 @@ def init_api_routes(api_bp, services):
                     continue
 
             if not candidates:
+                with _amixer_pick_cache_lock:
+                    _amixer_pick_cache["value"] = None
+                    _amixer_pick_cache["ts"] = now
                 return None
 
             # Prefer cards with preferred control names.
             for p in preferred:
                 for card, names in candidates:
                     if p in names:
-                        return (card if card >= 0 else 0, p) if card == -1 else (card, p)
+                        picked = (card if card >= 0 else 0, p) if card == -1 else (card, p)
+                        with _amixer_pick_cache_lock:
+                            _amixer_pick_cache["value"] = picked
+                            _amixer_pick_cache["ts"] = now
+                        return picked
 
             # Fall back to first control on first candidate card.
             card, names = candidates[0]
-            return (card if card >= 0 else 0, names[0]) if names else None
+            picked = (card if card >= 0 else 0, names[0]) if names else None
+            with _amixer_pick_cache_lock:
+                _amixer_pick_cache["value"] = picked
+                _amixer_pick_cache["ts"] = now
+            return picked
         except Exception:
+            with _amixer_pick_cache_lock:
+                _amixer_pick_cache["value"] = None
+                _amixer_pick_cache["ts"] = now
             return None
 
     def _audio_get() -> dict:
@@ -440,26 +478,35 @@ def init_api_routes(api_bp, services):
     @login_required
     def get_system_status():
         try:
+            now = time.time()
+            with _system_status_cache_lock:
+                cached = _system_status_cache.get("payload")
+                ts = float(_system_status_cache.get("ts") or 0.0)
+                if cached is not None and (now - ts) < _system_status_cache_ttl_sec:
+                    return jsonify(cached)
+
             upload_folder = current_app.config.get("UPLOAD_FOLDER", "/var/lib/dsign/media")
-            return jsonify(
-                {
-                    "success": True,
-                    "status": {
-                        "storage": {
-                            "root": _disk_usage("/"),
-                            "media": _disk_usage(upload_folder),
-                        },
-                        "cpu": {
-                            "temp_c": _read_cpu_temp_c(),
-                            # Prefer procstat CPU% (delta) when available; fall back to loadavg-based estimate.
-                            "usage_percent": _read_cpu_percent_procstat(),
-                            "load_percent": _read_cpu_load_percent(),
-                        },
-                        "display": _read_display_status(),
-                        "audio": _audio_get(),
+            payload = {
+                "success": True,
+                "status": {
+                    "storage": {
+                        "root": _disk_usage("/"),
+                        "media": _disk_usage(upload_folder),
                     },
-                }
-            )
+                    "cpu": {
+                        "temp_c": _read_cpu_temp_c(),
+                        # Prefer procstat CPU% (delta) when available; fall back to loadavg-based estimate.
+                        "usage_percent": _read_cpu_percent_procstat(),
+                        "load_percent": _read_cpu_load_percent(),
+                    },
+                    "display": _read_display_status(),
+                    "audio": _audio_get(),
+                },
+            }
+            with _system_status_cache_lock:
+                _system_status_cache["payload"] = payload
+                _system_status_cache["ts"] = now
+            return jsonify(payload)
         except Exception as e:
             current_app.logger.error(f"Error getting system status: {str(e)}")
             return jsonify({"success": False, "error": str(e)}), 500
@@ -468,10 +515,21 @@ def init_api_routes(api_bp, services):
     @login_required
     def get_network_status():
         try:
-            return jsonify({
+            now = time.time()
+            with _network_status_cache_lock:
+                cached = _network_status_cache.get("payload")
+                ts = float(_network_status_cache.get("ts") or 0.0)
+                if cached is not None and (now - ts) < _network_status_cache_ttl_sec:
+                    return jsonify(cached)
+
+            payload = {
                 "success": True,
                 "network": _collect_network_status(),
-            })
+            }
+            with _network_status_cache_lock:
+                _network_status_cache["payload"] = payload
+                _network_status_cache["ts"] = now
+            return jsonify(payload)
         except Exception as e:
             current_app.logger.error(f"Error getting network status: {str(e)}")
             return jsonify({"success": False, "error": str(e)}), 500
@@ -1368,8 +1426,9 @@ def init_api_routes(api_bp, services):
             return jsonify(result)
         
         except Exception as e:
-            current_app.logger.error(f"API error updating playlist files {playlist_id}: {str(e)}", exc_info=True)
-            return jsonify({"success": False, "error": "Internal server error"}), 500
+            # ServiceLogger may not support exc_info kwarg; keep logs simple and always return JSON.
+            current_app.logger.error(f"API error updating playlist files {playlist_id}: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
     
     # ======================
     # Media File Handling (/api/media)
@@ -1383,11 +1442,42 @@ def init_api_routes(api_bp, services):
                 playlist_id=playlist_id,
                 db_session=db.session
             )
+
+            # Append external media (Rutube / VK Video etc.) so UI can treat them like regular media.
+            try:
+                from dsign.models import ExternalMedia
+                ext_rows = db.session.query(ExternalMedia).order_by(ExternalMedia.created_at.desc()).all()
+                ext_items = [r.to_media_file_dict() for r in (ext_rows or [])]
+            except Exception:
+                ext_items = []
+
+            # Merge, keeping filesystem items first for familiarity.
+            merged = (files or []) + (ext_items or [])
+
+            # If playlist_id is provided, mark included/duration/muted for external items too.
+            if playlist_id and playlist_id != "all":
+                try:
+                    from dsign.models import Playlist
+                    pid = int(playlist_id)
+                    playlist = db.session.query(Playlist).get(pid)
+                    if playlist:
+                        included = {pf.file_name: pf for pf in (playlist.files or [])}
+                        for item in merged:
+                            fn = item.get("filename")
+                            pf = included.get(fn)
+                            if pf:
+                                item["included"] = True
+                                item["duration"] = getattr(pf, "duration", None)
+                                item["muted"] = bool(getattr(pf, "muted", False))
+                            else:
+                                item["included"] = False
+                except Exception:
+                    pass
         
             return jsonify({
                 "success": True,
-                "files": files,
-                "count": len(files)
+                "files": merged,
+                "count": len(merged)
             })
         except Exception as e:
             current_app.logger.error(f"Error getting media files: {str(e)}")
@@ -1408,17 +1498,37 @@ def init_api_routes(api_bp, services):
                     "error": "Invalid request format. Expected {'files': [...]}"
                 }), 400
 
-            files_to_delete = [secure_filename(f) for f in data['files'] if f]
-            if not files_to_delete:
+            raw_keys = [str(f) for f in data.get("files", []) if f]
+            if not raw_keys:
                 return jsonify({
                     "success": False,
-                    "error": "No valid filenames provided"
+                    "error": "No valid media keys provided"
                 }), 400
 
-            result = file_service.delete_files(files_to_delete)
+            # Split local filenames and external keys (ext-<id>)
+            local_files = [secure_filename(k) for k in raw_keys if not str(k).startswith("ext-")]
+            ext_keys = [k for k in raw_keys if str(k).startswith("ext-")]
+
+            deleted = {"local": None, "external": []}
+            if local_files:
+                deleted["local"] = file_service.delete_files(local_files)
+
+            if ext_keys:
+                ext_svc = getattr(current_app, "external_media_service", None)
+                if ext_svc:
+                    for k in ext_keys:
+                        ok = False
+                        try:
+                            ok = bool(ext_svc.delete_by_key(k))
+                        except Exception:
+                            ok = False
+                        deleted["external"].append({"key": k, "deleted": ok})
+                else:
+                    deleted["external"] = [{"key": k, "deleted": False, "error": "external_media_service not available"} for k in ext_keys]
+
             return jsonify({
                 "success": True,
-                "deleted": result
+                "deleted": deleted
             })
         except Exception as e:
             current_app.logger.error(f"Error deleting media files: {str(e)}")
@@ -1426,6 +1536,39 @@ def init_api_routes(api_bp, services):
                 "success": False,
                 "error": str(e)
             }), 500
+
+    @api_bp.route('/media/external', methods=['POST'])
+    @login_required
+    def add_external_media():
+        """
+        Add an external media URL (Rutube / VK Video).
+        Body: { url: "https://..." }
+        """
+        try:
+            data = request.get_json() or {}
+            url = (data.get("url") or "").strip()
+            if not url:
+                return jsonify({"success": False, "error": "Missing url"}), 400
+
+            current_app.logger.info(
+                "External media add requested",
+                extra={"url": url, "remote_addr": request.remote_addr},
+            )
+            svc = getattr(current_app, "external_media_service", None)
+            if not svc:
+                return jsonify({"success": False, "error": "external_media_service not available"}), 500
+
+            row, created = svc.get_or_create(url)
+            return jsonify(
+                {
+                    "success": True,
+                    "created": bool(created),
+                    "media": row.to_media_file_dict(),
+                }
+            )
+        except Exception as e:
+            current_app.logger.error(f"Error adding external media: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/media/upload', methods=['POST'])
     @login_required
@@ -1769,6 +1912,19 @@ def init_api_routes(api_bp, services):
     @login_required
     def get_media_thumbnail(filename):
         try:
+            # External media thumbnails: ext-<id>
+            if str(filename).startswith("ext-"):
+                svc = getattr(current_app, "external_media_service", None)
+                if svc:
+                    p = svc.get_cached_thumbnail_path(str(filename))
+                    if p and p.exists():
+                        return send_from_directory(
+                            str(p.parent),
+                            p.name,
+                            mimetype="image/jpeg",
+                            max_age=86400,
+                        )
+
             # Всегда используем .jpg в пути
             thumb_name = f"thumb_{Path(filename).stem}.jpg"
         

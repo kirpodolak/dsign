@@ -274,7 +274,16 @@ class MPVManager:
 
     def _send_command(self, command: Dict[str, Any], timeout: float = 5.0) -> Optional[Dict[str, Any]]:
         """Отправка команды в MPV. Успехи — только DEBUG (слайдшоу иначе забивает journal)."""
-        command_name = command.get("command", ["unknown"])[0]
+        command_arr = command.get("command", ["unknown"])
+        command_name = command_arr[0] if isinstance(command_arr, list) and command_arr else "unknown"
+        # For get_property/set_property, include the property name in logs to make "property unavailable"
+        # actionable (and to distinguish normal mpv behavior from real errors).
+        prop_name: Optional[str] = None
+        if isinstance(command_arr, list) and len(command_arr) >= 2 and command_name in ("get_property", "set_property"):
+            try:
+                prop_name = str(command_arr[1])
+            except Exception:
+                prop_name = None
         ipc_request_id = int(time.time() * 1_000_000) & 0x7FFFFFFF
         start_time = time.time()
 
@@ -282,6 +291,7 @@ class MPVManager:
             "MPVCommand started",
             extra={
                 "command": command_name,
+                **({"property": prop_name} if prop_name else {}),
                 "request_id": ipc_request_id,
                 "timeout": timeout,
             },
@@ -342,12 +352,32 @@ class MPVManager:
                                 "MPVCommand completed",
                                 extra={
                                     "command": command_name,
+                                    **({"property": prop_name} if prop_name else {}),
                                     "request_id": ipc_request_id,
                                     "duration_sec": duration_sec,
                                     "attempt": attempt + 1,
                                 },
                             )
                         else:
+                            # For get_property, "property unavailable" is expected on some mpv builds / media types.
+                            # Treat it as a non-error and normalize to {"error":"success","data":None} so callers can
+                            # handle it without generating noisy logs.
+                            if command_name == "get_property" and err == "property unavailable":
+                                self.logger.debug(
+                                    "MPVCommand property unavailable",
+                                    extra={
+                                        "command": command_name,
+                                        **({"property": prop_name} if prop_name else {}),
+                                        "request_id": ipc_request_id,
+                                        "duration_sec": duration_sec,
+                                        "attempt": attempt + 1,
+                                    },
+                                )
+                                return {
+                                    "request_id": result.get("request_id", ipc_request_id),
+                                    "error": "success",
+                                    "data": None,
+                                }
                             # "property unavailable" is common on some mpv builds and is not actionable in production.
                             # Keep it at DEBUG to avoid log spam.
                             log_fn = self.logger.debug if err == "property unavailable" else self.logger.warning
@@ -355,6 +385,7 @@ class MPVManager:
                                 "MPVCommand error response",
                                 extra={
                                     "command": command_name,
+                                    **({"property": prop_name} if prop_name else {}),
                                     "request_id": ipc_request_id,
                                     "duration_sec": duration_sec,
                                     "attempt": attempt + 1,

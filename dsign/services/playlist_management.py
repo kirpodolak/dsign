@@ -3,7 +3,7 @@ import subprocess
 import traceback
 import time
 from threading import Event, Thread
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from pathlib import Path
 
 from .playback_constants import PlaybackConstants
@@ -26,6 +26,48 @@ class PlaylistManager:
         self._play_thread: Optional[Thread] = None
         self._stop_event = Event()
         self._active_playlist_id: Optional[int] = None
+        # External media resolver is optional; attached lazily to avoid tight coupling.
+        self._external_media_service = None
+        # Backoff per media key for unstable/blocked streams to avoid busy looping loadfile.
+        # key -> {failures:int, next_try_monotonic:float}
+        self._media_backoff: Dict[str, Dict[str, Any]] = {}
+
+    def set_external_media_service(self, service) -> None:
+        """Attach external media resolver service (optional)."""
+        self._external_media_service = service
+
+    def _resolve_playlist_item_path(self, file_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Convert a playlist file_name into a playback dict: {path,is_video,duration,muted}.
+        Supports both local filenames and synthetic external keys ext-<id>.
+        """
+        if not file_name:
+            return None
+
+        # External media key: ext-<id>
+        if str(file_name).startswith("ext-"):
+            svc = self._external_media_service
+            if not svc:
+                # If service isn't attached, fallback to the raw key (will fail to loadfile).
+                return {"path": str(file_name), "is_video": True}
+            row = svc.get_by_key(str(file_name))
+            if not row:
+                return None
+            url = svc.ensure_fresh_resolved_url(row)
+            return {
+                "key": str(file_name),
+                "path": url,
+                "is_video": True,
+                "http_headers": (getattr(row, "http_headers", None) or {}),
+            }
+
+        # Local file
+        file_path = self.upload_folder / str(file_name)
+        if not file_path.exists():
+            return None
+        ext = file_path.suffix.lower()
+        is_video = ext in (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
+        return {"path": str(file_path), "is_video": is_video}
 
     def _wait_for_mpv_loaded_path(self, expected_path: str, timeout: float = 10.0) -> bool:
         """
@@ -104,6 +146,190 @@ class PlaylistManager:
                 return True
             self._stop_event.wait(timeout=min(step, remaining))
 
+    def _mpv_get_prop_bool(self, name: str, timeout: float = 3.0) -> Optional[bool]:
+        """Return bool property value, or None if unavailable / error."""
+        try:
+            resp = self._mpv_manager._send_command(
+                {"command": ["get_property", name]},
+                timeout=timeout,
+            )
+        except Exception:
+            return None
+        if not resp or resp.get("error") != "success":
+            return None
+        data = resp.get("data")
+        if isinstance(data, bool):
+            return data
+        return None
+
+    def _mpv_get_prop_number(self, name: str, timeout: float = 3.0) -> Optional[float]:
+        """Return numeric property (time-pos, duration, ...), or None if unavailable."""
+        try:
+            resp = self._mpv_manager._send_command(
+                {"command": ["get_property", name]},
+                timeout=timeout,
+            )
+        except Exception:
+            return None
+        if not resp or resp.get("error") != "success":
+            return None
+        data = resp.get("data")
+        if isinstance(data, (int, float)) and not isinstance(data, bool):
+            return float(data)
+        return None
+
+    def _mpv_get_prop_string(self, name: str, timeout: float = 3.0) -> Optional[str]:
+        try:
+            resp = self._mpv_manager._send_command(
+                {"command": ["get_property", name]},
+                timeout=timeout,
+            )
+        except Exception:
+            return None
+        if not resp or resp.get("error") != "success":
+            return None
+        data = resp.get("data")
+        if data is None:
+            return None
+        return str(data)
+
+    def _wait_mpv_leave_idle(self, timeout_sec: float = 45.0) -> bool:
+        """
+        After loadfile, mpv often reports idle-active=true until the demuxer opens.
+        Our old loop treated idle as EOF and skipped network streams in ~1 tick.
+        """
+        deadline = time.monotonic() + max(0.5, float(timeout_sec))
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            idle = self._mpv_get_prop_bool("idle-active", timeout=3.0)
+            if idle is False:
+                return True
+            self._stop_event.wait(timeout=0.15)
+        return False
+
+    def _wait_mpv_stream_ready(
+        self,
+        expected_url: str,
+        timeout_sec: float = 90.0,
+        poll_sec: float = 0.5,
+    ) -> bool:
+        """
+        Some mpv builds never expose `eof-reached` for network streams (always 'property unavailable').
+        Detect that demuxer/decoder actually started using time-pos / path / duration.
+        """
+        deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        exp = (expected_url or "").strip()
+        exp_host = ""
+        try:
+            from urllib.parse import urlparse
+
+            if exp.startswith(("http://", "https://")):
+                exp_host = urlparse(exp).netloc or ""
+        except Exception:
+            exp_host = ""
+
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            tp = self._mpv_get_prop_number("time-pos", timeout=2.0)
+            if tp is not None:
+                return True
+            dur = self._mpv_get_prop_number("duration", timeout=2.0)
+            if dur is not None and dur > 0:
+                return True
+            # Do NOT treat `path` equality alone as readiness: mpv can report path while still idle.
+            self._stop_event.wait(timeout=max(0.1, float(poll_sec)))
+        return False
+
+    def _wait_mpv_video_end(
+        self,
+        playlist_id: int,
+        *,
+        is_network: bool,
+        stream_ready: bool,
+        poll_sec: float = 1.0,
+    ) -> None:
+        """
+        End-of-playback detection that works when `eof-reached` is permanently unavailable.
+
+        - Prefer eof-reached == True when MPV returns a real boolean.
+        - Else for streams: after stream_ready, treat return to idle-active as end-of-file.
+        - Else for local files: same idle fallback after a short grace period.
+        """
+        start = time.time()
+        grace_until = time.monotonic() + (1.5 if is_network else 0.3)
+        consecutive_idle = 0
+
+        while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
+            if time.time() - start > 6 * 3600:
+                break
+
+            eof = self._mpv_get_prop_bool("eof-reached", timeout=3.0)
+            if eof is True:
+                break
+
+            idle = self._mpv_get_prop_bool("idle-active", timeout=3.0)
+            if idle is True and time.monotonic() >= grace_until:
+                if is_network:
+                    if stream_ready:
+                        consecutive_idle += 1
+                        if consecutive_idle >= 2:
+                            break
+                else:
+                    consecutive_idle += 1
+                    if consecutive_idle >= 2:
+                        break
+            else:
+                consecutive_idle = 0
+
+            core_idle = self._mpv_get_prop_bool("core-idle", timeout=3.0)
+            if (
+                eof is False
+                and core_idle is True
+                and idle is True
+                and time.monotonic() >= grace_until
+                and (stream_ready or not is_network)
+            ):
+                break
+
+            self._stop_event.wait(timeout=max(0.2, float(poll_sec)))
+
+    def _log_mpv_network_debug_snapshot(self, *, media_key: str, url: str) -> None:
+        """
+        Best-effort debug snapshot for stubborn network streams.
+        This helps distinguish 'mpv never tried to open URL' vs 'opened but blocked (403/TLS)'.
+        """
+        try:
+            props = ["path", "stream-open-filename", "media-title", "file-format", "demuxer"]
+            snap: Dict[str, Any] = {}
+            for p in props:
+                try:
+                    r = self._mpv_manager._send_command({"command": ["get_property", p]}, timeout=2.0)
+                    if r and r.get("error") == "success":
+                        snap[p] = r.get("data")
+                except Exception:
+                    pass
+            idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+            core_idle = self._mpv_get_prop_bool("core-idle", timeout=2.0)
+            tp = self._mpv_get_prop_number("time-pos", timeout=2.0)
+            dur = self._mpv_get_prop_number("duration", timeout=2.0)
+            self.logger.warning(
+                "MPV network stream debug snapshot",
+                extra={
+                    "media_key": media_key,
+                    "url_preview": str(url)[:160],
+                    "idle_active": idle,
+                    "core_idle": core_idle,
+                    "time_pos": tp,
+                    "duration": dur,
+                    "mpv_props": snap,
+                },
+            )
+        except Exception:
+            # never let diagnostics break playback
+            pass
+
     def _stop_play_thread(self):
         if self._play_thread and self._play_thread.is_alive():
             self._stop_event.set()
@@ -140,6 +366,8 @@ class PlaylistManager:
 
                 path = item["path"]
                 is_video = item["is_video"]
+                media_key = str(item.get("key") or path)
+                http_headers = item.get("http_headers") or {}
                 raw_duration = item.get("duration")
                 # Only images use duration. Treat 0/None as "missing" for images.
                 duration = raw_duration if (raw_duration is not None and int(raw_duration) >= 1) else default_duration
@@ -167,6 +395,41 @@ class PlaylistManager:
 
                 # Load next media file
                 load_started = time.monotonic()
+                # Respect per-media backoff to avoid tight loops on failing streams.
+                try:
+                    b = self._media_backoff.get(media_key) or {}
+                    next_try = float(b.get("next_try_monotonic") or 0.0)
+                except Exception:
+                    next_try = 0.0
+                if next_try and time.monotonic() < next_try:
+                    wait_sec = max(0.0, next_try - time.monotonic())
+                    self.logger.debug(
+                        "Backoff active for media",
+                        extra={"media_key": media_key, "wait_sec": round(wait_sec, 2)},
+                    )
+                    self._stop_event.wait(timeout=min(30.0, wait_sec))
+                    if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
+                        break
+                # If this is an external stream requiring headers, apply them before loadfile.
+                # MPV expects a single string of "Key: Value\r\nKey2: Value2" for http-header-fields.
+                if http_headers and isinstance(http_headers, dict):
+                    try:
+                        header_lines = []
+                        for k, v in http_headers.items():
+                            if k is None or v is None:
+                                continue
+                            ks = str(k).strip()
+                            vs = str(v).strip()
+                            if not ks or not vs:
+                                continue
+                            header_lines.append(f"{ks}: {vs}")
+                        if header_lines:
+                            self._mpv_manager._send_command(
+                                {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
+                                timeout=5.0,
+                            )
+                    except Exception:
+                        pass
                 load_resp = self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
                 self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
                 if not load_resp or load_resp.get("error") != "success":
@@ -178,28 +441,36 @@ class PlaylistManager:
                     continue
 
                 if is_video:
-                    # Wait until playback ends
-                    start = time.time()
-                    while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
-                        # `eof-reached` is the most reliable signal for local files.
-                        resp = self._mpv_manager._send_command(
-                            {"command": ["get_property", "eof-reached"]},
-                            timeout=5.0,
-                        )
-                        if resp and resp.get("error") == "success" and resp.get("data") is True:
-                            break
-
-                        # Fallback for unusual states: if mpv goes idle, treat as ended
-                        resp = self._mpv_manager._send_command(
-                            {"command": ["get_property", "idle-active"]},
-                            timeout=5.0
-                        )
-                        if resp and resp.get("error") == "success" and resp.get("data") is True:
-                            break
-                        # prevent stuck forever: 6 hours max video
-                        if time.time() - start > 6 * 3600:
-                            break
-                        time.sleep(1.0)
+                    # Network streams: mpv stays idle-active until open; do not treat idle as EOF.
+                    is_network = isinstance(path, str) and (
+                        path.startswith("http://")
+                        or path.startswith("https://")
+                        or path.startswith("ytdl://")
+                    )
+                    stream_ready = False
+                    if is_network:
+                        if not self._wait_mpv_leave_idle(timeout_sec=60.0):
+                            self.logger.warning(
+                                "MPV stayed idle after loadfile (stream failed or blocked)",
+                                extra={"media_key": media_key, "path_preview": str(path)[:120]},
+                            )
+                            self._register_media_failure(media_key, reason="stayed_idle")
+                            continue
+                        stream_ready = self._wait_mpv_stream_ready(str(path), timeout_sec=90.0)
+                        if not stream_ready:
+                            self.logger.warning(
+                                "MPV stream did not become ready (no time-pos/duration/path match)",
+                                extra={"media_key": media_key, "path_preview": str(path)[:120]},
+                            )
+                            self._register_media_failure(media_key, reason="not_ready")
+                            continue
+                        self._reset_media_backoff(media_key)
+                    self._wait_mpv_video_end(
+                        playlist_id,
+                        is_network=is_network,
+                        stream_ready=stream_ready,
+                        poll_sec=1.0,
+                    )
                 else:
                     # For still images, keep the frame open to avoid quick close/reopen churn.
                     # (Videos should not be kept open; they are EOF-driven here.)
@@ -231,6 +502,41 @@ class PlaylistManager:
                         },
                     )
                     self._sleep_until(switch_at, step=0.2)
+
+    def _register_media_failure(self, media_key: str, reason: str = "unknown") -> None:
+        """Exponential backoff for media that fails to start/open."""
+        if not media_key:
+            return
+        entry = self._media_backoff.get(media_key) or {"failures": 0, "next_try_monotonic": 0.0}
+        try:
+            failures = int(entry.get("failures") or 0) + 1
+        except Exception:
+            failures = 1
+        # 2s, 4s, 8s... cap at 120s, add small jitter.
+        delay = min(120.0, float(2 ** min(failures, 6)))
+        jitter = min(1.5, 0.1 * delay)
+        next_try = time.monotonic() + delay + (jitter * (0.5))
+        entry["failures"] = failures
+        entry["next_try_monotonic"] = next_try
+        self._media_backoff[media_key] = entry
+        self.logger.warning(
+            "Media backoff scheduled",
+            extra={
+                "media_key": media_key,
+                "reason": reason,
+                "failures": failures,
+                "delay_sec": round(delay, 2),
+            },
+        )
+
+    def _reset_media_backoff(self, media_key: str) -> None:
+        if not media_key:
+            return
+        if media_key in self._media_backoff:
+            try:
+                del self._media_backoff[media_key]
+            except Exception:
+                self._media_backoff.pop(media_key, None)
 
     def play(self, playlist_id: int) -> bool:
         """Play playlist with profile support"""
@@ -277,16 +583,15 @@ class PlaylistManager:
             # Enforce stable playback order (PlaylistFiles.order in DB).
             files = sorted((playlist.files or []), key=lambda x: int(getattr(x, "order", 0) or 0))
             for pf in files:
-                file_path = self.upload_folder / pf.file_name
-                if not file_path.exists():
-                    missing.append(str(file_path))
+                resolved = self._resolve_playlist_item_path(getattr(pf, "file_name", None))
+                if not resolved or not resolved.get("path"):
+                    missing.append(str(getattr(pf, "file_name", "")))
                     continue
 
-                ext = file_path.suffix.lower()
-                is_video = ext in (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
+                is_video = bool(resolved.get("is_video"))
                 items.append(
                     {
-                        "path": str(file_path),
+                        "path": resolved["path"],
                         "duration": int(getattr(pf, "duration", 0) or 0),
                         "is_video": is_video,
                         "muted": bool(getattr(pf, "muted", False)) if is_video else False,
@@ -339,11 +644,20 @@ class PlaylistManager:
             self._play_thread.start()
 
             # Notify clients
-            self.socketio.emit('playback_state', {
-                'status': 'playing',
-                'playlist': {'id': playlist.id, 'name': playlist.name},
-                'settings': profile_settings
-            })
+            try:
+                if self.socketio:
+                    self.socketio.emit(
+                        'playback_update',
+                        {
+                            'status': 'playing',
+                            'playlist_id': playlist.id,
+                            'playlist': {'id': playlist.id, 'name': playlist.name},
+                            'settings': profile_settings,
+                        },
+                    )
+            except Exception:
+                # Best-effort: playback must continue even if sockets are unavailable.
+                pass
         
             return True
 
@@ -395,6 +709,18 @@ class PlaylistManager:
             playback.playlist_id = last_playlist_id
             self.db_session.add(playback)
             self.db_session.commit()
+
+            try:
+                if self.socketio:
+                    self.socketio.emit(
+                        'playback_update',
+                        {
+                            'status': 'stopped',
+                            'playlist_id': last_playlist_id,
+                        },
+                    )
+            except Exception:
+                pass
             return ok
         except Exception as e:
             self.logger.error(
