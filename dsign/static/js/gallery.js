@@ -772,7 +772,7 @@ class MediaGallery {
       this.elements.uploadBtn.addEventListener('click', this.uploadMedia.bind(this));
     }
 
-    const addLinkBtn = document.querySelector('#add-external-btn');
+    const addLinkBtn = document.querySelector('#external-add-btn');
     const linkInput = document.querySelector('#external-url');
     if (addLinkBtn && linkInput) {
       addLinkBtn.addEventListener('click', async () => {
