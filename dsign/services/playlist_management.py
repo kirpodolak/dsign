@@ -28,6 +28,9 @@ class PlaylistManager:
         self._active_playlist_id: Optional[int] = None
         # External media resolver is optional; attached lazily to avoid tight coupling.
         self._external_media_service = None
+        # Backoff per media key for unstable/blocked streams to avoid busy looping loadfile.
+        # key -> {failures:int, next_try_monotonic:float}
+        self._media_backoff: Dict[str, Dict[str, Any]] = {}
 
     def set_external_media_service(self, service) -> None:
         """Attach external media resolver service (optional)."""
@@ -357,6 +360,21 @@ class PlaylistManager:
 
                 # Load next media file
                 load_started = time.monotonic()
+                # Respect per-media backoff to avoid tight loops on failing streams.
+                try:
+                    b = self._media_backoff.get(media_key) or {}
+                    next_try = float(b.get("next_try_monotonic") or 0.0)
+                except Exception:
+                    next_try = 0.0
+                if next_try and time.monotonic() < next_try:
+                    wait_sec = max(0.0, next_try - time.monotonic())
+                    self.logger.debug(
+                        "Backoff active for media",
+                        extra={"media_key": media_key, "wait_sec": round(wait_sec, 2)},
+                    )
+                    self._stop_event.wait(timeout=min(30.0, wait_sec))
+                    if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
+                        break
                 # If this is an external stream requiring headers, apply them before loadfile.
                 # MPV expects a single string of "Key: Value\r\nKey2: Value2" for http-header-fields.
                 if http_headers and isinstance(http_headers, dict):
@@ -401,6 +419,7 @@ class PlaylistManager:
                                 "MPV stayed idle after loadfile (stream failed or blocked)",
                                 extra={"media_key": media_key, "path_preview": str(path)[:120]},
                             )
+                            self._register_media_failure(media_key, reason="stayed_idle")
                             continue
                         stream_ready = self._wait_mpv_stream_ready(str(path), timeout_sec=90.0)
                         if not stream_ready:
@@ -408,7 +427,9 @@ class PlaylistManager:
                                 "MPV stream did not become ready (no time-pos/duration/path match)",
                                 extra={"media_key": media_key, "path_preview": str(path)[:120]},
                             )
+                            self._register_media_failure(media_key, reason="not_ready")
                             continue
+                        self._reset_media_backoff(media_key)
                     self._wait_mpv_video_end(
                         playlist_id,
                         is_network=is_network,
@@ -446,6 +467,41 @@ class PlaylistManager:
                         },
                     )
                     self._sleep_until(switch_at, step=0.2)
+
+    def _register_media_failure(self, media_key: str, reason: str = "unknown") -> None:
+        """Exponential backoff for media that fails to start/open."""
+        if not media_key:
+            return
+        entry = self._media_backoff.get(media_key) or {"failures": 0, "next_try_monotonic": 0.0}
+        try:
+            failures = int(entry.get("failures") or 0) + 1
+        except Exception:
+            failures = 1
+        # 2s, 4s, 8s... cap at 120s, add small jitter.
+        delay = min(120.0, float(2 ** min(failures, 6)))
+        jitter = min(1.5, 0.1 * delay)
+        next_try = time.monotonic() + delay + (jitter * (0.5))
+        entry["failures"] = failures
+        entry["next_try_monotonic"] = next_try
+        self._media_backoff[media_key] = entry
+        self.logger.warning(
+            "Media backoff scheduled",
+            extra={
+                "media_key": media_key,
+                "reason": reason,
+                "failures": failures,
+                "delay_sec": round(delay, 2),
+            },
+        )
+
+    def _reset_media_backoff(self, media_key: str) -> None:
+        if not media_key:
+            return
+        if media_key in self._media_backoff:
+            try:
+                del self._media_backoff[media_key]
+            except Exception:
+                self._media_backoff.pop(media_key, None)
 
     def play(self, playlist_id: int) -> bool:
         """Play playlist with profile support"""
