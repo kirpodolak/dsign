@@ -53,7 +53,9 @@ class PlaylistManager:
             row = svc.get_by_key(str(file_name))
             if not row:
                 return None
-            playback = svc.ensure_fresh_playback(row)
+            # IMPORTANT: do not block Play/UI on slow external providers.
+            # Prefer cached resolved_url; refresh is best-effort and bounded.
+            playback = svc.ensure_fresh_playback(row, allow_refresh=False)
             url = playback.get("url") or svc.ensure_fresh_resolved_url(row)
             return {
                 "key": str(file_name),

@@ -400,12 +400,23 @@ class ExternalMediaService:
 
         return row.resolved_url or row.url
 
-    def ensure_fresh_playback(self, row: "ExternalMedia", max_age_sec: int = 3600) -> Dict[str, Any]:
+    def ensure_fresh_playback(
+        self,
+        row: "ExternalMedia",
+        max_age_sec: int = 3600,
+        *,
+        allow_network: bool = True,
+    ) -> Dict[str, Any]:
         """
         Return playback details for MPV: {"url": ..., "http_headers": {...}}.
         Refreshes resolved URL + headers periodically.
         """
-        url = self.ensure_fresh_resolved_url(row, max_age_sec=max_age_sec)
+        # IMPORTANT: on user-initiated "Play", we must not block the request on yt-dlp/network.
+        # If allow_network=False, we will use cached resolved_url if present and fall back to page URL.
+        if allow_network:
+            url = self.ensure_fresh_resolved_url(row, max_age_sec=max_age_sec)
+        else:
+            url = (getattr(row, "resolved_url", None) or getattr(row, "url", None) or "")
         headers: Dict[str, Any] = {}
         try:
             headers = dict(row.http_headers or {})
