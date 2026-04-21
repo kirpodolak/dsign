@@ -499,6 +499,23 @@ def init_services(
                     'stack': traceback.format_exc()
                 })
 
+        # Wire optional services together (order-independent).
+        try:
+            playback_service = services.get("playback_service")
+            external_media_service = services.get("external_media_service")
+            if playback_service and external_media_service:
+                # PlaybackService -> PlaylistManager needs this to resolve keys like `ext-<id>` into real URLs.
+                try:
+                    pm = getattr(playback_service, "_playlist_manager", None)
+                    if pm and hasattr(pm, "set_external_media_service"):
+                        pm.set_external_media_service(external_media_service)
+                        logger.info("ExternalMediaService wired into PlaybackService")
+                except Exception as e:
+                    logger.warning("Failed wiring ExternalMediaService into PlaybackService", {"error": str(e)})
+        except Exception:
+            # Best-effort only; local playback must keep working.
+            pass
+
         logger.info("Все сервисы инициализированы", {
             'initialized': list(services.keys()),
             'failed': [name for name, _ in optional_services if name not in services]
