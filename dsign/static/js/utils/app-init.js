@@ -257,15 +257,4 @@ export class AuthService {
 if (typeof window !== 'undefined') {
     window.App = window.App || {};
     window.App.Auth = window.App.Auth || new AuthService();
-    
-    // Initialize auth check handlers when DOM is ready
-    document.addEventListener('DOMContentLoaded', () => {
-        if (!window.location.pathname.includes('/api/auth/login')) {
-            setInterval(() => {
-                window.App.Auth.checkAuth().catch(error => {
-                    window.App.logger?.error('Periodic auth check failed', error);
-                });
-            }, window.App.config?.authCheckInterval || 60000);
-        }
-    });
 }

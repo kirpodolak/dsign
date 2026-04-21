@@ -1,114 +1,35 @@
-{% extends "base.html" %}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
 
-{% block styles %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}?v={{ timestamp }}">
-{% endblock %}
+    <title>{% block title %}Digital Signage{% endblock %}</title>
 
-{% block content %}
-<h1>Digital Signage Control Panel</h1>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}?v={{ timestamp }}">
+    {% block styles %}{% endblock %}
+  </head>
 
-<div class="info-panel">
-    <div id="settings-container" class="info-card">
-        <h3>Current Settings</h3>
-        <!-- Данные настроек будут загружены через JS -->
-    </div>
+  <body class="{% block body_class %}{% endblock %}">
+    {% block site_nav %}
+    <nav class="site-nav" aria-label="Primary">
+      <a class="site-nav__brand" href="{{ url_for('main.index') }}">Digital Signage</a>
+      <div class="site-nav__links">
+        <a class="site-nav__link" href="{{ url_for('main.index') }}">Home</a>
+        <a class="site-nav__link" href="{{ url_for('main.gallery') }}">Gallery</a>
+        <a class="site-nav__link" href="{{ url_for('main.settings') }}">Settings</a>
+      </div>
+    </nav>
+    {% endblock %}
 
-    <div class="mpv-preview">
-        <h3>MPV Player Preview</h3>
-        <div class="mpv-preview-container">
-            <img id="mpv-preview-image" 
-                 src="{{ url_for('api.get_mpv_screenshot') }}" 
-                 class="mpv-preview-image"
-                 style="display: none;"
-                 onload="this.style.display='block'"
-                 onerror="this.onerror=null;this.src='{{ url_for('static', filename='images/default-preview.jpg') }}?t='+Date.now()">
-            <button id="refresh-mpv-preview" class="mpv-refresh-btn" title="Refresh Preview">
-                <i class="fas fa-sync-alt"></i>
-            </button>
-        </div>
-        <div class="mpv-status">
-            Last updated: <span id="mpv-last-update">Never</span>
-            <span id="mpv-auto-refresh-status" class="mpv-auto-refresh-status"></span>
-        </div>
-    </div>
+    <main class="page-content">
+      {% block content %}{% endblock %}
+    </main>
 
-    <div class="logo-preview">
-        <h3>Current Logo</h3>
-        <img id="idle-logo"
-             src="{{ url_for('api.serve_media', filename='idle_logo.jpg') }}"
-             style="display: none;"
-             onload="this.style.display='block'"
-             onerror="this.onerror=null;this.src='{{ url_for('static', filename='default-logo.jpg') }}?t={{ default_logo_cache_buster }}'">
+    <div id="loading-indicator" class="loading-indicator" hidden></div>
 
-        <form id="logo-upload-form" enctype="multipart/form-data">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <div class="logo-upload">
-                <input type="file" id="logo-upload" name="logo" accept="image/jpeg, image/png" required>
-                <button type="button" id="upload-logo-btn" class="btn small">
-                    <span class="btn-text">Update Logo</span>
-                    <span class="loading-spinner" style="display:none;"></span>
-                </button>
-            </div>
-        </form>
-    </div>
-</div>
-
-<div class="playlist-section">
-    <div class="section-header">
-        <h2>Playlists</h2>
-        <button id="create-playlist-btn" class="btn primary">
-            <i class="fas fa-plus"></i> New Playlist
-        </button>
-    </div>
-
-    <div id="playlist-status"></div>
-
-    <div class="playlist-table-wrap">
-        <table class="playlist-table" id="playlist-table">
-            <colgroup>
-                <col class="playlist-col-name">
-                <col class="playlist-col-customer">
-                <col class="playlist-col-files">
-                <col class="playlist-col-status">
-                <col class="playlist-col-actions">
-            </colgroup>
-            <thead>
-                <tr>
-                    <th scope="col">Name</th>
-                    <th scope="col">Customer</th>
-                    <th scope="col">Files</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Actions</th>
-                </tr>
-            </thead>
-            <tbody id="playlist-table-body">
-                <!-- Filled by JavaScript -->
-            </tbody>
-        </table>
-    </div>
-</div>
-
-<!-- Модальное окно создания плейлиста -->
-<div id="create-playlist-modal" class="modal" style="display:none;">
-    <div class="modal-content">
-        <span class="close">&times;</span>
-        <h2>Create New Playlist</h2>
-        <form id="create-playlist-form" method="POST">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <div class="form-group">
-                <label for="playlist-name">Playlist Name:</label>
-                <input type="text" id="playlist-name" name="name" required>
-            </div>
-            <div class="form-group">
-                <label for="playlist-customer">Customer:</label>
-                <input type="text" id="playlist-customer" name="customer" required>
-            </div>
-            <button type="submit" class="btn primary">Create</button>
-        </form>
-    </div>
-</div>
-{% endblock %}
-
-{% block scripts %}
-<script type="module" src="{{ url_for('static', filename='js/index.js') }}?v={{ timestamp }}"></script>
-{% endblock %}
+    <script type="module" src="{{ url_for('static', filename='js/base.js') }}?v={{ timestamp }}"></script>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>
