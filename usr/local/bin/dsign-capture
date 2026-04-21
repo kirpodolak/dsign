@@ -1,11 +1,14 @@
 #!/bin/bash
+# Capture a still from the signage display for the web UI "on air" preview.
+# MPV with vo=drm often cannot take a software screenshot; framebuffer / raspi2png are fallbacks.
+
+set -euo pipefail
 
 OUTPUT_DIR="/home/dsign/dsign/static/images"
 OUTPUT_FILE="on_air_screen.jpg"
 FB_DEV="/dev/fb0"
 MPV_SOCKET="/var/lib/dsign/mpv/socket"
 
-# Функция: определение разрешения
 get_resolution() {
     if [ -f /sys/class/graphics/fb0/virtual_size ]; then
         FB_WIDTH=$(cut -d, -f1 /sys/class/graphics/fb0/virtual_size)
@@ -14,81 +17,155 @@ get_resolution() {
         return
     fi
     if command -v fbset &> /dev/null; then
-        fbset | grep -oP "'\K\d+x\d+"
+        local s
+        s=$(fbset 2>/dev/null | grep -oP "'\K\d+x\d+" || true)
+        if [ -n "$s" ]; then
+            echo "$s"
+            return
+        fi
+    fi
+    echo "1920x1080"
+}
+
+get_fb_bpp() {
+    if [ -f /sys/class/graphics/fb0/bits_per_pixel ]; then
+        cat /sys/class/graphics/fb0/bits_per_pixel
         return
     fi
-    echo "1024x768"  # Дефолтное для Raspberry Pi
+    echo "16"
+}
+
+get_fb_line_length() {
+    if [ -f /sys/class/graphics/fb0/line_length ]; then
+        cat /sys/class/graphics/fb0/line_length
+        return
+    fi
+    echo "0"
+}
+
+get_fb_yres() {
+    if [ -f /sys/class/graphics/fb0/yres ]; then
+        cat /sys/class/graphics/fb0/yres
+        return
+    fi
+    echo "0"
 }
 
 RESOLUTION=$(get_resolution)
-echo "Resolution: $RESOLUTION"
+FB_BPP=$(get_fb_bpp)
+LINE_LEN=$(get_fb_line_length)
+YRES=$(get_fb_yres)
 
-# Проверка ffmpeg
+echo "Resolution: $RESOLUTION fb_bpp=$FB_BPP line_length=$LINE_LEN yres=$YRES"
+
 if ! command -v ffmpeg &> /dev/null; then
     echo "Error: ffmpeg is not installed!" >&2
     exit 1
 fi
 
-# Проверка socat
-if ! command -v socat &> /dev/null; then
-    echo "Warning: socat is not installed, MPV screenshots disabled" >&2
-fi
+mpv_screenshot_ok() {
+    local f="$OUTPUT_DIR/$OUTPUT_FILE"
+    [ -f "$f" ] && [ "$(wc -c < "$f" 2>/dev/null | tr -d ' ')" -ge 512 ]
+}
 
-# Функция: скриншот через MPV (если доступен)
+# Try MPV IPC: vo=drm often fails for "video"; try several modes and verify file size.
 screenshot_with_mpv() {
-    if command -v socat &> /dev/null && [ -S "$MPV_SOCKET" ]; then
-        echo '{"command": ["screenshot-to-file", "'"$OUTPUT_DIR/$OUTPUT_FILE"'", "video"]}' | socat - "$MPV_SOCKET" 2>/dev/null
-        if [ $? -eq 0 ]; then
+    if ! command -v socat &> /dev/null || [ ! -S "$MPV_SOCKET" ]; then
+        return 1
+    fi
+    local out="$OUTPUT_DIR/$OUTPUT_FILE"
+    rm -f "$out" 2>/dev/null || true
+    # JSON-escape path for backslashes
+    local jpath
+    jpath=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')
+
+    for mode in video subtitles window; do
+        rm -f "$out" 2>/dev/null || true
+        if [ "$mode" = "window" ]; then
+            printf '{"command": ["screenshot-to-file", %s]}\n' "$jpath" | socat - "$MPV_SOCKET" 2>/dev/null || true
+        else
+            printf '{"command": ["screenshot-to-file", %s, "%s"]}\n' "$jpath" "$mode" | socat - "$MPV_SOCKET" 2>/dev/null || true
+        fi
+        sleep 0.15
+        if mpv_screenshot_ok; then
             return 0
         fi
-    fi
+    done
     return 1
 }
 
-# Создаем директорию если не существует
+# Framebuffer: use line_length * yres when available (includes row padding).
+capture_fb_raw() {
+    local temp="$1"
+    local bytes=0
+    if [ "$LINE_LEN" != "0" ] && [ "$YRES" != "0" ]; then
+        bytes=$((LINE_LEN * YRES))
+    fi
+    if [ "$bytes" -lt 1000 ]; then
+        local w h
+        w=$(echo "$RESOLUTION" | cut -dx -f1)
+        h=$(echo "$RESOLUTION" | cut -dx -f2)
+        bytes=$((w * h * FB_BPP / 8))
+    fi
+    if [ "$bytes" -lt 1000 ]; then
+        return 1
+    fi
+    if [ "$LINE_LEN" != "0" ] && [ "$YRES" != "0" ]; then
+        if [ -r "$FB_DEV" ]; then
+            dd if="$FB_DEV" of="$temp" bs="$LINE_LEN" count="$YRES" status=none 2>/dev/null || return 1
+        else
+            sudo dd if="$FB_DEV" of="$temp" bs="$LINE_LEN" count="$YRES" status=none 2>/dev/null || return 1
+        fi
+        return 0
+    fi
+    if [ -r "$FB_DEV" ]; then
+        dd if="$FB_DEV" of="$temp" bs=1048576 count=1 status=none 2>/dev/null || return 1
+    else
+        sudo dd if="$FB_DEV" of="$temp" bs=1048576 count=1 status=none 2>/dev/null || return 1
+    fi
+    return 0
+}
+
+ffmpeg_fb_to_jpeg() {
+    local temp="$1"
+    local w h
+    w=$(echo "$RESOLUTION" | cut -dx -f1)
+    h=$(echo "$RESOLUTION" | cut -dx -f2)
+    local pixfmt="rgb565le"
+    case "$FB_BPP" in
+        32) pixfmt="bgra" ;;
+        24) pixfmt="rgb24" ;;
+        16) pixfmt="rgb565le" ;;
+    esac
+    ffmpeg -hide_banner -loglevel error \
+        -f rawvideo -pixel_format "$pixfmt" -video_size "${w}x${h}" \
+        -i "$temp" -pix_fmt yuvj420p -frames:v 1 "$OUTPUT_DIR/$OUTPUT_FILE" -y
+}
+
 mkdir -p "$OUTPUT_DIR"
 
-# Пытаемся сделать скриншот через MPV
 if screenshot_with_mpv; then
     echo "Screenshot taken from MPV."
     exit 0
 fi
 
-# Fallback: скриншот через framebuffer
-echo "Using framebuffer fallback..."
-if [ -c "$FB_DEV" ]; then
-    # Создаем временный файл
-    TEMP_RAW=$(mktemp)
-    
-    # Копируем framebuffer (без sudo если возможно)
-    if [ -r "$FB_DEV" ]; then
-        cat "$FB_DEV" > "$TEMP_RAW" 2>/dev/null
-    else
-        sudo cat "$FB_DEV" > "$TEMP_RAW" 2>/dev/null
+if command -v raspi2png &> /dev/null; then
+    if raspi2png -p "$OUTPUT_DIR/$OUTPUT_FILE" 2>/dev/null && mpv_screenshot_ok; then
+        echo "Screenshot taken via raspi2png."
+        exit 0
     fi
-    
-    # Конвертируем в JPEG с правильными параметрами
-    ffmpeg \
-        -f rawvideo \
-        -pixel_format rgb565le \
-        -video_size "$RESOLUTION" \
-        -i "$TEMP_RAW" \
-        -pix_fmt yuvj420p \
-        -frames:v 1 \
-        "$OUTPUT_DIR/$OUTPUT_FILE" \
-        -y 2>/dev/null
-    
-    # Удаляем временный файл
-    rm -f "$TEMP_RAW"
-    
-    if [ -f "$OUTPUT_DIR/$OUTPUT_FILE" ]; then
+fi
+
+echo "Using framebuffer fallback..."
+TEMP_RAW=$(mktemp)
+trap 'rm -f "$TEMP_RAW"' EXIT
+
+if [ -c "$FB_DEV" ] && capture_fb_raw "$TEMP_RAW"; then
+    if ffmpeg_fb_to_jpeg "$TEMP_RAW" && mpv_screenshot_ok; then
         echo "Screenshot taken from framebuffer."
         exit 0
-    else
-        echo "Framebuffer capture failed."
-        exit 1
     fi
-else
-    echo "Framebuffer device not found: $FB_DEV"
-    exit 1
 fi
+
+echo "All capture methods failed." >&2
+exit 1

@@ -53,7 +53,8 @@ class PlaylistManager:
             row = svc.get_by_key(str(file_name))
             if not row:
                 return None
-            pb = svc.ensure_fresh_playback(row)
+            # Always re-resolve on play: CDN URLs are signed to yt-dlp's egress; cached URLs break on the Pi.
+            pb = svc.ensure_fresh_playback(row, max_age_sec=0)
             return {
                 "key": str(file_name),
                 "path": pb.get("url") or row.resolved_url or row.url,
@@ -305,15 +306,13 @@ class PlaylistManager:
 
     def _clear_mpv_http_options(self) -> None:
         """Reset per-stream HTTP options so a previous item cannot poison the next load."""
-        for cmd in (
-            {"command": ["set_property", "http-header-fields", ""]},
-            {"command": ["set_property", "user-agent", ""]},
-            {"command": ["set_property", "referrer", ""]},
-        ):
-            try:
-                self._mpv_manager._send_command(cmd, timeout=3.0)
-            except Exception:
-                pass
+        try:
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "http-header-fields", ""]},
+                timeout=3.0,
+            )
+        except Exception:
+            pass
 
     def _apply_mpv_http_headers(self, item: dict, *, stream_url: str) -> Dict[str, str]:
         """

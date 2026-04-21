@@ -360,15 +360,22 @@ class ExternalMediaService:
     def ensure_fresh_resolved_url(self, row: "ExternalMedia", max_age_sec: int = 3600) -> str:
         """
         Return a URL that MPV can play without ytdl. Refresh periodically.
+
+        Use ``max_age_sec=0`` to always re-run yt-dlp (used before MPV playback for signed CDNs).
         """
         now = int(time.time())
         prov = str(getattr(row, "provider", "") or "").strip().lower()
         # VK/Rutube CDN URLs are signed (srcIp, expires, sig). Caching them for an hour reuses
         # URLs bound to yt-dlp's egress IP and breaks playback from the Pi (HTTP 400).
-        effective_max = max_age_sec
-        if prov in ("vkvideo", "rutube"):
-            effective_max = min(int(max_age_sec), 90)
-        if row.resolved_url and row.resolved_at and (now - int(row.resolved_at)) < effective_max:
+        effective_max = int(max_age_sec)
+        if prov in ("vkvideo", "rutube") and effective_max > 0:
+            effective_max = min(effective_max, 90)
+        if (
+            row.resolved_url
+            and row.resolved_at
+            and effective_max > 0
+            and (now - int(row.resolved_at)) < effective_max
+        ):
             return row.resolved_url
 
         info = self.resolve_info(row.url)
@@ -399,7 +406,10 @@ class ExternalMediaService:
     def ensure_fresh_playback(self, row: "ExternalMedia", max_age_sec: int = 3600) -> Dict[str, Any]:
         """
         Return playback details for MPV: {"url": ..., "http_headers": {...}}.
-        Refreshes resolved URL + headers periodically.
+
+        Pass ``max_age_sec=0`` to always run yt-dlp again before playback. That is required for
+        VK/Rutube when the server resolves media on a different egress than MPV on the device:
+        signed CDN URLs embed the resolver's client IP and fail with HTTP 400 if reused.
         """
         url = self.ensure_fresh_resolved_url(row, max_age_sec=max_age_sec)
         headers: Dict[str, Any] = {}
