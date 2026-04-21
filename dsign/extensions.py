@@ -39,6 +39,14 @@ def init_extensions(app) -> Dict[str, Any]:
                 h.setLevel(logging.DEBUG)
                 h.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
                 logger.addHandler(h)
+            # Also enable upstream loggers used by python-socketio / python-engineio.
+            # These are the ones that typically log close reasons and transport errors.
+            for name in ("engineio", "socketio"):
+                l = logging.getLogger(name)
+                l.setLevel(logging.DEBUG)
+                l.propagate = True
+                if not l.handlers:
+                    l.addHandler(h)
 
         # 1. Инициализация Flask-расширений
         db.init_app(app)
