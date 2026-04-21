@@ -28,6 +28,14 @@ SOCKET_TOKEN_EXPIRATION = 5  # 5 minutes in minutes
 rate_limit_data = {}
 rate_limit_lock = Lock()
 
+# In-memory socket token cache to avoid session cookie bloat.
+# Keyed by (user_id, ip, user_agent). Values: {"token": str, "exp_ts": float}.
+_socket_token_cache = {}
+_socket_token_cache_lock = Lock()
+
+def _socket_cache_key(user_id: int, ip: str, ua: str) -> str:
+    return f"{int(user_id)}|{ip}|{ua}"
+
 def _is_safe_next_url(target: str) -> bool:
     if not target:
         return False
