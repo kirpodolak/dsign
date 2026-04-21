@@ -110,17 +110,23 @@
 }
 
 .controls--stack input[type="text"],
+.controls--stack input[type="url"],
+.controls--stack input[type="file"],
 .controls--stack select {
     width: 100%;
+    max-width: 100%;
     padding: 10px 12px;
     border: 1px solid rgba(203, 213, 225, 0.95);
     border-radius: 10px;
     background: #fff;
     color: #111827;
     outline: none;
+    box-sizing: border-box;
 }
 
 .controls--stack input[type="text"]:focus,
+.controls--stack input[type="url"]:focus,
+.controls--stack input[type="file"]:focus,
 .controls--stack select:focus {
     border-color: rgba(92, 107, 192, 0.9);
     box-shadow: 0 0 0 3px rgba(92, 107, 192, 0.18);
@@ -160,6 +166,7 @@
     width: 100%;
     flex: 0 0 auto;
     margin: 0;
+    box-sizing: border-box;
 }
 
 /* External link add form */
@@ -328,6 +335,13 @@
     border: 2px solid #ddd;
     border-radius: 4px;
     transition: all 0.2s;
+    z-index: 3;
+    pointer-events: none; /* keep hover stable; input receives pointer */
+}
+
+.file-item:hover .file-checkbox + label {
+    border-color: rgba(92, 107, 192, 0.7);
+    box-shadow: 0 0 0 3px rgba(92, 107, 192, 0.14);
 }
 
 .file-checkbox:checked + label {
@@ -501,24 +515,7 @@
     text-align: center;
 }
 
-.btn.danger {
-    background-color: #ef5350;
-    color: white;
-}
-
-.btn.danger:hover {
-    background-color: #d32f2f;
-    transform: translateY(-2px);
-}
-
-.btn.secondary {
-    background-color: #e0e0e0;
-    color: #424242;
-}
-
-.btn.secondary:hover {
-    background-color: #bdbdbd;
-}
+/* Button colors come from base.css to keep pages consistent. */
 
 /* Анимации */
 @keyframes fadeIn {
