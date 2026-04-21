@@ -162,7 +162,11 @@ class AppCore {
                 return;
             }
 
-            await this.initializeStartupNetworkAssistant();
+            // Don't block the initial paint on potentially slow network/API calls.
+            // Startup assistant is optional and may require system/network endpoints.
+            setTimeout(() => {
+                this.initializeStartupNetworkAssistant().catch(() => {});
+            }, 0);
 
             // Initialize WebSocket only on pages that currently use realtime updates.
             if (this.shouldInitializeSockets()) {
