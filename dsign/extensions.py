@@ -33,8 +33,10 @@ def init_extensions(app) -> Dict[str, Any]:
             app,
             cors_allowed_origins=app.config.get('SOCKETIO_CORS_ALLOWED_ORIGINS', "*"),
             async_mode=app.config.get('SOCKETIO_ASYNC_MODE', 'eventlet'),
+            ping_interval=app.config.get('SOCKETIO_PING_INTERVAL', 25),
+            ping_timeout=app.config.get('SOCKETIO_PING_TIMEOUT', 60),
             logger=logger,
-            engineio_logger=logger if app.debug else False
+            engineio_logger=logger if app.config.get('SOCKETIO_ENGINEIO_DEBUG', False) else False
         )
         
         # 2. Настройка аутентификации
