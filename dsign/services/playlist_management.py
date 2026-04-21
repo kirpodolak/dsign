@@ -159,6 +159,37 @@ class PlaylistManager:
             return data
         return None
 
+    def _mpv_get_prop_number(self, name: str, timeout: float = 3.0) -> Optional[float]:
+        """Return numeric property (time-pos, duration, ...), or None if unavailable."""
+        try:
+            resp = self._mpv_manager._send_command(
+                {"command": ["get_property", name]},
+                timeout=timeout,
+            )
+        except Exception:
+            return None
+        if not resp or resp.get("error") != "success":
+            return None
+        data = resp.get("data")
+        if isinstance(data, (int, float)) and not isinstance(data, bool):
+            return float(data)
+        return None
+
+    def _mpv_get_prop_string(self, name: str, timeout: float = 3.0) -> Optional[str]:
+        try:
+            resp = self._mpv_manager._send_command(
+                {"command": ["get_property", name]},
+                timeout=timeout,
+            )
+        except Exception:
+            return None
+        if not resp or resp.get("error") != "success":
+            return None
+        data = resp.get("data")
+        if data is None:
+            return None
+        return str(data)
+
     def _wait_mpv_leave_idle(self, timeout_sec: float = 45.0) -> bool:
         """
         After loadfile, mpv often reports idle-active=true until the demuxer opens.
@@ -173,6 +204,96 @@ class PlaylistManager:
                 return True
             self._stop_event.wait(timeout=0.15)
         return False
+
+    def _wait_mpv_stream_ready(
+        self,
+        expected_url: str,
+        timeout_sec: float = 90.0,
+        poll_sec: float = 0.5,
+    ) -> bool:
+        """
+        Some mpv builds never expose `eof-reached` for network streams (always 'property unavailable').
+        Detect that demuxer/decoder actually started using time-pos / path / duration.
+        """
+        deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        exp = (expected_url or "").strip()
+        exp_host = ""
+        try:
+            from urllib.parse import urlparse
+
+            if exp.startswith(("http://", "https://")):
+                exp_host = urlparse(exp).netloc or ""
+        except Exception:
+            exp_host = ""
+
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            tp = self._mpv_get_prop_number("time-pos", timeout=2.0)
+            if tp is not None:
+                return True
+            dur = self._mpv_get_prop_number("duration", timeout=2.0)
+            if dur is not None and dur > 0:
+                return True
+            p = self._mpv_get_prop_string("path", timeout=2.0)
+            if p and exp:
+                if p == exp or (exp_host and exp_host in p):
+                    return True
+            self._stop_event.wait(timeout=max(0.1, float(poll_sec)))
+        return False
+
+    def _wait_mpv_video_end(
+        self,
+        playlist_id: int,
+        *,
+        is_network: bool,
+        stream_ready: bool,
+        poll_sec: float = 1.0,
+    ) -> None:
+        """
+        End-of-playback detection that works when `eof-reached` is permanently unavailable.
+
+        - Prefer eof-reached == True when MPV returns a real boolean.
+        - Else for streams: after stream_ready, treat return to idle-active as end-of-file.
+        - Else for local files: same idle fallback after a short grace period.
+        """
+        start = time.time()
+        grace_until = time.monotonic() + (1.5 if is_network else 0.3)
+        consecutive_idle = 0
+
+        while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
+            if time.time() - start > 6 * 3600:
+                break
+
+            eof = self._mpv_get_prop_bool("eof-reached", timeout=3.0)
+            if eof is True:
+                break
+
+            idle = self._mpv_get_prop_bool("idle-active", timeout=3.0)
+            if idle is True and time.monotonic() >= grace_until:
+                if is_network:
+                    if stream_ready:
+                        consecutive_idle += 1
+                        if consecutive_idle >= 2:
+                            break
+                else:
+                    consecutive_idle += 1
+                    if consecutive_idle >= 2:
+                        break
+            else:
+                consecutive_idle = 0
+
+            core_idle = self._mpv_get_prop_bool("core-idle", timeout=3.0)
+            if (
+                eof is False
+                and core_idle is True
+                and idle is True
+                and time.monotonic() >= grace_until
+                and (stream_ready or not is_network)
+            ):
+                break
+
+            self._stop_event.wait(timeout=max(0.2, float(poll_sec)))
 
     def _stop_play_thread(self):
         if self._play_thread and self._play_thread.is_alive():
@@ -276,6 +397,7 @@ class PlaylistManager:
                         or path.startswith("https://")
                         or path.startswith("ytdl://")
                     )
+                    stream_ready = False
                     if is_network:
                         if not self._wait_mpv_leave_idle(timeout_sec=60.0):
                             self.logger.warning(
@@ -283,23 +405,19 @@ class PlaylistManager:
                                 extra={"media_key": media_key, "path_preview": str(path)[:120]},
                             )
                             continue
-                    # Wait until eof-reached is a real bool (some builds return unavailable briefly).
-                    prop_deadline = time.monotonic() + 12.0
-                    while time.monotonic() < prop_deadline and not self._stop_event.is_set():
-                        eof = self._mpv_get_prop_bool("eof-reached", timeout=3.0)
-                        if eof is not None:
-                            break
-                        self._stop_event.wait(timeout=0.2)
-                    # Wait until playback ends (eof-reached only; idle-active is not EOF for streams).
-                    start = time.time()
-                    while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
-                        eof = self._mpv_get_prop_bool("eof-reached", timeout=5.0)
-                        if eof is True:
-                            break
-                        # prevent stuck forever: 6 hours max video
-                        if time.time() - start > 6 * 3600:
-                            break
-                        time.sleep(1.0)
+                        stream_ready = self._wait_mpv_stream_ready(str(path), timeout_sec=90.0)
+                        if not stream_ready:
+                            self.logger.warning(
+                                "MPV stream did not become ready (no time-pos/duration/path match)",
+                                extra={"media_key": media_key, "path_preview": str(path)[:120]},
+                            )
+                            continue
+                    self._wait_mpv_video_end(
+                        playlist_id,
+                        is_network=is_network,
+                        stream_ready=stream_ready,
+                        poll_sec=1.0,
+                    )
                 else:
                     # For still images, keep the frame open to avoid quick close/reopen churn.
                     # (Videos should not be kept open; they are EOF-driven here.)
