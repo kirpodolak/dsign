@@ -32,7 +32,7 @@ apt-get update
 apt-get install -y \
     python3-pip python3-venv python3-dev \
     sqlite3 libsqlite3-dev \
-    mpv ffmpeg \
+    mpv ffmpeg yt-dlp \
     socat \
     nginx git \
     acl libdrm-dev \
@@ -151,6 +151,10 @@ ReadWritePaths=/var/log/dsign /var/lib/dsign
 WantedBy=multi-user.target
 EOL
 
+# MPV minimal config (ytdl hook path optional; see file comments)
+mkdir -p /etc/dsign/mpv-minimal
+install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/mpv.conf" /etc/dsign/mpv-minimal/mpv.conf
+
 # MPV Player Service
 cat > /etc/systemd/system/dsign-mpv.service <<EOL
 [Unit]
@@ -177,7 +181,7 @@ ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv
 ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
-ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --no-ytdl --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --log-file=/var/log/dsign/mpv.log
+ExecStart=/usr/bin/mpv --idle=yes --no-terminal --config-dir=/etc/dsign/mpv-minimal --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --log-file=/var/log/dsign/mpv.log
 ExecStartPost=-/usr/local/bin/dsign-show-startup-ip
 Restart=always
 RestartSec=5s

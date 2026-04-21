@@ -20,7 +20,8 @@ class ExternalMediaInfo:
 
 class ExternalMediaService:
     """
-    Resolve and cache external media (Rutube / VK Video) so it can be displayed and played without MPV ytdl.
+    Resolve and cache external media (Rutube / VK Video). Gallery/metadata use yt-dlp in-process;
+    playback prefers ``ytdl://`` URLs so MPV resolves streams on the signage device.
     """
 
     def __init__(self, db_session, thumbnail_folder: str, logger):
@@ -410,7 +411,15 @@ class ExternalMediaService:
         Pass ``max_age_sec=0`` to always run yt-dlp again before playback. That is required for
         VK/Rutube when the server resolves media on a different egress than MPV on the device:
         signed CDN URLs embed the resolver's client IP and fail with HTTP 400 if reused.
+
+        For VK and Rutube, prefer ``ytdl://<canonical page URL>`` so MPV's yt-dlp hook resolves
+        streams on the same host as playback (dsign-mpv must not be started with ``--no-ytdl``).
         """
+        provider = str(getattr(row, "provider", "") or "").strip().lower()
+        page_url = str(getattr(row, "url", "") or "").strip()
+        if provider in ("vkvideo", "rutube") and page_url.startswith(("http://", "https://")):
+            return {"url": f"ytdl://{page_url}", "http_headers": {}}
+
         url = self.ensure_fresh_resolved_url(row, max_age_sec=max_age_sec)
         headers: Dict[str, Any] = {}
         try:
@@ -418,8 +427,6 @@ class ExternalMediaService:
         except Exception:
             headers = {}
 
-        provider = str(getattr(row, "provider", "") or "")
-        page_url = str(getattr(row, "url", "") or "")
         safe = self._normalize_playback_headers(
             headers,
             page_url=page_url,
