@@ -295,6 +295,41 @@ class PlaylistManager:
 
             self._stop_event.wait(timeout=max(0.2, float(poll_sec)))
 
+    def _log_mpv_network_debug_snapshot(self, *, media_key: str, url: str) -> None:
+        """
+        Best-effort debug snapshot for stubborn network streams.
+        This helps distinguish 'mpv never tried to open URL' vs 'opened but blocked (403/TLS)'.
+        """
+        try:
+            props = ["path", "stream-open-filename", "media-title", "file-format", "demuxer"]
+            snap: Dict[str, Any] = {}
+            for p in props:
+                try:
+                    r = self._mpv_manager._send_command({"command": ["get_property", p]}, timeout=2.0)
+                    if r and r.get("error") == "success":
+                        snap[p] = r.get("data")
+                except Exception:
+                    pass
+            idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+            core_idle = self._mpv_get_prop_bool("core-idle", timeout=2.0)
+            tp = self._mpv_get_prop_number("time-pos", timeout=2.0)
+            dur = self._mpv_get_prop_number("duration", timeout=2.0)
+            self.logger.warning(
+                "MPV network stream debug snapshot",
+                extra={
+                    "media_key": media_key,
+                    "url_preview": str(url)[:160],
+                    "idle_active": idle,
+                    "core_idle": core_idle,
+                    "time_pos": tp,
+                    "duration": dur,
+                    "mpv_props": snap,
+                },
+            )
+        except Exception:
+            # never let diagnostics break playback
+            pass
+
     def _stop_play_thread(self):
         if self._play_thread and self._play_thread.is_alive():
             self._stop_event.set()
