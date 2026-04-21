@@ -30,6 +30,15 @@ def init_extensions(app) -> Dict[str, Any]:
             if app.config.get("DEBUG", False) or engineio_debug
             else logging.WARNING
         )
+        if engineio_debug:
+            # Ensure Engine.IO logs reach stdout/stderr even when the app uses a custom logger.
+            # systemd captures stdout/stderr into journald.
+            logger.propagate = True
+            if not logger.handlers:
+                h = logging.StreamHandler()
+                h.setLevel(logging.DEBUG)
+                h.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
+                logger.addHandler(h)
 
         # 1. Инициализация Flask-расширений
         db.init_app(app)
