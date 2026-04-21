@@ -106,6 +106,22 @@ class ExternalMediaService:
             out[canonical.get(kl, kl)] = val
         return out
 
+    def _normalize_playback_headers(
+        self,
+        headers: Optional[Dict[str, Any]],
+        *,
+        page_url: Optional[str] = None,
+        stream_url: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Playback-time alias for `sanitize_mpv_http_headers` (used by `ensure_fresh_playback`)."""
+        return self.sanitize_mpv_http_headers(
+            headers,
+            page_url=page_url,
+            stream_url=stream_url,
+            provider=provider,
+        )
+
     # -----------------------
     # Provider identification
     # -----------------------
