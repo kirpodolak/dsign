@@ -1954,7 +1954,7 @@ def init_api_routes(api_bp, services):
         # Fallback
         return send_from_directory(
             current_app.static_folder,
-            'images/default-preview.jpg',
+            'images/placeholder.jpg',
             max_age=3600
         )
             

@@ -290,9 +290,9 @@ class MediaGallery {
         };
         previewContainer.appendChild(img);
       } else {
-        previewContainer.classList.add('file-icon');
-        // Use a thumbnail even for external videos if available.
-        if (isExternal) {
+        // Prefer thumbnails for videos (local + external). Fallback to icon if thumb fails.
+        const isVideoLike = Boolean(file.is_video) || ALLOWED_VIDEO_TYPES.includes(file.type) || isExternal;
+        if (isVideoLike) {
           previewContainer.classList.add('file-preview-container');
           const img = document.createElement('img');
           img.src = this.getThumbnailUrl(file.name);
@@ -303,11 +303,20 @@ class MediaGallery {
           img.onerror = () => {
             img.src = PLACEHOLDER_IMAGE;
             img.style.opacity = '0.7';
+            previewContainer.classList.add('file-icon');
+            try {
+              const icon = document.createElement('i');
+              icon.className = 'fas fa-file-video';
+              previewContainer.appendChild(icon);
+            } catch {
+              // ignore
+            }
           };
           previewContainer.appendChild(img);
         } else {
+          previewContainer.classList.add('file-icon');
           const icon = document.createElement('i');
-          icon.className = 'fas fa-file-video';
+          icon.className = 'fas fa-file';
           previewContainer.appendChild(icon);
         }
       }
