@@ -28,6 +28,9 @@ class PlaylistManager:
         self._active_playlist_id: Optional[int] = None
         # External media resolver is optional; attached lazily to avoid tight coupling.
         self._external_media_service = None
+        # Backoff per media key for unstable/blocked streams to avoid busy looping loadfile.
+        # key -> {failures:int, next_try_monotonic:float}
+        self._media_backoff: Dict[str, Dict[str, Any]] = {}
 
     def set_external_media_service(self, service) -> None:
         """Attach external media resolver service (optional)."""
@@ -143,6 +146,221 @@ class PlaylistManager:
                 return True
             self._stop_event.wait(timeout=min(step, remaining))
 
+    def _mpv_get_prop_bool(self, name: str, timeout: float = 3.0) -> Optional[bool]:
+        """Return bool property value, or None if unavailable / error."""
+        try:
+            resp = self._mpv_manager._send_command(
+                {"command": ["get_property", name]},
+                timeout=timeout,
+            )
+        except Exception:
+            return None
+        if not resp or resp.get("error") != "success":
+            return None
+        data = resp.get("data")
+        if isinstance(data, bool):
+            return data
+        return None
+
+    def _mpv_get_prop_number(self, name: str, timeout: float = 3.0) -> Optional[float]:
+        """Return numeric property (time-pos, duration, ...), or None if unavailable."""
+        try:
+            resp = self._mpv_manager._send_command(
+                {"command": ["get_property", name]},
+                timeout=timeout,
+            )
+        except Exception:
+            return None
+        if not resp or resp.get("error") != "success":
+            return None
+        data = resp.get("data")
+        if isinstance(data, (int, float)) and not isinstance(data, bool):
+            return float(data)
+        return None
+
+    def _mpv_get_prop_string(self, name: str, timeout: float = 3.0) -> Optional[str]:
+        try:
+            resp = self._mpv_manager._send_command(
+                {"command": ["get_property", name]},
+                timeout=timeout,
+            )
+        except Exception:
+            return None
+        if not resp or resp.get("error") != "success":
+            return None
+        data = resp.get("data")
+        if data is None:
+            return None
+        return str(data)
+
+    def _wait_mpv_leave_idle(self, timeout_sec: float = 45.0) -> bool:
+        """
+        After loadfile, mpv often reports idle-active=true until the demuxer opens.
+        Our old loop treated idle as EOF and skipped network streams in ~1 tick.
+        """
+        deadline = time.monotonic() + max(0.5, float(timeout_sec))
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            idle = self._mpv_get_prop_bool("idle-active", timeout=3.0)
+            if idle is False:
+                return True
+            self._stop_event.wait(timeout=0.15)
+        return False
+
+    def _wait_mpv_stream_ready(
+        self,
+        expected_url: str,
+        timeout_sec: float = 90.0,
+        poll_sec: float = 0.5,
+    ) -> bool:
+        """
+        Some mpv builds never expose `eof-reached` for network streams (always 'property unavailable').
+        Detect that demuxer/decoder actually started.
+
+        Notes:
+        - `time-pos`/`duration` can be "property unavailable" for a while on some network streams,
+          yet playback is actually in progress (especially HLS).
+        - Redirected stream URLs often change host/path (vk okcdn), so `path` equality is unreliable.
+        """
+        deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        exp = (expected_url or "").strip()
+        exp_host = ""
+        exp_scheme = ""
+        try:
+            from urllib.parse import urlparse
+
+            if exp.startswith(("http://", "https://")):
+                p = urlparse(exp)
+                exp_host = p.netloc or ""
+                exp_scheme = p.scheme or ""
+        except Exception:
+            exp_host = ""
+            exp_scheme = ""
+
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            tp = self._mpv_get_prop_number("time-pos", timeout=2.0)
+            if tp is not None:
+                return True
+            dur = self._mpv_get_prop_number("duration", timeout=2.0)
+            if dur is not None and dur > 0:
+                return True
+            idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+            core_idle = self._mpv_get_prop_bool("core-idle", timeout=2.0)
+
+            # Strong signal: mpv is not idle anymore (demuxer active / decoding started)
+            if idle is False and core_idle is False:
+                return True
+
+            # Medium signal: demuxer/file-format known and we left idle-active.
+            if idle is False:
+                demuxer = self._mpv_get_prop_string("demuxer", timeout=2.0)
+                file_format = self._mpv_get_prop_string("file-format", timeout=2.0)
+                if demuxer or file_format:
+                    return True
+
+            # Medium signal: stream-open-filename is set (often to the redirected/real URL).
+            sof = self._mpv_get_prop_string("stream-open-filename", timeout=2.0)
+            if sof and sof.startswith(("http://", "https://")):
+                # If we can parse and see same scheme, treat it as "opened".
+                if exp_scheme and sof.startswith(exp_scheme + "://"):
+                    if idle is False or core_idle is False:
+                        return True
+
+            # Do NOT treat `path` equality alone as readiness: mpv can report path while still idle.
+            self._stop_event.wait(timeout=max(0.1, float(poll_sec)))
+        return False
+
+    def _wait_mpv_video_end(
+        self,
+        playlist_id: int,
+        *,
+        is_network: bool,
+        stream_ready: bool,
+        poll_sec: float = 1.0,
+    ) -> None:
+        """
+        End-of-playback detection that works when `eof-reached` is permanently unavailable.
+
+        - Prefer eof-reached == True when MPV returns a real boolean.
+        - Else for streams: after stream_ready, treat return to idle-active as end-of-file.
+        - Else for local files: same idle fallback after a short grace period.
+        """
+        start = time.time()
+        grace_until = time.monotonic() + (1.5 if is_network else 0.3)
+        consecutive_idle = 0
+
+        while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
+            if time.time() - start > 6 * 3600:
+                break
+
+            eof = self._mpv_get_prop_bool("eof-reached", timeout=3.0)
+            if eof is True:
+                break
+
+            idle = self._mpv_get_prop_bool("idle-active", timeout=3.0)
+            if idle is True and time.monotonic() >= grace_until:
+                if is_network:
+                    if stream_ready:
+                        consecutive_idle += 1
+                        if consecutive_idle >= 2:
+                            break
+                else:
+                    consecutive_idle += 1
+                    if consecutive_idle >= 2:
+                        break
+            else:
+                consecutive_idle = 0
+
+            core_idle = self._mpv_get_prop_bool("core-idle", timeout=3.0)
+            if (
+                eof is False
+                and core_idle is True
+                and idle is True
+                and time.monotonic() >= grace_until
+                and (stream_ready or not is_network)
+            ):
+                break
+
+            self._stop_event.wait(timeout=max(0.2, float(poll_sec)))
+
+    def _log_mpv_network_debug_snapshot(self, *, media_key: str, url: str) -> None:
+        """
+        Best-effort debug snapshot for stubborn network streams.
+        This helps distinguish 'mpv never tried to open URL' vs 'opened but blocked (403/TLS)'.
+        """
+        try:
+            props = ["path", "stream-open-filename", "media-title", "file-format", "demuxer"]
+            snap: Dict[str, Any] = {}
+            for p in props:
+                try:
+                    r = self._mpv_manager._send_command({"command": ["get_property", p]}, timeout=2.0)
+                    if r and r.get("error") == "success":
+                        snap[p] = r.get("data")
+                except Exception:
+                    pass
+            idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+            core_idle = self._mpv_get_prop_bool("core-idle", timeout=2.0)
+            tp = self._mpv_get_prop_number("time-pos", timeout=2.0)
+            dur = self._mpv_get_prop_number("duration", timeout=2.0)
+            self.logger.warning(
+                "MPV network stream debug snapshot",
+                extra={
+                    "media_key": media_key,
+                    "url_preview": str(url)[:160],
+                    "idle_active": idle,
+                    "core_idle": core_idle,
+                    "time_pos": tp,
+                    "duration": dur,
+                    "mpv_props": snap,
+                },
+            )
+        except Exception:
+            # never let diagnostics break playback
+            pass
+
     def _stop_play_thread(self):
         if self._play_thread and self._play_thread.is_alive():
             self._stop_event.set()
@@ -208,10 +426,51 @@ class PlaylistManager:
 
                 # Load next media file
                 load_started = time.monotonic()
+                # Respect per-media backoff to avoid tight loops on failing streams.
+                try:
+                    b = self._media_backoff.get(media_key) or {}
+                    next_try = float(b.get("next_try_monotonic") or 0.0)
+                except Exception:
+                    next_try = 0.0
+                if next_try and time.monotonic() < next_try:
+                    wait_sec = max(0.0, next_try - time.monotonic())
+                    self.logger.debug(
+                        "Backoff active for media",
+                        extra={"media_key": media_key, "wait_sec": round(wait_sec, 2)},
+                    )
+                    self._stop_event.wait(timeout=min(30.0, wait_sec))
+                    if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
+                        break
+                # Reset stateful properties before loading a new item.
+                # This prevents "image mode" state leaking into video streams and avoids header bleed.
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "keep-open", "no"]},
+                        timeout=5.0,
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "force-window", "yes"]},
+                        timeout=5.0,
+                    )
+                except Exception:
+                    pass
+
                 # If this is an external stream requiring headers, apply them before loadfile.
                 # MPV expects a single string of "Key: Value\r\nKey2: Value2" for http-header-fields.
                 if http_headers and isinstance(http_headers, dict):
                     try:
+                        # Always set a sane Referer for external streams when available.
+                        # Many CDNs (VK okcdn, Rutube) reject direct segment URLs without it.
+                        try:
+                            if isinstance(item.get("page_url"), str) and item.get("page_url"):
+                                http_headers.setdefault("Referer", item.get("page_url"))
+                                http_headers.setdefault("referer", item.get("page_url"))
+                        except Exception:
+                            pass
+
                         header_lines = []
                         for k, v in http_headers.items():
                             if k is None or v is None:
@@ -226,6 +485,48 @@ class PlaylistManager:
                                 {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
                                 timeout=5.0,
                             )
+                        # Some CDNs require explicit mpv properties for UA/Referer even if provided in header-fields.
+                        try:
+                            ua = http_headers.get("User-Agent") or http_headers.get("user-agent")
+                            if ua:
+                                self._mpv_manager._send_command(
+                                    {"command": ["set_property", "user-agent", str(ua)]},
+                                    timeout=5.0,
+                                )
+                        except Exception:
+                            pass
+                        try:
+                            ref = http_headers.get("Referer") or http_headers.get("Referrer") or http_headers.get("referer")
+                            if ref:
+                                self._mpv_manager._send_command(
+                                    {"command": ["set_property", "referrer", str(ref)]},
+                                    timeout=5.0,
+                                )
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                else:
+                    # Clear leftover headers from previous external items.
+                    try:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "http-header-fields", ""]},
+                            timeout=2.0,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "user-agent", ""]},
+                            timeout=2.0,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "referrer", ""]},
+                            timeout=2.0,
+                        )
                     except Exception:
                         pass
                 load_resp = self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
@@ -239,28 +540,36 @@ class PlaylistManager:
                     continue
 
                 if is_video:
-                    # Wait until playback ends
-                    start = time.time()
-                    while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
-                        # `eof-reached` is the most reliable signal for local files.
-                        resp = self._mpv_manager._send_command(
-                            {"command": ["get_property", "eof-reached"]},
-                            timeout=5.0,
-                        )
-                        if resp and resp.get("error") == "success" and resp.get("data") is True:
-                            break
-
-                        # Fallback for unusual states: if mpv goes idle, treat as ended
-                        resp = self._mpv_manager._send_command(
-                            {"command": ["get_property", "idle-active"]},
-                            timeout=5.0
-                        )
-                        if resp and resp.get("error") == "success" and resp.get("data") is True:
-                            break
-                        # prevent stuck forever: 6 hours max video
-                        if time.time() - start > 6 * 3600:
-                            break
-                        time.sleep(1.0)
+                    # Network streams: mpv stays idle-active until open; do not treat idle as EOF.
+                    is_network = isinstance(path, str) and (
+                        path.startswith("http://")
+                        or path.startswith("https://")
+                        or path.startswith("ytdl://")
+                    )
+                    stream_ready = False
+                    if is_network:
+                        if not self._wait_mpv_leave_idle(timeout_sec=60.0):
+                            self.logger.warning(
+                                "MPV stayed idle after loadfile (stream failed or blocked)",
+                                extra={"media_key": media_key, "path_preview": str(path)[:120]},
+                            )
+                            self._register_media_failure(media_key, reason="stayed_idle")
+                            continue
+                        stream_ready = self._wait_mpv_stream_ready(str(path), timeout_sec=90.0)
+                        if not stream_ready:
+                            self.logger.warning(
+                                "MPV stream did not become ready (no time-pos/duration/path match)",
+                                extra={"media_key": media_key, "path_preview": str(path)[:120]},
+                            )
+                            self._register_media_failure(media_key, reason="not_ready")
+                            continue
+                        self._reset_media_backoff(media_key)
+                    self._wait_mpv_video_end(
+                        playlist_id,
+                        is_network=is_network,
+                        stream_ready=stream_ready,
+                        poll_sec=1.0,
+                    )
                 else:
                     # For still images, keep the frame open to avoid quick close/reopen churn.
                     # (Videos should not be kept open; they are EOF-driven here.)
@@ -292,6 +601,41 @@ class PlaylistManager:
                         },
                     )
                     self._sleep_until(switch_at, step=0.2)
+
+    def _register_media_failure(self, media_key: str, reason: str = "unknown") -> None:
+        """Exponential backoff for media that fails to start/open."""
+        if not media_key:
+            return
+        entry = self._media_backoff.get(media_key) or {"failures": 0, "next_try_monotonic": 0.0}
+        try:
+            failures = int(entry.get("failures") or 0) + 1
+        except Exception:
+            failures = 1
+        # 2s, 4s, 8s... cap at 120s, add small jitter.
+        delay = min(120.0, float(2 ** min(failures, 6)))
+        jitter = min(1.5, 0.1 * delay)
+        next_try = time.monotonic() + delay + (jitter * (0.5))
+        entry["failures"] = failures
+        entry["next_try_monotonic"] = next_try
+        self._media_backoff[media_key] = entry
+        self.logger.warning(
+            "Media backoff scheduled",
+            extra={
+                "media_key": media_key,
+                "reason": reason,
+                "failures": failures,
+                "delay_sec": round(delay, 2),
+            },
+        )
+
+    def _reset_media_backoff(self, media_key: str) -> None:
+        if not media_key:
+            return
+        if media_key in self._media_backoff:
+            try:
+                del self._media_backoff[media_key]
+            except Exception:
+                self._media_backoff.pop(media_key, None)
 
     def play(self, playlist_id: int) -> bool:
         """Play playlist with profile support"""
@@ -346,10 +690,13 @@ class PlaylistManager:
                 is_video = bool(resolved.get("is_video"))
                 items.append(
                     {
+                        "key": resolved.get("key") or getattr(pf, "file_name", None),
                         "path": resolved["path"],
                         "duration": int(getattr(pf, "duration", 0) or 0),
                         "is_video": is_video,
                         "muted": bool(getattr(pf, "muted", False)) if is_video else False,
+                        "http_headers": resolved.get("http_headers") or {},
+                        "page_url": resolved.get("page_url") or resolved.get("url") or None,
                     }
                 )
 
@@ -379,7 +726,83 @@ class PlaylistManager:
                 )
             except Exception:
                 pass
-            self._mpv_manager._send_command({"command": ["loadfile", first["path"], "replace"]}, timeout=10.0)
+            # Reset stateful properties before loading (same as in the background loop).
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "keep-open", "no"]},
+                    timeout=5.0,
+                )
+            except Exception:
+                pass
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "force-window", "yes"]},
+                    timeout=5.0,
+                )
+            except Exception:
+                pass
+
+            http_headers = first.get("http_headers") or {}
+            if http_headers and isinstance(http_headers, dict):
+                try:
+                    header_lines = []
+                    for k, v in http_headers.items():
+                        if k is None or v is None:
+                            continue
+                        ks = str(k).strip()
+                        vs = str(v).strip()
+                        if not ks or not vs:
+                            continue
+                        header_lines.append(f"{ks}: {vs}")
+                    if header_lines:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
+                            timeout=5.0,
+                        )
+                    try:
+                        ua = http_headers.get("User-Agent") or http_headers.get("user-agent")
+                        if ua:
+                            self._mpv_manager._send_command(
+                                {"command": ["set_property", "user-agent", str(ua)]},
+                                timeout=5.0,
+                            )
+                    except Exception:
+                        pass
+                    try:
+                        ref = http_headers.get("Referer") or http_headers.get("Referrer") or http_headers.get("referer")
+                        if ref:
+                            self._mpv_manager._send_command(
+                                {"command": ["set_property", "referrer", str(ref)]},
+                                timeout=5.0,
+                            )
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "http-header-fields", ""]},
+                        timeout=2.0,
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "user-agent", ""]},
+                        timeout=2.0,
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "referrer", ""]},
+                        timeout=2.0,
+                    )
+                except Exception:
+                    pass
+
+            self._mpv_manager._send_command({"command": ["loadfile", first["path"], "replace"]}, timeout=20.0)
             self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
 
             # Update playback status (single-row table; keep id=1 stable)
