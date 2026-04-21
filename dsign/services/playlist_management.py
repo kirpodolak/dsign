@@ -195,6 +195,31 @@ class PlaylistManager:
             return None
         return str(data)
 
+    def _sanitize_mpv_http_headers(self, headers: Any, *, page_url: Optional[str] = None) -> Dict[str, str]:
+        """
+        Last line of defense: only send a conservative header allowlist to mpv.
+        Prevents stale DB headers (Sec-Fetch-*, etc) from causing CDN 4xx.
+        """
+        if not isinstance(headers, dict):
+            headers = {}
+        allow = {"user-agent", "referer", "referrer", "cookie", "accept", "accept-language"}
+        out: Dict[str, str] = {}
+        for k, v in headers.items():
+            if k is None or v is None:
+                continue
+            ks = str(k).strip()
+            if not ks or ks.lower() not in allow:
+                continue
+            vs = str(v).strip()
+            if not vs:
+                continue
+            out[ks] = vs
+        if page_url:
+            has_ref = any(k.lower() in ("referer", "referrer") for k in out.keys())
+            if not has_ref:
+                out["Referer"] = str(page_url)
+        return out
+
     def _wait_mpv_leave_idle(self, timeout_sec: float = 45.0) -> bool:
         """
         After loadfile, mpv often reports idle-active=true until the demuxer opens.
@@ -473,6 +498,9 @@ class PlaylistManager:
                         except Exception:
                             pass
 
+                        # Final sanitize to avoid CDN 400 on unexpected headers.
+                        http_headers = self._sanitize_mpv_http_headers(http_headers, page_url=item.get("page_url"))
+
                         header_lines = []
                         for k, v in http_headers.items():
                             if k is None or v is None:
@@ -747,6 +775,7 @@ class PlaylistManager:
             http_headers = first.get("http_headers") or {}
             if http_headers and isinstance(http_headers, dict):
                 try:
+                    http_headers = self._sanitize_mpv_http_headers(http_headers, page_url=first.get("page_url"))
                     header_lines = []
                     for k, v in http_headers.items():
                         if k is None or v is None:

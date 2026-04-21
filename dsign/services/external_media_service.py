@@ -406,12 +406,20 @@ class ExternalMediaService:
         Refreshes resolved URL + headers periodically.
         """
         url = self.ensure_fresh_resolved_url(row, max_age_sec=max_age_sec)
-        headers = {}
+        headers: Dict[str, Any] = {}
         try:
             headers = dict(row.http_headers or {})
         except Exception:
             headers = {}
-        return {"url": url, "http_headers": headers}
+
+        # IMPORTANT: sanitize again at playback time.
+        # Old DB rows may contain browser-ish headers (Sec-Fetch-*, etc) that can trigger 4xx from CDNs.
+        safe_headers = self._sanitize_http_headers(
+            headers,
+            page_url=str(getattr(row, "url", "") or ""),
+            provider=str(getattr(row, "provider", "") or ""),
+        )
+        return {"url": url, "http_headers": safe_headers or {}}
 
     def get_cached_thumbnail_path(self, key: str) -> Optional[Path]:
         media_id = self._parse_ext_key(key)
