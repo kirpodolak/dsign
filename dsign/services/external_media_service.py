@@ -2,7 +2,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Iterable
 
 import requests
 
@@ -88,6 +88,118 @@ class ExternalMediaService:
     # -----------------------
     # Metadata resolution
     # -----------------------
+    def _sanitize_http_headers(self, headers: Optional[Dict[str, Any]], *, page_url: str, provider: str) -> Optional[Dict[str, str]]:
+        """
+        Keep only a conservative allowlist of headers safe/needed for mpv HTTP.
+        Some CDNs reject browser-ish headers (Sec-Fetch-*, etc) with 4xx.
+        """
+        if not isinstance(headers, dict):
+            headers = {}
+
+        allow = {"user-agent", "referer", "referrer", "cookie", "accept", "accept-language"}
+        out: Dict[str, str] = {}
+        for k, v in headers.items():
+            if k is None or v is None:
+                continue
+            ks = str(k).strip()
+            if not ks:
+                continue
+            if ks.lower() not in allow:
+                continue
+            vs = str(v).strip()
+            if not vs:
+                continue
+            out[ks] = vs
+
+        # Prefer canonical page URL as Referer for providers that require it.
+        if provider in ("vkvideo", "rutube") and page_url:
+            has_ref = any(k.lower() in ("referer", "referrer") for k in out.keys())
+            if not has_ref:
+                out["Referer"] = page_url
+
+        return out or None
+
+    def _iter_formats(self, info: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+        fmts = info.get("formats")
+        if isinstance(fmts, list):
+            for f in fmts:
+                if isinstance(f, dict):
+                    yield f
+
+    def _pick_best_playable_url(self, info: Dict[str, Any]) -> Optional[str]:
+        """
+        Prefer formats that are actual video streams (HLS/DASH/mp4) and avoid
+        preview/thumbnail/storyboard "video" that mpv treats like a still image.
+        """
+        best_url = None
+        best_score = None
+
+        def score(fmt: Dict[str, Any]) -> Optional[float]:
+            url = fmt.get("url")
+            if not isinstance(url, str) or not url:
+                return None
+
+            vcodec = (fmt.get("vcodec") or "").strip()
+            acodec = (fmt.get("acodec") or "").strip()
+            ext = (fmt.get("ext") or "").strip().lower()
+            proto = (fmt.get("protocol") or "").strip().lower()
+            format_id = (fmt.get("format_id") or "").strip().lower()
+            note = (fmt.get("format_note") or "").strip().lower()
+
+            # Must have video.
+            if not vcodec or vcodec == "none":
+                return None
+
+            # Reject common non-playback "formats".
+            bad_markers = ("storyboard", "thumbnail", "preview", "sprite", "images")
+            if any(m in format_id for m in bad_markers) or any(m in note for m in bad_markers):
+                return None
+
+            # Avoid mjpeg "video" (often a single JPEG frame stream).
+            if vcodec.lower() in ("mjpeg", "png", "gif"):
+                return None
+
+            # Prefer stream/container types mpv handles well.
+            stream_bonus = 0.0
+            if "m3u8" in proto or ext in ("m3u8", "mp4", "mkv", "webm", "ts"):
+                stream_bonus += 20.0
+            if "dash" in proto:
+                stream_bonus += 5.0
+
+            # Prefer formats that include audio, but allow video-only.
+            av_bonus = 10.0 if (acodec and acodec != "none") else 0.0
+
+            # Resolution/bitrate signal.
+            h = fmt.get("height")
+            tbr = fmt.get("tbr")
+            try:
+                h_val = float(h) if isinstance(h, (int, float)) else 0.0
+            except Exception:
+                h_val = 0.0
+            try:
+                tbr_val = float(tbr) if isinstance(tbr, (int, float)) else 0.0
+            except Exception:
+                tbr_val = 0.0
+
+            return stream_bonus + av_bonus + (h_val / 100.0) + (tbr_val / 1000.0)
+
+        for f in self._iter_formats(info):
+            s = score(f)
+            if s is None:
+                continue
+            url = f.get("url")
+            if best_score is None or s > best_score:
+                best_score = s
+                best_url = url
+
+        # Fallback to top-level url if we didn't find a better format.
+        if best_url:
+            return best_url
+        u = info.get("url")
+        if isinstance(u, str) and u:
+            return u
+        return None
+
     def _yt_dlp_extract(self, url: str) -> Dict[str, Any]:
         """
         Use yt-dlp python package to extract metadata and a playable URL.
@@ -132,35 +244,15 @@ class ExternalMediaService:
             info = self._yt_dlp_extract(url)
             title = info.get("title") or info.get("fulltitle")
             thumb = info.get("thumbnail")
-            # Prefer a direct URL when available.
-            resolved = info.get("url")
-            # Some extractors populate `formats`.
-            if not resolved and isinstance(info.get("formats"), list) and info["formats"]:
-                best = None
-                for f in info["formats"]:
-                    if not isinstance(f, dict):
-                        continue
-                    # Prefer combined A/V if possible, otherwise take best video.
-                    if f.get("vcodec") != "none" and f.get("acodec") != "none":
-                        best = f
-                        break
-                    if best is None and f.get("vcodec") != "none":
-                        best = f
-                if best:
-                    resolved = best.get("url")
+            resolved = self._pick_best_playable_url(info)
 
             # Some providers require HTTP headers for playback (User-Agent/Referer/Cookie).
             # yt-dlp exposes these in `http_headers`.
-            if isinstance(info.get("http_headers"), dict):
-                http_headers = {str(k): str(v) for k, v in info["http_headers"].items() if v is not None}
-            # Ensure we always have a referer for providers that commonly require it.
-            # Direct CDN URLs (okcdn/river-*) often reject requests without a valid referer.
-            if http_headers is None:
-                http_headers = {}
-            if provider in ("vkvideo", "rutube"):
-                has_ref = any(k.lower() in ("referer", "referrer") for k in http_headers.keys())
-                if not has_ref and url:
-                    http_headers["Referer"] = url
+            http_headers = self._sanitize_http_headers(
+                info.get("http_headers") if isinstance(info, dict) else None,
+                page_url=url,
+                provider=provider,
+            )
         except Exception as e:
             # Graceful fallback: still store the page URL and show as external media without thumb.
             self.logger.warning(
@@ -308,18 +400,44 @@ class ExternalMediaService:
 
         return row.resolved_url or row.url
 
-    def ensure_fresh_playback(self, row: "ExternalMedia", max_age_sec: int = 3600) -> Dict[str, Any]:
+    def ensure_fresh_playback(
+        self,
+        row: "ExternalMedia",
+        max_age_sec: int = 3600,
+        *,
+        # Back-compat: older callers used allow_refresh=False to avoid blocking UI.
+        # Prefer allow_network going forward.
+        allow_refresh: Optional[bool] = None,
+        allow_network: bool = True,
+    ) -> Dict[str, Any]:
         """
         Return playback details for MPV: {"url": ..., "http_headers": {...}}.
         Refreshes resolved URL + headers periodically.
         """
-        url = self.ensure_fresh_resolved_url(row, max_age_sec=max_age_sec)
-        headers = {}
+        # Back-compat shim.
+        if allow_refresh is not None:
+            allow_network = bool(allow_refresh)
+
+        # IMPORTANT: on user-initiated "Play", we must not block the request on yt-dlp/network.
+        # If allow_network=False, we will use cached resolved_url if present and fall back to page URL.
+        if allow_network:
+            url = self.ensure_fresh_resolved_url(row, max_age_sec=max_age_sec)
+        else:
+            url = (getattr(row, "resolved_url", None) or getattr(row, "url", None) or "")
+        headers: Dict[str, Any] = {}
         try:
             headers = dict(row.http_headers or {})
         except Exception:
             headers = {}
-        return {"url": url, "http_headers": headers}
+
+        # IMPORTANT: sanitize again at playback time.
+        # Old DB rows may contain browser-ish headers (Sec-Fetch-*, etc) that can trigger 4xx from CDNs.
+        safe_headers = self._sanitize_http_headers(
+            headers,
+            page_url=str(getattr(row, "url", "") or ""),
+            provider=str(getattr(row, "provider", "") or ""),
+        )
+        return {"url": url, "http_headers": safe_headers or {}}
 
     def get_cached_thumbnail_path(self, key: str) -> Optional[Path]:
         media_id = self._parse_ext_key(key)
