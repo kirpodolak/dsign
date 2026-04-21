@@ -28,6 +28,14 @@ SOCKET_TOKEN_EXPIRATION = 5  # 5 minutes in minutes
 rate_limit_data = {}
 rate_limit_lock = Lock()
 
+# In-memory socket token cache to avoid session cookie bloat.
+# Keyed by (user_id, ip, user_agent). Values: {"token": str, "exp_ts": float}.
+_socket_token_cache = {}
+_socket_token_cache_lock = Lock()
+
+def _socket_cache_key(user_id: int, ip: str, ua: str) -> str:
+    return f"{int(user_id)}|{ip}|{ua}"
+
 def _is_safe_next_url(target: str) -> bool:
     if not target:
         return False
@@ -405,6 +413,43 @@ def get_socket_token():
                 'login_url': url_for('auth.login')
             }), 401
 
+        # Best-effort server-side cache to avoid token-generation storms on reconnects/navigation.
+        # NOTE: Flask `session` is dict-like (SecureCookieSession), but not necessarily a `dict`.
+        # Token is short-lived; re-issue only when close to expiry or when client fingerprint changes.
+        try:
+            cached = session.get('socket_token_cache')
+        except Exception:
+            cached = None
+
+        ip_now = request.remote_addr or 'unknown'
+        ua_now = (request.user_agent.string or '')[:200]
+        now_ts = datetime.utcnow().timestamp()
+        if isinstance(cached, dict):
+            try:
+                token_cached = cached.get('token')
+                exp_ts = float(cached.get('exp_ts') or 0)
+                cached_ip = cached.get('ip') or ''
+                cached_ua = cached.get('ua') or ''
+                # Refresh 30s before expiry
+                if (
+                    isinstance(token_cached, str)
+                    and token_cached
+                    and exp_ts > (now_ts + 30)
+                    and cached_ip == ip_now
+                    and cached_ua == ua_now
+                ):
+                    return jsonify({
+                        'success': True,
+                        'token': token_cached,
+                        'expires_in': int(exp_ts - now_ts),
+                        'expires_at': datetime.utcfromtimestamp(exp_ts).isoformat(),
+                        'socket_url': current_app.config.get('SOCKET_SERVER_URL', '/socket.io'),
+                        'cached': True
+                    })
+            except Exception:
+                # Ignore cache errors and continue to generate a new token.
+                pass
+
         # Generate token with additional security claims
         payload = {
             'sub': str(current_user.id),
@@ -426,18 +471,39 @@ def get_socket_token():
             current_app.config['SECRET_KEY'],
             algorithm='HS256'
         )
+
+        # pyjwt may return bytes depending on version; Flask session must store JSON-serializable types.
+        if isinstance(token, (bytes, bytearray)):
+            token = token.decode('utf-8', errors='ignore')
         
         logger.info("Socket token generated", extra={
             'user_id': current_user.id,
             'ip': request.remote_addr
         })
+
+        # Store in session cache for this browser session.
+        try:
+            exp_ts = payload['exp'].timestamp()
+            session['socket_token_cache'] = {
+                'token': token,
+                'exp_ts': exp_ts,
+                'ip': ip_now,
+                'ua': ua_now,
+            }
+            try:
+                session.modified = True
+            except Exception:
+                pass
+        except Exception:
+            pass
         
         return jsonify({
             'success': True,
             'token': token,
             'expires_in': SOCKET_TOKEN_EXPIRATION * 60,
             'expires_at': payload['exp'].isoformat(),
-            'socket_url': current_app.config.get('SOCKET_SERVER_URL', '/socket.io')
+            'socket_url': current_app.config.get('SOCKET_SERVER_URL', '/socket.io'),
+            'cached': False,
         })
     except Exception as e:
         logger.error("Socket token generation failed", extra={
