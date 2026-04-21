@@ -515,24 +515,7 @@
     text-align: center;
 }
 
-.btn.danger {
-    background-color: #ef5350;
-    color: white;
-}
-
-.btn.danger:hover {
-    background-color: #d32f2f;
-    transform: translateY(-2px);
-}
-
-.btn.secondary {
-    background-color: #e0e0e0;
-    color: #424242;
-}
-
-.btn.secondary:hover {
-    background-color: #bdbdbd;
-}
+/* Button colors come from base.css to keep pages consistent. */
 
 /* Анимации */
 @keyframes fadeIn {

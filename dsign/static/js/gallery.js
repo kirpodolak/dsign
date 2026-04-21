@@ -301,15 +301,21 @@ class MediaGallery {
           img.loading = 'lazy';
           img.decoding = 'async';
           img.onerror = () => {
+            // Ensure we don't keep a “loading”/retrying state forever.
+            // Degrade to a static placeholder + a non-spinning icon.
+            img.onerror = null;
             img.src = PLACEHOLDER_IMAGE;
             img.style.opacity = '0.7';
             previewContainer.classList.add('file-icon');
-            try {
-              const icon = document.createElement('i');
-              icon.className = 'fas fa-file-video';
-              previewContainer.appendChild(icon);
-            } catch {
-              // ignore
+            // Avoid appending multiple icons if the error fires repeatedly.
+            if (!previewContainer.querySelector('i')) {
+              try {
+                const icon = document.createElement('i');
+                icon.className = 'fas fa-file-video';
+                previewContainer.appendChild(icon);
+              } catch {
+                // ignore
+              }
             }
           };
           previewContainer.appendChild(img);
