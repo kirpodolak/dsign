@@ -44,8 +44,8 @@ const CONFIG = {
         refreshPreviewBtn: '#refresh-mpv-preview',
         mpvLastUpdate: '#mpv-last-update'
     },
-    defaultLogo: '/static/images/default-logo.jpg',
-    defaultPreview: '/static/images/default-preview.jpg',
+    defaultLogo: '/static/images/placeholder.jpg',
+    defaultPreview: '/static/images/placeholder.jpg',
     // Polling cadence. Even without sockets, keep idle/stopped light to avoid server/log spam.
     refreshIntervalActiveMs: 2000,
     refreshIntervalIdleMs: 30000,
