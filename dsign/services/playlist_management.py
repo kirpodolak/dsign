@@ -193,6 +193,82 @@ class PlaylistManager:
             return None
         return str(data)
 
+    def _normalize_mpv_http_headers(
+        self,
+        headers: Any,
+        *,
+        page_url: Optional[str] = None,
+        stream_url: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """
+        Normalize/sanitize HTTP headers before passing to MPV.
+
+        Goals:
+        - Avoid duplicate headers like `referer` + `Referer` (some CDNs return 400).
+        - Keep a small allowlist (CDNs may reject browser-only headers like Sec-Fetch-*).
+        - Ensure a single, correct Referer/Origin for VK/Rutube.
+        """
+        if not isinstance(headers, dict):
+            headers = {}
+
+        allow = {
+            "user-agent",
+            "referer",
+            "referrer",
+            "origin",
+            "cookie",
+            "accept",
+            "accept-language",
+        }
+
+        # Canonicalize keys (Title-Case for readability; MPV doesn't care).
+        out: Dict[str, str] = {}
+        for k, v in headers.items():
+            if k is None or v is None:
+                continue
+            ks = str(k).strip()
+            vs = str(v).strip()
+            if not ks or not vs:
+                continue
+            if ks.lower() not in allow:
+                continue
+            canon = "-".join([p.capitalize() for p in ks.lower().split("-")])
+            out[canon] = vs
+
+        # Ensure a single Referer (prefer page_url).
+        ref = page_url or out.get("Referer") or out.get("Referrer") or out.get("referer")
+        if ref:
+            out.pop("Referrer", None)
+            out["Referer"] = str(ref)
+
+        # Derive Origin from referer if not provided.
+        if "Origin" not in out:
+            base = out.get("Referer") or page_url
+            if base and isinstance(base, str) and base.startswith(("http://", "https://")):
+                try:
+                    from urllib.parse import urlparse
+
+                    p = urlparse(base)
+                    if p.scheme and p.netloc:
+                        out["Origin"] = f"{p.scheme}://{p.netloc}"
+                except Exception:
+                    pass
+
+        # Set Accept defaults (some CDNs are picky; keep it minimal).
+        out.setdefault("Accept", "*/*")
+
+        # Ensure we always have a UA (MPV default can be too generic).
+        out.setdefault(
+            "User-Agent",
+            "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+
+        # Never send an empty Cookie header.
+        if out.get("Cookie", "").strip() == "":
+            out.pop("Cookie", None)
+
+        return out
+
     def _wait_mpv_leave_idle(self, timeout_sec: float = 45.0) -> bool:
         """
         After loadfile, mpv often reports idle-active=true until the demuxer opens.
@@ -414,6 +490,11 @@ class PlaylistManager:
                 # MPV expects a single string of "Key: Value\r\nKey2: Value2" for http-header-fields.
                 if http_headers and isinstance(http_headers, dict):
                     try:
+                        http_headers = self._normalize_mpv_http_headers(
+                            http_headers,
+                            page_url=item.get("page_url"),
+                            stream_url=path,
+                        )
                         header_lines = []
                         for k, v in http_headers.items():
                             if k is None or v is None:
@@ -428,6 +509,21 @@ class PlaylistManager:
                                 {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
                                 timeout=5.0,
                             )
+                        # Mirror key headers into dedicated mpv properties.
+                        try:
+                            self._mpv_manager._send_command(
+                                {"command": ["set_property", "user-agent", http_headers.get("User-Agent", "")]},
+                                timeout=5.0,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            self._mpv_manager._send_command(
+                                {"command": ["set_property", "referrer", http_headers.get("Referer", "")]},
+                                timeout=5.0,
+                            )
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                 load_resp = self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
