@@ -153,6 +153,14 @@ class ExternalMediaService:
             # yt-dlp exposes these in `http_headers`.
             if isinstance(info.get("http_headers"), dict):
                 http_headers = {str(k): str(v) for k, v in info["http_headers"].items() if v is not None}
+            # Ensure we always have a referer for providers that commonly require it.
+            # Direct CDN URLs (okcdn/river-*) often reject requests without a valid referer.
+            if http_headers is None:
+                http_headers = {}
+            if provider in ("vkvideo", "rutube"):
+                has_ref = any(k.lower() in ("referer", "referrer") for k in http_headers.keys())
+                if not has_ref and url:
+                    http_headers["Referer"] = url
         except Exception as e:
             # Graceful fallback: still store the page URL and show as external media without thumb.
             self.logger.warning(
@@ -166,7 +174,7 @@ class ExternalMediaService:
             page_url=url,
             thumbnail_url=thumb,
             resolved_url=resolved,
-            http_headers=http_headers,
+            http_headers=http_headers or None,
         )
 
     # -----------------------

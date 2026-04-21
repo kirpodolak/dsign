@@ -462,6 +462,15 @@ class PlaylistManager:
                 # MPV expects a single string of "Key: Value\r\nKey2: Value2" for http-header-fields.
                 if http_headers and isinstance(http_headers, dict):
                     try:
+                        # Always set a sane Referer for external streams when available.
+                        # Many CDNs (VK okcdn, Rutube) reject direct segment URLs without it.
+                        try:
+                            if isinstance(item.get("page_url"), str) and item.get("page_url"):
+                                http_headers.setdefault("Referer", item.get("page_url"))
+                                http_headers.setdefault("referer", item.get("page_url"))
+                        except Exception:
+                            pass
+
                         header_lines = []
                         for k, v in http_headers.items():
                             if k is None or v is None:
@@ -687,6 +696,7 @@ class PlaylistManager:
                         "is_video": is_video,
                         "muted": bool(getattr(pf, "muted", False)) if is_video else False,
                         "http_headers": resolved.get("http_headers") or {},
+                        "page_url": resolved.get("page_url") or resolved.get("url") or None,
                     }
                 )
 
