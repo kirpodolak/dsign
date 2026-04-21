@@ -43,7 +43,38 @@ class ExternalMediaService:
         return "unknown"
 
     def normalize_url(self, url: str) -> str:
-        return (url or "").strip()
+        raw = (url or "").strip()
+        if not raw:
+            return ""
+
+        # Accept "Code for embedding" (<iframe ... src="...">) pasted from VK/Rutube UI.
+        m = re.search(r'<iframe[^>]+src=["\']([^"\']+)["\']', raw, flags=re.IGNORECASE)
+        if m:
+            raw = (m.group(1) or "").strip()
+
+        # Normalize Rutube embed -> canonical video page URL.
+        # Example: https://rutube.ru/play/embed/<id>/  -> https://rutube.ru/video/<id>/
+        m = re.search(r"rutube\.ru/(?:play/)?embed/([0-9a-f]{16,})", raw, flags=re.IGNORECASE)
+        if m:
+            vid = m.group(1)
+            return f"https://rutube.ru/video/{vid}/"
+
+        # Normalize VK embed -> canonical page URL (best-effort).
+        # Example: https://vkvideo.ru/video_ext.php?oid=-..&id=.. -> https://vkvideo.ru/video<oid>_<id>
+        m = re.search(r"vkvideo\.ru/video_ext\.php\?([^#]+)", raw, flags=re.IGNORECASE)
+        if m:
+            qs = m.group(1)
+            oid = None
+            vid = None
+            for part in qs.split("&"):
+                if part.startswith("oid="):
+                    oid = part.split("=", 1)[1]
+                elif part.startswith("id="):
+                    vid = part.split("=", 1)[1]
+            if oid and vid:
+                return f"https://vkvideo.ru/video{oid}_{vid}"
+
+        return raw
 
     def _parse_ext_key(self, key: str) -> Optional[int]:
         m = re.match(r"^ext-(\d+)$", (key or "").strip())
@@ -122,6 +153,14 @@ class ExternalMediaService:
             # yt-dlp exposes these in `http_headers`.
             if isinstance(info.get("http_headers"), dict):
                 http_headers = {str(k): str(v) for k, v in info["http_headers"].items() if v is not None}
+            # Ensure we always have a referer for providers that commonly require it.
+            # Direct CDN URLs (okcdn/river-*) often reject requests without a valid referer.
+            if http_headers is None:
+                http_headers = {}
+            if provider in ("vkvideo", "rutube"):
+                has_ref = any(k.lower() in ("referer", "referrer") for k in http_headers.keys())
+                if not has_ref and url:
+                    http_headers["Referer"] = url
         except Exception as e:
             # Graceful fallback: still store the page URL and show as external media without thumb.
             self.logger.warning(
@@ -135,7 +174,7 @@ class ExternalMediaService:
             page_url=url,
             thumbnail_url=thumb,
             resolved_url=resolved,
-            http_headers=http_headers,
+            http_headers=http_headers or None,
         )
 
     # -----------------------
