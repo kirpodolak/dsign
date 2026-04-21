@@ -405,12 +405,19 @@ class ExternalMediaService:
         row: "ExternalMedia",
         max_age_sec: int = 3600,
         *,
+        # Back-compat: older callers used allow_refresh=False to avoid blocking UI.
+        # Prefer allow_network going forward.
+        allow_refresh: Optional[bool] = None,
         allow_network: bool = True,
     ) -> Dict[str, Any]:
         """
         Return playback details for MPV: {"url": ..., "http_headers": {...}}.
         Refreshes resolved URL + headers periodically.
         """
+        # Back-compat shim.
+        if allow_refresh is not None:
+            allow_network = bool(allow_refresh)
+
         # IMPORTANT: on user-initiated "Play", we must not block the request on yt-dlp/network.
         # If allow_network=False, we will use cached resolved_url if present and fall back to page URL.
         if allow_network:
