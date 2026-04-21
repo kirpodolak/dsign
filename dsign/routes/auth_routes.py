@@ -463,6 +463,10 @@ def get_socket_token():
             current_app.config['SECRET_KEY'],
             algorithm='HS256'
         )
+
+        # pyjwt may return bytes depending on version; Flask session must store JSON-serializable types.
+        if isinstance(token, (bytes, bytearray)):
+            token = token.decode('utf-8', errors='ignore')
         
         logger.info("Socket token generated", extra={
             'user_id': current_user.id,
@@ -478,6 +482,10 @@ def get_socket_token():
                 'ip': ip_now,
                 'ua': ua_now,
             }
+            try:
+                session.modified = True
+            except Exception:
+                pass
         except Exception:
             pass
         
