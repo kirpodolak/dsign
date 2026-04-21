@@ -270,12 +270,9 @@ class PlaylistManager:
         # Never send an empty Cookie header.
         if out.get("Cookie", "").strip() == "":
             out.pop("Cookie", None)
-        # Oversized cookies from yt-dlp often cause 4xx on VK/Rutube CDNs.
-        prov = (provider or "").strip().lower()
-        if prov in ("vkvideo", "rutube"):
-            ck = out.get("Cookie")
-            if ck and len(ck) > 512:
-                out.pop("Cookie", None)
+        ck = out.get("Cookie")
+        if ck and len(ck) > 32768:
+            out.pop("Cookie", None)
 
         return out
 
@@ -357,16 +354,8 @@ class PlaylistManager:
                     {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
                     timeout=5.0,
                 )
-            ua = normalized.get("User-Agent", "")
-            ref = normalized.get("Referer", "")
-            self._mpv_manager._send_command(
-                {"command": ["set_property", "user-agent", ua]},
-                timeout=5.0,
-            )
-            self._mpv_manager._send_command(
-                {"command": ["set_property", "referrer", ref]},
-                timeout=5.0,
-            )
+            # Do not also set `user-agent` / `referrer` MPV properties: they duplicate the same
+            # headers from `http-header-fields` and some CDNs respond with HTTP 400.
         except Exception:
             pass
         return normalized
@@ -519,7 +508,14 @@ class PlaylistManager:
         self._stop_event.clear()
         self._active_playlist_id = None
 
-    def _manual_slideshow_loop(self, playlist_id: int, items: list[dict], start_index: int = 0):
+    def _manual_slideshow_loop(
+        self,
+        playlist_id: int,
+        items: list[dict],
+        start_index: int = 0,
+        *,
+        first_item_preloaded: bool = False,
+    ):
         """
         Manual playback loop that enforces per-item durations for images and plays videos to EOF.
         Runs in a background thread; advances images by sleeping for their duration and videos by
@@ -587,17 +583,23 @@ class PlaylistManager:
                     self._stop_event.wait(timeout=min(30.0, wait_sec))
                     if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                         break
-                # External streams: Referer/UA must be set before loadfile (and cleared between items).
-                self._apply_mpv_http_headers(item, stream_url=str(path))
-                load_resp = self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
-                self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
-                if not load_resp or load_resp.get("error") != "success":
-                    self.logger.warning(
-                        "MPV loadfile failed",
-                        extra={"path": path, "mpv_response": load_resp},
+                skip_load = bool(
+                    first_item_preloaded and start_index == 0 and offset == 0
+                )
+                if not skip_load:
+                    # External streams: Referer/UA must be set before loadfile (and cleared between items).
+                    self._apply_mpv_http_headers(item, stream_url=str(path))
+                    load_resp = self._mpv_manager._send_command(
+                        {"command": ["loadfile", path, "replace"]}, timeout=20.0
                     )
-                    # Skip to next item; avoid getting stuck on a bad file.
-                    continue
+                    self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
+                    if not load_resp or load_resp.get("error") != "success":
+                        self.logger.warning(
+                            "MPV loadfile failed",
+                            extra={"path": path, "mpv_response": load_resp},
+                        )
+                        # Skip to next item; avoid getting stuck on a bad file.
+                        continue
 
                 if is_video:
                     # Network streams: mpv stays idle-active until open; do not treat idle as EOF.
@@ -799,10 +801,13 @@ class PlaylistManager:
             self.db_session.commit()
 
             # Start background loop to enforce durations and EOF waits.
-            # IMPORTANT: start from the *next* item, because we already loaded the first one above.
+            # Multi-item: start from index 1 because we already loadfile'd items[0] above.
+            # Single-item: start at 0 and skip the redundant loadfile in the loop (same URL/headers).
+            loop_start = 1 if len(items) > 1 else 0
             self._play_thread = Thread(
                 target=self._manual_slideshow_loop,
-                args=(playlist_id, items, 1),
+                args=(playlist_id, items, loop_start),
+                kwargs={"first_item_preloaded": len(items) == 1},
                 daemon=True,
             )
             self._play_thread.start()

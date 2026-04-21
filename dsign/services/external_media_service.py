@@ -85,12 +85,11 @@ class ExternalMediaService:
         # Provide a safe default accept.
         out_lc.setdefault("accept", "*/*")
 
-        # For these providers, cookie headers from yt-dlp are often stale and can trigger 4xx.
-        # Keep cookies only if explicitly provided and short.
-        if provider in ("vkvideo", "rutube"):
-            ck = out_lc.get("cookie")
-            if ck and len(ck) > 512:
-                out_lc.pop("cookie", None)
+        # Drop only absurdly large cookie blobs (yt-dlp edge cases). VK/Rutube often need the
+        # full cookie set for CDN auth; rely on short URL refresh TTL instead of truncating.
+        ck = out_lc.get("cookie")
+        if ck and len(ck) > 32768:
+            out_lc.pop("cookie", None)
 
         # Convert to conventional header casing for mpv `http-header-fields`.
         canonical = {
@@ -363,7 +362,13 @@ class ExternalMediaService:
         Return a URL that MPV can play without ytdl. Refresh periodically.
         """
         now = int(time.time())
-        if row.resolved_url and row.resolved_at and (now - int(row.resolved_at)) < max_age_sec:
+        prov = str(getattr(row, "provider", "") or "").strip().lower()
+        # VK/Rutube CDN URLs are signed (srcIp, expires, sig). Caching them for an hour reuses
+        # URLs bound to yt-dlp's egress IP and breaks playback from the Pi (HTTP 400).
+        effective_max = max_age_sec
+        if prov in ("vkvideo", "rutube"):
+            effective_max = min(int(max_age_sec), 90)
+        if row.resolved_url and row.resolved_at and (now - int(row.resolved_at)) < effective_max:
             return row.resolved_url
 
         info = self.resolve_info(row.url)
