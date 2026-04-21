@@ -22,7 +22,14 @@ def init_extensions(app) -> Dict[str, Any]:
     try:
         # SocketIO/EngineIO can be very noisy; keep it quiet by default.
         logger = logging.getLogger("dsign.socketio")
-        logger.setLevel(logging.DEBUG if app.config.get("DEBUG", False) else logging.WARNING)
+        engineio_debug = bool(app.config.get("SOCKETIO_ENGINEIO_DEBUG", False))
+        # Engine.IO close/transport diagnostics are logged at INFO/DEBUG.
+        # When explicitly enabled, raise log level so journald actually captures them.
+        logger.setLevel(
+            logging.DEBUG
+            if app.config.get("DEBUG", False) or engineio_debug
+            else logging.WARNING
+        )
 
         # 1. Инициализация Flask-расширений
         db.init_app(app)
@@ -35,8 +42,9 @@ def init_extensions(app) -> Dict[str, Any]:
             async_mode=app.config.get('SOCKETIO_ASYNC_MODE', 'eventlet'),
             ping_interval=app.config.get('SOCKETIO_PING_INTERVAL', 25),
             ping_timeout=app.config.get('SOCKETIO_PING_TIMEOUT', 60),
-            logger=logger,
-            engineio_logger=logger if app.config.get('SOCKETIO_ENGINEIO_DEBUG', False) else False
+            # Only enable Socket.IO internal logs when explicitly debugging.
+            logger=logger if engineio_debug else False,
+            engineio_logger=logger if engineio_debug else False
         )
         
         # 2. Настройка аутентификации
