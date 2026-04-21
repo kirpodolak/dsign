@@ -413,42 +413,35 @@ def get_socket_token():
                 'login_url': url_for('auth.login')
             }), 401
 
-        # Best-effort server-side cache to avoid token-generation storms on reconnects/navigation.
-        # NOTE: Flask `session` is dict-like (SecureCookieSession), but not necessarily a `dict`.
-        # Token is short-lived; re-issue only when close to expiry or when client fingerprint changes.
-        try:
-            cached = session.get('socket_token_cache')
-        except Exception:
-            cached = None
-
+        # Server-side in-memory cache to avoid token-generation storms on reconnects/navigation.
+        # Do NOT use Flask session/cookies for this cache (cookie size / serialization).
         ip_now = request.remote_addr or 'unknown'
         ua_now = (request.user_agent.string or '')[:200]
         now_ts = datetime.utcnow().timestamp()
-        if isinstance(cached, dict):
-            try:
-                token_cached = cached.get('token')
-                exp_ts = float(cached.get('exp_ts') or 0)
-                cached_ip = cached.get('ip') or ''
-                cached_ua = cached.get('ua') or ''
-                # Refresh 30s before expiry
-                if (
-                    isinstance(token_cached, str)
-                    and token_cached
-                    and exp_ts > (now_ts + 30)
-                    and cached_ip == ip_now
-                    and cached_ua == ua_now
-                ):
-                    return jsonify({
-                        'success': True,
-                        'token': token_cached,
-                        'expires_in': int(exp_ts - now_ts),
-                        'expires_at': datetime.utcfromtimestamp(exp_ts).isoformat(),
-                        'socket_url': current_app.config.get('SOCKET_SERVER_URL', '/socket.io'),
-                        'cached': True
-                    })
-            except Exception:
-                # Ignore cache errors and continue to generate a new token.
-                pass
+        cache_key = _socket_cache_key(current_user.id, ip_now, ua_now)
+        with _socket_token_cache_lock:
+            cached = _socket_token_cache.get(cache_key)
+            if isinstance(cached, dict):
+                try:
+                    token_cached = cached.get('token')
+                    exp_ts = float(cached.get('exp_ts') or 0)
+                    # Refresh 30s before expiry
+                    if (
+                        isinstance(token_cached, str)
+                        and token_cached
+                        and exp_ts > (now_ts + 30)
+                    ):
+                        return jsonify({
+                            'success': True,
+                            'token': token_cached,
+                            'expires_in': int(exp_ts - now_ts),
+                            'expires_at': datetime.utcfromtimestamp(exp_ts).isoformat(),
+                            'socket_url': current_app.config.get('SOCKET_SERVER_URL', '/socket.io'),
+                            'cached': True
+                        })
+                except Exception:
+                    # Ignore cache errors and continue to generate a new token.
+                    pass
 
         # Generate token with additional security claims
         payload = {
@@ -481,20 +474,24 @@ def get_socket_token():
             'ip': request.remote_addr
         })
 
-        # Store in session cache for this browser session.
+        # Store in in-memory cache for this server process.
         try:
             exp_ts = payload['exp'].timestamp()
-            session['socket_token_cache'] = {
-                'token': token,
-                'exp_ts': exp_ts,
-                'ip': ip_now,
-                'ua': ua_now,
-            }
-            try:
-                session.modified = True
-            except Exception:
-                pass
+            with _socket_token_cache_lock:
+                _socket_token_cache[cache_key] = {
+                    'token': token,
+                    'exp_ts': exp_ts,
+                }
+                # Best-effort cleanup of expired entries (bounded work).
+                if len(_socket_token_cache) > 1024:
+                    for k, v in list(_socket_token_cache.items())[:256]:
+                        try:
+                            if float(v.get('exp_ts') or 0) < (now_ts - 5):
+                                _socket_token_cache.pop(k, None)
+                        except Exception:
+                            _socket_token_cache.pop(k, None)
         except Exception:
+            # Cache is a best-effort optimization.
             pass
         
         return jsonify({
