@@ -53,12 +53,14 @@ class PlaylistManager:
             row = svc.get_by_key(str(file_name))
             if not row:
                 return None
-            url = svc.ensure_fresh_resolved_url(row)
+            playback = svc.ensure_fresh_playback(row)
+            url = playback.get("url") or svc.ensure_fresh_resolved_url(row)
             return {
                 "key": str(file_name),
                 "path": url,
                 "is_video": True,
-                "http_headers": (getattr(row, "http_headers", None) or {}),
+                "http_headers": (playback.get("http_headers") or {}),
+                "page_url": getattr(row, "url", None),
             }
 
         # Local file
