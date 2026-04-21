@@ -216,18 +216,27 @@ class PlaylistManager:
     ) -> bool:
         """
         Some mpv builds never expose `eof-reached` for network streams (always 'property unavailable').
-        Detect that demuxer/decoder actually started using time-pos / path / duration.
+        Detect that demuxer/decoder actually started.
+
+        Notes:
+        - `time-pos`/`duration` can be "property unavailable" for a while on some network streams,
+          yet playback is actually in progress (especially HLS).
+        - Redirected stream URLs often change host/path (vk okcdn), so `path` equality is unreliable.
         """
         deadline = time.monotonic() + max(1.0, float(timeout_sec))
         exp = (expected_url or "").strip()
         exp_host = ""
+        exp_scheme = ""
         try:
             from urllib.parse import urlparse
 
             if exp.startswith(("http://", "https://")):
-                exp_host = urlparse(exp).netloc or ""
+                p = urlparse(exp)
+                exp_host = p.netloc or ""
+                exp_scheme = p.scheme or ""
         except Exception:
             exp_host = ""
+            exp_scheme = ""
 
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
@@ -238,6 +247,28 @@ class PlaylistManager:
             dur = self._mpv_get_prop_number("duration", timeout=2.0)
             if dur is not None and dur > 0:
                 return True
+            idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+            core_idle = self._mpv_get_prop_bool("core-idle", timeout=2.0)
+
+            # Strong signal: mpv is not idle anymore (demuxer active / decoding started)
+            if idle is False and core_idle is False:
+                return True
+
+            # Medium signal: demuxer/file-format known and we left idle-active.
+            if idle is False:
+                demuxer = self._mpv_get_prop_string("demuxer", timeout=2.0)
+                file_format = self._mpv_get_prop_string("file-format", timeout=2.0)
+                if demuxer or file_format:
+                    return True
+
+            # Medium signal: stream-open-filename is set (often to the redirected/real URL).
+            sof = self._mpv_get_prop_string("stream-open-filename", timeout=2.0)
+            if sof and sof.startswith(("http://", "https://")):
+                # If we can parse and see same scheme, treat it as "opened".
+                if exp_scheme and sof.startswith(exp_scheme + "://"):
+                    if idle is False or core_idle is False:
+                        return True
+
             # Do NOT treat `path` equality alone as readiness: mpv can report path while still idle.
             self._stop_event.wait(timeout=max(0.1, float(poll_sec)))
         return False
@@ -410,6 +441,23 @@ class PlaylistManager:
                     self._stop_event.wait(timeout=min(30.0, wait_sec))
                     if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                         break
+                # Reset stateful properties before loading a new item.
+                # This prevents "image mode" state leaking into video streams and avoids header bleed.
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "keep-open", "no"]},
+                        timeout=5.0,
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "force-window", "yes"]},
+                        timeout=5.0,
+                    )
+                except Exception:
+                    pass
+
                 # If this is an external stream requiring headers, apply them before loadfile.
                 # MPV expects a single string of "Key: Value\r\nKey2: Value2" for http-header-fields.
                 if http_headers and isinstance(http_headers, dict):
@@ -428,6 +476,48 @@ class PlaylistManager:
                                 {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
                                 timeout=5.0,
                             )
+                        # Some CDNs require explicit mpv properties for UA/Referer even if provided in header-fields.
+                        try:
+                            ua = http_headers.get("User-Agent") or http_headers.get("user-agent")
+                            if ua:
+                                self._mpv_manager._send_command(
+                                    {"command": ["set_property", "user-agent", str(ua)]},
+                                    timeout=5.0,
+                                )
+                        except Exception:
+                            pass
+                        try:
+                            ref = http_headers.get("Referer") or http_headers.get("Referrer") or http_headers.get("referer")
+                            if ref:
+                                self._mpv_manager._send_command(
+                                    {"command": ["set_property", "referrer", str(ref)]},
+                                    timeout=5.0,
+                                )
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                else:
+                    # Clear leftover headers from previous external items.
+                    try:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "http-header-fields", ""]},
+                            timeout=2.0,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "user-agent", ""]},
+                            timeout=2.0,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "referrer", ""]},
+                            timeout=2.0,
+                        )
                     except Exception:
                         pass
                 load_resp = self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
@@ -591,10 +681,12 @@ class PlaylistManager:
                 is_video = bool(resolved.get("is_video"))
                 items.append(
                     {
+                        "key": resolved.get("key") or getattr(pf, "file_name", None),
                         "path": resolved["path"],
                         "duration": int(getattr(pf, "duration", 0) or 0),
                         "is_video": is_video,
                         "muted": bool(getattr(pf, "muted", False)) if is_video else False,
+                        "http_headers": resolved.get("http_headers") or {},
                     }
                 )
 
@@ -624,7 +716,83 @@ class PlaylistManager:
                 )
             except Exception:
                 pass
-            self._mpv_manager._send_command({"command": ["loadfile", first["path"], "replace"]}, timeout=10.0)
+            # Reset stateful properties before loading (same as in the background loop).
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "keep-open", "no"]},
+                    timeout=5.0,
+                )
+            except Exception:
+                pass
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "force-window", "yes"]},
+                    timeout=5.0,
+                )
+            except Exception:
+                pass
+
+            http_headers = first.get("http_headers") or {}
+            if http_headers and isinstance(http_headers, dict):
+                try:
+                    header_lines = []
+                    for k, v in http_headers.items():
+                        if k is None or v is None:
+                            continue
+                        ks = str(k).strip()
+                        vs = str(v).strip()
+                        if not ks or not vs:
+                            continue
+                        header_lines.append(f"{ks}: {vs}")
+                    if header_lines:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
+                            timeout=5.0,
+                        )
+                    try:
+                        ua = http_headers.get("User-Agent") or http_headers.get("user-agent")
+                        if ua:
+                            self._mpv_manager._send_command(
+                                {"command": ["set_property", "user-agent", str(ua)]},
+                                timeout=5.0,
+                            )
+                    except Exception:
+                        pass
+                    try:
+                        ref = http_headers.get("Referer") or http_headers.get("Referrer") or http_headers.get("referer")
+                        if ref:
+                            self._mpv_manager._send_command(
+                                {"command": ["set_property", "referrer", str(ref)]},
+                                timeout=5.0,
+                            )
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "http-header-fields", ""]},
+                        timeout=2.0,
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "user-agent", ""]},
+                        timeout=2.0,
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "referrer", ""]},
+                        timeout=2.0,
+                    )
+                except Exception:
+                    pass
+
+            self._mpv_manager._send_command({"command": ["loadfile", first["path"], "replace"]}, timeout=20.0)
             self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
 
             # Update playback status (single-row table; keep id=1 stable)
