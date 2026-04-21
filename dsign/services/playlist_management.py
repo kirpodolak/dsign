@@ -143,6 +143,37 @@ class PlaylistManager:
                 return True
             self._stop_event.wait(timeout=min(step, remaining))
 
+    def _mpv_get_prop_bool(self, name: str, timeout: float = 3.0) -> Optional[bool]:
+        """Return bool property value, or None if unavailable / error."""
+        try:
+            resp = self._mpv_manager._send_command(
+                {"command": ["get_property", name]},
+                timeout=timeout,
+            )
+        except Exception:
+            return None
+        if not resp or resp.get("error") != "success":
+            return None
+        data = resp.get("data")
+        if isinstance(data, bool):
+            return data
+        return None
+
+    def _wait_mpv_leave_idle(self, timeout_sec: float = 45.0) -> bool:
+        """
+        After loadfile, mpv often reports idle-active=true until the demuxer opens.
+        Our old loop treated idle as EOF and skipped network streams in ~1 tick.
+        """
+        deadline = time.monotonic() + max(0.5, float(timeout_sec))
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            idle = self._mpv_get_prop_bool("idle-active", timeout=3.0)
+            if idle is False:
+                return True
+            self._stop_event.wait(timeout=0.15)
+        return False
+
     def _stop_play_thread(self):
         if self._play_thread and self._play_thread.is_alive():
             self._stop_event.set()
@@ -239,23 +270,31 @@ class PlaylistManager:
                     continue
 
                 if is_video:
-                    # Wait until playback ends
+                    # Network streams: mpv stays idle-active until open; do not treat idle as EOF.
+                    is_network = isinstance(path, str) and (
+                        path.startswith("http://")
+                        or path.startswith("https://")
+                        or path.startswith("ytdl://")
+                    )
+                    if is_network:
+                        if not self._wait_mpv_leave_idle(timeout_sec=60.0):
+                            self.logger.warning(
+                                "MPV stayed idle after loadfile (stream failed or blocked)",
+                                extra={"media_key": media_key, "path_preview": str(path)[:120]},
+                            )
+                            continue
+                    # Wait until eof-reached is a real bool (some builds return unavailable briefly).
+                    prop_deadline = time.monotonic() + 12.0
+                    while time.monotonic() < prop_deadline and not self._stop_event.is_set():
+                        eof = self._mpv_get_prop_bool("eof-reached", timeout=3.0)
+                        if eof is not None:
+                            break
+                        self._stop_event.wait(timeout=0.2)
+                    # Wait until playback ends (eof-reached only; idle-active is not EOF for streams).
                     start = time.time()
                     while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
-                        # `eof-reached` is the most reliable signal for local files.
-                        resp = self._mpv_manager._send_command(
-                            {"command": ["get_property", "eof-reached"]},
-                            timeout=5.0,
-                        )
-                        if resp and resp.get("error") == "success" and resp.get("data") is True:
-                            break
-
-                        # Fallback for unusual states: if mpv goes idle, treat as ended
-                        resp = self._mpv_manager._send_command(
-                            {"command": ["get_property", "idle-active"]},
-                            timeout=5.0
-                        )
-                        if resp and resp.get("error") == "success" and resp.get("data") is True:
+                        eof = self._mpv_get_prop_bool("eof-reached", timeout=5.0)
+                        if eof is True:
                             break
                         # prevent stuck forever: 6 hours max video
                         if time.time() - start > 6 * 3600:
