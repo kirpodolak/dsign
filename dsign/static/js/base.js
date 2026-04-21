@@ -162,7 +162,11 @@ class AppCore {
                 return;
             }
 
-            await this.initializeStartupNetworkAssistant();
+            // Don't block the initial paint on potentially slow network/API calls.
+            // Startup assistant is optional and may require system/network endpoints.
+            setTimeout(() => {
+                this.initializeStartupNetworkAssistant().catch(() => {});
+            }, 0);
 
             // Initialize WebSocket only on pages that currently use realtime updates.
             if (this.shouldInitializeSockets()) {
@@ -172,14 +176,16 @@ class AppCore {
             // Set up periodic auth checks only for realtime pages.
             if (!isLoginPage && this.shouldRunPeriodicAuthChecks()) {
                 this.logger.debug('Setting up periodic auth checks');
-                
-                setInterval(async () => {
+                // Keep a single global interval per tab to avoid stacking checks on navigation.
+                if (!window.__dsign_authCheckIntervalId) {
+                    window.__dsign_authCheckIntervalId = setInterval(async () => {
                     const isAuth = await this.auth.checkAuth();
                     if (!isAuth) {
                         this.logger.warn('Periodic auth check failed');
                         this.auth.handleUnauthorized();
                     }
-                }, this.config.authCheckInterval);
+                    }, this.config.authCheckInterval);
+                }
             }
 
             // Mark core as initialized
@@ -328,7 +334,7 @@ class AppCore {
             // Expose unified socket adapter for pages (prevents multiple parallel Socket.IO clients).
             window.App = window.App || {};
             if (!window.App.Sockets || typeof window.App.Sockets.on !== 'function') {
-                window.App.Sockets = createSocketAdapter(() => window.appSocket);
+                window.App.Sockets = createSocketAdapter(window.appSocket);
             }
             
             // Expose socket interface

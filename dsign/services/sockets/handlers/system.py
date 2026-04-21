@@ -135,11 +135,28 @@ class SystemHandlers:
         @self.socket_service.socketio.on('connect')
         def handle_connect(auth=None):
             try:
+                # Keep connect logs small/stable to avoid log storms on reconnect loops.
+                # Never log raw tokens or full headers (can be large / sensitive).
+                hdr = request.headers
+                ua = (hdr.get('User-Agent') or '')[:200]
+                origin = (hdr.get('Origin') or '')[:200]
+                transport = request.args.get('transport') or ''
+                token_preview = None
+                try:
+                    tok = (auth.get('token') if auth and isinstance(auth, dict) else None)
+                    if isinstance(tok, str) and tok:
+                        token_preview = tok[:12] + '…'
+                except Exception:
+                    token_preview = None
                 self.logger.info('New connection attempt', {
                     'sid': request.sid,
-                    'auth': auth,
-                    'headers': dict(request.headers),
-                    'ip': request.remote_addr
+                    'ip': request.remote_addr,
+                    'namespace': request.namespace,
+                    'transport': transport,
+                    'ua': ua,
+                    'origin': origin,
+                    'auth_keys': list(auth.keys()) if isinstance(auth, dict) else None,
+                    'token_preview': token_preview,
                 })
                 
                 token = self._extract_token(auth)
@@ -250,12 +267,22 @@ class SystemHandlers:
             'ip': request.remote_addr
         })
 
-    def handle_disconnect(self):
+    def handle_disconnect(self, *args, **kwargs):
         """Handle client disconnection"""
         sid = request.sid
+        reason = None
+        try:
+            # Depending on Flask-SocketIO/python-socketio version, disconnect may pass a reason.
+            if args:
+                reason = args[0]
+            elif isinstance(kwargs, dict):
+                reason = kwargs.get('reason')
+        except Exception:
+            reason = None
         self.logger.info('Client disconnected', {
             'sid': sid,
-            'namespace': request.namespace
+            'namespace': request.namespace,
+            'reason': reason
         })
         self.cleanup_client(sid)
 

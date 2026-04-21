@@ -22,7 +22,31 @@ def init_extensions(app) -> Dict[str, Any]:
     try:
         # SocketIO/EngineIO can be very noisy; keep it quiet by default.
         logger = logging.getLogger("dsign.socketio")
-        logger.setLevel(logging.DEBUG if app.config.get("DEBUG", False) else logging.WARNING)
+        engineio_debug = bool(app.config.get("SOCKETIO_ENGINEIO_DEBUG", False))
+        # Engine.IO close/transport diagnostics are logged at INFO/DEBUG.
+        # When explicitly enabled, raise log level so journald actually captures them.
+        logger.setLevel(
+            logging.DEBUG
+            if app.config.get("DEBUG", False) or engineio_debug
+            else logging.WARNING
+        )
+        if engineio_debug:
+            # Ensure Engine.IO logs reach stdout/stderr even when the app uses a custom logger.
+            # systemd captures stdout/stderr into journald.
+            logger.propagate = True
+            if not logger.handlers:
+                h = logging.StreamHandler()
+                h.setLevel(logging.DEBUG)
+                h.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
+                logger.addHandler(h)
+            # Also enable upstream loggers used by python-socketio / python-engineio.
+            # These are the ones that typically log close reasons and transport errors.
+            for name in ("engineio", "socketio"):
+                l = logging.getLogger(name)
+                l.setLevel(logging.DEBUG)
+                l.propagate = True
+                if not l.handlers:
+                    l.addHandler(h)
 
         # 1. Инициализация Flask-расширений
         db.init_app(app)
@@ -33,8 +57,11 @@ def init_extensions(app) -> Dict[str, Any]:
             app,
             cors_allowed_origins=app.config.get('SOCKETIO_CORS_ALLOWED_ORIGINS', "*"),
             async_mode=app.config.get('SOCKETIO_ASYNC_MODE', 'eventlet'),
-            logger=logger,
-            engineio_logger=logger if app.debug else False
+            ping_interval=app.config.get('SOCKETIO_PING_INTERVAL', 25),
+            ping_timeout=app.config.get('SOCKETIO_PING_TIMEOUT', 60),
+            # Only enable Socket.IO internal logs when explicitly debugging.
+            logger=logger if engineio_debug else False,
+            engineio_logger=logger if engineio_debug else False
         )
         
         # 2. Настройка аутентификации

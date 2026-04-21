@@ -112,9 +112,18 @@ export class SettingsManager {
         this.state.initStarted = true;
         this.performance.mark('init-start');
         try {
-            await this.loadPlaylistOverrides().catch(() => []);
-            this.performance.mark('overrides-loaded');
-            this.renderPlaylistOverrides();
+            // Do not block initial render on slow endpoints (e.g. /api/playlists/overrides).
+            // Kick it off in background and render when ready.
+            this.renderStatusDashboardSkeleton();
+            Promise.resolve()
+                .then(() => this.loadPlaylistOverrides())
+                .then(() => {
+                    this.performance.mark('overrides-loaded');
+                    this.renderPlaylistOverrides();
+                })
+                .catch(() => {
+                    this.performance.mark('overrides-loaded');
+                });
 
             await Promise.all([
                 this.loadCurrentSettings(),
@@ -123,7 +132,6 @@ export class SettingsManager {
             ]);
             this.performance.mark('settings-schema-current-loaded');
 
-            this.renderStatusDashboardSkeleton();
             await this.refreshSystemStatus({ startPolling: true }).catch(() => {});
             this.performance.mark('system-status-loaded');
             this._bindVolumeKnob();
