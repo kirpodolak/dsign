@@ -70,6 +70,12 @@ class Config:
     SOCKETIO_CORS_ALLOWED_ORIGINS = "*"
     # Flask-SocketIO: threading | eventlet | gevent (как в manage.py / зависимостях)
     SOCKETIO_ASYNC_MODE = os.getenv("SOCKETIO_ASYNC_MODE", "eventlet")
+    # Keep ping/pong stable to avoid disconnect loops on low-power devices / Wi-Fi.
+    # Values are in seconds (Flask-SocketIO passes them to python-socketio/engineio).
+    SOCKETIO_PING_INTERVAL = int(os.getenv("DSIGN_SOCKETIO_PING_INTERVAL", "25"))
+    SOCKETIO_PING_TIMEOUT = int(os.getenv("DSIGN_SOCKETIO_PING_TIMEOUT", "60"))
+    # Debugging: enable Engine.IO logger (very verbose) only when explicitly asked.
+    SOCKETIO_ENGINEIO_DEBUG = os.getenv("DSIGN_SOCKETIO_ENGINEIO_DEBUG", "false").lower() == "true"
 
     # Режим отладки
     DEBUG = os.getenv("FLASK_ENV", "production").lower() == "development"
