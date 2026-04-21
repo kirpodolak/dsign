@@ -406,9 +406,10 @@ def get_socket_token():
             }), 401
 
         # Best-effort server-side cache to avoid token-generation storms on reconnects/navigation.
+        # NOTE: Flask `session` is dict-like (SecureCookieSession), but not necessarily a `dict`.
         # Token is short-lived; re-issue only when close to expiry or when client fingerprint changes.
         try:
-            cached = session.get('socket_token_cache') if isinstance(session, dict) else None
+            cached = session.get('socket_token_cache')
         except Exception:
             cached = None
 
@@ -475,7 +476,7 @@ def get_socket_token():
                 'token': token,
                 'exp_ts': exp_ts,
                 'ip': ip_now,
-                'ua': ua_now
+                'ua': ua_now,
             }
         except Exception:
             pass
@@ -485,7 +486,8 @@ def get_socket_token():
             'token': token,
             'expires_in': SOCKET_TOKEN_EXPIRATION * 60,
             'expires_at': payload['exp'].isoformat(),
-            'socket_url': current_app.config.get('SOCKET_SERVER_URL', '/socket.io')
+            'socket_url': current_app.config.get('SOCKET_SERVER_URL', '/socket.io'),
+            'cached': False,
         })
     except Exception as e:
         logger.error("Socket token generation failed", extra={
