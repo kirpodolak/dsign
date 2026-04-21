@@ -21,7 +21,7 @@
                  class="mpv-preview-image"
                  style="display: none;"
                  onload="this.style.display='block'"
-                 onerror="this.onerror=null;this.src='{{ url_for('static', filename='images/default-preview.jpg') }}?t='+Date.now()">
+                 onerror="this.onerror=null;this.src='{{ url_for('static', filename='images/placeholder.jpg') }}?t='+Date.now()">
             <button id="refresh-mpv-preview" class="mpv-refresh-btn" title="Refresh Preview">
                 <i class="fas fa-sync-alt"></i>
             </button>
@@ -38,7 +38,7 @@
              src="{{ url_for('api.serve_media', filename='idle_logo.jpg') }}"
              style="display: none;"
              onload="this.style.display='block'"
-             onerror="this.onerror=null;this.src='{{ url_for('static', filename='default-logo.jpg') }}?t={{ default_logo_cache_buster }}'">
+             onerror="this.onerror=null;this.src='{{ url_for('static', filename='images/placeholder.jpg') }}?t={{ default_logo_cache_buster }}'">
 
         <form id="logo-upload-form" enctype="multipart/form-data">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

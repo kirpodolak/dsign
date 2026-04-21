@@ -268,7 +268,7 @@ export class PlaylistManager {
         files.forEach((file, index) => {
             const row = document.createElement('tr');
             const img = document.createElement('img');
-            img.src = '/static/images/default-preview.jpg';
+            img.src = '/static/images/placeholder.jpg';
             img.alt = 'Preview';
             img.className = `playlist-thumb-img${file.is_video ? ' playlist-thumb-img--video' : ''}`;
             img.dataset.filename = file.filename;
@@ -282,13 +282,13 @@ export class PlaylistManager {
                 const maxRetries = 6;
                 const cur = parseInt(this.dataset.thumbRetries || '0', 10) || 0;
                 if (cur >= maxRetries) {
-                    this.src = '/static/images/default-preview.jpg';
+                    this.src = '/static/images/placeholder.jpg';
                     return;
                 }
                 this.dataset.thumbRetries = String(cur + 1);
                 // Exponential-ish backoff: 0.8s, 1.6s, 3.2s, ...
                 const delay = Math.min(15000, Math.round(800 * Math.pow(2, cur)));
-                this.src = '/static/images/default-preview.jpg';
+                this.src = '/static/images/placeholder.jpg';
                 setTimeout(() => {
                     const base = this.dataset.src || '';
                     if (!base) return;
