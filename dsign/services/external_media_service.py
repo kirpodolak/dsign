@@ -43,7 +43,38 @@ class ExternalMediaService:
         return "unknown"
 
     def normalize_url(self, url: str) -> str:
-        return (url or "").strip()
+        raw = (url or "").strip()
+        if not raw:
+            return ""
+
+        # Accept "Code for embedding" (<iframe ... src="...">) pasted from VK/Rutube UI.
+        m = re.search(r'<iframe[^>]+src=["\']([^"\']+)["\']', raw, flags=re.IGNORECASE)
+        if m:
+            raw = (m.group(1) or "").strip()
+
+        # Normalize Rutube embed -> canonical video page URL.
+        # Example: https://rutube.ru/play/embed/<id>/  -> https://rutube.ru/video/<id>/
+        m = re.search(r"rutube\.ru/(?:play/)?embed/([0-9a-f]{16,})", raw, flags=re.IGNORECASE)
+        if m:
+            vid = m.group(1)
+            return f"https://rutube.ru/video/{vid}/"
+
+        # Normalize VK embed -> canonical page URL (best-effort).
+        # Example: https://vkvideo.ru/video_ext.php?oid=-..&id=.. -> https://vkvideo.ru/video<oid>_<id>
+        m = re.search(r"vkvideo\.ru/video_ext\.php\?([^#]+)", raw, flags=re.IGNORECASE)
+        if m:
+            qs = m.group(1)
+            oid = None
+            vid = None
+            for part in qs.split("&"):
+                if part.startswith("oid="):
+                    oid = part.split("=", 1)[1]
+                elif part.startswith("id="):
+                    vid = part.split("=", 1)[1]
+            if oid and vid:
+                return f"https://vkvideo.ru/video{oid}_{vid}"
+
+        return raw
 
     def _parse_ext_key(self, key: str) -> Optional[int]:
         m = re.match(r"^ext-(\d+)$", (key or "").strip())

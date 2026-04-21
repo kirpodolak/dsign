@@ -235,10 +235,7 @@ class PlaylistManager:
             dur = self._mpv_get_prop_number("duration", timeout=2.0)
             if dur is not None and dur > 0:
                 return True
-            p = self._mpv_get_prop_string("path", timeout=2.0)
-            if p and exp:
-                if p == exp or (exp_host and exp_host in p):
-                    return True
+            # Do NOT treat `path` equality alone as readiness: mpv can report path while still idle.
             self._stop_event.wait(timeout=max(0.1, float(poll_sec)))
         return False
 
