@@ -73,18 +73,21 @@ class ExternalMediaService:
 
         # NOTE: Providers differ a lot in how strict their CDNs are about Referer/Origin.
         # - VK/OKCDN frequently requires Referer; without it ffmpeg opens can return HTTP 400.
-        # - Rutube's HLS CDNs (river-*/rtbcdn) can return HTTP 400 if an unexpected Referer/Origin is forced.
+        # - Rutube CDN behavior changes over time; empirically, `river-*.rutube.ru` often expects
+        #   Rutube page-level Referer/Origin (matches browser behavior and curl/ffmpeg repros).
         want_synth_ref = False
         if prov == "vkvideo":
+            want_synth_ref = True
+        elif prov == "rutube":
             want_synth_ref = True
         elif "okcdn.ru" in su or "vkvd" in su:
             want_synth_ref = True
 
-        # Prefer page URL as referer for VK (and OKCDN). Avoid forcing it for Rutube.
+        # Prefer page URL as referer for VK/Rutube (and OKCDN).
         if want_synth_ref and page_url and "referer" not in out_lc:
             out_lc["referer"] = str(page_url)
 
-        # Some CDNs want Origin that matches referer origin (VK/OKCDN). Avoid forcing it for Rutube.
+        # Some CDNs want Origin that matches referer origin (VK/Rutube/OKCDN).
         if want_synth_ref and page_url and "origin" not in out_lc:
             try:
                 p = urlparse(str(page_url))

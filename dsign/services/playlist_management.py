@@ -241,17 +241,18 @@ class PlaylistManager:
 
         # Ensure a single Referer.
         #
-        # IMPORTANT: Rutube's video CDN hosts (river-*.rutube.ru / *.rtbcdn.ru) can return HTTP 400
-        # when a page-level Referer/Origin is injected for the HLS playlist/segments. For VK/OKCDN,
-        # Referer is often required. So: only synthesize Referer from page_url when we are confident
-        # it's beneficial (VK/OKCDN / unknown), and avoid forcing it for Rutube.
+        # IMPORTANT: Provider CDNs change behavior over time. Empirically:
+        # - VK/OKCDN requires page-level Referer/Origin.
+        # - Rutube `river-*.rutube.ru` / `*.rtbcdn.ru` often expects Rutube page-level Referer/Origin
+        #   (matches browser/curl behavior), so do not suppress it here. Prefer the ExternalMediaService
+        #   sanitizer when attached for a single source of truth.
         prov_lc = (str(provider or "").strip().lower()) if provider is not None else ""
         su = str(stream_url or "")
         is_rutube_cdn = ("rutube" in prov_lc) and (
             "river-" in su or ".rtbcdn.ru/" in su or "rtbcdn.ru/" in su
         )
         ref = out.get("Referer") or out.get("Referrer") or out.get("referer")
-        if not ref and page_url and not is_rutube_cdn and prov_lc != "rutube":
+        if not ref and page_url:
             ref = page_url
         if ref:
             out.pop("Referrer", None)
@@ -259,7 +260,7 @@ class PlaylistManager:
 
         # Derive Origin from referer if not provided.
         if "Origin" not in out:
-            base = out.get("Referer") or (page_url if not is_rutube_cdn else None)
+            base = out.get("Referer") or page_url
             if base and isinstance(base, str) and base.startswith(("http://", "https://")):
                 try:
                     from urllib.parse import urlparse
