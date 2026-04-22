@@ -1,6 +1,7 @@
 import { showAlert, showError } from './utils/alerts.js';
 import { toggleButtonState } from './utils/helpers.js';
 import { fetchAPI, getCSRFToken } from './utils/api.js';
+import { t, getUiLang } from './i18n.js';
 
 // Application configuration
 const CONFIG = {
@@ -313,18 +314,16 @@ const ui = {
         const el = document.querySelector('#mpv-auto-refresh-status');
         if (!el) return;
         const sec = Number(settings?.display?.preview_auto_interval_sec || 0);
+        const lang = getUiLang();
         if (!sec) {
             el.innerHTML = [
-                '<span class="mpv-auto-refresh-line"><strong>Auto preview:</strong> Off</span>',
-                '<span class="mpv-auto-refresh-line">Background capture is blocked. Use the Refresh button.</span>'
+                `<span class="mpv-auto-refresh-line"><strong>${t('auto_preview_bold', lang)}:</strong> ${t('transcode_off', lang)}</span>`,
+                `<span class="mpv-auto-refresh-line">${t('preview_block_hint', lang)}</span>`,
             ].join('');
             el.classList.add('is-off');
         } else {
             const mins = Math.round(sec / 60);
-            el.innerHTML = [
-                `<span class="mpv-auto-refresh-line"><strong>Auto preview:</strong> Every ${mins} min</span>`,
-                '<span class="mpv-auto-refresh-line">Tip: On Pi 3B+ use Off or infrequent.</span>'
-            ].join('');
+            el.innerHTML = t('preview_lines_on', lang, mins);
             el.classList.remove('is-off');
         }
     },
@@ -344,7 +343,7 @@ const ui = {
 
     _formatBytes(bytes) {
         const value = Number(bytes);
-        if (!Number.isFinite(value) || value < 0) return 'N/A';
+        if (!Number.isFinite(value) || value < 0) return t('value_na', getUiLang());
         const units = ['B', 'KB', 'MB', 'GB', 'TB'];
         let idx = 0;
         let size = value;
@@ -382,11 +381,12 @@ const ui = {
         if (preset === '4k30') return '3840x2160';
         const explicitResolution = String(settings?.resolution || '').trim();
         if (explicitResolution) return explicitResolution;
-        return preset === 'auto' ? 'Auto' : 'N/A';
+        return preset === 'auto' ? t('value_auto', getUiLang()) : t('value_na', getUiLang());
     },
 
     renderSettings(settings, runtime = {}) {
         if (!elements.settingsPanel) return;
+        const lang = getUiLang();
 
         const playlists = Array.isArray(runtime.playlists) ? runtime.playlists : [];
         const playbackStatus = runtime.playbackStatus || {};
@@ -408,75 +408,75 @@ const ui = {
             ? systemVolumeNum
             : (Number.isFinite(settingsVolumeNum) ? settingsVolumeNum : null);
         const volumeValue = isMuted
-            ? 'Mute'
-            : (volumeNum !== null ? `${Math.max(0, Math.min(100, Math.round(volumeNum)))}%` : 'N/A');
+            ? t('value_mute', lang)
+            : (volumeNum !== null ? `${Math.max(0, Math.min(100, Math.round(volumeNum)))}%` : t('value_na', lang));
 
         const playbackState = String(playbackStatus?.status || '').toLowerCase();
         const activePlaylistId = playbackStatus?.playlist_id;
         const activePlaylist = playlists.find((item) => String(item.id) === String(activePlaylistId));
         const broadcastRaw = playbackState === 'playing'
             ? (activePlaylist?.name || `Playlist #${activePlaylistId ?? ''}`.trim() || 'Playlist')
-            : 'Logo';
+            : t('broadcast_logo', lang);
         const broadcastValue = this._truncateText(broadcastRaw, 32);
 
         const storageData = systemStatus?.storage?.media || systemStatus?.storage?.root || null;
         const storagePercent = this._clampPercent(storageData?.used_percent);
         const storageValue = storagePercent !== null
             ? `${Math.round(storagePercent)}% (${this._formatBytes(storageData.used)} / ${this._formatBytes(storageData.total)})`
-            : 'N/A';
+            : t('value_na', lang);
 
         const cpuTempRaw = Number(systemStatus?.cpu?.temp_c);
         const cpuTemp = Number.isFinite(cpuTempRaw) ? cpuTempRaw : null;
         const cpuTempPercent = cpuTemp === null ? null : this._clampPercent(cpuTemp);
-        const cpuTempValue = cpuTemp === null ? 'N/A' : `${cpuTemp.toFixed(1)}°C`;
+        const cpuTempValue = cpuTemp === null ? t('value_na', lang) : `${cpuTemp.toFixed(1)}°C`;
 
         const cpuLoadRaw = Number(systemStatus?.cpu?.usage_percent ?? systemStatus?.cpu?.load_percent);
         const cpuLoad = Number.isFinite(cpuLoadRaw) ? this._clampPercent(cpuLoadRaw) : null;
-        const cpuLoadValue = cpuLoad === null ? 'N/A' : `${cpuLoad.toFixed(1)}%`;
+        const cpuLoadValue = cpuLoad === null ? t('value_na', lang) : `${cpuLoad.toFixed(1)}%`;
 
         const transcodeEnabledRaw = settings?.display?.auto_transcode_videos;
         const transcodeEnabled = transcodeEnabledRaw === true || String(transcodeEnabledRaw).toLowerCase() === 'true';
-        const transcodeValue = transcodeEnabled ? 'On' : 'Off';
+        const transcodeValue = transcodeEnabled ? t('transcode_on', lang) : t('transcode_off', lang);
 
-        const ipValue = networkStatus?.primary_ip || 'N/A';
+        const ipValue = networkStatus?.primary_ip || t('value_na', lang);
 
         const html = `
             <div class="settings-section">
-                <h3>Operational Metrics</h3>
+                <h3>${this.escapeHtml(t('metric_ops_title', lang))}</h3>
                 <div class="metrics-grid">
                     <div class="metric-item">
-                        <div class="metric-label">Screen</div>
+                        <div class="metric-label">${this.escapeHtml(t('metric_screen', lang))}</div>
                         <div class="metric-value">${this.escapeHtml(screenResolution)}</div>
                     </div>
                     <div class="metric-item">
-                        <div class="metric-label">Volume</div>
+                        <div class="metric-label">${this.escapeHtml(t('metric_volume', lang))}</div>
                         <div class="metric-value">${this.escapeHtml(volumeValue)}</div>
                     </div>
                     <div class="metric-item metric-item--full">
-                        <div class="metric-label">Broadcast</div>
+                        <div class="metric-label">${this.escapeHtml(t('metric_broadcast', lang))}</div>
                         <div class="metric-value">${this.escapeHtml(broadcastValue)}</div>
                     </div>
                     <div class="metric-item metric-item--full">
-                        <div class="metric-label">Storage</div>
+                        <div class="metric-label">${this.escapeHtml(t('metric_storage', lang))}</div>
                         <div class="metric-value">${this.escapeHtml(storageValue)}</div>
                         ${this._renderMetricBar(storagePercent)}
                     </div>
                     <div class="metric-item">
-                        <div class="metric-label">CPU Temperature</div>
+                        <div class="metric-label">${this.escapeHtml(t('metric_cpu_temp', lang))}</div>
                         <div class="metric-value">${this.escapeHtml(cpuTempValue)}</div>
                         ${this._renderMetricBar(cpuTempPercent)}
                     </div>
                     <div class="metric-item">
-                        <div class="metric-label">CPU Load</div>
+                        <div class="metric-label">${this.escapeHtml(t('metric_cpu_load', lang))}</div>
                         <div class="metric-value">${this.escapeHtml(cpuLoadValue)}</div>
                         ${this._renderMetricBar(cpuLoad)}
                     </div>
                     <div class="metric-item">
-                        <div class="metric-label">Video Optimization</div>
+                        <div class="metric-label">${this.escapeHtml(t('metric_transcode', lang))}</div>
                         <div class="metric-value">${this.escapeHtml(transcodeValue)}</div>
                     </div>
                     <div class="metric-item">
-                        <div class="metric-label">Current IP Address</div>
+                        <div class="metric-label">${this.escapeHtml(t('metric_ip', lang))}</div>
                         <div class="metric-value">${this.escapeHtml(ipValue)}</div>
                     </div>
                 </div>
@@ -509,9 +509,15 @@ const ui = {
             files_count: p.files_count
         })));
 
+        const lang = getUiLang();
+        const un = t('unnamed', lang);
+        const pt = t('play_title', lang);
+        const st = t('stop_title', lang);
+        const et = t('edit_title', lang);
+        const dt = t('delete_title', lang);
         tableBody.innerHTML = playlistsArray.map(playlist => `
             <tr data-id="${playlist.id}">
-                <td class="playlist-td-name">${this.escapeHtml(playlist.name || 'Unnamed')}</td>
+                <td class="playlist-td-name">${this.escapeHtml(playlist.name || un)}</td>
                 <td class="playlist-td-customer">${this.escapeHtml(playlist.customer)}</td>
                 <td class="playlist-td-files">${playlist.files_count || 0}</td>
                 <td class="playlist-td-status">
@@ -522,16 +528,16 @@ const ui = {
                 <td class="playlist-td-actions">
                     <div class="playlist-td-inner">
                         <div class="actions">
-                        <button class="btn play" data-id="${playlist.id}" title="Play">
+                        <button class="btn play" data-id="${playlist.id}" title="${this.escapeHtml(pt)}">
                             <i class="fas fa-play"></i>
                         </button>
-                        <button class="btn stop" data-id="${playlist.id}" title="Stop" disabled>
+                        <button class="btn stop" data-id="${playlist.id}" title="${this.escapeHtml(st)}" disabled>
                             <i class="fas fa-stop"></i>
                         </button>
-                        <button class="btn edit" data-id="${playlist.id}" title="Edit">
+                        <button class="btn edit" data-id="${playlist.id}" title="${this.escapeHtml(et)}">
                             <i class="fas fa-edit"></i>
                         </button>
-                        <button class="btn delete" data-id="${playlist.id}" title="Delete">
+                        <button class="btn delete" data-id="${playlist.id}" title="${this.escapeHtml(dt)}">
                             <i class="fas fa-trash"></i>
                         </button>
                         </div>
@@ -539,6 +545,23 @@ const ui = {
                 </td>
             </tr>
         `).join('');
+    },
+
+    refreshLanguageUI() {
+        if (!elements.settingsPanel && !document.querySelector('#playlist-table-body')) return;
+        this.renderSettings(state.currentSettings, {
+            playlists: state.playlists,
+            playbackStatus: state.playbackStatus,
+            systemStatus: state.systemStatus,
+            networkStatus: state.networkStatus,
+        });
+        this.renderPlaylists(state.playlists);
+        try {
+            this.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
+        } catch (e) {
+            console.warn(e);
+        }
+        this.updatePreviewAutoStatus(state.currentSettings || {});
     },
 
     escapeHtml(unsafe) {
@@ -565,20 +588,21 @@ const ui = {
             const statusBadge = row.querySelector('.status-badge');
             if (!playBtn || !stopBtn || !statusBadge) return;
 
+            const lang = getUiLang();
             if (mode === 'playing') {
                 playBtn.disabled = true;
                 stopBtn.disabled = false;
-                statusBadge.textContent = 'Playing';
+                statusBadge.textContent = t('status_playing', lang);
                 statusBadge.className = 'status-badge active playing';
             } else if (mode === 'stopped') {
                 playBtn.disabled = false;
                 stopBtn.disabled = true;
-                statusBadge.textContent = 'Stopped';
+                statusBadge.textContent = t('status_stopped', lang);
                 statusBadge.className = 'status-badge stopped';
             } else {
                 playBtn.disabled = false;
                 stopBtn.disabled = true;
-                statusBadge.textContent = 'Idle';
+                statusBadge.textContent = t('status_idle', lang);
                 statusBadge.className = 'status-badge idle';
             }
         });
@@ -704,7 +728,7 @@ const ui = {
     updateLogoFileSelection(file) {
         const selectedLabel = elements.logoSelectedFile;
         if (selectedLabel) {
-            selectedLabel.textContent = file ? file.name : 'No file selected';
+            selectedLabel.textContent = file ? file.name : t('no_file', getUiLang());
         }
 
         if (elements.uploadLogoBtn) {
@@ -787,6 +811,13 @@ const handlers = {
             ui.updatePreviewImage({ updateTimestamp: initPreviewAutoSec > 0 });
 
             this.setupEventListeners();
+            document.addEventListener('dsign:language-changed', () => {
+                try {
+                    ui.refreshLanguageUI();
+                } catch (e) {
+                    console.warn('Language refresh failed', e);
+                }
+            });
             this.setupSocketSubscriptions();
             this.startAutoRefresh();
             this.startPreviewRefresh(settings);

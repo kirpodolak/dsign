@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <title>{% block document_title %}Digital Signage{% endblock %}</title>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}?v={{ timestamp }}">
+    {% block head_extra %}{% endblock %}
+    {% block styles %}{% endblock %}
+</head>
+<body class="app-body{% block body_class %}{% endblock %}"{% block body_extra_attrs %}{% endblock %}>
+    <div class="app-shell">
+        <header class="app-header" role="banner">
+            <nav class="app-nav app-nav--primary" aria-label="{% block nav_primary_aria %}{% endblock %}">
+                {% block site_nav %}
+                <div class="app-nav__left">
+                    <a href="{{ url_for('main.index') }}" class="nav-pill{% if request.path == '/' or request.path == '' %} is-active{% endif %}">
+                        <i class="fas fa-home" aria-hidden="true"></i>
+                        <span data-i18n="nav_home">Главная</span>
+                    </a>
+                    <a href="{{ url_for('main.gallery') }}" class="nav-pill{% if request.path.startswith('/gallery') %} is-active{% endif %}">
+                        <i class="fas fa-images" aria-hidden="true"></i>
+                        <span data-i18n="nav_gallery">Галерея</span>
+                    </a>
+                    <a href="{{ url_for('main.settings') }}" class="nav-pill{% if request.path.startswith('/settings') %} is-active{% endif %}">
+                        <i class="fas fa-sliders-h" aria-hidden="true"></i>
+                        <span data-i18n="nav_settings">Настройки</span>
+                    </a>
+                </div>
+                <div class="app-nav__center">
+                    <a href="{{ url_for('main.index') }}" class="app-brand" title="Home">
+                        <i class="fas fa-tv app-brand__icon" aria-hidden="true"></i>
+                        <span class="app-brand__text" data-i18n="brand_center">Digital Signage</span>
+                    </a>
+                </div>
+                <div class="app-nav__right">
+                    <div class="lang-toggle" role="group" data-i18n-aria="lang_aria" aria-label="Interface language">
+                        <button type="button" class="lang-toggle__btn" data-lang-set="ru" data-lang="ru" data-i18n-title="lang_ru" title="Русский">
+                            <span class="lang-toggle__fi" aria-hidden="true">🇷🇺</span>
+                            <span class="lang-toggle__label" data-i18n="lang_ru">Русский</span>
+                        </button>
+                        <button type="button" class="lang-toggle__btn" data-lang-set="en" data-lang="en" data-i18n-title="lang_en" title="English">
+                            <span class="lang-toggle__fi" aria-hidden="true">🇬🇧</span>
+                            <span class="lang-toggle__label" data-i18n="lang_en">English</span>
+                        </button>
+                    </div>
+                </div>
+                {% endblock %}
+            </nav>
+        </header>
+        <main class="app-main" id="main-content" role="main">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+    <script type="module" src="{{ url_for('static', filename='js/i18n.js') }}?v={{ timestamp }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

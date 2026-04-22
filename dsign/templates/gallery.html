@@ -1,20 +1,22 @@
-{% extends "base.html" %}
+{% extends "layout.html" %}
+
+{% block body_extra_attrs %} data-page-title-i18n="page_gallery_title"{% endblock %}
 
 {% block styles %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/gallery.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/gallery.css') }}?v={{ timestamp|default(0) }}">
 {% endblock %}
 
 {% block content %}
-<h1>Media Gallery</h1>
+<h1 class="page-title" data-i18n="page_gallery_title">Медиа-галерея</h1>
 
   <div class="gallery-shell">
     <div class="gallery-main">
-      <div class="gallery-actions" role="toolbar" aria-label="Gallery actions">
-        <button id="select-all" class="btn secondary">
-          <i class="fas fa-check-square"></i> Select All
+      <div class="gallery-actions" role="toolbar" data-i18n-aria="gallery_toolbar_aria" aria-label="Галерея">
+        <button id="select-all" type="button" class="btn secondary">
+          <i class="fas fa-check-square" aria-hidden="true"></i> <span data-i18n="select_all">Выбрать все</span>
         </button>
-        <button id="delete-selected" class="btn danger">
-          <i class="fas fa-trash"></i> Delete Selected
+        <button id="delete-selected" type="button" class="btn danger">
+          <i class="fas fa-trash" aria-hidden="true"></i> <span data-i18n="delete_selected">Удалить выбранные</span>
         </button>
       </div>
 
@@ -27,40 +29,40 @@
 
     <aside class="gallery-side" aria-label="Gallery controls">
       <div class="gallery-side__card">
-        <div class="gallery-side__title">Search & Sort</div>
+        <div class="gallery-side__title" data-i18n="gallery_search_sort">Поиск и сортировка</div>
         <div class="controls controls--stack">
-          <input type="text" id="search-input" placeholder="Search files...">
+          <input type="text" id="search-input" data-i18n-placeholder="search_placeholder" placeholder="Поиск файлов…">
           <select id="sort-select" aria-label="Sort">
-            <option value="name-asc">Name (A-Z)</option>
-            <option value="name-desc">Name (Z-A)</option>
-            <option value="date-newest">Date (Newest)</option>
-            <option value="date-oldest">Date (Oldest)</option>
-            <option value="type">File Type</option>
+            <option value="name-asc" data-i18n="sort_name_az">Name (A-Z)</option>
+            <option value="name-desc" data-i18n="sort_name_za">Name (Z-A)</option>
+            <option value="date-newest" data-i18n="sort_date_new">Date (newest)</option>
+            <option value="date-oldest" data-i18n="sort_date_old">Date (oldest)</option>
+            <option value="type" data-i18n="sort_type">File type</option>
           </select>
           <select id="group-select" aria-label="Group">
-            <option value="none">No Grouping</option>
-            <option value="type">Group by Type</option>
-            <option value="date">Group by Date</option>
+            <option value="none" data-i18n="group_none">No grouping</option>
+            <option value="type" data-i18n="group_type">By type</option>
+            <option value="date" data-i18n="group_date">By date</option>
           </select>
         </div>
       </div>
 
       <div class="gallery-side__card">
-        <div class="gallery-side__title">Add link</div>
+        <div class="gallery-side__title" data-i18n="gallery_add_link">Ссылка</div>
         <div class="controls controls--stack">
-          <input type="url" id="external-url" placeholder="Paste VK Video / Rutube link…">
+          <input type="url" id="external-url" data-i18n-placeholder="ext_placeholder" placeholder="…">
           <button type="button" id="external-add-btn" class="btn primary">
             <i class="fas fa-link" aria-hidden="true"></i>
-            Add
+            <span data-i18n="btn_add">Добавить</span>
           </button>
-          <div id="external-add-hint" class="gallery-side__hint">
-            Supported: VK Video, Rutube
+          <div id="external-add-hint" class="gallery-side__hint" data-i18n="ext_hint">
+            VK Video, Rutube
           </div>
         </div>
       </div>
 
       <div class="gallery-side__card">
-        <div class="gallery-side__title">Upload</div>
+        <div class="gallery-side__title" data-i18n="gallery_upload">Загрузка</div>
         <form id="upload-form" enctype="multipart/form-data">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <div class="upload-container upload-container--stack">
@@ -69,7 +71,7 @@
               <span class="upload-btn__track" aria-hidden="true"><span class="upload-btn__fill"></span></span>
               <span class="upload-btn__content">
                 <i class="fas fa-upload upload-btn__icon" aria-hidden="true"></i>
-                <span class="upload-btn__text">Upload</span>
+                <span class="upload-btn__text" data-i18n="btn_upload">Загрузить</span>
               </span>
             </button>
           </div>
@@ -78,10 +80,9 @@
     </aside>
   </div>
 
-<!-- Preview: fixed overlay + centered dialog (styles in gallery.css) -->
 <div id="preview-modal" class="preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-filename" hidden>
   <div class="preview-modal__panel">
-    <button type="button" class="preview-modal__close" id="preview-modal-close" aria-label="Close preview">
+    <button type="button" class="preview-modal__close" id="preview-modal-close" data-i18n-aria="preview_close" aria-label="Close">
       <i class="fas fa-times" aria-hidden="true"></i>
     </button>
     <div id="preview-container" class="preview-modal__media"></div>
@@ -95,5 +96,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="{{ url_for('static', filename='js/gallery.js') }}"></script>
+<script type="module" src="{{ url_for('static', filename='js/gallery.js') }}?v={{ timestamp|default(0) }}"></script>
 {% endblock %}

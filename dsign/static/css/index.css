@@ -368,7 +368,8 @@
     background: linear-gradient(180deg, var(--table-header) 0%, #4338ca 100%);
     color: #fff;
     font-weight: 600;
-    font-size: var(--text-sm);
+    /* Column headers should read slightly above body text (typography / hierarchy). */
+    font-size: 0.9375rem;
     letter-spacing: 0.02em;
     text-transform: none;
     padding: 0.75rem 1rem;

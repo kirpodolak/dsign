@@ -1,3 +1,5 @@
+import { t, getUiLang, applyI18n } from './i18n.js';
+
 // Кэш для превью медиафайлов
 const previewCache = new Map();
 
@@ -15,9 +17,12 @@ function getCSRFToken() {
 function toggleButtonState(button, isLoading) {
     if (!button) return;
     button.disabled = isLoading;
-    button.innerHTML = isLoading ? 
-        '<i class="fas fa-spinner fa-spin"></i> Сохранение...' : 
-        '<i class="fas fa-save"></i> Сохранить плейлист';
+    const lang = getUiLang();
+    if (isLoading) {
+        button.innerHTML = `<i class="fas fa-spinner fa-spin" aria-hidden="true"></i> <span class="save-playlist__label">${t('saving_ellipsis', lang)}</span>`;
+    } else {
+        button.innerHTML = `<i class="fas fa-save" aria-hidden="true"></i> <span class="save-playlist__label" data-i18n="btn_save_playlist">${t('btn_save_playlist', lang)}</span>`;
+    }
 }
 
 // UI компонент для уведомлений
@@ -145,6 +150,7 @@ export class PlaylistManager {
         this.emptyMessage = document.getElementById('empty-playlist-message');
         this.ui = new PlaylistUI();
         this._thumbObserver = null;
+        this._lastFiles = null;
 
         this.init();
     }
@@ -163,6 +169,13 @@ export class PlaylistManager {
         
         this.loadMediaFiles();
         this.setupCheckboxHandlers();
+
+        document.addEventListener('dsign:language-changed', () => {
+            applyI18n();
+            if (this._lastFiles) {
+                this.renderFileTable(this._lastFiles);
+            }
+        });
         
         if (window.App?.Sockets?.socket) {
             window.App.Sockets.socket.on('playlist_updated', (data) => {
@@ -254,6 +267,7 @@ export class PlaylistManager {
     // Рендеринг таблицы файлов
     renderFileTable(files) {
         if (!this.fileListEl) return;
+        this._lastFiles = files;
 
         if (!files || files.length === 0) {
             this.fileListEl.innerHTML = '';
@@ -264,6 +278,7 @@ export class PlaylistManager {
         if (this.emptyMessage) this.emptyMessage.style.display = 'none';
         this.fileListEl.innerHTML = '';
         this._ensureThumbObserver();
+        const lang = getUiLang();
 
         files.forEach((file, index) => {
             const row = document.createElement('tr');
@@ -302,6 +317,7 @@ export class PlaylistManager {
                 Boolean(file.is_external) ||
                 String(file.filename || '').startsWith('ext-') ||
                 ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v'].some(ext => String(file.filename || '').toLowerCase().endsWith(ext));
+            const videoFullLabel = t('pl_video_full', lang);
 
             // Use DB duration when present (avoid `|| 10` which treats 0 as missing).
             const imageSeconds = (() => {
@@ -323,7 +339,7 @@ export class PlaylistManager {
                 </td>
                 <td class="playlist-col-duration">
                     ${isVideo ?
-                        '<span class="playlist-video-hint">Полное видео</span>' :
+                        `<span class="playlist-video-hint">${videoFullLabel}</span>` :
                         `<input type="number" class="duration-input" data-filename="${file.filename}"
                           value="${imageSeconds}" min="1">`
                     }

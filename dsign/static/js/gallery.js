@@ -1,3 +1,5 @@
+import { t, getUiLang, applyI18n } from './i18n.js';
+
 // Utility functions
 function getFileExtension(filename) {
   if (!filename) return '';
@@ -518,9 +520,11 @@ class MediaGallery {
     });
     
     if (this.elements.selectAllBtn) {
-      this.elements.selectAllBtn.innerHTML = allSelected ? 
-        '<i class="fas fa-check-square"></i> Select All' : 
-        '<i class="fas fa-times"></i> Deselect All';
+      const newAll = Array.from(checkboxes).every((cb) => cb.checked);
+      const lang = getUiLang();
+      const label = newAll ? t('deselect_all', lang) : t('select_all', lang);
+      const icon = newAll ? 'fa-times' : 'fa-check-square';
+      this.elements.selectAllBtn.innerHTML = `<i class="fas ${icon}"></i> ${label}`;
     }
   }
 
@@ -682,7 +686,7 @@ class MediaGallery {
       fill.classList.add('upload-btn__fill--pulse');
       fill.style.width = '100%';
     }
-    if (text) text.textContent = 'Processing…';
+    if (text) text.textContent = t('processing_ellipsis', getUiLang());
     if (icon) icon.className = 'fas fa-circle-notch fa-spin upload-btn__icon';
   }
 
@@ -699,7 +703,7 @@ class MediaGallery {
       fill.classList.remove('upload-btn__fill--pulse');
       fill.style.opacity = '';
     }
-    if (text) text.textContent = 'Upload';
+    if (text) text.textContent = t('btn_upload', getUiLang());
     if (icon) icon.className = 'fas fa-upload upload-btn__icon';
   }
 
@@ -845,9 +849,28 @@ class MediaGallery {
       }
     });
 
+    document.addEventListener('dsign:language-changed', () => {
+      applyI18n();
+      this._syncSelectAllLabel();
+    });
+
     window.addEventListener('visibilitychange', () => {
       if (!document.hidden) this.loadMediaFiles();
     });
+  }
+
+  _syncSelectAllLabel() {
+    if (!this.elements.selectAllBtn) return;
+    const checkboxes = document.querySelectorAll('.file-checkbox');
+    const lang = getUiLang();
+    if (!checkboxes.length) {
+      this.elements.selectAllBtn.innerHTML = `<i class="fas fa-check-square"></i> ${t('select_all', lang)}`;
+      return;
+    }
+    const allSelected = Array.from(checkboxes).every((cb) => cb.checked);
+    const label = allSelected ? t('deselect_all', lang) : t('select_all', lang);
+    const icon = allSelected ? 'fa-times' : 'fa-check-square';
+    this.elements.selectAllBtn.innerHTML = `<i class="fas ${icon}"></i> ${label}`;
   }
 }
 
