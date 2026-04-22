@@ -68,12 +68,24 @@ class ExternalMediaService:
             # Keep first value; do not allow multiple variants of same header.
             out_lc.setdefault(kl, vs)
 
-        # Prefer page URL as referer for VK/Rutube (CDNs reject direct URLs without it).
-        if page_url and "referer" not in out_lc:
+        prov = (str(provider or "").strip().lower() if provider is not None else "")
+        su = (str(stream_url or "").strip().lower() if stream_url is not None else "")
+
+        # NOTE: Providers differ a lot in how strict their CDNs are about Referer/Origin.
+        # - VK/OKCDN frequently requires Referer; without it ffmpeg opens can return HTTP 400.
+        # - Rutube's HLS CDNs (river-*/rtbcdn) can return HTTP 400 if an unexpected Referer/Origin is forced.
+        want_synth_ref = False
+        if prov == "vkvideo":
+            want_synth_ref = True
+        elif "okcdn.ru" in su or "vkvd" in su:
+            want_synth_ref = True
+
+        # Prefer page URL as referer for VK (and OKCDN). Avoid forcing it for Rutube.
+        if want_synth_ref and page_url and "referer" not in out_lc:
             out_lc["referer"] = str(page_url)
 
-        # Some CDNs want Origin that matches referer origin.
-        if page_url and "origin" not in out_lc:
+        # Some CDNs want Origin that matches referer origin (VK/OKCDN). Avoid forcing it for Rutube.
+        if want_synth_ref and page_url and "origin" not in out_lc:
             try:
                 p = urlparse(str(page_url))
                 if p.scheme and p.netloc:
@@ -260,6 +272,113 @@ class ExternalMediaService:
             http_headers=http_headers,
         )
 
+    def _cookies_blob_to_cookie_header(self, cookies: Optional[str]) -> str:
+        """
+        Convert yt-dlp cookie blob to a Cookie header string.
+
+        yt-dlp may include attributes like Domain/Path/Expires inline; MPV/ffmpeg want only
+        `name=value` pairs joined by `; `.
+        """
+        raw = (cookies or "").strip()
+        if not raw:
+            return ""
+        # Normalize to semicolon-separated tokens; keep only non-attribute key=value pairs.
+        attr_keys = {
+            "domain",
+            "path",
+            "expires",
+            "max-age",
+            "secure",
+            "httponly",
+            "samesite",
+            "priority",
+        }
+        pairs: Dict[str, str] = {}
+        for tok in raw.split(";"):
+            t = tok.strip()
+            if not t or "=" not in t:
+                continue
+            k, v = t.split("=", 1)
+            k = k.strip()
+            v = v.strip()
+            if not k or not v:
+                continue
+            if k.lower() in attr_keys:
+                continue
+            # Keep first occurrence to preserve whatever yt-dlp decided.
+            pairs.setdefault(k, v)
+        if not pairs:
+            return ""
+        return "; ".join([f"{k}={v}" for k, v in pairs.items()])
+
+    def _yt_dlp_pick_playback(self, page_url: str) -> Tuple[Optional[str], Dict[str, Any]]:
+        """
+        Resolve a direct playback URL and a header dict for MPV from yt-dlp output.
+
+        Returns (stream_url, headers_dict). headers may include Cookie/User-Agent/etc.
+        """
+        try:
+            info = self._yt_dlp_extract(page_url)
+        except Exception:
+            return None, {}
+
+        headers: Dict[str, Any] = {}
+        if isinstance(info.get("http_headers"), dict):
+            headers.update({str(k): str(v) for k, v in info["http_headers"].items() if v is not None})
+
+        # Prefer yt-dlp's requested download (already format-selected) when present.
+        candidates = []
+        rd = info.get("requested_downloads")
+        if isinstance(rd, list) and rd:
+            for ent in rd:
+                if isinstance(ent, dict):
+                    candidates.append(ent)
+        fmts = info.get("formats")
+        if isinstance(fmts, list):
+            for f in fmts:
+                if isinstance(f, dict):
+                    candidates.append(f)
+
+        # Rutube: pick a URL that is both playable *and* comes with the anti-bot cookie blob.
+        # Many Rutube extracts include multiple m3u8 variants; some have cookies, some don't.
+        # Prefer: m3u8 with cookies > m3u8 without cookies > any URL with cookies > any URL.
+        picked_url: Optional[str] = None
+        picked_cookies: str = ""
+        fallback_m3u8: Optional[str] = None
+        fallback_any: Optional[str] = None
+        fallback_any_cookies: str = ""
+
+        for c in candidates:
+            u = str(c.get("url") or "").strip()
+            if not u:
+                continue
+            ck = str(c.get("cookies") or "").strip()
+            is_m3u8 = ".m3u8" in u
+            if fallback_any is None:
+                fallback_any = u
+                fallback_any_cookies = ck
+            if is_m3u8 and fallback_m3u8 is None:
+                fallback_m3u8 = u
+            if is_m3u8 and ck:
+                picked_url = u
+                picked_cookies = ck
+                break
+            if picked_url is None and ck:
+                # keep looking for an m3u8 with cookies, but remember any url with cookies
+                picked_url = u
+                picked_cookies = ck
+
+        if not picked_url:
+            picked_url = fallback_m3u8 or fallback_any
+            picked_cookies = fallback_any_cookies if picked_url == fallback_any else ""
+
+        if picked_cookies:
+            ck = self._cookies_blob_to_cookie_header(picked_cookies)
+            if ck:
+                headers.setdefault("Cookie", ck)
+
+        return picked_url, headers
+
     # -----------------------
     # Thumbnail caching
     # -----------------------
@@ -425,7 +544,12 @@ class ExternalMediaService:
         # Prefer URL-based detection (canonical vk/rutube links); fall back to stored value.
         provider = url_provider if url_provider != "unknown" else (db_provider or "unknown")
 
-        if provider in ("vkvideo", "rutube") and page_url.startswith(("http://", "https://")):
+        # Provider-specific startup:
+        # - VK: prefer ytdl:// so yt-dlp resolves on the same host as MPV; OKCDN is very sensitive to Referer.
+        # - Rutube: ytdl_hook currently only injects a limited cookie set into mpv/ffmpeg opens, which can
+        #   trigger HTTP 400 from river-*/rtbcdn. Prefer resolving to a direct CDN URL via yt-dlp on-device
+        #   so we can pass the exact UA+Cookie set through mpv http options.
+        if provider in ("vkvideo",) and page_url.startswith(("http://", "https://")):
             if db_provider != provider:
                 try:
                     row.provider = provider
@@ -437,6 +561,27 @@ class ExternalMediaService:
                     except Exception:
                         pass
             return {"url": f"ytdl://{page_url}", "http_headers": {}}
+
+        if provider in ("rutube",) and page_url.startswith(("http://", "https://")):
+            # Force a fresh resolve on the device; rutube CDNs are guarded and rely on qrator cookies.
+            # Prefer pulling the direct URL + cookie blob from yt-dlp output and turning it into a Cookie header.
+            url, headers = self._yt_dlp_pick_playback(page_url)
+            if not url:
+                url = self.ensure_fresh_resolved_url(row, max_age_sec=0)
+            if not isinstance(headers, dict):
+                headers = {}
+            if not headers:
+                try:
+                    headers = dict(row.http_headers or {})
+                except Exception:
+                    headers = {}
+            safe = self._normalize_playback_headers(
+                headers,
+                page_url=page_url,
+                stream_url=str(url or ""),
+                provider=provider,
+            )
+            return {"url": url, "http_headers": safe}
 
         url = self.ensure_fresh_resolved_url(row, max_age_sec=max_age_sec)
         headers: Dict[str, Any] = {}

@@ -287,15 +287,22 @@ class MPVManager:
         ipc_request_id = int(time.time() * 1_000_000) & 0x7FFFFFFF
         start_time = time.time()
 
-        self.logger.debug(
-            "MPVCommand started",
-            extra={
-                "command": command_name,
-                **({"property": prop_name} if prop_name else {}),
-                "request_id": ipc_request_id,
-                "timeout": timeout,
-            },
-        )
+        # IPC command logs can be extremely chatty (polling loops call this frequently).
+        # Keep per-command start/end logs OFF by default; allow opt-in via env.
+        log_ipc_debug = (os.getenv("DSIGN_MPV_IPC_DEBUG", "").strip().lower() in ("1", "true", "yes", "on"))
+        slow_ms = int(os.getenv("DSIGN_MPV_IPC_SLOW_MS", "250") or 250)
+        if slow_ms < 0:
+            slow_ms = 0
+        if log_ipc_debug:
+            self.logger.debug(
+                "MPVCommand started",
+                extra={
+                    "command": command_name,
+                    **({"property": prop_name} if prop_name else {}),
+                    "request_id": ipc_request_id,
+                    "timeout": timeout,
+                },
+            )
 
         for attempt in range(PlaybackConstants.MAX_RETRIES):
             try:
@@ -348,31 +355,35 @@ class MPVManager:
                         duration_sec = round(time.time() - start_time, 3)
                         err = result.get("error")
                         if err == "success":
-                            self.logger.debug(
-                                "MPVCommand completed",
-                                extra={
-                                    "command": command_name,
-                                    **({"property": prop_name} if prop_name else {}),
-                                    "request_id": ipc_request_id,
-                                    "duration_sec": duration_sec,
-                                    "attempt": attempt + 1,
-                                },
-                            )
-                        else:
-                            # For get_property, "property unavailable" is expected on some mpv builds / media types.
-                            # Treat it as a non-error and normalize to {"error":"success","data":None} so callers can
-                            # handle it without generating noisy logs.
-                            if command_name == "get_property" and err == "property unavailable":
+                            duration_ms = int(duration_sec * 1000)
+                            if log_ipc_debug or (slow_ms and duration_ms >= slow_ms):
                                 self.logger.debug(
-                                    "MPVCommand property unavailable",
+                                    "MPVCommand completed" if log_ipc_debug else "MPVCommand slow",
                                     extra={
                                         "command": command_name,
                                         **({"property": prop_name} if prop_name else {}),
                                         "request_id": ipc_request_id,
                                         "duration_sec": duration_sec,
                                         "attempt": attempt + 1,
+                                        **({"slow_ms_threshold": slow_ms} if not log_ipc_debug else {}),
                                     },
                                 )
+                        else:
+                            # For get_property, "property unavailable" is expected on some mpv builds / media types.
+                            # Treat it as a non-error and normalize to {"error":"success","data":None} so callers can
+                            # handle it without generating noisy logs.
+                            if command_name == "get_property" and err == "property unavailable":
+                                if log_ipc_debug:
+                                    self.logger.debug(
+                                        "MPVCommand property unavailable",
+                                        extra={
+                                            "command": command_name,
+                                            **({"property": prop_name} if prop_name else {}),
+                                            "request_id": ipc_request_id,
+                                            "duration_sec": duration_sec,
+                                            "attempt": attempt + 1,
+                                        },
+                                    )
                                 return {
                                     "request_id": result.get("request_id", ipc_request_id),
                                     "error": "success",
