@@ -313,6 +313,29 @@ class PlaylistManager:
             )
         except Exception:
             pass
+        # Some network fetches (notably EDL sources opened by lavf/ffmpeg) do not always honor
+        # `http-header-fields`. Clear/override the more specific stream options too.
+        try:
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "file-local-options/stream-lavf-o", {}]},
+                timeout=3.0,
+            )
+        except Exception:
+            pass
+        try:
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "user-agent", ""]},
+                timeout=3.0,
+            )
+        except Exception:
+            pass
+        try:
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "referrer", ""]},
+                timeout=3.0,
+            )
+        except Exception:
+            pass
         # ytdl options can also be sticky across items; clear them for deterministic behavior.
         try:
             self._mpv_manager._send_command(
@@ -321,6 +344,69 @@ class PlaylistManager:
             )
         except Exception:
             pass
+
+    def _apply_mpv_stream_lavf_options(self, headers: Dict[str, str]) -> None:
+        """
+        Apply headers for lavf/ffmpeg-based network opens.
+
+        When mpv plays `edl://` sources from ytdl_hook, the underlying open can go through
+        lavf/ffmpeg. Those opens may ignore `http-header-fields`, so we also set
+        `file-local-options/stream-lavf-o` (plus `user-agent`/`referrer`) for best compatibility.
+
+        IMPORTANT: Avoid duplicating UA/Referer between multiple mechanisms when possible.
+        """
+        if not headers:
+            return
+        ua = str(headers.get("User-Agent") or "").strip()
+        ref = str(headers.get("Referer") or "").strip()
+        if not ua and not ref:
+            return
+
+        # ffmpeg expects CRLF-separated header lines in `headers`.
+        hdr_lines = []
+        for k, v in headers.items():
+            if not k or not v:
+                continue
+            # Avoid duplicating UA/Referer: these are provided separately via lavf options.
+            lk = str(k).strip().lower()
+            if lk in ("user-agent", "referer", "referrer"):
+                continue
+            hdr_lines.append(f"{str(k).strip()}: {str(v).strip()}")
+        hdr_blob = "\r\n".join([h for h in hdr_lines if h])
+
+        opts: Dict[str, str] = {}
+        if ua:
+            opts["user_agent"] = ua
+        if ref:
+            # ffmpeg uses `referer` (single-r).
+            opts["referer"] = ref
+        if hdr_blob:
+            opts["headers"] = hdr_blob + "\r\n"
+
+        try:
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "file-local-options/stream-lavf-o", opts]},
+                timeout=5.0,
+            )
+        except Exception:
+            pass
+        # These are mpv-level fallbacks; they can help non-lavf opens too.
+        if ua:
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "user-agent", ua]},
+                    timeout=3.0,
+                )
+            except Exception:
+                pass
+        if ref:
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "referrer", ref]},
+                    timeout=3.0,
+                )
+            except Exception:
+                pass
 
     def _apply_mpv_ytdl_options(self, item: dict, *, stream_url: str) -> None:
         """
@@ -372,6 +458,27 @@ class PlaylistManager:
             provider=provider,
         )
         self._clear_mpv_http_options()
+
+        # For ytdl:// items (VK/Rutube), ensure lavf/ffmpeg network opens also get UA/Referer.
+        # This helps when ytdl_hook builds an `edl://` of multiple sources (audio+video), and
+        # the individual sources are opened via lavf without inheriting `http-header-fields`.
+        is_ytdl = isinstance(stream_url, str) and stream_url.startswith("ytdl://")
+        is_vk_or_rutube = False
+        try:
+            prov = (provider or "").strip().lower() if isinstance(provider, str) else ""
+            pu = (page_url or "").strip() if isinstance(page_url, str) else ""
+            su = (stream_url or "").strip()
+            if prov in ("vkvideo", "rutube"):
+                is_vk_or_rutube = True
+            elif "vkvideo.ru" in pu or "vk.com/video" in pu or "rutube.ru" in pu:
+                is_vk_or_rutube = True
+            elif "okcdn.ru" in su:
+                is_vk_or_rutube = True
+        except Exception:
+            is_vk_or_rutube = False
+        if is_ytdl and is_vk_or_rutube:
+            self._apply_mpv_stream_lavf_options(normalized)
+
         try:
             header_lines = []
             for k, v in normalized.items():
@@ -381,14 +488,17 @@ class PlaylistManager:
                 vs = str(v).strip()
                 if not ks or not vs:
                     continue
+                # Avoid duplicating UA/Referer when we already set them via lavf/mpv properties.
+                if is_ytdl and is_vk_or_rutube and ks.lower() in ("user-agent", "referer", "referrer"):
+                    continue
                 header_lines.append(f"{ks}: {vs}")
             if header_lines:
                 self._mpv_manager._send_command(
                     {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
                     timeout=5.0,
                 )
-            # Do not also set `user-agent` / `referrer` MPV properties: they duplicate the same
-            # headers from `http-header-fields` and some CDNs respond with HTTP 400.
+            # We intentionally set UA/Referer via lavf/mpv properties for ytdl:// VK/Rutube,
+            # and strip them from `http-header-fields` to avoid duplicates (some CDNs return 400).
         except Exception:
             pass
         return normalized
