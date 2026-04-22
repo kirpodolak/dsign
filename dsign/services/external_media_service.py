@@ -387,6 +387,32 @@ class ExternalMediaService:
         except Exception:
             return ""
 
+    def _rutube_format_quality_score(self, fmt: Dict[str, Any], url: str) -> int:
+        """
+        Higher = better. Prefer height * width, then tbr, then URL ?i=WxH hint.
+        """
+        try:
+            h = int(fmt.get("height") or 0)
+            w = int(fmt.get("width") or 0)
+            if h > 0 and w > 0:
+                return h * w
+        except Exception:
+            pass
+        try:
+            tbr = int(fmt.get("tbr") or fmt.get("vbr") or 0)
+            if tbr > 0:
+                return tbr * 1000
+        except Exception:
+            pass
+        # Rutube HLS: ?i=1920x1080_7667 or ?i=256x144_170
+        m = re.search(r"[?&]i=([0-9]+)x([0-9]+)(?:_|&|$)", url, flags=re.IGNORECASE)
+        if m:
+            try:
+                return int(m.group(1)) * int(m.group(2))
+            except Exception:
+                pass
+        return 0
+
     def _yt_dlp_pick_playback(self, page_url: str) -> Tuple[Optional[str], Dict[str, Any]]:
         """
         Resolve a direct playback URL and a header dict for MPV from yt-dlp output.
@@ -415,14 +441,13 @@ class ExternalMediaService:
                 if isinstance(f, dict):
                     candidates.append(f)
 
-        # Rutube: pick a URL that is both playable *and* comes with the anti-bot cookie blob.
-        # Many Rutube extracts include multiple m3u8 variants; some have cookies, some don't.
-        # Prefer: m3u8 with cookies > m3u8 without cookies > any URL with cookies > any URL.
-        picked_url: Optional[str] = None
-        picked_cookies: str = ""
+        # Rutube: need both playable m3u8 *and* anti-bot cookie blob.
+        # Do NOT take the *first* m3u8 with cookies (often 256p); pick the best quality among m3u8+ck.
+        m3u8_with_cookies: list[tuple[int, str, str]] = []
         fallback_m3u8: Optional[str] = None
         fallback_any: Optional[str] = None
         fallback_any_cookies: str = ""
+        best_non_m3u8_with_ck: Optional[tuple[int, str, str]] = None
 
         for c in candidates:
             u = str(c.get("url") or "").strip()
@@ -436,15 +461,28 @@ class ExternalMediaService:
             if is_m3u8 and fallback_m3u8 is None:
                 fallback_m3u8 = u
             if is_m3u8 and ck:
-                picked_url = u
-                picked_cookies = ck
-                break
-            if picked_url is None and ck:
-                # keep looking for an m3u8 with cookies, but remember any url with cookies
-                picked_url = u
-                picked_cookies = ck
+                score = self._rutube_format_quality_score(c, u)
+                m3u8_with_cookies.append((score, u, ck))
+            elif ck and not is_m3u8:
+                score = self._rutube_format_quality_score(c, u)
+                if best_non_m3u8_with_ck is None or score > best_non_m3u8_with_ck[0]:
+                    best_non_m3u8_with_ck = (score, u, ck)
+
+        picked_url: Optional[str] = None
+        picked_cookies: str = ""
+
+        if m3u8_with_cookies:
+            m3u8_with_cookies.sort(
+                key=lambda t: (t[0], len(t[1])),
+                reverse=True,
+            )
+            _, picked_url, picked_cookies = m3u8_with_cookies[0]
+
+        if not picked_url and best_non_m3u8_with_ck is not None:
+            _, picked_url, picked_cookies = best_non_m3u8_with_ck
 
         if not picked_url:
+            # Legacy fallback: any m3u8, then any URL
             picked_url = fallback_m3u8 or fallback_any
             picked_cookies = fallback_any_cookies if picked_url == fallback_any else ""
 
