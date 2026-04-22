@@ -367,10 +367,10 @@ class PlaylistManager:
         for k, v in headers.items():
             if not k or not v:
                 continue
-            # Avoid duplicating UA/Referer: these are provided separately via lavf options.
             lk = str(k).strip().lower()
-            if lk in ("user-agent", "referer", "referrer"):
-                continue
+            # We'll pass UA/Referer both in dedicated fields and in `headers` when present,
+            # because some OKCDN endpoints appear to require them and mpv's ytdl_hook may
+            # clobber dedicated lavf fields later (cookies-only writes).
             hdr_lines.append(f"{str(k).strip()}: {str(v).strip()}")
         hdr_blob = "\r\n".join([h for h in hdr_lines if h])
 
@@ -486,6 +486,16 @@ class PlaylistManager:
 
         merged = self._merge_mpv_lavf_options(base_val, extra)
         try:
+            self.logger.debug(
+                "Reapplying stream-lavf-o after ytdl_hook",
+                extra={
+                    "lavf_keys": sorted(list(merged.keys()))[:20],
+                    "has_cookies": bool(isinstance(merged, dict) and merged.get("cookies")),
+                    "has_user_agent": bool(isinstance(merged, dict) and merged.get("user_agent")),
+                    "has_referer": bool(isinstance(merged, dict) and merged.get("referer")),
+                    "has_headers": bool(isinstance(merged, dict) and merged.get("headers")),
+                },
+            )
             self._mpv_manager._send_command(
                 {"command": ["set_property", "file-local-options/stream-lavf-o", merged]},
                 timeout=5.0,
@@ -590,17 +600,14 @@ class PlaylistManager:
                 vs = str(v).strip()
                 if not ks or not vs:
                     continue
-                # Avoid duplicating UA/Referer when we already set them via lavf/mpv properties.
-                if is_ytdl and is_vk_or_rutube and ks.lower() in ("user-agent", "referer", "referrer"):
-                    continue
                 header_lines.append(f"{ks}: {vs}")
             if header_lines:
                 self._mpv_manager._send_command(
                     {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
                     timeout=5.0,
                 )
-            # We intentionally set UA/Referer via lavf/mpv properties for ytdl:// VK/Rutube,
-            # and strip them from `http-header-fields` to avoid duplicates (some CDNs return 400).
+            # For VK/OKCDN we prefer to keep UA/Referer here too: ytdl_hook may overwrite
+            # lavf options later (cookies-only), but it won't clobber http-header-fields.
         except Exception:
             pass
         return normalized
