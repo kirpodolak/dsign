@@ -24,9 +24,9 @@ TTYVTDisallocate=yes
 
 # Подготовка директории и прав
 ExecStartPre=/bin/chvt 1
-ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv
-ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv
-ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
+ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
+ExecStartPre=/bin/chown -R dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
+ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 
 # Основная команда запуска
@@ -38,8 +38,8 @@ ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 # --video-sync=display-vdrop: меньше CPU, чем display-resample. Звук по mute — через IPC/плейлист.
 # Без --audio-samplerate: меньше принудительного ресемплинга на ARM (при необходимости верните 48000).
 # ytdl/yt-dlp hook: required for VK Video / Rutube via `ytdl://<page URL>` (signage resolves on the Pi at play time).
-# Do not use --no-ytdl here. Optionally set script-opts=ytdl_hook-ytdl_path=... in /etc/dsign/mpv-minimal/mpv.conf.
-ExecStart=/usr/bin/mpv --idle=yes --no-terminal --config-dir=/etc/dsign/mpv-minimal --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --log-file=/var/log/dsign/mpv.log
+# Do not use --no-ytdl here. Optional script-opts=ytdl_hook-ytdl_path=... in /var/lib/dsign/mpv-minimal/mpv.conf (writable by dsign).
+ExecStart=/usr/bin/mpv --idle=yes --no-terminal --config-dir=/var/lib/dsign/mpv-minimal --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --log-file=/var/log/dsign/mpv.log
 # Startup IP OSD is best-effort; never fail MPV startup if helper is unavailable.
 ExecStartPost=-/bin/systemctl --no-block start dsign-show-startup-ip.service
 

@@ -151,9 +151,14 @@ ReadWritePaths=/var/log/dsign /var/lib/dsign
 WantedBy=multi-user.target
 EOL
 
-# MPV minimal config (ytdl hook path optional; see file comments)
-mkdir -p /etc/dsign/mpv-minimal
-install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/mpv.conf" /etc/dsign/mpv-minimal/mpv.conf
+# MPV minimal config under /var/lib/dsign (owned by dsign — editable without root)
+mkdir -p "$DB_DIR/mpv-minimal"
+if [ ! -f "$DB_DIR/mpv-minimal/mpv.conf" ]; then
+    install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/mpv.conf" "$DB_DIR/mpv-minimal/mpv.conf"
+fi
+chown -R "$DSIGN_USER:video" "$DB_DIR/mpv-minimal"
+chmod 775 "$DB_DIR/mpv-minimal"
+chmod 664 "$DB_DIR/mpv-minimal/mpv.conf" 2>/dev/null || true
 
 # MPV Player Service
 cat > /etc/systemd/system/dsign-mpv.service <<EOL
@@ -177,11 +182,11 @@ TTYVHangup=yes
 TTYVTDisallocate=yes
 UMask=0002
 ExecStartPre=/bin/chvt 1
-ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv
-ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv
-ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
+ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
+ExecStartPre=/bin/chown -R dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
+ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
-ExecStart=/usr/bin/mpv --idle=yes --no-terminal --config-dir=/etc/dsign/mpv-minimal --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --log-file=/var/log/dsign/mpv.log
+ExecStart=/usr/bin/mpv --idle=yes --no-terminal --config-dir=/var/lib/dsign/mpv-minimal --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --log-file=/var/log/dsign/mpv.log
 ExecStartPost=-/usr/local/bin/dsign-show-startup-ip
 Restart=always
 RestartSec=5s
