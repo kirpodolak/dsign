@@ -70,6 +70,9 @@ class ExternalMediaService:
 
         prov = (str(provider or "").strip().lower() if provider is not None else "")
         su = (str(stream_url or "").strip().lower() if stream_url is not None else "")
+        is_rutube_cdn = (prov == "rutube") and (
+            "river-" in su or ".rtbcdn.ru/" in su or "rtbcdn.ru/" in su
+        )
 
         # NOTE: Providers differ a lot in how strict their CDNs are about Referer/Origin.
         # - VK/OKCDN frequently requires Referer; without it ffmpeg opens can return HTTP 400.
@@ -96,10 +99,13 @@ class ExternalMediaService:
             except Exception:
                 pass
 
-        # Provide a safe default accept-language to mimic a real browser if missing.
+        # Keep headers minimal for CDN fetches: mpv/ffmpeg already diverges from browsers and some
+        # CDNs get picky about "browser-ish" accept lists. Empirically, Rutube CDN works with `*/*`.
+        if is_rutube_cdn:
+            out_lc["accept"] = "*/*"
+        else:
+            out_lc.setdefault("accept", "*/*")
         out_lc.setdefault("accept-language", "ru,en;q=0.9")
-        # Provide a safe default accept.
-        out_lc.setdefault("accept", "*/*")
 
         # Drop only absurdly large cookie blobs (yt-dlp edge cases). VK/Rutube often need the
         # full cookie set for CDN auth; rely on short URL refresh TTL instead of truncating.
