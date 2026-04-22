@@ -486,16 +486,17 @@ class PlaylistManager:
 
         merged = self._merge_mpv_lavf_options(base_val, extra)
         try:
-            # Use a structured message and INFO level to ensure it survives service log pipelines.
+            # Log with a string message + extras; some logging pipelines drop dict-as-message.
             self.logger.info(
-                {
-                    "text": "Reapplying stream-lavf-o after ytdl_hook",
+                "Reapplying stream-lavf-o after ytdl_hook",
+                extra={
+                    "event": "mpv_lavf_reapply_after_ytdl_hook",
                     "lavf_keys": sorted(list(merged.keys()))[:25],
                     "has_cookies": bool(isinstance(merged, dict) and merged.get("cookies")),
                     "has_user_agent": bool(isinstance(merged, dict) and merged.get("user_agent")),
                     "has_referer": bool(isinstance(merged, dict) and merged.get("referer")),
                     "has_headers": bool(isinstance(merged, dict) and merged.get("headers")),
-                }
+                },
             )
             self._mpv_manager._send_command(
                 {"command": ["set_property", "file-local-options/stream-lavf-o", merged]},
@@ -553,9 +554,6 @@ class PlaylistManager:
         Returns the normalized header dict (may be empty).
         """
         http_headers = item.get("http_headers") or {}
-        if not isinstance(http_headers, dict) or not http_headers:
-            self._clear_mpv_http_options()
-            return {}
 
         page_url = item.get("page_url")
         if page_url is not None:
@@ -563,6 +561,18 @@ class PlaylistManager:
         provider = item.get("provider")
         if provider is not None:
             provider = str(provider) if provider else None
+
+        # If the DB row doesn't have captured http_headers (common for older external-media rows),
+        # still synthesize a minimal set for network loads from page_url. VK/OKCDN is very sensitive
+        # to Referer; without it ffmpeg opens can return HTTP 400 even when cookies exist.
+        is_network_url = isinstance(stream_url, str) and stream_url.startswith(
+            ("http://", "https://", "ytdl://")
+        )
+        if not isinstance(http_headers, dict):
+            http_headers = {}
+        if not http_headers and not is_network_url:
+            self._clear_mpv_http_options()
+            return {}
 
         normalized = self._sanitize_headers_for_mpv(
             http_headers,
