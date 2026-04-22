@@ -388,11 +388,24 @@ class PlaylistManager:
         # If we set the dedicated lavf `cookies` option, avoid also embedding a `Cookie:` header
         # in the generic `headers` blob. Some CDNs respond with HTTP 400 to duplicate Cookie headers.
         hdr_lines = []
+        # Rutube CDN seems particularly sensitive to duplicated request context. For this path,
+        # prefer the dedicated lavf `referer` option and avoid also sending `Referer:` via `headers`.
+        try:
+            prov_lc_hdr = (str(provider or "").strip().lower()) if provider is not None else ""
+            su_hdr = (str(stream_url or "").strip().lower()) if stream_url is not None else ""
+            is_rutube_cdn_hdr = (prov_lc_hdr == "rutube") and (
+                "river-" in su_hdr or ".rtbcdn.ru/" in su_hdr or "rtbcdn.ru/" in su_hdr
+            )
+        except Exception:
+            is_rutube_cdn_hdr = False
         for k, v in headers.items():
             if not k or not v:
                 continue
             lk = str(k).strip().lower()
             if lk == "cookie" and cookie:
+                continue
+            if is_rutube_cdn_hdr and lk in ("referer", "referrer", "origin"):
+                # `referer` is already provided via the dedicated option; Origin is not required for ffmpeg.
                 continue
             # We'll pass UA/Referer both in dedicated fields and in `headers` when present.
             hdr_lines.append(f"{str(k).strip()}: {str(v).strip()}")
