@@ -371,7 +371,8 @@ class PlaylistManager:
             return
         ua = str(headers.get("User-Agent") or "").strip()
         ref = str(headers.get("Referer") or "").strip()
-        if not ua and not ref:
+        cookie = str(headers.get("Cookie") or "").strip()
+        if not ua and not ref and not cookie:
             return
 
         # ffmpeg expects CRLF-separated header lines in `headers`.
@@ -392,6 +393,10 @@ class PlaylistManager:
         if ref:
             # ffmpeg uses `referer` (single-r).
             opts["referer"] = ref
+        if cookie:
+            # ffmpeg/lavf accepts a cookie string via the `cookies` option; this can be more reliable
+            # than relying only on `headers` for some CDNs.
+            opts["cookies"] = cookie + ";\r\n"
         if hdr_blob:
             opts["headers"] = hdr_blob + "\r\n"
 
@@ -457,7 +462,8 @@ class PlaylistManager:
             return
         ua = str(normalized_headers.get("User-Agent") or "").strip()
         ref = str(normalized_headers.get("Referer") or "").strip()
-        if not ua and not ref:
+        cookie = str(normalized_headers.get("Cookie") or "").strip()
+        if not ua and not ref and not cookie:
             return
 
         # Build the extra dict we want to ensure exists in stream-lavf-o.
@@ -475,6 +481,8 @@ class PlaylistManager:
             extra["user_agent"] = ua
         if ref:
             extra["referer"] = ref
+        if cookie:
+            extra["cookies"] = cookie + ";\r\n"
         if hdr_blob:
             extra["headers"] = hdr_blob + "\r\n"
 
