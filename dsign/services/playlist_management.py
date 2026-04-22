@@ -486,15 +486,16 @@ class PlaylistManager:
 
         merged = self._merge_mpv_lavf_options(base_val, extra)
         try:
-            self.logger.debug(
-                "Reapplying stream-lavf-o after ytdl_hook",
-                extra={
-                    "lavf_keys": sorted(list(merged.keys()))[:20],
+            # Use a structured message and INFO level to ensure it survives service log pipelines.
+            self.logger.info(
+                {
+                    "text": "Reapplying stream-lavf-o after ytdl_hook",
+                    "lavf_keys": sorted(list(merged.keys()))[:25],
                     "has_cookies": bool(isinstance(merged, dict) and merged.get("cookies")),
                     "has_user_agent": bool(isinstance(merged, dict) and merged.get("user_agent")),
                     "has_referer": bool(isinstance(merged, dict) and merged.get("referer")),
                     "has_headers": bool(isinstance(merged, dict) and merged.get("headers")),
-                },
+                }
             )
             self._mpv_manager._send_command(
                 {"command": ["set_property", "file-local-options/stream-lavf-o", merged]},
