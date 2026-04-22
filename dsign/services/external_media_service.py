@@ -272,6 +272,95 @@ class ExternalMediaService:
             http_headers=http_headers,
         )
 
+    def _cookies_blob_to_cookie_header(self, cookies: Optional[str]) -> str:
+        """
+        Convert yt-dlp cookie blob to a Cookie header string.
+
+        yt-dlp may include attributes like Domain/Path/Expires inline; MPV/ffmpeg want only
+        `name=value` pairs joined by `; `.
+        """
+        raw = (cookies or "").strip()
+        if not raw:
+            return ""
+        # Normalize to semicolon-separated tokens; keep only non-attribute key=value pairs.
+        attr_keys = {
+            "domain",
+            "path",
+            "expires",
+            "max-age",
+            "secure",
+            "httponly",
+            "samesite",
+            "priority",
+        }
+        pairs: Dict[str, str] = {}
+        for tok in raw.split(";"):
+            t = tok.strip()
+            if not t or "=" not in t:
+                continue
+            k, v = t.split("=", 1)
+            k = k.strip()
+            v = v.strip()
+            if not k or not v:
+                continue
+            if k.lower() in attr_keys:
+                continue
+            # Keep first occurrence to preserve whatever yt-dlp decided.
+            pairs.setdefault(k, v)
+        if not pairs:
+            return ""
+        return "; ".join([f"{k}={v}" for k, v in pairs.items()])
+
+    def _yt_dlp_pick_playback(self, page_url: str) -> Tuple[Optional[str], Dict[str, Any]]:
+        """
+        Resolve a direct playback URL and a header dict for MPV from yt-dlp output.
+
+        Returns (stream_url, headers_dict). headers may include Cookie/User-Agent/etc.
+        """
+        try:
+            info = self._yt_dlp_extract(page_url)
+        except Exception:
+            return None, {}
+
+        headers: Dict[str, Any] = {}
+        if isinstance(info.get("http_headers"), dict):
+            headers.update({str(k): str(v) for k, v in info["http_headers"].items() if v is not None})
+
+        # Prefer yt-dlp's requested download (already format-selected) when present.
+        candidates = []
+        rd = info.get("requested_downloads")
+        if isinstance(rd, list) and rd:
+            for ent in rd:
+                if isinstance(ent, dict):
+                    candidates.append(ent)
+        fmts = info.get("formats")
+        if isinstance(fmts, list):
+            for f in fmts:
+                if isinstance(f, dict):
+                    candidates.append(f)
+
+        picked_url: Optional[str] = None
+        picked_cookies: str = ""
+        for c in candidates:
+            u = str(c.get("url") or "").strip()
+            if not u:
+                continue
+            # For Rutube, m3u8 is the common path; prefer it when available.
+            if ".m3u8" in u:
+                picked_url = u
+                picked_cookies = str(c.get("cookies") or "").strip()
+                break
+            if picked_url is None:
+                picked_url = u
+                picked_cookies = str(c.get("cookies") or "").strip()
+
+        if picked_cookies:
+            ck = self._cookies_blob_to_cookie_header(picked_cookies)
+            if ck:
+                headers.setdefault("Cookie", ck)
+
+        return picked_url, headers
+
     # -----------------------
     # Thumbnail caching
     # -----------------------
@@ -456,13 +545,18 @@ class ExternalMediaService:
             return {"url": f"ytdl://{page_url}", "http_headers": {}}
 
         if provider in ("rutube",) and page_url.startswith(("http://", "https://")):
-            # Force a fresh resolve on the device; rutube CDNs are signed/guarded and rely on cookies.
-            url = self.ensure_fresh_resolved_url(row, max_age_sec=0)
-            headers: Dict[str, Any] = {}
-            try:
-                headers = dict(row.http_headers or {})
-            except Exception:
+            # Force a fresh resolve on the device; rutube CDNs are guarded and rely on qrator cookies.
+            # Prefer pulling the direct URL + cookie blob from yt-dlp output and turning it into a Cookie header.
+            url, headers = self._yt_dlp_pick_playback(page_url)
+            if not url:
+                url = self.ensure_fresh_resolved_url(row, max_age_sec=0)
+            if not isinstance(headers, dict):
                 headers = {}
+            if not headers:
+                try:
+                    headers = dict(row.http_headers or {})
+                except Exception:
+                    headers = {}
             safe = self._normalize_playback_headers(
                 headers,
                 page_url=page_url,
