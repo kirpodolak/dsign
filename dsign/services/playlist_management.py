@@ -358,7 +358,13 @@ class PlaylistManager:
         except Exception:
             pass
 
-    def _apply_mpv_stream_lavf_options(self, headers: Dict[str, str]) -> None:
+    def _apply_mpv_stream_lavf_options(
+        self,
+        headers: Dict[str, str],
+        *,
+        stream_url: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> None:
         """
         Apply headers for lavf/ffmpeg-based network opens.
 
@@ -377,14 +383,34 @@ class PlaylistManager:
             return
 
         # ffmpeg expects CRLF-separated header lines in `headers`.
+        #
+        # IMPORTANT:
+        # If we set the dedicated lavf `cookies` option, avoid also embedding a `Cookie:` header
+        # in the generic `headers` blob. Some CDNs respond with HTTP 400 to duplicate Cookie headers.
         hdr_lines = []
+        # Rutube CDN seems particularly sensitive to duplicated request context. For this path,
+        # prefer the dedicated lavf `referer` option and avoid also sending `Referer:` via `headers`.
+        try:
+            prov_lc_hdr = (str(provider or "").strip().lower()) if provider is not None else ""
+            su_hdr = (str(stream_url or "").strip().lower()) if stream_url is not None else ""
+            is_rutube_cdn_hdr = (prov_lc_hdr == "rutube") and (
+                "river-" in su_hdr or ".rtbcdn.ru/" in su_hdr or "rtbcdn.ru/" in su_hdr
+            )
+        except Exception:
+            is_rutube_cdn_hdr = False
         for k, v in headers.items():
             if not k or not v:
                 continue
             lk = str(k).strip().lower()
-            # We'll pass UA/Referer both in dedicated fields and in `headers` when present,
-            # because some OKCDN endpoints appear to require them and mpv's ytdl_hook may
-            # clobber dedicated lavf fields later (cookies-only writes).
+            if lk == "cookie" and cookie:
+                continue
+            if lk == "user-agent" and ua:
+                # `user_agent` is already provided via the dedicated option; avoid duplicating it.
+                continue
+            if is_rutube_cdn_hdr and lk in ("referer", "referrer", "origin"):
+                # `referer` is already provided via the dedicated option; Origin is not required for ffmpeg.
+                continue
+            # We'll pass UA/Referer both in dedicated fields and in `headers` when present.
             hdr_lines.append(f"{str(k).strip()}: {str(v).strip()}")
         hdr_blob = "\r\n".join([h for h in hdr_lines if h])
 
@@ -397,7 +423,21 @@ class PlaylistManager:
         if cookie:
             # ffmpeg/lavf accepts a cookie string via the `cookies` option; this can be more reliable
             # than relying only on `headers` for some CDNs.
-            opts["cookies"] = cookie + ";\r\n"
+            # Do not append terminators: some CDNs reject malformed cookie strings.
+            opts["cookies"] = cookie
+
+        # Rutube CDN: force HTTP/1.1. Empirically, curl/ffmpeg repros succeed with HTTP/1.1, while
+        # mpv-embedded ffmpeg opens can differ in negotiation and trigger HTTP 400.
+        try:
+            prov_lc = (str(provider or "").strip().lower()) if provider is not None else ""
+            su = (str(stream_url or "").strip().lower()) if stream_url is not None else ""
+            is_rutube_cdn = (prov_lc == "rutube") and (
+                "river-" in su or ".rtbcdn.ru/" in su or "rtbcdn.ru/" in su
+            )
+            if is_rutube_cdn:
+                opts.setdefault("http_version", "1.1")
+        except Exception:
+            pass
         if hdr_blob:
             opts["headers"] = hdr_blob + "\r\n"
 
@@ -452,6 +492,8 @@ class PlaylistManager:
         self,
         *,
         normalized_headers: Dict[str, str],
+        stream_url: Optional[str] = None,
+        provider: Optional[str] = None,
         timeout_sec: float = 8.0,
     ) -> None:
         """
@@ -468,12 +510,17 @@ class PlaylistManager:
             return
 
         # Build the extra dict we want to ensure exists in stream-lavf-o.
+        #
+        # If we also set the dedicated lavf `cookies` option, avoid putting `Cookie:` into the
+        # generic `headers` blob to prevent duplicate Cookie headers (can trigger HTTP 400).
         hdr_lines = []
         for k, v in normalized_headers.items():
             if not k or not v:
                 continue
             lk = str(k).strip().lower()
             if lk in ("user-agent", "referer", "referrer"):
+                continue
+            if lk == "cookie" and cookie:
                 continue
             hdr_lines.append(f"{str(k).strip()}: {str(v).strip()}")
         hdr_blob = "\r\n".join([h for h in hdr_lines if h])
@@ -483,7 +530,20 @@ class PlaylistManager:
         if ref:
             extra["referer"] = ref
         if cookie:
-            extra["cookies"] = cookie + ";\r\n"
+            # Do not append terminators: some CDNs reject malformed cookie strings.
+            extra["cookies"] = cookie
+
+        # Same Rutube transport tweak as in the initial lavf set.
+        try:
+            prov_lc = (str(provider or "").strip().lower()) if provider is not None else ""
+            su = (str(stream_url or "").strip().lower()) if stream_url is not None else ""
+            is_rutube_cdn = (prov_lc == "rutube") and (
+                "river-" in su or ".rtbcdn.ru/" in su or "rtbcdn.ru/" in su
+            )
+            if is_rutube_cdn:
+                extra.setdefault("http_version", "1.1")
+        except Exception:
+            pass
         if hdr_blob:
             extra["headers"] = hdr_blob + "\r\n"
 
@@ -607,27 +667,50 @@ class PlaylistManager:
         # also apply `stream-lavf-o` so ffmpeg uses the same request context as mpv.
         is_network = isinstance(stream_url, str) and stream_url.startswith(("http://", "https://", "ytdl://"))
         if is_network and normalized:
-            self._apply_mpv_stream_lavf_options(normalized)
+            self._apply_mpv_stream_lavf_options(
+                normalized,
+                stream_url=stream_url,
+                provider=provider,
+            )
 
+        # Rutube direct CDN (river-*/rtbcdn): the actual open goes through lavf/ffmpeg.
+        # Setting global `http-header-fields` in parallel (Cookie/Referer/Origin/UA) can
+        # duplicate or fight `file-local-options/stream-lavf-o` and some CDNs return 400.
+        # Leave `http-header-fields` empty after _clear_mpv_http_options; rely on stream-lavf-o + mpv user-agent/referrer.
+        skip_global_http_header_fields = False
         try:
-            header_lines = []
-            for k, v in normalized.items():
-                if k is None or v is None:
-                    continue
-                ks = str(k).strip()
-                vs = str(v).strip()
-                if not ks or not vs:
-                    continue
-                header_lines.append(f"{ks}: {vs}")
-            if header_lines:
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
-                    timeout=5.0,
-                )
-            # For VK/OKCDN we prefer to keep UA/Referer here too: ytdl_hook may overwrite
-            # lavf options later (cookies-only), but it won't clobber http-header-fields.
+            prov_h = (str(provider or "").strip().lower()) if provider is not None else ""
+            su_h = (str(stream_url or "").strip().lower()) if stream_url is not None else ""
+            if prov_h == "rutube" and is_network and not str(stream_url or "").startswith(
+                "ytdl://"
+            ):
+                if "river-" in su_h or ".rtbcdn.ru/" in su_h or "rtbcdn.ru/" in su_h:
+                    skip_global_http_header_fields = True
         except Exception:
             pass
+
+        if not skip_global_http_header_fields:
+            try:
+                header_lines = []
+                for k, v in normalized.items():
+                    if k is None or v is None:
+                        continue
+                    ks = str(k).strip()
+                    vs = str(v).strip()
+                    if not ks or not vs:
+                        continue
+                    header_lines.append(f"{ks}: {vs}")
+                if header_lines:
+                    self._mpv_manager._send_command(
+                        {
+                            "command": ["set_property", "http-header-fields", "\r\n".join(header_lines)],
+                        },
+                        timeout=5.0,
+                    )
+                # For VK/OKCDN we prefer to keep UA/Referer here too: ytdl_hook may overwrite
+                # lavf options later (cookies-only), but it won't clobber http-header-fields.
+            except Exception:
+                pass
         return normalized
 
     def _wait_mpv_leave_idle(self, timeout_sec: float = 45.0) -> bool:
@@ -929,6 +1012,8 @@ class PlaylistManager:
                             try:
                                 self._apply_mpv_lavf_headers_after_ytdl_hook(
                                     normalized_headers=normalized_headers or {},
+                                    stream_url=str(path),
+                                    provider=str(item.get("provider") or "") if item.get("provider") else None,
                                     timeout_sec=8.0,
                                 )
                             except Exception:
