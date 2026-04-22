@@ -414,10 +414,28 @@ class ExternalMediaService:
 
         For VK and Rutube, prefer ``ytdl://<canonical page URL>`` so MPV's yt-dlp hook resolves
         streams on the same host as playback (dsign-mpv must not be started with ``--no-ytdl``).
+
+        Rows created before provider detection was reliable may have ``provider='unknown'`` while
+        still pointing at a VK/Rutube page URL. Infer from ``page_url`` in that case and persist
+        the corrected provider so we never feed MPV a server-resolved CDN URL for those sites.
         """
-        provider = str(getattr(row, "provider", "") or "").strip().lower()
         page_url = str(getattr(row, "url", "") or "").strip()
+        db_provider = str(getattr(row, "provider", "") or "").strip().lower()
+        url_provider = self.detect_provider(page_url) if page_url else "unknown"
+        # Prefer URL-based detection (canonical vk/rutube links); fall back to stored value.
+        provider = url_provider if url_provider != "unknown" else (db_provider or "unknown")
+
         if provider in ("vkvideo", "rutube") and page_url.startswith(("http://", "https://")):
+            if db_provider != provider:
+                try:
+                    row.provider = provider
+                    self.db_session.add(row)
+                    self.db_session.commit()
+                except Exception:
+                    try:
+                        self.db_session.rollback()
+                    except Exception:
+                        pass
             return {"url": f"ytdl://{page_url}", "http_headers": {}}
 
         url = self.ensure_fresh_resolved_url(row, max_age_sec=max_age_sec)

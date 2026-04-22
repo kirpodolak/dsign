@@ -382,29 +382,44 @@ class PlaylistManager:
     ) -> bool:
         """
         Some mpv builds never expose `eof-reached` for network streams (always 'property unavailable').
-        Detect that demuxer/decoder actually started using time-pos / path / duration.
+        Detect that demuxer/decoder actually started using time-pos / duration.
+
+        For `ytdl://` items, MPV can spend a noticeable amount of time in the ytdl_hook resolution
+        subprocess, and `time-pos`/`duration` may remain unavailable until after `path` switches
+        from the virtual `ytdl://...` URL to a real stream URL. In that case, treat `path` switching
+        away from `ytdl://` as progress/readiness.
         """
         deadline = time.monotonic() + max(1.0, float(timeout_sec))
         exp = (expected_url or "").strip()
-        exp_host = ""
-        try:
-            from urllib.parse import urlparse
-
-            if exp.startswith(("http://", "https://")):
-                exp_host = urlparse(exp).netloc or ""
-        except Exception:
-            exp_host = ""
+        is_ytdl = exp.startswith("ytdl://")
+        # For ytdl:// resolution on low-power devices, be gentle with IPC:
+        # - ytdl_hook may take >10s
+        # - mpv may update stream-open-filename earlier than time-pos/duration
+        heavy_every = 2 if is_ytdl else 1
+        tick = 0
 
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
+            if is_ytdl:
+                # When ytdl_hook resolves, MPV's `path` often switches to the resolved URL first,
+                # while time-pos/duration are still unavailable. Use that as readiness signal.
+                cur_stream = self._mpv_get_prop_string("stream-open-filename", timeout=2.0)
+                if cur_stream and not str(cur_stream).startswith("ytdl://"):
+                    return True
+                cur_path = self._mpv_get_prop_string("path", timeout=2.0)
+                if cur_path and not str(cur_path).startswith("ytdl://"):
+                    return True
+            tick += 1
+            if heavy_every > 1 and (tick % heavy_every) != 0:
+                self._stop_event.wait(timeout=max(0.15, float(poll_sec)))
+                continue
             tp = self._mpv_get_prop_number("time-pos", timeout=2.0)
             if tp is not None:
                 return True
             dur = self._mpv_get_prop_number("duration", timeout=2.0)
             if dur is not None and dur > 0:
                 return True
-            # Do NOT treat `path` equality alone as readiness: mpv can report path while still idle.
             self._stop_event.wait(timeout=max(0.1, float(poll_sec)))
         return False
 
