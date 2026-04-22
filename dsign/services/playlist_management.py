@@ -408,6 +408,108 @@ class PlaylistManager:
             except Exception:
                 pass
 
+    def _merge_mpv_lavf_options(self, base: Any, extra: Dict[str, str]) -> Dict[str, str]:
+        """Merge dict-like lavf options, normalizing keys/values as strings."""
+        out: Dict[str, str] = {}
+        if isinstance(base, dict):
+            for k, v in base.items():
+                if k is None or v is None:
+                    continue
+                ks = str(k).strip()
+                vs = str(v).strip()
+                if not ks or not vs:
+                    continue
+                out[ks] = vs
+        for k, v in (extra or {}).items():
+            if k is None or v is None:
+                continue
+            ks = str(k).strip()
+            vs = str(v).strip()
+            if not ks or not vs:
+                continue
+            out[ks] = vs
+        return out
+
+    def _apply_mpv_lavf_headers_after_ytdl_hook(
+        self,
+        *,
+        normalized_headers: Dict[str, str],
+        timeout_sec: float = 8.0,
+    ) -> None:
+        """
+        ytdl_hook often sets `file-local-options/stream-lavf-o` (cookies) *after* loadfile.
+        That can overwrite our earlier lavf options. Re-apply/merge UA+Referer+headers once the
+        cookies option appears so ffmpeg opens (EDL sources) have the right request context.
+        """
+        if not normalized_headers:
+            return
+        ua = str(normalized_headers.get("User-Agent") or "").strip()
+        ref = str(normalized_headers.get("Referer") or "").strip()
+        if not ua and not ref:
+            return
+
+        # Build the extra dict we want to ensure exists in stream-lavf-o.
+        hdr_lines = []
+        for k, v in normalized_headers.items():
+            if not k or not v:
+                continue
+            lk = str(k).strip().lower()
+            if lk in ("user-agent", "referer", "referrer"):
+                continue
+            hdr_lines.append(f"{str(k).strip()}: {str(v).strip()}")
+        hdr_blob = "\r\n".join([h for h in hdr_lines if h])
+        extra: Dict[str, str] = {}
+        if ua:
+            extra["user_agent"] = ua
+        if ref:
+            extra["referer"] = ref
+        if hdr_blob:
+            extra["headers"] = hdr_blob + "\r\n"
+
+        # Wait briefly for ytdl_hook to populate cookies, then merge+set.
+        deadline = time.monotonic() + max(0.2, float(timeout_sec))
+        base_val: Any = None
+        while time.monotonic() < deadline and not self._stop_event.is_set():
+            try:
+                resp = self._mpv_manager._send_command(
+                    {"command": ["get_property", "file-local-options/stream-lavf-o"]},
+                    timeout=2.0,
+                )
+                if resp and resp.get("error") == "success":
+                    base_val = resp.get("data")
+                    # If cookies already exist, this is the most common ytdl_hook write point.
+                    if isinstance(base_val, dict) and base_val.get("cookies"):
+                        break
+            except Exception:
+                pass
+            self._stop_event.wait(timeout=0.15)
+
+        merged = self._merge_mpv_lavf_options(base_val, extra)
+        try:
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "file-local-options/stream-lavf-o", merged]},
+                timeout=5.0,
+            )
+        except Exception:
+            pass
+        # Also keep mpv fallbacks in sync.
+        if ua:
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "user-agent", ua]},
+                    timeout=3.0,
+                )
+            except Exception:
+                pass
+        if ref:
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "referrer", ref]},
+                    timeout=3.0,
+                )
+            except Exception:
+                pass
+
     def _apply_mpv_ytdl_options(self, item: dict, *, stream_url: str) -> None:
         """
         Some providers (notably VK) frequently resolve to separate DASH streams when using the
@@ -773,7 +875,7 @@ class PlaylistManager:
                 )
                 if not skip_load:
                     # External streams: Referer/UA must be set before loadfile (and cleared between items).
-                    self._apply_mpv_http_headers(item, stream_url=str(path))
+                    normalized_headers = self._apply_mpv_http_headers(item, stream_url=str(path))
                     self._apply_mpv_ytdl_options(item, stream_url=str(path))
                     load_resp = self._mpv_manager._send_command(
                         {"command": ["loadfile", path, "replace"]}, timeout=20.0
@@ -796,6 +898,16 @@ class PlaylistManager:
                     )
                     stream_ready = False
                     if is_network:
+                        # For ytdl:// sources, ytdl_hook can overwrite lavf options with cookies.
+                        # Re-apply/merge UA+Referer+headers after ytdl_hook writes cookies, before ffmpeg opens EDL parts.
+                        if isinstance(path, str) and path.startswith("ytdl://"):
+                            try:
+                                self._apply_mpv_lavf_headers_after_ytdl_hook(
+                                    normalized_headers=normalized_headers or {},
+                                    timeout_sec=8.0,
+                                )
+                            except Exception:
+                                pass
                         if not self._wait_mpv_leave_idle(timeout_sec=60.0):
                             self.logger.warning(
                                 "MPV stayed idle after loadfile (stream failed or blocked)",
