@@ -314,6 +314,73 @@ class ExternalMediaService:
             return ""
         return "; ".join([f"{k}={v}" for k, v in pairs.items()])
 
+    def _cookie_header_to_pairs(self, cookie_header: Optional[str]) -> Dict[str, str]:
+        raw = (cookie_header or "").strip()
+        if not raw:
+            return {}
+        pairs: Dict[str, str] = {}
+        for part in raw.split(";"):
+            t = part.strip()
+            if not t or "=" not in t:
+                continue
+            k, v = t.split("=", 1)
+            k = k.strip()
+            v = v.strip()
+            if not k or not v:
+                continue
+            pairs.setdefault(k, v)
+        return pairs
+
+    def _pairs_to_cookie_header(self, pairs: Dict[str, str]) -> str:
+        if not pairs:
+            return ""
+        # Stable-ish ordering (qrator first if present) helps troubleshooting, but is not required.
+        keys = list(pairs.keys())
+        keys.sort(key=lambda k: (0 if k.lower().startswith("qrator_") else 1, k.lower()))
+        return "; ".join([f"{k}={pairs[k]}" for k in keys if pairs.get(k)])
+
+    def _rutube_warmup_cookie_header(
+        self,
+        page_url: str,
+        *,
+        user_agent: str,
+        timeout_sec: float = 10.0,
+    ) -> str:
+        """
+        Rutube CDNs often require anti-bot cookies (e.g. qrator_msid2). yt-dlp sometimes returns
+        only session cookies (ea/eg/uuid). As a fallback, fetch the Rutube page once and merge
+        any set cookies into the playback Cookie header.
+        """
+        page_url = (page_url or "").strip()
+        if not page_url.startswith(("http://", "https://")):
+            return ""
+        try:
+            sess = requests.Session()
+            resp = sess.get(
+                page_url,
+                headers={
+                    "User-Agent": str(user_agent or "").strip() or "Mozilla/5.0",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "ru,en;q=0.9",
+                },
+                timeout=max(3.0, float(timeout_sec)),
+                allow_redirects=True,
+            )
+            # Even non-200 responses may set cookies (challenge flows).
+            jar = resp.cookies or sess.cookies
+            if not jar:
+                return ""
+            pairs: Dict[str, str] = {}
+            for c in jar:
+                try:
+                    if c and c.name and c.value:
+                        pairs[str(c.name)] = str(c.value)
+                except Exception:
+                    continue
+            return self._pairs_to_cookie_header(pairs)
+        except Exception:
+            return ""
+
     def _yt_dlp_pick_playback(self, page_url: str) -> Tuple[Optional[str], Dict[str, Any]]:
         """
         Resolve a direct playback URL and a header dict for MPV from yt-dlp output.
@@ -584,6 +651,33 @@ class ExternalMediaService:
                 stream_url=str(url or ""),
                 provider=provider,
             )
+            # If yt-dlp didn't provide Rutube's anti-bot cookies (qrator), try a lightweight warmup
+            # request to the Rutube page and merge any cookies we get.
+            try:
+                ck = str(safe.get("Cookie") or "").strip()
+                pairs = self._cookie_header_to_pairs(ck)
+                has_qrator = any(k.lower().startswith("qrator_") for k in pairs.keys())
+                if not has_qrator:
+                    ua = str(safe.get("User-Agent") or "").strip()
+                    warm = self._rutube_warmup_cookie_header(page_url, user_agent=ua, timeout_sec=10.0)
+                    warm_pairs = self._cookie_header_to_pairs(warm)
+                    warm_has_qrator = any(k.lower().startswith("qrator_") for k in warm_pairs.keys())
+                    if warm_pairs:
+                        # Merge (prefer warmup cookies for missing keys; keep existing values otherwise).
+                        merged = dict(pairs)
+                        for k, v in warm_pairs.items():
+                            merged.setdefault(k, v)
+                        merged_ck = self._pairs_to_cookie_header(merged)
+                        if merged_ck:
+                            safe["Cookie"] = merged_ck
+                    # Best-effort diagnostic (do not log cookie values).
+                    if warm_has_qrator:
+                        self.logger.info(
+                            "Rutube cookie warmup obtained qrator cookie",
+                            extra={"event": "rutube_cookie_warmup", "page_url": page_url},
+                        )
+            except Exception:
+                pass
             return {"url": url, "http_headers": safe}
 
         url = self.ensure_fresh_resolved_url(row, max_age_sec=max_age_sec)
