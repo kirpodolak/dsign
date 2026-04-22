@@ -437,7 +437,12 @@ class ExternalMediaService:
         # Prefer URL-based detection (canonical vk/rutube links); fall back to stored value.
         provider = url_provider if url_provider != "unknown" else (db_provider or "unknown")
 
-        if provider in ("vkvideo", "rutube") and page_url.startswith(("http://", "https://")):
+        # Provider-specific startup:
+        # - VK: prefer ytdl:// so yt-dlp resolves on the same host as MPV; OKCDN is very sensitive to Referer.
+        # - Rutube: ytdl_hook currently only injects a limited cookie set into mpv/ffmpeg opens, which can
+        #   trigger HTTP 400 from river-*/rtbcdn. Prefer resolving to a direct CDN URL via yt-dlp on-device
+        #   so we can pass the exact UA+Cookie set through mpv http options.
+        if provider in ("vkvideo",) and page_url.startswith(("http://", "https://")):
             if db_provider != provider:
                 try:
                     row.provider = provider
@@ -449,6 +454,22 @@ class ExternalMediaService:
                     except Exception:
                         pass
             return {"url": f"ytdl://{page_url}", "http_headers": {}}
+
+        if provider in ("rutube",) and page_url.startswith(("http://", "https://")):
+            # Force a fresh resolve on the device; rutube CDNs are signed/guarded and rely on cookies.
+            url = self.ensure_fresh_resolved_url(row, max_age_sec=0)
+            headers: Dict[str, Any] = {}
+            try:
+                headers = dict(row.http_headers or {})
+            except Exception:
+                headers = {}
+            safe = self._normalize_playback_headers(
+                headers,
+                page_url=page_url,
+                stream_url=str(url or ""),
+                provider=provider,
+            )
+            return {"url": url, "http_headers": safe}
 
         url = self.ensure_fresh_resolved_url(row, max_age_sec=max_age_sec)
         headers: Dict[str, Any] = {}

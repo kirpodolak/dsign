@@ -594,24 +594,10 @@ class PlaylistManager:
         )
         self._clear_mpv_http_options()
 
-        # For ytdl:// items (VK/Rutube), ensure lavf/ffmpeg network opens also get UA/Referer.
-        # This helps when ytdl_hook builds an `edl://` of multiple sources (audio+video), and
-        # the individual sources are opened via lavf without inheriting `http-header-fields`.
-        is_ytdl = isinstance(stream_url, str) and stream_url.startswith("ytdl://")
-        is_vk_or_rutube = False
-        try:
-            prov = (provider or "").strip().lower() if isinstance(provider, str) else ""
-            pu = (page_url or "").strip() if isinstance(page_url, str) else ""
-            su = (stream_url or "").strip()
-            if prov in ("vkvideo", "rutube"):
-                is_vk_or_rutube = True
-            elif "vkvideo.ru" in pu or "vk.com/video" in pu or "rutube.ru" in pu:
-                is_vk_or_rutube = True
-            elif "okcdn.ru" in su:
-                is_vk_or_rutube = True
-        except Exception:
-            is_vk_or_rutube = False
-        if is_ytdl and is_vk_or_rutube:
+        # For network streams opened via lavf/ffmpeg (incl. direct Rutube river/rtbcdn URLs),
+        # also apply `stream-lavf-o` so ffmpeg uses the same request context as mpv.
+        is_network = isinstance(stream_url, str) and stream_url.startswith(("http://", "https://", "ytdl://"))
+        if is_network and normalized:
             self._apply_mpv_stream_lavf_options(normalized)
 
         try:
