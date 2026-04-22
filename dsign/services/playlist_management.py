@@ -358,7 +358,13 @@ class PlaylistManager:
         except Exception:
             pass
 
-    def _apply_mpv_stream_lavf_options(self, headers: Dict[str, str]) -> None:
+    def _apply_mpv_stream_lavf_options(
+        self,
+        headers: Dict[str, str],
+        *,
+        stream_url: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> None:
         """
         Apply headers for lavf/ffmpeg-based network opens.
 
@@ -402,6 +408,19 @@ class PlaylistManager:
             # ffmpeg/lavf accepts a cookie string via the `cookies` option; this can be more reliable
             # than relying only on `headers` for some CDNs.
             opts["cookies"] = cookie + ";\r\n"
+
+        # Rutube CDN: force HTTP/1.1. Empirically, curl/ffmpeg repros succeed with HTTP/1.1, while
+        # mpv-embedded ffmpeg opens can differ in negotiation and trigger HTTP 400.
+        try:
+            prov_lc = (str(provider or "").strip().lower()) if provider is not None else ""
+            su = (str(stream_url or "").strip().lower()) if stream_url is not None else ""
+            is_rutube_cdn = (prov_lc == "rutube") and (
+                "river-" in su or ".rtbcdn.ru/" in su or "rtbcdn.ru/" in su
+            )
+            if is_rutube_cdn:
+                opts.setdefault("http_version", "1.1")
+        except Exception:
+            pass
         if hdr_blob:
             opts["headers"] = hdr_blob + "\r\n"
 
@@ -456,6 +475,8 @@ class PlaylistManager:
         self,
         *,
         normalized_headers: Dict[str, str],
+        stream_url: Optional[str] = None,
+        provider: Optional[str] = None,
         timeout_sec: float = 8.0,
     ) -> None:
         """
@@ -493,6 +514,18 @@ class PlaylistManager:
             extra["referer"] = ref
         if cookie:
             extra["cookies"] = cookie + ";\r\n"
+
+        # Same Rutube transport tweak as in the initial lavf set.
+        try:
+            prov_lc = (str(provider or "").strip().lower()) if provider is not None else ""
+            su = (str(stream_url or "").strip().lower()) if stream_url is not None else ""
+            is_rutube_cdn = (prov_lc == "rutube") and (
+                "river-" in su or ".rtbcdn.ru/" in su or "rtbcdn.ru/" in su
+            )
+            if is_rutube_cdn:
+                extra.setdefault("http_version", "1.1")
+        except Exception:
+            pass
         if hdr_blob:
             extra["headers"] = hdr_blob + "\r\n"
 
@@ -616,7 +649,11 @@ class PlaylistManager:
         # also apply `stream-lavf-o` so ffmpeg uses the same request context as mpv.
         is_network = isinstance(stream_url, str) and stream_url.startswith(("http://", "https://", "ytdl://"))
         if is_network and normalized:
-            self._apply_mpv_stream_lavf_options(normalized)
+            self._apply_mpv_stream_lavf_options(
+                normalized,
+                stream_url=stream_url,
+                provider=provider,
+            )
 
         try:
             header_lines = []
@@ -938,6 +975,8 @@ class PlaylistManager:
                             try:
                                 self._apply_mpv_lavf_headers_after_ytdl_hook(
                                     normalized_headers=normalized_headers or {},
+                                    stream_url=str(path),
+                                    provider=str(item.get("provider") or "") if item.get("provider") else None,
                                     timeout_sec=8.0,
                                 )
                             except Exception:
