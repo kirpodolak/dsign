@@ -377,14 +377,18 @@ class PlaylistManager:
             return
 
         # ffmpeg expects CRLF-separated header lines in `headers`.
+        #
+        # IMPORTANT:
+        # If we set the dedicated lavf `cookies` option, avoid also embedding a `Cookie:` header
+        # in the generic `headers` blob. Some CDNs respond with HTTP 400 to duplicate Cookie headers.
         hdr_lines = []
         for k, v in headers.items():
             if not k or not v:
                 continue
             lk = str(k).strip().lower()
-            # We'll pass UA/Referer both in dedicated fields and in `headers` when present,
-            # because some OKCDN endpoints appear to require them and mpv's ytdl_hook may
-            # clobber dedicated lavf fields later (cookies-only writes).
+            if lk == "cookie" and cookie:
+                continue
+            # We'll pass UA/Referer both in dedicated fields and in `headers` when present.
             hdr_lines.append(f"{str(k).strip()}: {str(v).strip()}")
         hdr_blob = "\r\n".join([h for h in hdr_lines if h])
 
@@ -468,12 +472,17 @@ class PlaylistManager:
             return
 
         # Build the extra dict we want to ensure exists in stream-lavf-o.
+        #
+        # If we also set the dedicated lavf `cookies` option, avoid putting `Cookie:` into the
+        # generic `headers` blob to prevent duplicate Cookie headers (can trigger HTTP 400).
         hdr_lines = []
         for k, v in normalized_headers.items():
             if not k or not v:
                 continue
             lk = str(k).strip().lower()
             if lk in ("user-agent", "referer", "referrer"):
+                continue
+            if lk == "cookie" and cookie:
                 continue
             hdr_lines.append(f"{str(k).strip()}: {str(v).strip()}")
         hdr_blob = "\r\n".join([h for h in hdr_lines if h])
