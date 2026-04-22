@@ -673,25 +673,44 @@ class PlaylistManager:
                 provider=provider,
             )
 
+        # Rutube direct CDN (river-*/rtbcdn): the actual open goes through lavf/ffmpeg.
+        # Setting global `http-header-fields` in parallel (Cookie/Referer/Origin/UA) can
+        # duplicate or fight `file-local-options/stream-lavf-o` and some CDNs return 400.
+        # Leave `http-header-fields` empty after _clear_mpv_http_options; rely on stream-lavf-o + mpv user-agent/referrer.
+        skip_global_http_header_fields = False
         try:
-            header_lines = []
-            for k, v in normalized.items():
-                if k is None or v is None:
-                    continue
-                ks = str(k).strip()
-                vs = str(v).strip()
-                if not ks or not vs:
-                    continue
-                header_lines.append(f"{ks}: {vs}")
-            if header_lines:
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
-                    timeout=5.0,
-                )
-            # For VK/OKCDN we prefer to keep UA/Referer here too: ytdl_hook may overwrite
-            # lavf options later (cookies-only), but it won't clobber http-header-fields.
+            prov_h = (str(provider or "").strip().lower()) if provider is not None else ""
+            su_h = (str(stream_url or "").strip().lower()) if stream_url is not None else ""
+            if prov_h == "rutube" and is_network and not str(stream_url or "").startswith(
+                "ytdl://"
+            ):
+                if "river-" in su_h or ".rtbcdn.ru/" in su_h or "rtbcdn.ru/" in su_h:
+                    skip_global_http_header_fields = True
         except Exception:
             pass
+
+        if not skip_global_http_header_fields:
+            try:
+                header_lines = []
+                for k, v in normalized.items():
+                    if k is None or v is None:
+                        continue
+                    ks = str(k).strip()
+                    vs = str(v).strip()
+                    if not ks or not vs:
+                        continue
+                    header_lines.append(f"{ks}: {vs}")
+                if header_lines:
+                    self._mpv_manager._send_command(
+                        {
+                            "command": ["set_property", "http-header-fields", "\r\n".join(header_lines)],
+                        },
+                        timeout=5.0,
+                    )
+                # For VK/OKCDN we prefer to keep UA/Referer here too: ytdl_hook may overwrite
+                # lavf options later (cookies-only), but it won't clobber http-header-fields.
+            except Exception:
+                pass
         return normalized
 
     def _wait_mpv_leave_idle(self, timeout_sec: float = 45.0) -> bool:
