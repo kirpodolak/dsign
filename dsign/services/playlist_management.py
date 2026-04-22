@@ -420,7 +420,8 @@ class PlaylistManager:
         if cookie:
             # ffmpeg/lavf accepts a cookie string via the `cookies` option; this can be more reliable
             # than relying only on `headers` for some CDNs.
-            opts["cookies"] = cookie + ";\r\n"
+            # Do not append terminators: some CDNs reject malformed cookie strings.
+            opts["cookies"] = cookie
 
         # Rutube CDN: force HTTP/1.1. Empirically, curl/ffmpeg repros succeed with HTTP/1.1, while
         # mpv-embedded ffmpeg opens can differ in negotiation and trigger HTTP 400.
@@ -526,7 +527,8 @@ class PlaylistManager:
         if ref:
             extra["referer"] = ref
         if cookie:
-            extra["cookies"] = cookie + ";\r\n"
+            # Do not append terminators: some CDNs reject malformed cookie strings.
+            extra["cookies"] = cookie
 
         # Same Rutube transport tweak as in the initial lavf set.
         try:
