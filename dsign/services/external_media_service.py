@@ -68,12 +68,24 @@ class ExternalMediaService:
             # Keep first value; do not allow multiple variants of same header.
             out_lc.setdefault(kl, vs)
 
-        # Prefer page URL as referer for VK/Rutube (CDNs reject direct URLs without it).
-        if page_url and "referer" not in out_lc:
+        prov = (str(provider or "").strip().lower() if provider is not None else "")
+        su = (str(stream_url or "").strip().lower() if stream_url is not None else "")
+
+        # NOTE: Providers differ a lot in how strict their CDNs are about Referer/Origin.
+        # - VK/OKCDN frequently requires Referer; without it ffmpeg opens can return HTTP 400.
+        # - Rutube's HLS CDNs (river-*/rtbcdn) can return HTTP 400 if an unexpected Referer/Origin is forced.
+        want_synth_ref = False
+        if prov == "vkvideo":
+            want_synth_ref = True
+        elif "okcdn.ru" in su or "vkvd" in su:
+            want_synth_ref = True
+
+        # Prefer page URL as referer for VK (and OKCDN). Avoid forcing it for Rutube.
+        if want_synth_ref and page_url and "referer" not in out_lc:
             out_lc["referer"] = str(page_url)
 
-        # Some CDNs want Origin that matches referer origin.
-        if page_url and "origin" not in out_lc:
+        # Some CDNs want Origin that matches referer origin (VK/OKCDN). Avoid forcing it for Rutube.
+        if want_synth_ref and page_url and "origin" not in out_lc:
             try:
                 p = urlparse(str(page_url))
                 if p.scheme and p.netloc:
