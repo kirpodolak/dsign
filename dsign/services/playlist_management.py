@@ -313,6 +313,40 @@ class PlaylistManager:
             )
         except Exception:
             pass
+        # ytdl options can also be sticky across items; clear them for deterministic behavior.
+        try:
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "ytdl-format", ""]},
+                timeout=3.0,
+            )
+        except Exception:
+            pass
+
+    def _apply_mpv_ytdl_options(self, item: dict, *, stream_url: str) -> None:
+        """
+        Some providers (notably VK) frequently resolve to separate DASH streams when using the
+        default ytdl format selection. That can result in an `edl://` item that opens and then
+        immediately ends (black screen + rapid on_after_end_file).
+
+        Prefer `best` for VK to bias towards a single playable muxed stream (HLS/MP4) when available.
+        """
+        try:
+            provider = str(item.get("provider") or "").strip().lower()
+        except Exception:
+            provider = ""
+        try:
+            url = str(stream_url or "")
+        except Exception:
+            url = ""
+
+        if provider == "vkvideo" or "vkvideo.ru" in url or "vk.com/video" in url:
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "ytdl-format", "best"]},
+                    timeout=5.0,
+                )
+            except Exception:
+                pass
 
     def _apply_mpv_http_headers(self, item: dict, *, stream_url: str) -> Dict[str, str]:
         """
@@ -410,6 +444,14 @@ class PlaylistManager:
                 cur_path = self._mpv_get_prop_string("path", timeout=2.0)
                 if cur_path and not str(cur_path).startswith("ytdl://"):
                     return True
+            else:
+                # For already-resolved `edl://` items we still want to see that MPV has opened
+                # something non-empty. Without this, VK can look "ready" and then instantly EOF.
+                cur_stream = self._mpv_get_prop_string("stream-open-filename", timeout=2.0)
+                cur_path = self._mpv_get_prop_string("path", timeout=2.0)
+                if (cur_stream and len(str(cur_stream)) > 0) or (cur_path and len(str(cur_path)) > 0):
+                    # do not early-return; keep probing time-pos/duration below
+                    pass
             tick += 1
             if heavy_every > 1 and (tick % heavy_every) != 0:
                 self._stop_event.wait(timeout=max(0.15, float(poll_sec)))
@@ -421,6 +463,25 @@ class PlaylistManager:
             if dur is not None and dur > 0:
                 return True
             self._stop_event.wait(timeout=max(0.1, float(poll_sec)))
+        return False
+
+    def _detect_mpv_instant_eof(self, *, window_sec: float = 2.5) -> bool:
+        """
+        Detect a pathological case where MPV opens a file/stream and immediately returns to idle.
+        This happens with some VK `edl://` selections (separate streams / blocked URL) and should
+        be treated as a start failure (so we backoff instead of busy-looping).
+        """
+        deadline = time.monotonic() + max(0.2, float(window_sec))
+        saw_not_idle = False
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+            if idle is False:
+                saw_not_idle = True
+            if saw_not_idle and idle is True:
+                return True
+            self._stop_event.wait(timeout=0.1)
         return False
 
     def _wait_mpv_video_end(
@@ -603,6 +664,7 @@ class PlaylistManager:
                 if not skip_load:
                     # External streams: Referer/UA must be set before loadfile (and cleared between items).
                     self._apply_mpv_http_headers(item, stream_url=str(path))
+                    self._apply_mpv_ytdl_options(item, stream_url=str(path))
                     load_resp = self._mpv_manager._send_command(
                         {"command": ["loadfile", path, "replace"]}, timeout=20.0
                     )
@@ -638,6 +700,15 @@ class PlaylistManager:
                                 extra={"media_key": media_key, "path_preview": str(path)[:120]},
                             )
                             self._register_media_failure(media_key, reason="not_ready")
+                            continue
+                        # Detect "instant EOF" right after we considered it ready; avoid VK loops.
+                        if self._detect_mpv_instant_eof(window_sec=2.5):
+                            self.logger.warning(
+                                "MPV stream ended immediately after start (instant EOF)",
+                                extra={"media_key": media_key, "path_preview": str(path)[:160]},
+                            )
+                            self._log_mpv_network_debug_snapshot(media_key=media_key, url=str(path))
+                            self._register_media_failure(media_key, reason="instant_eof")
                             continue
                         self._reset_media_backoff(media_key)
                     self._wait_mpv_video_end(
