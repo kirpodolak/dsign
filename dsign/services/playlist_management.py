@@ -404,6 +404,9 @@ class PlaylistManager:
             lk = str(k).strip().lower()
             if lk == "cookie" and cookie:
                 continue
+            if lk == "user-agent" and ua:
+                # `user_agent` is already provided via the dedicated option; avoid duplicating it.
+                continue
             if is_rutube_cdn_hdr and lk in ("referer", "referrer", "origin"):
                 # `referer` is already provided via the dedicated option; Origin is not required for ffmpeg.
                 continue
