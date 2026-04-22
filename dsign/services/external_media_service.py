@@ -339,20 +339,38 @@ class ExternalMediaService:
                 if isinstance(f, dict):
                     candidates.append(f)
 
+        # Rutube: pick a URL that is both playable *and* comes with the anti-bot cookie blob.
+        # Many Rutube extracts include multiple m3u8 variants; some have cookies, some don't.
+        # Prefer: m3u8 with cookies > m3u8 without cookies > any URL with cookies > any URL.
         picked_url: Optional[str] = None
         picked_cookies: str = ""
+        fallback_m3u8: Optional[str] = None
+        fallback_any: Optional[str] = None
+        fallback_any_cookies: str = ""
+
         for c in candidates:
             u = str(c.get("url") or "").strip()
             if not u:
                 continue
-            # For Rutube, m3u8 is the common path; prefer it when available.
-            if ".m3u8" in u:
+            ck = str(c.get("cookies") or "").strip()
+            is_m3u8 = ".m3u8" in u
+            if fallback_any is None:
+                fallback_any = u
+                fallback_any_cookies = ck
+            if is_m3u8 and fallback_m3u8 is None:
+                fallback_m3u8 = u
+            if is_m3u8 and ck:
                 picked_url = u
-                picked_cookies = str(c.get("cookies") or "").strip()
+                picked_cookies = ck
                 break
-            if picked_url is None:
+            if picked_url is None and ck:
+                # keep looking for an m3u8 with cookies, but remember any url with cookies
                 picked_url = u
-                picked_cookies = str(c.get("cookies") or "").strip()
+                picked_cookies = ck
+
+        if not picked_url:
+            picked_url = fallback_m3u8 or fallback_any
+            picked_cookies = fallback_any_cookies if picked_url == fallback_any else ""
 
         if picked_cookies:
             ck = self._cookies_blob_to_cookie_header(picked_cookies)
