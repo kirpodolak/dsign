@@ -478,6 +478,7 @@ class MediaGallery {
       const img = document.createElement('img');
       img.src = `/api/media/${encodeURIComponent(file.name)}`;
       img.alt = file.name;
+      img.classList.add('preview-modal__img');
       img.onerror = () => {
         img.src = PLACEHOLDER_IMAGE;
         img.style.opacity = '0.7';
@@ -496,8 +497,8 @@ class MediaGallery {
       const provider = isExternal ? this.getExternalProvider(file) : null;
 
       // Local videos can always be previewed via /api/media/<filename>.
-      // External videos: we don't have a browser-playable direct URL (HLS + headers/cookies),
-      // so embed the provider page in an iframe when possible.
+      // External videos: don't attempt browser playback/embeds. Show a large thumbnail preview
+      // (same as the gallery tile) and provide an "open original" action.
       if (!isExternal) {
         const video = document.createElement('video');
         video.controls = true;
@@ -510,7 +511,7 @@ class MediaGallery {
         video.appendChild(source);
         this.elements.previewContainer.appendChild(video);
       } else {
-        this._renderExternalInlineEmbed(file, provider);
+        this._renderExternalPreviewFallback(file, provider);
       }
     }
     
@@ -527,7 +528,7 @@ class MediaGallery {
     const img = document.createElement('img');
     img.src = this.getThumbnailUrl(file.name);
     img.alt = file.external?.title || file.name;
-    img.classList.add('file-preview');
+    img.classList.add('preview-modal__img');
     img.loading = 'lazy';
     img.decoding = 'async';
     img.onerror = () => {

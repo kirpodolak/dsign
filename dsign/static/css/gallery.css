@@ -677,6 +677,16 @@
     border-radius: 8px;
 }
 
+/* Force modal preview images to use "contain" sizing even if they reuse tile classes */
+.preview-modal__media img.file-preview,
+.preview-modal__media img.preview-modal__img {
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: min(68vh, 640px);
+    object-fit: contain;
+}
+
 /* External embeds (VK/Rutube): keep 16:9 and fit modal */
 .preview-external-embed {
     width: 100%;
