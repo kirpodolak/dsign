@@ -295,6 +295,28 @@
     transform: none;
 }
 
+/* Align logo buttons with Settings segmented visual language */
+.logo-btn {
+    border-radius: 12px;
+}
+.logo-btn--choose {
+    background: rgba(74, 107, 255, 0.10);
+    border-color: rgba(74, 107, 255, 0.30);
+}
+.logo-btn--choose:hover {
+    background: rgba(74, 107, 255, 0.16);
+    border-color: rgba(74, 107, 255, 0.40);
+}
+.logo-btn--apply {
+    background: #4a6bff;
+    border-color: #4a6bff;
+    box-shadow: 0 0 0 3px rgba(74, 107, 255, 0.12);
+}
+.logo-btn--apply:hover:not(:disabled) {
+    background: #3a5bef;
+    border-color: #3a5bef;
+}
+
 .logo-selected-file {
     margin: 2px 2px 0;
     font-size: 0.82rem;
@@ -540,6 +562,14 @@
     background: #f8fafc;
     color: #475569;
     transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+/* Bigger, clearer icons (still within squares) */
+.playlist-table .actions .btn .btn-icon {
+    width: 1.25rem;
+    height: 1.25rem;
+    font-size: 1.25rem;
+    line-height: 1;
 }
 
 .playlist-table .actions .btn:hover:not(:disabled) {

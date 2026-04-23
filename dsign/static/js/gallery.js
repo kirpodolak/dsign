@@ -275,6 +275,10 @@ class MediaGallery {
       
       const isExternal = this.isExternalFile(file);
       const provider = isExternal ? this.getExternalProvider(file) : null;
+      const isVideo =
+        Boolean(file?.is_video) ||
+        ALLOWED_VIDEO_TYPES.includes(String(file.type || '').toLowerCase()) ||
+        String(file.name || '').toLowerCase().startsWith('ext-');
 
       if (ALLOWED_IMAGE_TYPES.includes(file.type) && !isExternal) {
         previewContainer.classList.add('file-preview-container');
@@ -292,10 +296,9 @@ class MediaGallery {
         };
         previewContainer.appendChild(img);
       } else {
-        previewContainer.classList.add('file-icon');
-        // Use a thumbnail even for external videos if available.
-        if (isExternal) {
-          previewContainer.classList.add('file-preview-container');
+        // Videos: always try server-side thumbnail cache first (local + external).
+        if (isVideo) {
+          previewContainer.classList.add('file-preview-container', 'file-preview-container--video');
           const img = document.createElement('img');
           img.src = this.getThumbnailUrl(file.name);
           img.alt = file.external?.title || file.name;
@@ -303,15 +306,18 @@ class MediaGallery {
           img.loading = 'lazy';
           img.decoding = 'async';
           img.onerror = () => {
+            // Fallback placeholder if thumbnail is unavailable for this video.
             img.src = PLACEHOLDER_IMAGE;
             img.style.opacity = '0.7';
           };
           previewContainer.appendChild(img);
         } else {
+          // Other non-image files: placeholder icon.
+          previewContainer.classList.add('file-icon');
           const icon = document.createElement('span');
           icon.className = 'file-icon__glyph';
           icon.setAttribute('aria-hidden', 'true');
-          icon.textContent = '🎬';
+          icon.textContent = '📄';
           previewContainer.appendChild(icon);
         }
       }
