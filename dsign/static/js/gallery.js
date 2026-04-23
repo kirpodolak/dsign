@@ -601,7 +601,7 @@ class MediaGallery {
     const u = String(url || '').trim();
     if (!u) return '';
     // If user already gave an embed src, keep it.
-    if (/\\/play\\/embed\\//i.test(u) || /\\/video_ext\\.php/i.test(u) || /\\/embed\\//i.test(u)) {
+    if (/\/play\/embed\//i.test(u) || /\/video_ext\.php/i.test(u) || /\/embed\//i.test(u)) {
       return u;
     }
 
