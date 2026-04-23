@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -19,7 +20,8 @@ class ExternalMediaInfo:
 
 class ExternalMediaService:
     """
-    Resolve and cache external media (Rutube / VK Video) so it can be displayed and played without MPV ytdl.
+    Resolve and cache external media (Rutube / VK Video). Gallery/metadata use yt-dlp in-process;
+    playback prefers ``ytdl://`` URLs so MPV resolves streams on the signage device.
     """
 
     def __init__(self, db_session, thumbnail_folder: str, logger):
@@ -30,6 +32,95 @@ class ExternalMediaService:
         self.thumbnail_folder.mkdir(parents=True, exist_ok=True)
         self._thumb_dir = self.thumbnail_folder / "external"
         self._thumb_dir.mkdir(parents=True, exist_ok=True)
+
+    def sanitize_mpv_http_headers(
+        self,
+        headers: Optional[Dict[str, Any]],
+        *,
+        page_url: Optional[str] = None,
+        stream_url: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """
+        Normalize + sanitize HTTP headers for MPV.
+
+        Key goals:
+        - avoid duplicated headers with different casing (e.g. Referer + referer)
+        - keep a small allowlist to avoid CDN 4xx on browser-ish headers
+        - ensure a single canonical Referer (VK/Rutube CDNs often require it)
+        - optionally set Origin derived from page_url
+        """
+        if not isinstance(headers, dict):
+            headers = {}
+
+        allow = {"user-agent", "referer", "origin", "accept", "accept-language", "cookie"}
+        out_lc: Dict[str, str] = {}
+        for k, v in headers.items():
+            if k is None or v is None:
+                continue
+            ks = str(k).strip()
+            vs = str(v).strip()
+            if not ks or not vs:
+                continue
+            kl = ks.lower()
+            if kl not in allow:
+                continue
+            # Keep first value; do not allow multiple variants of same header.
+            out_lc.setdefault(kl, vs)
+
+        # Prefer page URL as referer for VK/Rutube (CDNs reject direct URLs without it).
+        if page_url and "referer" not in out_lc:
+            out_lc["referer"] = str(page_url)
+
+        # Some CDNs want Origin that matches referer origin.
+        if page_url and "origin" not in out_lc:
+            try:
+                p = urlparse(str(page_url))
+                if p.scheme and p.netloc:
+                    out_lc["origin"] = f"{p.scheme}://{p.netloc}"
+            except Exception:
+                pass
+
+        # Provide a safe default accept-language to mimic a real browser if missing.
+        out_lc.setdefault("accept-language", "ru,en;q=0.9")
+        # Provide a safe default accept.
+        out_lc.setdefault("accept", "*/*")
+
+        # Drop only absurdly large cookie blobs (yt-dlp edge cases). VK/Rutube often need the
+        # full cookie set for CDN auth; rely on short URL refresh TTL instead of truncating.
+        ck = out_lc.get("cookie")
+        if ck and len(ck) > 32768:
+            out_lc.pop("cookie", None)
+
+        # Convert to conventional header casing for mpv `http-header-fields`.
+        canonical = {
+            "user-agent": "User-Agent",
+            "referer": "Referer",
+            "origin": "Origin",
+            "accept": "Accept",
+            "accept-language": "Accept-Language",
+            "cookie": "Cookie",
+        }
+        out: Dict[str, str] = {}
+        for kl, val in out_lc.items():
+            out[canonical.get(kl, kl)] = val
+        return out
+
+    def _normalize_playback_headers(
+        self,
+        headers: Optional[Dict[str, Any]],
+        *,
+        page_url: Optional[str] = None,
+        stream_url: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Playback-time alias for `sanitize_mpv_http_headers` (used by `ensure_fresh_playback`)."""
+        return self.sanitize_mpv_http_headers(
+            headers,
+            page_url=page_url,
+            stream_url=stream_url,
+            provider=provider,
+        )
 
     # -----------------------
     # Provider identification
@@ -270,9 +361,22 @@ class ExternalMediaService:
     def ensure_fresh_resolved_url(self, row: "ExternalMedia", max_age_sec: int = 3600) -> str:
         """
         Return a URL that MPV can play without ytdl. Refresh periodically.
+
+        Use ``max_age_sec=0`` to always re-run yt-dlp (used before MPV playback for signed CDNs).
         """
         now = int(time.time())
-        if row.resolved_url and row.resolved_at and (now - int(row.resolved_at)) < max_age_sec:
+        prov = str(getattr(row, "provider", "") or "").strip().lower()
+        # VK/Rutube CDN URLs are signed (srcIp, expires, sig). Caching them for an hour reuses
+        # URLs bound to yt-dlp's egress IP and breaks playback from the Pi (HTTP 400).
+        effective_max = int(max_age_sec)
+        if prov in ("vkvideo", "rutube") and effective_max > 0:
+            effective_max = min(effective_max, 90)
+        if (
+            row.resolved_url
+            and row.resolved_at
+            and effective_max > 0
+            and (now - int(row.resolved_at)) < effective_max
+        ):
             return row.resolved_url
 
         info = self.resolve_info(row.url)
@@ -303,15 +407,33 @@ class ExternalMediaService:
     def ensure_fresh_playback(self, row: "ExternalMedia", max_age_sec: int = 3600) -> Dict[str, Any]:
         """
         Return playback details for MPV: {"url": ..., "http_headers": {...}}.
-        Refreshes resolved URL + headers periodically.
+
+        Pass ``max_age_sec=0`` to always run yt-dlp again before playback. That is required for
+        VK/Rutube when the server resolves media on a different egress than MPV on the device:
+        signed CDN URLs embed the resolver's client IP and fail with HTTP 400 if reused.
+
+        For VK and Rutube, prefer ``ytdl://<canonical page URL>`` so MPV's yt-dlp hook resolves
+        streams on the same host as playback (dsign-mpv must not be started with ``--no-ytdl``).
         """
+        provider = str(getattr(row, "provider", "") or "").strip().lower()
+        page_url = str(getattr(row, "url", "") or "").strip()
+        if provider in ("vkvideo", "rutube") and page_url.startswith(("http://", "https://")):
+            return {"url": f"ytdl://{page_url}", "http_headers": {}}
+
         url = self.ensure_fresh_resolved_url(row, max_age_sec=max_age_sec)
-        headers = {}
+        headers: Dict[str, Any] = {}
         try:
             headers = dict(row.http_headers or {})
         except Exception:
             headers = {}
-        return {"url": url, "http_headers": headers}
+
+        safe = self._normalize_playback_headers(
+            headers,
+            page_url=page_url,
+            stream_url=str(url or ""),
+            provider=provider,
+        )
+        return {"url": url, "http_headers": safe}
 
     def get_cached_thumbnail_path(self, key: str) -> Optional[Path]:
         media_id = self._parse_ext_key(key)

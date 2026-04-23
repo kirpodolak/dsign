@@ -53,12 +53,15 @@ class PlaylistManager:
             row = svc.get_by_key(str(file_name))
             if not row:
                 return None
-            url = svc.ensure_fresh_resolved_url(row)
+            # Always re-resolve on play: CDN URLs are signed to yt-dlp's egress; cached URLs break on the Pi.
+            pb = svc.ensure_fresh_playback(row, max_age_sec=0)
             return {
                 "key": str(file_name),
-                "path": url,
+                "path": pb.get("url") or row.resolved_url or row.url,
                 "is_video": True,
-                "http_headers": (getattr(row, "http_headers", None) or {}),
+                "http_headers": pb.get("http_headers") or {},
+                "page_url": str(getattr(row, "url", "") or ""),
+                "provider": str(getattr(row, "provider", "") or ""),
             }
 
         # Local file
@@ -192,6 +195,169 @@ class PlaylistManager:
         if data is None:
             return None
         return str(data)
+
+    def _normalize_mpv_http_headers(
+        self,
+        headers: Any,
+        *,
+        page_url: Optional[str] = None,
+        stream_url: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """
+        Normalize/sanitize HTTP headers before passing to MPV.
+
+        Goals:
+        - Avoid duplicate headers like `referer` + `Referer` (some CDNs return 400).
+        - Keep a small allowlist (CDNs may reject browser-only headers like Sec-Fetch-*).
+        - Ensure a single, correct Referer/Origin for VK/Rutube.
+        """
+        if not isinstance(headers, dict):
+            headers = {}
+
+        allow = {
+            "user-agent",
+            "referer",
+            "referrer",
+            "origin",
+            "cookie",
+            "accept",
+            "accept-language",
+        }
+
+        # Canonicalize keys (Title-Case for readability; MPV doesn't care).
+        out: Dict[str, str] = {}
+        for k, v in headers.items():
+            if k is None or v is None:
+                continue
+            ks = str(k).strip()
+            vs = str(v).strip()
+            if not ks or not vs:
+                continue
+            if ks.lower() not in allow:
+                continue
+            canon = "-".join([p.capitalize() for p in ks.lower().split("-")])
+            out[canon] = vs
+
+        # Ensure a single Referer (prefer page_url).
+        ref = page_url or out.get("Referer") or out.get("Referrer") or out.get("referer")
+        if ref:
+            out.pop("Referrer", None)
+            out["Referer"] = str(ref)
+
+        # Derive Origin from referer if not provided.
+        if "Origin" not in out:
+            base = out.get("Referer") or page_url
+            if base and isinstance(base, str) and base.startswith(("http://", "https://")):
+                try:
+                    from urllib.parse import urlparse
+
+                    p = urlparse(base)
+                    if p.scheme and p.netloc:
+                        out["Origin"] = f"{p.scheme}://{p.netloc}"
+                except Exception:
+                    pass
+
+        # Set Accept defaults (some CDNs are picky; keep it minimal).
+        out.setdefault("Accept", "*/*")
+        out.setdefault("Accept-Language", "ru,en;q=0.9")
+
+        # Ensure we always have a UA (MPV default can be too generic).
+        out.setdefault(
+            "User-Agent",
+            "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+
+        # Never send an empty Cookie header.
+        if out.get("Cookie", "").strip() == "":
+            out.pop("Cookie", None)
+        ck = out.get("Cookie")
+        if ck and len(ck) > 32768:
+            out.pop("Cookie", None)
+
+        return out
+
+    def _sanitize_headers_for_mpv(
+        self,
+        headers: Any,
+        *,
+        page_url: Optional[str] = None,
+        stream_url: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Prefer ExternalMediaService sanitizer when attached (single source of truth)."""
+        svc = self._external_media_service
+        if svc and hasattr(svc, "sanitize_mpv_http_headers"):
+            try:
+                return svc.sanitize_mpv_http_headers(
+                    headers,
+                    page_url=page_url,
+                    stream_url=stream_url,
+                    provider=provider,
+                )
+            except Exception:
+                pass
+        return self._normalize_mpv_http_headers(
+            headers,
+            page_url=page_url,
+            stream_url=stream_url,
+            provider=provider,
+        )
+
+    def _clear_mpv_http_options(self) -> None:
+        """Reset per-stream HTTP options so a previous item cannot poison the next load."""
+        try:
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "http-header-fields", ""]},
+                timeout=3.0,
+            )
+        except Exception:
+            pass
+
+    def _apply_mpv_http_headers(self, item: dict, *, stream_url: str) -> Dict[str, str]:
+        """
+        Set MPV HTTP options for one playlist item. Always clears stale options first.
+        Returns the normalized header dict (may be empty).
+        """
+        http_headers = item.get("http_headers") or {}
+        if not isinstance(http_headers, dict) or not http_headers:
+            self._clear_mpv_http_options()
+            return {}
+
+        page_url = item.get("page_url")
+        if page_url is not None:
+            page_url = str(page_url) if page_url else None
+        provider = item.get("provider")
+        if provider is not None:
+            provider = str(provider) if provider else None
+
+        normalized = self._sanitize_headers_for_mpv(
+            http_headers,
+            page_url=page_url,
+            stream_url=stream_url,
+            provider=provider,
+        )
+        self._clear_mpv_http_options()
+        try:
+            header_lines = []
+            for k, v in normalized.items():
+                if k is None or v is None:
+                    continue
+                ks = str(k).strip()
+                vs = str(v).strip()
+                if not ks or not vs:
+                    continue
+                header_lines.append(f"{ks}: {vs}")
+            if header_lines:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
+                    timeout=5.0,
+                )
+            # Do not also set `user-agent` / `referrer` MPV properties: they duplicate the same
+            # headers from `http-header-fields` and some CDNs respond with HTTP 400.
+        except Exception:
+            pass
+        return normalized
 
     def _wait_mpv_leave_idle(self, timeout_sec: float = 45.0) -> bool:
         """
@@ -341,7 +507,14 @@ class PlaylistManager:
         self._stop_event.clear()
         self._active_playlist_id = None
 
-    def _manual_slideshow_loop(self, playlist_id: int, items: list[dict], start_index: int = 0):
+    def _manual_slideshow_loop(
+        self,
+        playlist_id: int,
+        items: list[dict],
+        start_index: int = 0,
+        *,
+        first_item_preloaded: bool = False,
+    ):
         """
         Manual playback loop that enforces per-item durations for images and plays videos to EOF.
         Runs in a background thread; advances images by sleeping for their duration and videos by
@@ -367,7 +540,6 @@ class PlaylistManager:
                 path = item["path"]
                 is_video = item["is_video"]
                 media_key = str(item.get("key") or path)
-                http_headers = item.get("http_headers") or {}
                 raw_duration = item.get("duration")
                 # Only images use duration. Treat 0/None as "missing" for images.
                 duration = raw_duration if (raw_duration is not None and int(raw_duration) >= 1) else default_duration
@@ -410,35 +582,23 @@ class PlaylistManager:
                     self._stop_event.wait(timeout=min(30.0, wait_sec))
                     if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                         break
-                # If this is an external stream requiring headers, apply them before loadfile.
-                # MPV expects a single string of "Key: Value\r\nKey2: Value2" for http-header-fields.
-                if http_headers and isinstance(http_headers, dict):
-                    try:
-                        header_lines = []
-                        for k, v in http_headers.items():
-                            if k is None or v is None:
-                                continue
-                            ks = str(k).strip()
-                            vs = str(v).strip()
-                            if not ks or not vs:
-                                continue
-                            header_lines.append(f"{ks}: {vs}")
-                        if header_lines:
-                            self._mpv_manager._send_command(
-                                {"command": ["set_property", "http-header-fields", "\r\n".join(header_lines)]},
-                                timeout=5.0,
-                            )
-                    except Exception:
-                        pass
-                load_resp = self._mpv_manager._send_command({"command": ["loadfile", path, "replace"]}, timeout=20.0)
-                self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
-                if not load_resp or load_resp.get("error") != "success":
-                    self.logger.warning(
-                        "MPV loadfile failed",
-                        extra={"path": path, "mpv_response": load_resp},
+                skip_load = bool(
+                    first_item_preloaded and start_index == 0 and offset == 0
+                )
+                if not skip_load:
+                    # External streams: Referer/UA must be set before loadfile (and cleared between items).
+                    self._apply_mpv_http_headers(item, stream_url=str(path))
+                    load_resp = self._mpv_manager._send_command(
+                        {"command": ["loadfile", path, "replace"]}, timeout=20.0
                     )
-                    # Skip to next item; avoid getting stuck on a bad file.
-                    continue
+                    self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
+                    if not load_resp or load_resp.get("error") != "success":
+                        self.logger.warning(
+                            "MPV loadfile failed",
+                            extra={"path": path, "mpv_response": load_resp},
+                        )
+                        # Skip to next item; avoid getting stuck on a bad file.
+                        continue
 
                 if is_video:
                     # Network streams: mpv stays idle-active until open; do not treat idle as EOF.
@@ -591,10 +751,14 @@ class PlaylistManager:
                 is_video = bool(resolved.get("is_video"))
                 items.append(
                     {
+                        "key": resolved.get("key"),
                         "path": resolved["path"],
                         "duration": int(getattr(pf, "duration", 0) or 0),
                         "is_video": is_video,
                         "muted": bool(getattr(pf, "muted", False)) if is_video else False,
+                        "http_headers": resolved.get("http_headers") or {},
+                        "page_url": resolved.get("page_url"),
+                        "provider": resolved.get("provider"),
                     }
                 )
 
@@ -624,6 +788,7 @@ class PlaylistManager:
                 )
             except Exception:
                 pass
+            self._apply_mpv_http_headers(first, stream_url=str(first.get("path") or ""))
             self._mpv_manager._send_command({"command": ["loadfile", first["path"], "replace"]}, timeout=10.0)
             self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
 
@@ -635,10 +800,13 @@ class PlaylistManager:
             self.db_session.commit()
 
             # Start background loop to enforce durations and EOF waits.
-            # IMPORTANT: start from the *next* item, because we already loaded the first one above.
+            # Multi-item: start from index 1 because we already loadfile'd items[0] above.
+            # Single-item: start at 0 and skip the redundant loadfile in the loop (same URL/headers).
+            loop_start = 1 if len(items) > 1 else 0
             self._play_thread = Thread(
                 target=self._manual_slideshow_loop,
-                args=(playlist_id, items, 1),
+                args=(playlist_id, items, loop_start),
+                kwargs={"first_item_preloaded": len(items) == 1},
                 daemon=True,
             )
             self._play_thread.start()
