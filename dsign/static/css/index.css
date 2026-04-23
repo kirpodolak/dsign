@@ -622,32 +622,7 @@
     background: #fef3c7;
 }
 
-/* Кнопки */
-.btn {
-    padding: var(--space-sm) var(--space-md);
-    border: none;
-    border-radius: var(--radius-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-xs);
-}
-
-.btn.primary {
-    background-color: var(--primary-accent);
-    color: white;
-}
-
-.btn.primary:hover {
-    background-color: #3949ab;
-}
-
-.btn.small {
-    padding: var(--space-xs) var(--space-sm);
-    font-size: var(--text-sm);
-}
+/* Buttons now live in base.css (shared across pages). */
 
 /* Модальное окно */
 .modal {
