@@ -1,33 +1,33 @@
-{% extends "base.html" %}
+{% extends "layout.html" %}
 
-{% block title %}Edit Playlist{% endblock %}
+{% block body_extra_attrs %} data-page-title-i18n="page_playlist_title"{% endblock %}
 
 {% block styles %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/playlist.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/playlist.css') }}?v={{ timestamp|default(0) }}">
 {% endblock %}
 
 {% block content %}
 <div class="playlist-page">
     <header class="playlist-page__header">
-        <h1 class="playlist-page__title">Edit playlist</h1>
-        <p class="playlist-page__lead">Choose slides and set how long each image is shown.</p>
+        <h1 class="playlist-page__title page-title" data-i18n="page_playlist_title">Edit playlist</h1>
+        <p class="playlist-page__lead" data-i18n="playlist_lead">Choose slides and set how long each image is shown.</p>
     </header>
 
     <div class="playlist-card">
         <div id="empty-playlist-message" class="playlist-empty" style="display: none;">
-            <p class="playlist-empty__text">No media files found. Add files to the media folder first.</p>
+            <p class="playlist-empty__text" data-i18n="playlist_empty">No media files found.</p>
         </div>
 
         <div class="playlist-table-scroll">
             <table class="playlist-table" id="playlist-table">
                 <thead>
                     <tr>
-                        <th class="playlist-table__th playlist-table__th--num" scope="col">#</th>
-                        <th class="playlist-table__th playlist-table__th--check" scope="col">Include</th>
-                        <th class="playlist-table__th playlist-table__th--preview" scope="col">Preview</th>
-                        <th class="playlist-table__th" scope="col">File name</th>
-                        <th class="playlist-table__th playlist-table__th--mute" scope="col">Mute</th>
-                        <th class="playlist-table__th playlist-table__th--duration" scope="col">Duration (sec)</th>
+                        <th class="playlist-table__th playlist-table__th--num" scope="col" data-i18n="pl_col_num">#</th>
+                        <th class="playlist-table__th playlist-table__th--check" scope="col" data-i18n="pl_col_include">Include</th>
+                        <th class="playlist-table__th playlist-table__th--preview" scope="col" data-i18n="pl_col_preview">Preview</th>
+                        <th class="playlist-table__th" scope="col" data-i18n="pl_col_filename">File name</th>
+                        <th class="playlist-table__th playlist-table__th--mute" scope="col" data-i18n="pl_col_mute">Mute</th>
+                        <th class="playlist-table__th playlist-table__th--duration" scope="col" data-i18n="pl_col_duration">Duration (sec)</th>
                     </tr>
                 </thead>
                 <tbody id="file-list"></tbody>
@@ -36,12 +36,12 @@
 
         <footer class="playlist-actions">
             <button type="button" id="save-playlist" class="btn btn-primary playlist-actions__save">
-                <i class="fas fa-save" aria-hidden="true"></i>
-                Save playlist
+                <span class="btn-icon" aria-hidden="true">💾</span>
+                <span class="save-playlist__label" data-i18n="btn_save_playlist">Save playlist</span>
             </button>
             <a href="{{ url_for('main.index') }}" class="playlist-actions__cancel">
-                <i class="fas fa-times" aria-hidden="true"></i>
-                Cancel
+                <span class="btn-icon" aria-hidden="true">✕</span>
+                <span data-i18n="btn_cancel">Cancel</span>
             </a>
         </footer>
     </div>
@@ -49,5 +49,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="{{ url_for('static', filename='js/playlist.js') }}"></script>
+<script type="module" src="{{ url_for('static', filename='js/playlist.js') }}?v={{ timestamp|default(0) }}"></script>
 {% endblock %}
