@@ -1,6 +1,7 @@
 from flask import Blueprint, render_template, redirect, url_for, flash, send_from_directory, current_app, session
 from flask_login import login_required
 from datetime import datetime
+import time
 from dsign.forms import SettingsForm, UploadLogoForm, PlaylistProfileForm
 from dsign.services.settings_service import SettingsService
 import requests
@@ -17,7 +18,8 @@ def init_main_routes(main_bp: Blueprint, settings_service: SettingsService):
         return render_template(
             'index.html',
             settings=settings,
-            default_logo_cache_buster=int(datetime.now().timestamp())
+            default_logo_cache_buster=int(datetime.now().timestamp()),
+            timestamp=int(time.time()),
         )
 
     @main_bp.route('/settings')
@@ -32,20 +34,18 @@ def init_main_routes(main_bp: Blueprint, settings_service: SettingsService):
             
             # Get playlists with their assigned profiles
             playlists = db.session.query(Playlist).all()
-            assignments = (
-                db.session.query(PlaylistProfileAssignment.playlist_id, PlaylistProfileAssignment.profile_id)
-                .all()
-            )
-            assignments_by_playlist_id = {a.playlist_id: a.profile_id for a in assignments}
-
-            playlist_data = [
-                {
+            playlist_data = []
+            
+            for playlist in playlists:
+                assignment = db.session.query(PlaylistProfileAssignment).filter_by(
+                    playlist_id=playlist.id
+                ).first()
+                
+                playlist_data.append({
                     'id': playlist.id,
                     'name': playlist.name,
-                    'profile_id': assignments_by_playlist_id.get(playlist.id),
-                }
-                for playlist in playlists
-            ]
+                    'profile_id': assignment.profile_id if assignment else None
+                })
             
             # Get current profile
             current_profile = None
@@ -59,7 +59,8 @@ def init_main_routes(main_bp: Blueprint, settings_service: SettingsService):
                 profiles=profiles,
                 current_settings=current_settings,
                 playlists={'playlists': playlist_data},
-                current_profile=current_profile
+                current_profile=current_profile,
+                timestamp=int(time.time()),
             )
                 
         except Exception as e:
@@ -69,7 +70,8 @@ def init_main_routes(main_bp: Blueprint, settings_service: SettingsService):
                 profiles=[],
                 current_settings={},
                 playlists={'playlists': []},
-                current_profile=None
+                current_profile=None,
+                timestamp=int(time.time()),
             ), 500
     
     @main_bp.route('/favicon.ico')
@@ -80,13 +82,13 @@ def init_main_routes(main_bp: Blueprint, settings_service: SettingsService):
     @login_required
     def gallery():
         """Рендеринг галереи медиа"""
-        return render_template('gallery.html')
+        return render_template('gallery.html', timestamp=int(time.time()))
 
     @main_bp.route('/playlist')
     @login_required
     def playlist():
         """Рендеринг страницы плейлистов"""
-        return render_template('playlist.html')
+        return render_template('playlist.html', timestamp=int(time.time()))
         
     @main_bp.route('/playlist/<int:playlist_id>')
     @login_required
@@ -98,7 +100,7 @@ def init_main_routes(main_bp: Blueprint, settings_service: SettingsService):
                 flash('Playlist not found', 'error')
                 return redirect(url_for('main.index'))
 
-            return render_template('playlist.html', playlist_id=playlist_id)
+            return render_template('playlist.html', playlist_id=playlist_id, timestamp=int(time.time()))
         except Exception as e:
             current_app.logger.error(f"Error loading playlist {playlist_id}: {str(e)}")
             flash('Error loading playlist', 'error')
