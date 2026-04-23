@@ -5,8 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>{% block document_title %}Digital Signage{% endblock %}</title>
-    <link rel="preconnect" href="https://cdnjs.cloudflare.com">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}?v={{ timestamp }}">
     {% block head_extra %}{% endblock %}
     {% block styles %}{% endblock %}
@@ -18,21 +16,21 @@
                 {% block site_nav %}
                 <div class="app-nav__left">
                     <a href="{{ url_for('main.index') }}" class="nav-pill{% if request.path == '/' or request.path == '' %} is-active{% endif %}">
-                        <i class="fas fa-home" aria-hidden="true"></i>
+                        <span class="nav-icon" aria-hidden="true">⌂</span>
                         <span data-i18n="nav_home">Главная</span>
                     </a>
                     <a href="{{ url_for('main.gallery') }}" class="nav-pill{% if request.path.startswith('/gallery') %} is-active{% endif %}">
-                        <i class="fas fa-images" aria-hidden="true"></i>
+                        <span class="nav-icon" aria-hidden="true">▦</span>
                         <span data-i18n="nav_gallery">Галерея</span>
                     </a>
                     <a href="{{ url_for('main.settings') }}" class="nav-pill{% if request.path.startswith('/settings') %} is-active{% endif %}">
-                        <i class="fas fa-sliders-h" aria-hidden="true"></i>
+                        <span class="nav-icon" aria-hidden="true">⚙</span>
                         <span data-i18n="nav_settings">Настройки</span>
                     </a>
                 </div>
                 <div class="app-nav__center">
                     <a href="{{ url_for('main.index') }}" class="app-brand" title="Home">
-                        <i class="fas fa-tv app-brand__icon" aria-hidden="true"></i>
+                        <span class="app-brand__icon" aria-hidden="true">▣</span>
                         <span class="app-brand__text" data-i18n="brand_center">Digital Signage</span>
                     </a>
                 </div>
@@ -47,6 +45,10 @@
                             <span class="lang-toggle__label" data-i18n="lang_en">English</span>
                         </button>
                     </div>
+                    <a href="{{ url_for('auth.logout') }}" class="nav-pill nav-pill--logout" data-i18n-title="logout" title="Logout">
+                        <span class="nav-icon" aria-hidden="true">⇦</span>
+                        <span data-i18n="logout">Logout</span>
+                    </a>
                 </div>
                 {% endblock %}
             </nav>

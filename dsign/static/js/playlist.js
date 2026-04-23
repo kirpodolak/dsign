@@ -19,9 +19,9 @@ function toggleButtonState(button, isLoading) {
     button.disabled = isLoading;
     const lang = getUiLang();
     if (isLoading) {
-        button.innerHTML = `<i class="fas fa-spinner fa-spin" aria-hidden="true"></i> <span class="save-playlist__label">${t('saving_ellipsis', lang)}</span>`;
+        button.innerHTML = `⏳ <span class="save-playlist__label">${t('saving_ellipsis', lang)}</span>`;
     } else {
-        button.innerHTML = `<i class="fas fa-save" aria-hidden="true"></i> <span class="save-playlist__label" data-i18n="btn_save_playlist">${t('btn_save_playlist', lang)}</span>`;
+        button.innerHTML = `💾 <span class="save-playlist__label" data-i18n="btn_save_playlist">${t('btn_save_playlist', lang)}</span>`;
     }
 }
 
@@ -78,24 +78,29 @@ class PlaylistUI {
 
         // Добавляем иконку в зависимости от типа
         const icons = {
-            success: 'fa-check-circle',
-            error: 'fa-times-circle',
-            warning: 'fa-exclamation-triangle',
-            info: 'fa-info-circle'
+            success: '✓',
+            error: '×',
+            warning: '!',
+            info: 'i'
         };
+
+        const lang = getUiLang();
+        const title =
+            type === 'error' ? t('alert_error', lang) :
+            type === 'success' ? t('alert_success', lang) :
+            type === 'warning' ? t('alert_warning', lang) :
+            t('alert_info', lang);
 
         alertDiv.innerHTML = `
             <div style="display: flex; align-items: center; gap: 10px;">
-                <i class="fas ${icons[type] || 'fa-info-circle'}" style="font-size: 1.5rem;"></i>
+                <span aria-hidden="true" style="font-size: 1.35rem; line-height: 1;">${icons[type] || 'i'}</span>
                 <div>
-                    <div style="font-weight: bold; margin-bottom: 5px;">${type === 'error' ? 'Ошибка' : 
-                        type === 'success' ? 'Успех' : 
-                        type === 'warning' ? 'Внимание' : 'Информация'}</div>
+                    <div style="font-weight: bold; margin-bottom: 5px;">${title}</div>
                     <div>${message}</div>
                 </div>
             </div>
             <button class="alert-close-btn" style="background: none; border: none; color: white; cursor: pointer;">
-                <i class="fas fa-times"></i>
+                <span aria-hidden="true">×</span>
             </button>
         `;
 

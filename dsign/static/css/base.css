@@ -97,6 +97,16 @@ body.app-body {
   opacity: 0.9;
 }
 
+.nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1rem;
+  text-align: center;
+  font-weight: 800;
+  opacity: 0.9;
+}
+
 .nav-pill:hover {
   background: #e2e8f0;
   color: #0f172a;
@@ -135,6 +145,7 @@ body.app-body {
 .app-brand__icon {
   font-size: 1.15rem;
   color: #4f46e5;
+  font-weight: 900;
 }
 
 .app-brand__text {

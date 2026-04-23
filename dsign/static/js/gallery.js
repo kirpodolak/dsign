@@ -308,8 +308,10 @@ class MediaGallery {
           };
           previewContainer.appendChild(img);
         } else {
-          const icon = document.createElement('i');
-          icon.className = 'fas fa-file-video';
+          const icon = document.createElement('span');
+          icon.className = 'file-icon__glyph';
+          icon.setAttribute('aria-hidden', 'true');
+          icon.textContent = '🎬';
           previewContainer.appendChild(icon);
         }
       }
@@ -523,8 +525,8 @@ class MediaGallery {
       const newAll = Array.from(checkboxes).every((cb) => cb.checked);
       const lang = getUiLang();
       const label = newAll ? t('deselect_all', lang) : t('select_all', lang);
-      const icon = newAll ? 'fa-times' : 'fa-check-square';
-      this.elements.selectAllBtn.innerHTML = `<i class="fas ${icon}"></i> ${label}`;
+      const icon = newAll ? '✕' : '✓';
+      this.elements.selectAllBtn.innerHTML = `${icon} ${label}`;
     }
   }
 
@@ -646,7 +648,7 @@ class MediaGallery {
     const icon = btn.querySelector('.upload-btn__icon');
     const text = btn.querySelector('.upload-btn__text');
     const fill = btn.querySelector('.upload-btn__fill');
-    if (icon) icon.className = 'fas fa-circle-notch fa-spin upload-btn__icon';
+    if (icon) icon.textContent = '⏳';
     if (text) text.textContent = '0%';
     if (fill) {
       fill.style.width = '0%';
@@ -663,7 +665,7 @@ class MediaGallery {
     if (percent == null || !Number.isFinite(percent)) {
       fill.classList.add('upload-btn__fill--pulse');
       fill.style.width = '100%';
-      text.textContent = 'Uploading…';
+      text.textContent = t('upload_ellipsis', getUiLang());
       return;
     }
     fill.classList.remove('upload-btn__fill--pulse');
@@ -687,7 +689,7 @@ class MediaGallery {
       fill.style.width = '100%';
     }
     if (text) text.textContent = t('processing_ellipsis', getUiLang());
-    if (icon) icon.className = 'fas fa-circle-notch fa-spin upload-btn__icon';
+    if (icon) icon.textContent = '⏳';
   }
 
   resetUploadButton() {
@@ -704,7 +706,7 @@ class MediaGallery {
       fill.style.opacity = '';
     }
     if (text) text.textContent = t('btn_upload', getUiLang());
-    if (icon) icon.className = 'fas fa-upload upload-btn__icon';
+    if (icon) icon.textContent = '⭳';
   }
 
   async deleteSelectedMedia() {
@@ -764,10 +766,10 @@ class MediaGallery {
 
     if (isLoading) {
       button.disabled = true;
-      button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Deleting...';
+      button.innerHTML = `⏳ ${t('deleting_ellipsis', getUiLang())}`;
     } else {
       button.disabled = false;
-      button.innerHTML = '<i class="fas fa-trash"></i> Delete Selected';
+      button.innerHTML = `🗑 ${t('delete_selected', getUiLang())}`;
     }
   }
 
@@ -864,13 +866,12 @@ class MediaGallery {
     const checkboxes = document.querySelectorAll('.file-checkbox');
     const lang = getUiLang();
     if (!checkboxes.length) {
-      this.elements.selectAllBtn.innerHTML = `<i class="fas fa-check-square"></i> ${t('select_all', lang)}`;
+      this.elements.selectAllBtn.textContent = `☑ ${t('select_all', lang)}`;
       return;
     }
     const allSelected = Array.from(checkboxes).every((cb) => cb.checked);
     const label = allSelected ? t('deselect_all', lang) : t('select_all', lang);
-    const icon = allSelected ? 'fa-times' : 'fa-check-square';
-    this.elements.selectAllBtn.innerHTML = `<i class="fas ${icon}"></i> ${label}`;
+    this.elements.selectAllBtn.textContent = `${allSelected ? '✖' : '☑'} ${label}`;
   }
 }
 

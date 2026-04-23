@@ -25,7 +25,7 @@
                  onload="this.style.display='block'"
                  onerror="this.onerror=null;this.src='{{ url_for('static', filename='images/default-preview.jpg') }}?t='+Date.now()">
             <button id="refresh-mpv-preview" class="mpv-refresh-btn" data-i18n-title="refresh_preview" title="Refresh preview">
-                <i class="fas fa-sync-alt"></i>
+                <span aria-hidden="true">⟳</span>
             </button>
         </div>
         <div class="mpv-status">
@@ -48,7 +48,7 @@
                 <input type="file" id="logo-upload" class="logo-upload-input" name="logo" accept="image/jpeg, image/png" required>
                 <div class="logo-upload-controls">
                     <label for="logo-upload" class="logo-btn logo-btn--choose">
-                        <i class="fas fa-folder-open"></i>
+                        <span aria-hidden="true">📁</span>
                         <span data-i18n="choose_file">Choose File</span>
                     </label>
                     <button type="button" id="upload-logo-btn" class="logo-btn logo-btn--apply" disabled>
@@ -66,7 +66,7 @@
     <div class="section-header">
         <h2 data-i18n="playlists_heading">Playlists</h2>
         <button id="create-playlist-btn" class="btn primary" type="button">
-            <i class="fas fa-plus" aria-hidden="true"></i> <span data-i18n="btn_new_playlist">New Playlist</span>
+            <span aria-hidden="true">＋</span> <span data-i18n="btn_new_playlist">New Playlist</span>
         </button>
     </div>
 

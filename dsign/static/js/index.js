@@ -3,6 +3,18 @@ import { toggleButtonState } from './utils/helpers.js';
 import { fetchAPI, getCSRFToken } from './utils/api.js';
 import { t, getUiLang } from './i18n.js';
 
+function setBtnIconText(btn, text) {
+    if (!btn) return;
+    let el = btn.querySelector('.btn-icon');
+    if (!el) {
+        el = document.createElement('span');
+        el.className = 'btn-icon';
+        el.setAttribute('aria-hidden', 'true');
+        btn.prepend(el);
+    }
+    el.textContent = String(text || '');
+}
+
 // Application configuration
 const CONFIG = {
     api: {
@@ -515,6 +527,12 @@ const ui = {
         const st = t('stop_title', lang);
         const et = t('edit_title', lang);
         const dt = t('delete_title', lang);
+        const icons = {
+            play: '▶',
+            stop: '■',
+            edit: '✎',
+            del: '🗑',
+        };
         tableBody.innerHTML = playlistsArray.map(playlist => `
             <tr data-id="${playlist.id}">
                 <td class="playlist-td-name">${this.escapeHtml(playlist.name || un)}</td>
@@ -529,16 +547,20 @@ const ui = {
                     <div class="playlist-td-inner">
                         <div class="actions">
                         <button class="btn play" data-id="${playlist.id}" title="${this.escapeHtml(pt)}">
-                            <i class="fas fa-play"></i>
+                            <span class="btn-icon" aria-hidden="true">${icons.play}</span>
+                            <span class="sr-only">${this.escapeHtml(pt)}</span>
                         </button>
                         <button class="btn stop" data-id="${playlist.id}" title="${this.escapeHtml(st)}" disabled>
-                            <i class="fas fa-stop"></i>
+                            <span class="btn-icon" aria-hidden="true">${icons.stop}</span>
+                            <span class="sr-only">${this.escapeHtml(st)}</span>
                         </button>
                         <button class="btn edit" data-id="${playlist.id}" title="${this.escapeHtml(et)}">
-                            <i class="fas fa-edit"></i>
+                            <span class="btn-icon" aria-hidden="true">${icons.edit}</span>
+                            <span class="sr-only">${this.escapeHtml(et)}</span>
                         </button>
                         <button class="btn delete" data-id="${playlist.id}" title="${this.escapeHtml(dt)}">
-                            <i class="fas fa-trash"></i>
+                            <span class="btn-icon" aria-hidden="true">${icons.del}</span>
+                            <span class="sr-only">${this.escapeHtml(dt)}</span>
                         </button>
                         </div>
                     </div>
@@ -964,10 +986,7 @@ const handlers = {
             
             try {
                 elements.refreshPreviewBtn.disabled = true;
-                const icon = elements.refreshPreviewBtn.querySelector('i');
-                if (icon) {
-                    icon.className = 'fas fa-spinner fa-spin';
-                }
+                setBtnIconText(elements.refreshPreviewBtn, '⟳');
                 
                 const r = await api.refreshPreview();
                 const now = Date.now();
@@ -989,10 +1008,7 @@ const handlers = {
                 showError('Failed to refresh preview');
             } finally {
                 elements.refreshPreviewBtn.disabled = false;
-                const icon = elements.refreshPreviewBtn.querySelector('i');
-                if (icon) {
-                    icon.className = 'fas fa-sync-alt';
-                }
+                setBtnIconText(elements.refreshPreviewBtn, '⟳');
             }
         });
 
@@ -1041,10 +1057,7 @@ const handlers = {
                     if (confirm('Are you sure you want to delete this playlist?')) {
                         try {
                             // Show loading state
-                            const icon = btn.querySelector('i');
-                            if (icon) {
-                                icon.className = 'fas fa-spinner fa-spin';
-                            }
+                            setBtnIconText(btn, '…');
                             btn.disabled = true;
 
                             const delResult = await api.deletePlaylist(playlistId);
@@ -1073,10 +1086,7 @@ const handlers = {
                             showError('Failed to delete playlist: ' + (error.details || error.message));
                             
                             // Reset button state
-                            const icon = btn.querySelector('i');
-                            if (icon) {
-                                icon.className = 'fas fa-trash';
-                            }
+                            setBtnIconText(btn, '🗑');
                             btn.disabled = false;
                         }
                     }
