@@ -606,19 +606,19 @@ class MediaGallery {
     }
 
     // Rutube: https://rutube.ru/video/<id>/ -> https://rutube.ru/play/embed/<id>/
-    if (provider === 'rutube' || /rutube\\.ru/i.test(u)) {
-      const m = u.match(/rutube\\.ru\\/video\\/([0-9a-f]{16,})/i);
+    if (provider === 'rutube' || /rutube\.ru/i.test(u)) {
+      const m = u.match(/rutube\.ru\/video\/([0-9a-f]{16,})/i);
       if (m && m[1]) return `https://rutube.ru/play/embed/${m[1]}/`;
-      const m2 = u.match(/rutube\\.ru\\/(?:play\\/)?embed\\/([0-9a-f]{16,})/i);
+      const m2 = u.match(/rutube\.ru\/(?:play\/)?embed\/([0-9a-f]{16,})/i);
       if (m2 && m2[1]) return `https://rutube.ru/play/embed/${m2[1]}/`;
       return u;
     }
 
     // VK Video: accept both vk.com/video and vkvideo.ru/video
-    if (provider === 'vkvideo' || /vkvideo\\.ru/i.test(u) || /vk\\.com\\/video/i.test(u)) {
+    if (provider === 'vkvideo' || /vkvideo\.ru/i.test(u) || /vk\.com\/video/i.test(u)) {
       // vkvideo.ru/video-<oid>_<id>
-      let m = u.match(/vkvideo\\.ru\\/video(-?\\d+)_([0-9]+)/i);
-      if (!m) m = u.match(/vk\\.com\\/video(-?\\d+)_([0-9]+)/i);
+      let m = u.match(/vkvideo\.ru\/video(-?\d+)_(\d+)/i);
+      if (!m) m = u.match(/vk\.com\/video(-?\d+)_(\d+)/i);
       if (m && m[1] && m[2]) {
         const oid = m[1];
         const id = m[2];
