@@ -9,6 +9,8 @@
     {% block head_extra %}{% endblock %}
     {% block styles %}{% endblock %}
 </head>
+{# Default empty body_class so self.body_class() exists in all templates. #}
+{% block body_class %}{% endblock %}
 {# Ensure blocks add classes without requiring leading spaces in children. #}
 {% set _body_class = (self.body_class() | trim) %}
 <body class="app-body{% if _body_class %} {{ _body_class }}{% endif %}"{% block body_extra_attrs %}{% endblock %}>
