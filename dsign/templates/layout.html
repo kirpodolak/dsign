@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <title>{% block document_title %}Digital Signage{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}?v={{ timestamp }}">
+    {% block head_extra %}{% endblock %}
+    {% block styles %}{% endblock %}
+</head>
+{# Default empty body_class so self.body_class() exists in all templates. #}
+{% block body_class %}{% endblock %}
+{# Ensure blocks add classes without requiring leading spaces in children. #}
+{% set _body_class = (self.body_class() | trim) %}
+<body class="app-body{% if _body_class %} {{ _body_class }}{% endif %}"{% block body_extra_attrs %}{% endblock %}>
+    <div class="app-shell">
+        <header class="app-header" role="banner">
+            <nav class="app-nav app-nav--primary" aria-label="{% block nav_primary_aria %}{% endblock %}">
+                {% block site_nav %}
+                <div class="app-nav__left">
+                    <a href="{{ url_for('main.index') }}" class="nav-pill{% if request.path == '/' or request.path == '' %} is-active{% endif %}">
+                        <span class="nav-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                <path d="M12 3l9 8h-3v10h-5v-6H11v6H6V11H3l9-8z" fill="currentColor"></path>
+                            </svg>
+                        </span>
+                        <span data-i18n="nav_home">Главная</span>
+                    </a>
+                    <a href="{{ url_for('main.gallery') }}" class="nav-pill{% if request.path.startswith('/gallery') %} is-active{% endif %}">
+                        <span class="nav-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                <path d="M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm0 2v10h16V7H4zm2 2h5v3H6V9zm0 5h5v3H6v-3zm7-5h5v3h-5V9zm0 5h5v3h-5v-3z" fill="currentColor"></path>
+                            </svg>
+                        </span>
+                        <span data-i18n="nav_gallery">Галерея</span>
+                    </a>
+                    <a href="{{ url_for('main.settings') }}" class="nav-pill{% if request.path.startswith('/settings') %} is-active{% endif %}">
+                        <span class="nav-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                <path d="M19.14 12.94a7.75 7.75 0 0 0 .05-.94 7.75 7.75 0 0 0-.05-.94l2.03-1.58a.6.6 0 0 0 .14-.76l-1.92-3.32a.6.6 0 0 0-.73-.26l-2.39.96a7.35 7.35 0 0 0-1.63-.94l-.36-2.54A.6.6 0 0 0 13.7 1h-3.4a.6.6 0 0 0-.59.5l-.36 2.54c-.58.23-1.12.54-1.63.94l-2.39-.96a.6.6 0 0 0-.73.26L2.68 7.6a.6.6 0 0 0 .14.76L4.85 9.94c-.03.31-.05.63-.05.94s.02.63.05.94l-2.03 1.58a.6.6 0 0 0-.14.76l1.92 3.32c.15.26.46.37.73.26l2.39-.96c.5.4 1.05.71 1.63.94l.36 2.54c.05.29.3.5.59.5h3.4c.29 0 .54-.21.59-.5l.36-2.54c.58-.23 1.12-.54 1.63-.94l2.39.96c.27.11.58 0 .73-.26l1.92-3.32a.6.6 0 0 0-.14-.76l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5z" fill="currentColor"></path>
+                            </svg>
+                        </span>
+                        <span data-i18n="nav_settings">Настройки</span>
+                    </a>
+                </div>
+                <div class="app-nav__center">
+                    <a href="{{ url_for('main.index') }}" class="app-brand" title="Home">
+                        <span class="app-brand__icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                <path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-5l2 2v1H9v-1l2-2H6a2 2 0 0 1-2-2V6zm2 0v9h12V6H6z" fill="currentColor"></path>
+                            </svg>
+                        </span>
+                        <span class="app-brand__text" data-i18n="brand_center">Digital Signage</span>
+                    </a>
+                </div>
+                <div class="app-nav__right">
+                    <div class="lang-toggle" role="group" data-i18n-aria="lang_aria" aria-label="Interface language">
+                        <button type="button" class="lang-toggle__btn" data-lang-set="ru" data-lang="ru" data-i18n-title="lang_ru" title="Русский">
+                            <span class="lang-toggle__fi" aria-hidden="true">🇷🇺</span>
+                            <span class="lang-toggle__label" data-i18n="lang_ru">Русский</span>
+                        </button>
+                        <button type="button" class="lang-toggle__btn" data-lang-set="en" data-lang="en" data-i18n-title="lang_en" title="English">
+                            <span class="lang-toggle__fi" aria-hidden="true">🇬🇧</span>
+                            <span class="lang-toggle__label" data-i18n="lang_en">English</span>
+                        </button>
+                    </div>
+                    <a href="{{ url_for('auth.logout') }}" class="nav-pill nav-pill--logout" data-i18n-title="logout" title="Logout">
+                        <span class="nav-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                <path d="M10 17l-1.41-1.41L12.17 12 8.59 8.41 10 7l7 5-7 5z" fill="currentColor"></path>
+                                <path d="M4 5h8a2 2 0 0 1 2 2v2h-2V7H4v10h8v-2h2v2a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z" fill="currentColor" opacity="0.9"></path>
+                            </svg>
+                        </span>
+                        <span data-i18n="logout">Logout</span>
+                    </a>
+                </div>
+                {% endblock %}
+            </nav>
+        </header>
+        <main class="app-main" id="main-content" role="main">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+    <script type="module" src="{{ url_for('static', filename='js/i18n.js') }}?v={{ timestamp }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
