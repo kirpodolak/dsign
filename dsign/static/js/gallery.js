@@ -486,21 +486,104 @@ class MediaGallery {
         }
       };
       this.elements.previewContainer.appendChild(img);
-    } else if (ALLOWED_VIDEO_TYPES.includes(file.type)) {
-      const video = document.createElement('video');
-      video.controls = true;
-      video.autoplay = true;
-      const source = document.createElement('source');
-      source.src = `/api/media/${encodeURIComponent(file.name)}`;
-      source.type = file.mimetype || `video/${file.type}`;
-      video.appendChild(source);
-      this.elements.previewContainer.appendChild(video);
+    } else if (
+      ALLOWED_VIDEO_TYPES.includes(file.type) ||
+      Boolean(file?.is_video) ||
+      this.isExternalFile(file) ||
+      String(file.name || '').toLowerCase().startsWith('ext-')
+    ) {
+      const isExternal = this.isExternalFile(file);
+      const provider = isExternal ? this.getExternalProvider(file) : null;
+
+      // Local videos can always be previewed via /api/media/<filename>.
+      // External videos: we don't have a browser-playable direct URL (HLS + headers/cookies),
+      // so embed the provider page in an iframe when possible.
+      if (!isExternal) {
+        const video = document.createElement('video');
+        video.controls = true;
+        video.autoplay = true;
+        video.playsInline = true;
+        video.preload = 'metadata';
+        const source = document.createElement('source');
+        source.src = `/api/media/${encodeURIComponent(file.name)}`;
+        source.type = file.mimetype || `video/${file.type}`;
+        video.appendChild(source);
+        this.elements.previewContainer.appendChild(video);
+      } else {
+        this._renderExternalInlineEmbed(file, provider);
+      }
     }
     
     if (this.elements.previewModal) {
       this.elements.previewModal.removeAttribute('hidden');
       document.body.style.overflow = 'hidden';
     }
+  }
+
+  _renderExternalPreviewFallback(file, provider) {
+    const wrap = document.createElement('div');
+    wrap.className = 'preview-external-fallback';
+
+    const img = document.createElement('img');
+    img.src = this.getThumbnailUrl(file.name);
+    img.alt = file.external?.title || file.name;
+    img.classList.add('file-preview');
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.onerror = () => {
+      img.src = PLACEHOLDER_IMAGE;
+      img.style.opacity = '0.7';
+    };
+    wrap.appendChild(img);
+
+    const actions = document.createElement('div');
+    actions.className = 'preview-external-actions';
+
+    const openBtn = document.createElement('a');
+    openBtn.className = 'btn primary';
+    openBtn.href = (file?.external?.url || file?.url || '').toString();
+    openBtn.target = '_blank';
+    openBtn.rel = 'noopener noreferrer';
+    const label = provider?.label ? `Open ${provider.label}` : 'Open link';
+    openBtn.textContent = label;
+    actions.appendChild(openBtn);
+
+    wrap.appendChild(actions);
+    this.elements.previewContainer.appendChild(wrap);
+  }
+
+  _renderExternalInlineEmbed(file, provider) {
+    const url = String(file?.external?.url || file?.path || '').trim();
+    if (!url) {
+      this._renderExternalPreviewFallback(file, provider);
+      return;
+    }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'preview-external-embed';
+
+    const iframe = document.createElement('iframe');
+    iframe.className = 'preview-external-embed__frame';
+    iframe.src = url;
+    iframe.loading = 'lazy';
+    iframe.referrerPolicy = 'no-referrer-when-downgrade';
+    iframe.allow = 'autoplay; fullscreen; picture-in-picture';
+    iframe.allowFullscreen = true;
+    iframe.setAttribute('title', file.external?.title || url);
+    wrap.appendChild(iframe);
+
+    const footer = document.createElement('div');
+    footer.className = 'preview-external-embed__footer';
+    const btn = document.createElement('a');
+    btn.href = url;
+    btn.target = '_blank';
+    btn.rel = 'noopener noreferrer';
+    btn.className = 'btn secondary preview-external-embed__open';
+    btn.textContent = provider?.label ? `Open on ${provider.label}` : 'Open link';
+    footer.appendChild(btn);
+    wrap.appendChild(footer);
+
+    this.elements.previewContainer.appendChild(wrap);
   }
 
   closePreview() {

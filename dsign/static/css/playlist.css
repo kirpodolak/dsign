@@ -250,21 +250,35 @@
     gap: 0.5rem;
 }
 
+.playlist-actions__save.btn {
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
 .playlist-actions__cancel {
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
     font-size: 0.875rem;
     font-weight: 500;
-    color: var(--text-secondary, #64748b);
     text-decoration: none;
-    padding: 0.35rem 0;
-    transition: color 0.15s ease;
+    padding: 0.35rem 0.55rem;
+    border-radius: 10px;
+    border: 1px solid rgba(239, 83, 80, 0.35);
+    color: #991b1b;
+    background: rgba(239, 83, 80, 0.10);
+    transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .playlist-actions__cancel:hover {
-    color: var(--text-primary, #0f172a);
-    text-decoration: underline;
+    transform: translateY(-1px);
+    background: rgba(239, 83, 80, 0.14);
+    border-color: rgba(239, 83, 80, 0.55);
+    color: #7f1d1d;
+    box-shadow: 0 0 0 3px rgba(239, 83, 80, 0.12);
+    text-decoration: none;
 }
 
 @media (max-width: 640px) {
