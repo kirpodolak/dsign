@@ -1,44 +1,46 @@
-{% extends "base.html" %}
+{% extends "layout.html" %}
+
+{% block body_extra_attrs %} data-page-title-i18n="page_home_title"{% endblock %}
 
 {% block styles %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}?v={{ timestamp }}">
 {% endblock %}
 
 {% block content %}
-<h1>Digital Signage Control Panel</h1>
+<h1 class="page-title" data-i18n="page_home_title">Control Panel</h1>
 
 <div class="info-panel">
     <div id="settings-container" class="info-card info-card--metrics">
-        <h3>Operational Metrics</h3>
-        <!-- Filled by JS -->
+        <h3 data-i18n="current_settings">Current Settings</h3>
+        <!-- Данные настроек будут загружены через JS -->
     </div>
 
     <div class="mpv-preview">
-        <h3>MPV Player Preview</h3>
+        <h3 data-i18n="mpv_preview">MPV Player Preview</h3>
         <div class="mpv-preview-container">
             <img id="mpv-preview-image" 
                  src="{{ url_for('api.get_mpv_screenshot') }}" 
                  class="mpv-preview-image"
                  style="display: none;"
                  onload="this.style.display='block'"
-                 onerror="this.onerror=null;this.src='{{ url_for('static', filename='images/placeholder.jpg') }}?t='+Date.now()">
-            <button id="refresh-mpv-preview" class="mpv-refresh-btn" title="Refresh Preview">
-                <i class="fas fa-sync-alt"></i>
+                 onerror="this.onerror=null;this.src='{{ url_for('static', filename='images/default-preview.jpg') }}?t='+Date.now()">
+            <button id="refresh-mpv-preview" class="mpv-refresh-btn" data-i18n-title="refresh_preview" title="Refresh preview">
+                <span aria-hidden="true">⟳</span>
             </button>
         </div>
         <div class="mpv-status">
-            Last updated: <span id="mpv-last-update">Never</span>
+            <span data-i18n="last_updated_label">Last updated</span>: <span id="mpv-last-update">—</span>
             <span id="mpv-auto-refresh-status" class="mpv-auto-refresh-status"></span>
         </div>
     </div>
 
     <div class="logo-preview">
-        <h3>Current Logo</h3>
+        <h3 data-i18n="current_logo">Current Logo</h3>
         <img id="idle-logo"
              src="{{ url_for('api.serve_media', filename='idle_logo.jpg') }}"
              style="display: none;"
              onload="this.style.display='block'"
-             onerror="this.onerror=null;this.src='{{ url_for('static', filename='images/placeholder.jpg') }}?t={{ default_logo_cache_buster }}'">
+             onerror="this.onerror=null;this.src='{{ url_for('static', filename='default-logo.jpg') }}?t={{ default_logo_cache_buster }}'">
 
         <form id="logo-upload-form" enctype="multipart/form-data">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -46,15 +48,15 @@
                 <input type="file" id="logo-upload" class="logo-upload-input" name="logo" accept="image/jpeg, image/png" required>
                 <div class="logo-upload-controls">
                     <label for="logo-upload" class="logo-btn logo-btn--choose">
-                        <i class="fas fa-folder-open"></i>
-                        <span>Choose File</span>
+                        <span aria-hidden="true">📁</span>
+                        <span data-i18n="choose_file">Choose File</span>
                     </label>
                     <button type="button" id="upload-logo-btn" class="logo-btn logo-btn--apply" disabled>
-                        <span class="btn-text">Apply Logo</span>
+                        <span class="btn-text" data-i18n="apply_logo">Apply Logo</span>
                         <span class="loading-spinner" style="display:none;"></span>
                     </button>
                 </div>
-                <p id="logo-selected-file" class="logo-selected-file">No file selected</p>
+                <p id="logo-selected-file" class="logo-selected-file" data-i18n="no_file">No file selected</p>
             </div>
         </form>
     </div>
@@ -62,9 +64,9 @@
 
 <div class="playlist-section">
     <div class="section-header">
-        <h2>Playlists</h2>
-        <button id="create-playlist-btn" class="btn primary">
-            <i class="fas fa-plus"></i> New Playlist
+        <h2 data-i18n="playlists_heading">Playlists</h2>
+        <button id="create-playlist-btn" class="btn primary" type="button">
+            <span aria-hidden="true">＋</span> <span data-i18n="btn_new_playlist">New Playlist</span>
         </button>
     </div>
 
@@ -81,11 +83,11 @@
             </colgroup>
             <thead>
                 <tr>
-                    <th scope="col">Name</th>
-                    <th scope="col">Customer</th>
-                    <th scope="col">Files</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Actions</th>
+                    <th scope="col" data-i18n="playlist_col_name">Name</th>
+                    <th scope="col" data-i18n="playlist_col_customer">Customer</th>
+                    <th scope="col" data-i18n="playlist_col_files">Files</th>
+                    <th scope="col" data-i18n="playlist_col_status">Status</th>
+                    <th scope="col" data-i18n="playlist_col_actions">Actions</th>
                 </tr>
             </thead>
             <tbody id="playlist-table-body">
@@ -98,18 +100,18 @@
 <div id="create-playlist-modal" class="modal" style="display:none;">
     <div class="modal-content">
         <span class="close">&times;</span>
-        <h2>Create New Playlist</h2>
+        <h2 data-i18n="modal_new_playlist">New Playlist</h2>
         <form id="create-playlist-form" method="POST">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="form-group">
-                <label for="playlist-name">Playlist Name:</label>
+                <label for="playlist-name" data-i18n="form_playlist_name">Playlist name</label>
                 <input type="text" id="playlist-name" name="name" required>
             </div>
             <div class="form-group">
-                <label for="playlist-customer">Customer:</label>
+                <label for="playlist-customer" data-i18n="form_customer">Customer</label>
                 <input type="text" id="playlist-customer" name="customer" required>
             </div>
-            <button type="submit" class="btn primary">Create</button>
+            <button type="submit" class="btn primary" data-i18n="btn_create">Create</button>
         </form>
     </div>
 </div>
