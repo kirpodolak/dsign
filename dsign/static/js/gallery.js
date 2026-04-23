@@ -553,7 +553,9 @@ class MediaGallery {
   }
 
   _renderExternalInlineEmbed(file, provider) {
-    const url = String(file?.external?.url || file?.path || '').trim();
+    const rawUrl = String(file?.external?.url || file?.path || '').trim();
+    const prov = String(file?.external?.provider || provider?.key || '').toLowerCase();
+    const url = this._buildEmbedUrl(rawUrl, prov);
     if (!url) {
       this._renderExternalPreviewFallback(file, provider);
       return;
@@ -567,7 +569,10 @@ class MediaGallery {
     iframe.src = url;
     iframe.loading = 'lazy';
     iframe.referrerPolicy = 'no-referrer-when-downgrade';
-    iframe.allow = 'autoplay; fullscreen; picture-in-picture';
+    iframe.allow =
+      prov === 'vkvideo'
+        ? 'autoplay; encrypted-media; fullscreen; picture-in-picture; screen-wake-lock;'
+        : 'clipboard-write; autoplay; fullscreen; picture-in-picture;';
     iframe.allowFullscreen = true;
     iframe.setAttribute('title', file.external?.title || url);
     wrap.appendChild(iframe);
@@ -575,7 +580,7 @@ class MediaGallery {
     const footer = document.createElement('div');
     footer.className = 'preview-external-embed__footer';
     const btn = document.createElement('a');
-    btn.href = url;
+    btn.href = rawUrl;
     btn.target = '_blank';
     btn.rel = 'noopener noreferrer';
     btn.className = 'btn secondary preview-external-embed__open';
@@ -584,6 +589,46 @@ class MediaGallery {
     wrap.appendChild(footer);
 
     this.elements.previewContainer.appendChild(wrap);
+  }
+
+  /**
+   * Build provider-specific embed URL from a canonical page URL or existing embed URL.
+   * @param {string} url
+   * @param {string} provider
+   * @returns {string}
+   */
+  _buildEmbedUrl(url, provider) {
+    const u = String(url || '').trim();
+    if (!u) return '';
+    // If user already gave an embed src, keep it.
+    if (/\\/play\\/embed\\//i.test(u) || /\\/video_ext\\.php/i.test(u) || /\\/embed\\//i.test(u)) {
+      return u;
+    }
+
+    // Rutube: https://rutube.ru/video/<id>/ -> https://rutube.ru/play/embed/<id>/
+    if (provider === 'rutube' || /rutube\\.ru/i.test(u)) {
+      const m = u.match(/rutube\\.ru\\/video\\/([0-9a-f]{16,})/i);
+      if (m && m[1]) return `https://rutube.ru/play/embed/${m[1]}/`;
+      const m2 = u.match(/rutube\\.ru\\/(?:play\\/)?embed\\/([0-9a-f]{16,})/i);
+      if (m2 && m2[1]) return `https://rutube.ru/play/embed/${m2[1]}/`;
+      return u;
+    }
+
+    // VK Video: accept both vk.com/video and vkvideo.ru/video
+    if (provider === 'vkvideo' || /vkvideo\\.ru/i.test(u) || /vk\\.com\\/video/i.test(u)) {
+      // vkvideo.ru/video-<oid>_<id>
+      let m = u.match(/vkvideo\\.ru\\/video(-?\\d+)_([0-9]+)/i);
+      if (!m) m = u.match(/vk\\.com\\/video(-?\\d+)_([0-9]+)/i);
+      if (m && m[1] && m[2]) {
+        const oid = m[1];
+        const id = m[2];
+        // Use vk.com embed endpoint (works for VK Video player)
+        return `https://vk.com/video_ext.php?oid=${encodeURIComponent(oid)}&id=${encodeURIComponent(id)}&hd=2`;
+      }
+      return u;
+    }
+
+    return u;
   }
 
   closePreview() {

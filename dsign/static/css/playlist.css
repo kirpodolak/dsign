@@ -255,6 +255,8 @@
     padding: 10px 12px;
     font-size: 0.9rem;
     font-weight: 600;
+    min-height: 40px;
+    border-radius: 10px;
 }
 
 .playlist-actions__cancel {
@@ -264,7 +266,8 @@
     font-size: 0.875rem;
     font-weight: 500;
     text-decoration: none;
-    padding: 0.35rem 0.55rem;
+    padding: 10px 12px;
+    min-height: 40px;
     border-radius: 10px;
     border: 1px solid rgba(239, 83, 80, 0.35);
     color: #991b1b;

@@ -30,6 +30,82 @@ body.app-body {
   line-height: 1.5;
 }
 
+/* Shared buttons (used across pages). */
+.btn {
+  appearance: none;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: rgba(255, 255, 255, 0.65);
+  color: #2c3e50;
+  border-radius: 10px; /* match Settings segmented */
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease, color 0.12s ease;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+  border-color: var(--ds-accent-border);
+}
+
+.btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(74, 107, 255, 0.12);
+}
+
+.btn.primary {
+  background: var(--ds-accent);
+  border-color: var(--ds-accent);
+  color: #fff;
+}
+
+.btn.primary:hover {
+  background: #3a5bef;
+  border-color: #3a5bef;
+}
+
+.btn.secondary {
+  background: rgba(74, 107, 255, 0.12);
+  border-color: rgba(74, 107, 255, 0.35);
+  color: #1f3fc5;
+}
+
+.btn.secondary:hover {
+  background: rgba(74, 107, 255, 0.18);
+}
+
+.btn.danger {
+  background: rgba(239, 83, 80, 0.10);
+  border-color: rgba(239, 83, 80, 0.35);
+  color: #991b1b;
+}
+
+.btn.danger:hover {
+  background: rgba(239, 83, 80, 0.14);
+  border-color: rgba(239, 83, 80, 0.55);
+  color: #7f1d1d;
+  box-shadow: 0 0 0 3px rgba(239, 83, 80, 0.12);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn.small {
+  padding: 8px 10px;
+  font-size: 0.8125rem;
+}
+
 .app-shell {
   min-height: 100vh;
   display: flex;
