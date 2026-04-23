@@ -1,3 +1,5 @@
+import { t, getUiLang, applyI18n } from './i18n.js';
+
 // Utility functions
 function getFileExtension(filename) {
   if (!filename) return '';
@@ -273,6 +275,10 @@ class MediaGallery {
       
       const isExternal = this.isExternalFile(file);
       const provider = isExternal ? this.getExternalProvider(file) : null;
+      const isVideo =
+        Boolean(file?.is_video) ||
+        ALLOWED_VIDEO_TYPES.includes(String(file.type || '').toLowerCase()) ||
+        String(file.name || '').toLowerCase().startsWith('ext-');
 
       if (ALLOWED_IMAGE_TYPES.includes(file.type) && !isExternal) {
         previewContainer.classList.add('file-preview-container');
@@ -290,10 +296,9 @@ class MediaGallery {
         };
         previewContainer.appendChild(img);
       } else {
-        // Prefer thumbnails for videos (local + external). Fallback to icon if thumb fails.
-        const isVideoLike = Boolean(file.is_video) || ALLOWED_VIDEO_TYPES.includes(file.type) || isExternal;
-        if (isVideoLike) {
-          previewContainer.classList.add('file-preview-container');
+        // Videos: always try server-side thumbnail cache first (local + external).
+        if (isVideo) {
+          previewContainer.classList.add('file-preview-container', 'file-preview-container--video');
           const img = document.createElement('img');
           img.src = this.getThumbnailUrl(file.name);
           img.alt = file.external?.title || file.name;
@@ -301,28 +306,18 @@ class MediaGallery {
           img.loading = 'lazy';
           img.decoding = 'async';
           img.onerror = () => {
-            // Ensure we don't keep a “loading”/retrying state forever.
-            // Degrade to a static placeholder + a non-spinning icon.
-            img.onerror = null;
+            // Fallback placeholder if thumbnail is unavailable for this video.
             img.src = PLACEHOLDER_IMAGE;
             img.style.opacity = '0.7';
-            previewContainer.classList.add('file-icon');
-            // Avoid appending multiple icons if the error fires repeatedly.
-            if (!previewContainer.querySelector('i')) {
-              try {
-                const icon = document.createElement('i');
-                icon.className = 'fas fa-file-video';
-                previewContainer.appendChild(icon);
-              } catch {
-                // ignore
-              }
-            }
           };
           previewContainer.appendChild(img);
         } else {
+          // Other non-image files: placeholder icon.
           previewContainer.classList.add('file-icon');
-          const icon = document.createElement('i');
-          icon.className = 'fas fa-file';
+          const icon = document.createElement('span');
+          icon.className = 'file-icon__glyph';
+          icon.setAttribute('aria-hidden', 'true');
+          icon.textContent = '📄';
           previewContainer.appendChild(icon);
         }
       }
@@ -533,9 +528,11 @@ class MediaGallery {
     });
     
     if (this.elements.selectAllBtn) {
-      this.elements.selectAllBtn.innerHTML = allSelected ? 
-        '<i class="fas fa-check-square"></i> Select All' : 
-        '<i class="fas fa-times"></i> Deselect All';
+      const newAll = Array.from(checkboxes).every((cb) => cb.checked);
+      const lang = getUiLang();
+      const label = newAll ? t('deselect_all', lang) : t('select_all', lang);
+      const icon = newAll ? '✕' : '✓';
+      this.elements.selectAllBtn.innerHTML = `${icon} ${label}`;
     }
   }
 
@@ -657,7 +654,7 @@ class MediaGallery {
     const icon = btn.querySelector('.upload-btn__icon');
     const text = btn.querySelector('.upload-btn__text');
     const fill = btn.querySelector('.upload-btn__fill');
-    if (icon) icon.className = 'fas fa-circle-notch fa-spin upload-btn__icon';
+    if (icon) icon.textContent = '⏳';
     if (text) text.textContent = '0%';
     if (fill) {
       fill.style.width = '0%';
@@ -674,7 +671,7 @@ class MediaGallery {
     if (percent == null || !Number.isFinite(percent)) {
       fill.classList.add('upload-btn__fill--pulse');
       fill.style.width = '100%';
-      text.textContent = 'Uploading…';
+      text.textContent = t('upload_ellipsis', getUiLang());
       return;
     }
     fill.classList.remove('upload-btn__fill--pulse');
@@ -697,8 +694,8 @@ class MediaGallery {
       fill.classList.add('upload-btn__fill--pulse');
       fill.style.width = '100%';
     }
-    if (text) text.textContent = 'Processing…';
-    if (icon) icon.className = 'fas fa-circle-notch fa-spin upload-btn__icon';
+    if (text) text.textContent = t('processing_ellipsis', getUiLang());
+    if (icon) icon.textContent = '⏳';
   }
 
   resetUploadButton() {
@@ -714,8 +711,8 @@ class MediaGallery {
       fill.classList.remove('upload-btn__fill--pulse');
       fill.style.opacity = '';
     }
-    if (text) text.textContent = 'Upload';
-    if (icon) icon.className = 'fas fa-upload upload-btn__icon';
+    if (text) text.textContent = t('btn_upload', getUiLang());
+    if (icon) icon.textContent = '⭳';
   }
 
   async deleteSelectedMedia() {
@@ -775,10 +772,10 @@ class MediaGallery {
 
     if (isLoading) {
       button.disabled = true;
-      button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Deleting...';
+      button.innerHTML = `⏳ ${t('deleting_ellipsis', getUiLang())}`;
     } else {
       button.disabled = false;
-      button.innerHTML = '<i class="fas fa-trash"></i> Delete Selected';
+      button.innerHTML = `🗑 ${t('delete_selected', getUiLang())}`;
     }
   }
 
@@ -860,9 +857,27 @@ class MediaGallery {
       }
     });
 
+    document.addEventListener('dsign:language-changed', () => {
+      applyI18n();
+      this._syncSelectAllLabel();
+    });
+
     window.addEventListener('visibilitychange', () => {
       if (!document.hidden) this.loadMediaFiles();
     });
+  }
+
+  _syncSelectAllLabel() {
+    if (!this.elements.selectAllBtn) return;
+    const checkboxes = document.querySelectorAll('.file-checkbox');
+    const lang = getUiLang();
+    if (!checkboxes.length) {
+      this.elements.selectAllBtn.textContent = `☑ ${t('select_all', lang)}`;
+      return;
+    }
+    const allSelected = Array.from(checkboxes).every((cb) => cb.checked);
+    const label = allSelected ? t('deselect_all', lang) : t('select_all', lang);
+    this.elements.selectAllBtn.textContent = `${allSelected ? '✖' : '☑'} ${label}`;
   }
 }
 
