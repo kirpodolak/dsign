@@ -1,3 +1,5 @@
+import { t, getUiLang, applyI18n } from './i18n.js';
+
 // Кэш для превью медиафайлов
 const previewCache = new Map();
 
@@ -15,9 +17,12 @@ function getCSRFToken() {
 function toggleButtonState(button, isLoading) {
     if (!button) return;
     button.disabled = isLoading;
-    button.innerHTML = isLoading ? 
-        '<i class="fas fa-spinner fa-spin"></i> Сохранение...' : 
-        '<i class="fas fa-save"></i> Сохранить плейлист';
+    const lang = getUiLang();
+    if (isLoading) {
+        button.innerHTML = `⏳ <span class="save-playlist__label">${t('saving_ellipsis', lang)}</span>`;
+    } else {
+        button.innerHTML = `💾 <span class="save-playlist__label" data-i18n="btn_save_playlist">${t('btn_save_playlist', lang)}</span>`;
+    }
 }
 
 // UI компонент для уведомлений
@@ -73,24 +78,29 @@ class PlaylistUI {
 
         // Добавляем иконку в зависимости от типа
         const icons = {
-            success: 'fa-check-circle',
-            error: 'fa-times-circle',
-            warning: 'fa-exclamation-triangle',
-            info: 'fa-info-circle'
+            success: '✓',
+            error: '×',
+            warning: '!',
+            info: 'i'
         };
+
+        const lang = getUiLang();
+        const title =
+            type === 'error' ? t('alert_error', lang) :
+            type === 'success' ? t('alert_success', lang) :
+            type === 'warning' ? t('alert_warning', lang) :
+            t('alert_info', lang);
 
         alertDiv.innerHTML = `
             <div style="display: flex; align-items: center; gap: 10px;">
-                <i class="fas ${icons[type] || 'fa-info-circle'}" style="font-size: 1.5rem;"></i>
+                <span aria-hidden="true" style="font-size: 1.35rem; line-height: 1;">${icons[type] || 'i'}</span>
                 <div>
-                    <div style="font-weight: bold; margin-bottom: 5px;">${type === 'error' ? 'Ошибка' : 
-                        type === 'success' ? 'Успех' : 
-                        type === 'warning' ? 'Внимание' : 'Информация'}</div>
+                    <div style="font-weight: bold; margin-bottom: 5px;">${title}</div>
                     <div>${message}</div>
                 </div>
             </div>
             <button class="alert-close-btn" style="background: none; border: none; color: white; cursor: pointer;">
-                <i class="fas fa-times"></i>
+                <span aria-hidden="true">×</span>
             </button>
         `;
 
@@ -145,6 +155,7 @@ export class PlaylistManager {
         this.emptyMessage = document.getElementById('empty-playlist-message');
         this.ui = new PlaylistUI();
         this._thumbObserver = null;
+        this._lastFiles = null;
 
         this.init();
     }
@@ -163,6 +174,13 @@ export class PlaylistManager {
         
         this.loadMediaFiles();
         this.setupCheckboxHandlers();
+
+        document.addEventListener('dsign:language-changed', () => {
+            applyI18n();
+            if (this._lastFiles) {
+                this.renderFileTable(this._lastFiles);
+            }
+        });
         
         if (window.App?.Sockets?.socket) {
             window.App.Sockets.socket.on('playlist_updated', (data) => {
@@ -254,6 +272,7 @@ export class PlaylistManager {
     // Рендеринг таблицы файлов
     renderFileTable(files) {
         if (!this.fileListEl) return;
+        this._lastFiles = files;
 
         if (!files || files.length === 0) {
             this.fileListEl.innerHTML = '';
@@ -264,11 +283,12 @@ export class PlaylistManager {
         if (this.emptyMessage) this.emptyMessage.style.display = 'none';
         this.fileListEl.innerHTML = '';
         this._ensureThumbObserver();
+        const lang = getUiLang();
 
         files.forEach((file, index) => {
             const row = document.createElement('tr');
             const img = document.createElement('img');
-            img.src = '/static/images/placeholder.jpg';
+            img.src = '/static/images/default-preview.jpg';
             img.alt = 'Preview';
             img.className = `playlist-thumb-img${file.is_video ? ' playlist-thumb-img--video' : ''}`;
             img.dataset.filename = file.filename;
@@ -282,13 +302,13 @@ export class PlaylistManager {
                 const maxRetries = 6;
                 const cur = parseInt(this.dataset.thumbRetries || '0', 10) || 0;
                 if (cur >= maxRetries) {
-                    this.src = '/static/images/placeholder.jpg';
+                    this.src = '/static/images/default-preview.jpg';
                     return;
                 }
                 this.dataset.thumbRetries = String(cur + 1);
                 // Exponential-ish backoff: 0.8s, 1.6s, 3.2s, ...
                 const delay = Math.min(15000, Math.round(800 * Math.pow(2, cur)));
-                this.src = '/static/images/placeholder.jpg';
+                this.src = '/static/images/default-preview.jpg';
                 setTimeout(() => {
                     const base = this.dataset.src || '';
                     if (!base) return;
@@ -302,6 +322,7 @@ export class PlaylistManager {
                 Boolean(file.is_external) ||
                 String(file.filename || '').startsWith('ext-') ||
                 ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v'].some(ext => String(file.filename || '').toLowerCase().endsWith(ext));
+            const videoFullLabel = t('pl_video_full', lang);
 
             // Use DB duration when present (avoid `|| 10` which treats 0 as missing).
             const imageSeconds = (() => {
@@ -323,7 +344,7 @@ export class PlaylistManager {
                 </td>
                 <td class="playlist-col-duration">
                     ${isVideo ?
-                        '<span class="playlist-video-hint">Полное видео</span>' :
+                        `<span class="playlist-video-hint">${videoFullLabel}</span>` :
                         `<input type="number" class="duration-input" data-filename="${file.filename}"
                           value="${imageSeconds}" min="1">`
                     }
