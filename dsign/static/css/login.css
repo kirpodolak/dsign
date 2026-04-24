@@ -42,13 +42,17 @@ body.page-login main {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 48px;
-  height: 48px;
-  border-radius: 12px;
-  background: rgba(74, 107, 255, 0.12);
-  color: var(--primary-accent, #4a6bff);
-  font-size: 1.25rem;
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  background: linear-gradient(145deg, rgba(92, 107, 192, 0.18), rgba(57, 73, 171, 0.1));
+  border: 1px solid rgba(92, 107, 192, 0.28);
+  box-shadow: 0 4px 14px rgba(57, 73, 171, 0.15);
   margin-bottom: 0.75rem;
+}
+
+.login-brand-svg {
+  display: block;
 }
 
 .login-title {
@@ -66,14 +70,13 @@ body.page-login main {
   line-height: 1.4;
 }
 
-/* Flash messages — top of card */
-.login-flash-list {
-  list-style: none;
+/* Flash messages — single banner (dedupe identical texts in template) */
+.login-flash-banner {
   margin: 0 0 1.25rem;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
+}
+
+.login-flash-banner .login-flash {
+  margin: 0;
 }
 
 .login-flash {
