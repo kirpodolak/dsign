@@ -326,6 +326,8 @@ export class SettingsManager {
                 this._applyAudioToDashboard(data.audio);
             }
             this.state.audioLocal = { volume: null, muted: null };
+            // Re-fetch status so the donut matches server truth (avoids stale cached /api/system/status audio).
+            await this.refreshSystemStatus().catch(() => {});
         } catch (err) {
             console.error('Audio save failed:', err);
         }
@@ -399,14 +401,19 @@ export class SettingsManager {
             if (audioValue) audioValue.textContent = t('value_na', lang);
             if (audioSub) audioSub.textContent = t('audio_unavailable', lang);
             if (muteBtn) muteBtn.disabled = true;
+            if (audioDonut) audioDonut.style.setProperty('--p', '0');
             return;
         }
         const vol = audio.volume_percent;
         const isMuted = Boolean(audio.muted);
         if (audioValue) audioValue.textContent = vol != null ? `${vol}%` : '—';
         if (audioSub) audioSub.textContent = isMuted ? t('dash_audio_muted', lang) : t('dash_audio_hint', lang);
-        if (audioDonut && vol != null) {
-            audioDonut.style.setProperty('--p', String(Math.max(0, Math.min(100, Number(vol)))));
+        if (audioDonut) {
+            if (vol != null) {
+                audioDonut.style.setProperty('--p', String(Math.max(0, Math.min(100, Number(vol)))));
+            } else {
+                audioDonut.style.setProperty('--p', '0');
+            }
         }
         if (muteBtn) {
             muteBtn.disabled = false;
