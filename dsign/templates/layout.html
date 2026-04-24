@@ -9,11 +9,8 @@
     {% block head_extra %}{% endblock %}
     {% block styles %}{% endblock %}
 </head>
-{# Default empty body_class so self.body_class() exists in all templates. #}
-{% block body_class %}{% endblock %}
-{# Ensure blocks add classes without requiring leading spaces in children. #}
-{% set _body_class = (self.body_class() | trim) %}
-<body class="app-body{% if _body_class %} {{ _body_class }}{% endif %}"{% block body_extra_attrs %}{% endblock %}>
+{# body_class must live inside <body> — a block between </head> and <body> renders as stray text (e.g. "page-login"). #}
+<body class="app-body{% block body_class %}{% endblock %}"{% block body_extra_attrs %}{% endblock %}>
     <div class="app-shell">
         <header class="app-header" role="banner">
             <nav class="app-nav app-nav--primary" aria-label="{% block nav_primary_aria %}{% endblock %}">
