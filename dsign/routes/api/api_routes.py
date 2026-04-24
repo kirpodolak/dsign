@@ -319,23 +319,6 @@ def init_api_routes(api_bp, services):
             subprocess.run(["amixer", "-c", str(card), "sset", ctl, "mute" if muted else "unmute"], check=False)
         return _audio_get()
 
-    def _sync_mpv_volume_mute(volume_percent: int | None, muted: bool | None) -> None:
-        """
-        MPV software volume/mute is separate from ALSA. Settings controls global sink via amixer;
-        also push the same values to MPV so playback level changes immediately during video.
-        """
-        try:
-            mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
-            if not mgr:
-                return
-            if volume_percent is not None:
-                v = float(max(0, min(100, int(volume_percent))))
-                mgr._send_command({"command": ["set_property", "volume", v]}, timeout=2.0)
-            if muted is not None:
-                mgr._send_command({"command": ["set_property", "mute", bool(muted)]}, timeout=2.0)
-        except Exception:
-            pass
-
     def _is_nmcli_available() -> bool:
         return shutil.which("nmcli") is not None
 
@@ -652,8 +635,9 @@ def init_api_routes(api_bp, services):
             muted = data.get("muted")
             vol_i = int(vol) if vol is not None else None
             muted_b = bool(muted) if muted is not None else None
+            # Volume/mute: ALSA only. Do not mirror into MPV `volume`/`mute` — that stacks with the
+            # hardware sink and adds IPC work on every slider tick (can cause micro-stutters).
             state = _audio_set(volume_percent=vol_i, muted=muted_b)
-            _sync_mpv_volume_mute(vol_i, muted_b)
             return jsonify({"success": True, "audio": state})
         except Exception as e:
             current_app.logger.error(f"Error setting system audio: {str(e)}")
