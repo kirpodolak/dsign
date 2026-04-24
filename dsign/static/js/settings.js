@@ -1,3 +1,5 @@
+import { t, getUiLang, applyI18n } from './i18n.js';
+
 // Utility functions that can be shared across modules
 export function showAlert(message, type = 'info') {
     const alert = document.createElement('div');
@@ -177,11 +179,12 @@ export class SettingsManager {
 
     renderStatusDashboardSkeleton() {
         if (!this.elements.systemDashboard) return;
+        const lang = getUiLang();
         this.elements.systemDashboard.innerHTML = `
             <div class="status-tile status-tile--donut">
               <div class="donut" data-k="diskDonut" style="--p:0;"></div>
               <div class="status-tile__meta">
-                <p class="status-tile__title">Storage (media)</p>
+                <p class="status-tile__title" data-i18n="dash_title_storage">${t('dash_title_storage', lang)}</p>
                 <p class="status-tile__value" data-k="mediaFree">—</p>
                 <p class="status-tile__sub" data-k="mediaSub"></p>
               </div>
@@ -189,7 +192,7 @@ export class SettingsManager {
             <div class="status-tile status-tile--donut">
               <div class="donut" data-k="tempDonut" style="--p:0;"></div>
               <div class="status-tile__meta">
-                <p class="status-tile__title">CPU temp</p>
+                <p class="status-tile__title" data-i18n="dash_title_cput">${t('dash_title_cput', lang)}</p>
                 <p class="status-tile__value" data-k="cpuTemp">—</p>
                 <p class="status-tile__sub" data-k="cpuTempSub"></p>
               </div>
@@ -197,7 +200,7 @@ export class SettingsManager {
             <div class="status-tile status-tile--donut">
               <div class="donut" data-k="cpuDonut" style="--p:0;"></div>
               <div class="status-tile__meta">
-                <p class="status-tile__title">CPU usage</p>
+                <p class="status-tile__title" data-i18n="dash_title_cpuu">${t('dash_title_cpuu', lang)}</p>
                 <p class="status-tile__value" data-k="cpuUsage">—</p>
                 <p class="status-tile__sub" data-k="cpuUsageSub"></p>
               </div>
@@ -206,15 +209,25 @@ export class SettingsManager {
               <div class="volume-knob" data-k="audioKnobWrap">
                 <div class="volume-knob__ticks" aria-hidden="true"></div>
                 <div class="donut" data-k="audioDonut" style="--p:0;"></div>
-                <button type="button" class="volume-knob__center" data-k="audioMuteBtn" title="Mute / unmute">M</button>
+                <button type="button" class="volume-knob__center" data-k="audioMuteBtn" data-i18n-title="value_mute" title="${t('value_mute', lang)}">M</button>
               </div>
               <div class="status-tile__meta">
-                <p class="status-tile__title">Audio</p>
+                <p class="status-tile__title" data-i18n="dash_title_audio">${t('dash_title_audio', lang)}</p>
                 <p class="status-tile__value" data-k="audioValue">—</p>
-                <p class="status-tile__sub" data-k="audioSub">Drag ring up/down for volume</p>
+                <p class="status-tile__sub" data-k="audioSub">${t('dash_audio_hint', lang)}</p>
               </div>
             </div>
         `;
+        applyI18n();
+    }
+
+    refreshDashboardAfterLangChange() {
+        this.renderStatusDashboardSkeleton();
+        this._bindVolumeKnob();
+        if (this.state.systemStatus) {
+            this.applyNonAudioStatusToDashboard();
+            this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
+        }
     }
 
     _bindVolumeKnob() {
@@ -228,11 +241,12 @@ export class SettingsManager {
         const applyLocalToUi = () => {
             const v = this.state.audioLocal.volume;
             const m = this.state.audioLocal.muted;
+            const lang = getUiLang();
             if (v != null) donut.style.setProperty('--p', String(Math.max(0, Math.min(100, v))));
             const valEl = this._qsDashboard('audioValue');
             const subEl = this._qsDashboard('audioSub');
             if (valEl) valEl.textContent = v != null ? `${Math.round(v)}%` : '—';
-            if (subEl) subEl.textContent = m ? 'Muted' : 'Drag ring vertically to change';
+            if (subEl) subEl.textContent = m ? t('dash_audio_muted', lang) : t('dash_audio_hint', lang);
             btn.classList.toggle('is-muted', Boolean(m));
             btn.textContent = m ? 'Ø' : 'M';
         };
@@ -312,6 +326,8 @@ export class SettingsManager {
                 this._applyAudioToDashboard(data.audio);
             }
             this.state.audioLocal = { volume: null, muted: null };
+            // Re-fetch status so the donut matches server truth (avoids stale cached /api/system/status audio).
+            await this.refreshSystemStatus().catch(() => {});
         } catch (err) {
             console.error('Audio save failed:', err);
         }
@@ -375,23 +391,29 @@ export class SettingsManager {
 
     _applyAudioToDashboard(audio) {
         if (!this.elements.systemDashboard) return;
+        const lang = getUiLang();
         const audioValue = this._qsDashboard('audioValue');
         const audioSub = this._qsDashboard('audioSub');
         const audioDonut = this._qsDashboard('audioDonut');
         const muteBtn = this._qsDashboard('audioMuteBtn');
         const available = Boolean(audio?.available);
         if (!available) {
-            if (audioValue) audioValue.textContent = 'N/A';
-            if (audioSub) audioSub.textContent = 'amixer not available';
+            if (audioValue) audioValue.textContent = t('value_na', lang);
+            if (audioSub) audioSub.textContent = t('audio_unavailable', lang);
             if (muteBtn) muteBtn.disabled = true;
+            if (audioDonut) audioDonut.style.setProperty('--p', '0');
             return;
         }
         const vol = audio.volume_percent;
         const isMuted = Boolean(audio.muted);
         if (audioValue) audioValue.textContent = vol != null ? `${vol}%` : '—';
-        if (audioSub) audioSub.textContent = isMuted ? 'Muted' : 'Drag ring vertically to change';
-        if (audioDonut && vol != null) {
-            audioDonut.style.setProperty('--p', String(Math.max(0, Math.min(100, Number(vol)))));
+        if (audioSub) audioSub.textContent = isMuted ? t('dash_audio_muted', lang) : t('dash_audio_hint', lang);
+        if (audioDonut) {
+            if (vol != null) {
+                audioDonut.style.setProperty('--p', String(Math.max(0, Math.min(100, Number(vol)))));
+            } else {
+                audioDonut.style.setProperty('--p', '0');
+            }
         }
         if (muteBtn) {
             muteBtn.disabled = false;
@@ -403,16 +425,19 @@ export class SettingsManager {
     applyNonAudioStatusToDashboard() {
         const st = this.state.systemStatus;
         if (!st || !this.elements.systemDashboard) return;
+        const lang = getUiLang();
 
         const media = st.storage?.media || st.storage?.root;
         if (media) {
             const free = this._formatBytes(media.free);
             const total = this._formatBytes(media.total);
-            const usedPct = media.used_percent != null ? `${media.used_percent}% used` : '';
+            const usedPct = media.used_percent != null
+                ? `${media.used_percent}% ${t('word_used', lang)}`
+                : '';
             const pFree = this._qsDashboard('mediaFree');
             const pSub = this._qsDashboard('mediaSub');
             if (pFree) pFree.textContent = free;
-            if (pSub) pSub.textContent = `${usedPct} • ${total} total`;
+            if (pSub) pSub.textContent = usedPct ? `${usedPct} • ${total} ${t('word_total', lang)}` : '';
 
             const donut = this._qsDashboard('diskDonut');
             if (donut && media.used_percent != null) {
@@ -435,7 +460,7 @@ export class SettingsManager {
         const pUsage = this._qsDashboard('cpuUsage');
         const pUsageSub = this._qsDashboard('cpuUsageSub');
         if (pUsage) pUsage.textContent = (usage != null ? `${usage}%` : (loadFallback != null ? `${loadFallback}%` : '—'));
-        if (pUsageSub) pUsageSub.textContent = usage != null ? 'from /proc/stat' : 'estimated (loadavg)';
+        if (pUsageSub) pUsageSub.textContent = usage != null ? t('dash_cpu_from_stat', lang) : t('dash_cpu_estimated', lang);
         const cpuDonut = this._qsDashboard('cpuDonut');
         if (cpuDonut) {
             const val = usage != null ? Number(usage) : (loadFallback != null ? Number(loadFallback) : 0);
@@ -846,6 +871,15 @@ export class SettingsManager {
     // Event handlers
     setupEventListeners() {
         this.elements.mpvSettingsForm?.addEventListener('submit', (e) => e.preventDefault());
+
+        document.addEventListener('dsign:language-changed', () => {
+            applyI18n();
+            try {
+                this.refreshDashboardAfterLangChange();
+            } catch (e) {
+                console.warn(e);
+            }
+        });
 
         this.elements.btnMpvAdvanced?.addEventListener('click', () => {
             this._openMpvAdvancedModal().catch((err) => console.error(err));

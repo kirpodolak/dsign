@@ -295,6 +295,28 @@
     transform: none;
 }
 
+/* Align logo buttons with Settings segmented visual language */
+.logo-btn {
+    border-radius: 12px;
+}
+.logo-btn--choose {
+    background: rgba(74, 107, 255, 0.10);
+    border-color: rgba(74, 107, 255, 0.30);
+}
+.logo-btn--choose:hover {
+    background: rgba(74, 107, 255, 0.16);
+    border-color: rgba(74, 107, 255, 0.40);
+}
+.logo-btn--apply {
+    background: #4a6bff;
+    border-color: #4a6bff;
+    box-shadow: 0 0 0 3px rgba(74, 107, 255, 0.12);
+}
+.logo-btn--apply:hover:not(:disabled) {
+    background: #3a5bef;
+    border-color: #3a5bef;
+}
+
 .logo-selected-file {
     margin: 2px 2px 0;
     font-size: 0.82rem;
@@ -368,7 +390,8 @@
     background: linear-gradient(180deg, var(--table-header) 0%, #4338ca 100%);
     color: #fff;
     font-weight: 600;
-    font-size: var(--text-sm);
+    /* Column headers should read slightly above body text (typography / hierarchy). */
+    font-size: 0.9375rem;
     letter-spacing: 0.02em;
     text-transform: none;
     padding: 0.75rem 1rem;
@@ -541,6 +564,14 @@
     transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
 
+/* Bigger, clearer icons (still within squares) */
+.playlist-table .actions .btn .btn-icon {
+    width: 1.25rem;
+    height: 1.25rem;
+    font-size: 1.25rem;
+    line-height: 1;
+}
+
 .playlist-table .actions .btn:hover:not(:disabled) {
     background: #e2e8f0;
     color: #1e293b;
@@ -591,32 +622,7 @@
     background: #fef3c7;
 }
 
-/* Кнопки */
-.btn {
-    padding: var(--space-sm) var(--space-md);
-    border: none;
-    border-radius: var(--radius-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-xs);
-}
-
-.btn.primary {
-    background-color: var(--primary-accent);
-    color: white;
-}
-
-.btn.primary:hover {
-    background-color: #3949ab;
-}
-
-.btn.small {
-    padding: var(--space-xs) var(--space-sm);
-    font-size: var(--text-sm);
-}
+/* Buttons now live in base.css (shared across pages). */
 
 /* Модальное окно */
 .modal {

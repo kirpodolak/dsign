@@ -19,6 +19,12 @@ Environment=DSIGN_LOG_LEVEL=WARNING
 Environment=DSIGN_AUTO_TRANSCODE_VIDEOS=true
 Environment=DSIGN_TRANSCODE_TARGET_RESOLUTION=1920x1080
 Environment=DSIGN_TRANSCODE_TARGET_FPS=25
+# Optional: HLS/micro-hitch tuning for VK/Rutube (increases RAM/latency; can worsen jank on some Pi setups).
+# Environment=DSIGN_MPV_NETBUF=1
+# Environment=DSIGN_MPV_NETBUF_SECS=12
+# Environment=DSIGN_MPV_NETBUF_MAX_MB=96
+# Environment=DSIGN_MPV_NETBUF_BACK_MB=16
+# Environment=DSIGN_MPV_NETBUF_READAHEAD_SECS=20
 ExecStart=/usr/bin/python3 /home/dsign/run.py
 # Настройки перезапуска
 Restart=on-failure

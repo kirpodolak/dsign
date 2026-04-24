@@ -677,6 +677,57 @@
     border-radius: 8px;
 }
 
+/* Force modal preview images to use "contain" sizing even if they reuse tile classes */
+.preview-modal__media img.file-preview,
+.preview-modal__media img.preview-modal__img {
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: min(68vh, 640px);
+    object-fit: contain;
+}
+
+/* External embeds (VK/Rutube): keep 16:9 and fit modal */
+.preview-external-embed {
+    width: 100%;
+    max-width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.preview-external-embed__frame-wrap {
+    width: 100%;
+    max-width: 100%;
+    aspect-ratio: 16 / 9;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #0b1220;
+    box-shadow: 0 10px 18px rgba(15, 23, 42, 0.12);
+}
+
+.preview-external-embed__frame {
+    width: 100%;
+    height: 100%;
+    border: none;
+    display: block;
+}
+
+.preview-external-embed__footer,
+.preview-external-actions {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+}
+
+.preview-external-fallback {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    align-items: center;
+}
+
 .preview-modal__meta {
     flex-shrink: 0;
     padding: 14px 18px 18px;

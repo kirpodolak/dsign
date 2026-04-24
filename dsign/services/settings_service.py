@@ -449,7 +449,8 @@ class SettingsService:
         """Map UI audio-route to mpv ao + audio-device (best-effort for Raspberry Pi OS)."""
         r = (route or "auto").strip().lower()
         if r == "hdmi":
-            return {"ao": "alsa", "audio-device": "alsa/plughw:CARD=vc4hdmi,DEV=0"}
+            # Pi 4 exposes vc4hdmi0 / vc4hdmi1 (not "vc4hdmi").
+            return {"ao": "alsa", "audio-device": "alsa/hdmi:CARD=vc4hdmi0,DEV=0"}
         if r in ("headphones", "jack", "analog"):
             return {"ao": "alsa", "audio-device": "alsa/plughw:CARD=Headphones,DEV=0"}
         return {"ao": "alsa", "audio-device": "auto"}

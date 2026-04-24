@@ -1,3 +1,5 @@
+import { t, getUiLang, applyI18n } from './i18n.js';
+
 // Utility functions
 function getFileExtension(filename) {
   if (!filename) return '';
@@ -273,6 +275,10 @@ class MediaGallery {
       
       const isExternal = this.isExternalFile(file);
       const provider = isExternal ? this.getExternalProvider(file) : null;
+      const isVideo =
+        Boolean(file?.is_video) ||
+        ALLOWED_VIDEO_TYPES.includes(String(file.type || '').toLowerCase()) ||
+        String(file.name || '').toLowerCase().startsWith('ext-');
 
       if (ALLOWED_IMAGE_TYPES.includes(file.type) && !isExternal) {
         previewContainer.classList.add('file-preview-container');
@@ -290,10 +296,9 @@ class MediaGallery {
         };
         previewContainer.appendChild(img);
       } else {
-        previewContainer.classList.add('file-icon');
-        // Use a thumbnail even for external videos if available.
-        if (isExternal) {
-          previewContainer.classList.add('file-preview-container');
+        // Videos: always try server-side thumbnail cache first (local + external).
+        if (isVideo) {
+          previewContainer.classList.add('file-preview-container', 'file-preview-container--video');
           const img = document.createElement('img');
           img.src = this.getThumbnailUrl(file.name);
           img.alt = file.external?.title || file.name;
@@ -301,13 +306,18 @@ class MediaGallery {
           img.loading = 'lazy';
           img.decoding = 'async';
           img.onerror = () => {
+            // Fallback placeholder if thumbnail is unavailable for this video.
             img.src = PLACEHOLDER_IMAGE;
             img.style.opacity = '0.7';
           };
           previewContainer.appendChild(img);
         } else {
-          const icon = document.createElement('i');
-          icon.className = 'fas fa-file-video';
+          // Other non-image files: placeholder icon.
+          previewContainer.classList.add('file-icon');
+          const icon = document.createElement('span');
+          icon.className = 'file-icon__glyph';
+          icon.setAttribute('aria-hidden', 'true');
+          icon.textContent = '📄';
           previewContainer.appendChild(icon);
         }
       }
@@ -468,6 +478,7 @@ class MediaGallery {
       const img = document.createElement('img');
       img.src = `/api/media/${encodeURIComponent(file.name)}`;
       img.alt = file.name;
+      img.classList.add('preview-modal__img');
       img.onerror = () => {
         img.src = PLACEHOLDER_IMAGE;
         img.style.opacity = '0.7';
@@ -476,21 +487,149 @@ class MediaGallery {
         }
       };
       this.elements.previewContainer.appendChild(img);
-    } else if (ALLOWED_VIDEO_TYPES.includes(file.type)) {
-      const video = document.createElement('video');
-      video.controls = true;
-      video.autoplay = true;
-      const source = document.createElement('source');
-      source.src = `/api/media/${encodeURIComponent(file.name)}`;
-      source.type = file.mimetype || `video/${file.type}`;
-      video.appendChild(source);
-      this.elements.previewContainer.appendChild(video);
+    } else if (
+      ALLOWED_VIDEO_TYPES.includes(file.type) ||
+      Boolean(file?.is_video) ||
+      this.isExternalFile(file) ||
+      String(file.name || '').toLowerCase().startsWith('ext-')
+    ) {
+      const isExternal = this.isExternalFile(file);
+      const provider = isExternal ? this.getExternalProvider(file) : null;
+
+      // Local videos can always be previewed via /api/media/<filename>.
+      // External videos: don't attempt browser playback/embeds. Show a large thumbnail preview
+      // (same as the gallery tile) and provide an "open original" action.
+      if (!isExternal) {
+        const video = document.createElement('video');
+        video.controls = true;
+        video.autoplay = true;
+        video.playsInline = true;
+        video.preload = 'metadata';
+        const source = document.createElement('source');
+        source.src = `/api/media/${encodeURIComponent(file.name)}`;
+        source.type = file.mimetype || `video/${file.type}`;
+        video.appendChild(source);
+        this.elements.previewContainer.appendChild(video);
+      } else {
+        this._renderExternalPreviewFallback(file, provider);
+      }
     }
     
     if (this.elements.previewModal) {
       this.elements.previewModal.removeAttribute('hidden');
       document.body.style.overflow = 'hidden';
     }
+  }
+
+  _renderExternalPreviewFallback(file, provider) {
+    const wrap = document.createElement('div');
+    wrap.className = 'preview-external-fallback';
+
+    const img = document.createElement('img');
+    img.src = this.getThumbnailUrl(file.name);
+    img.alt = file.external?.title || file.name;
+    img.classList.add('preview-modal__img');
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.onerror = () => {
+      img.src = PLACEHOLDER_IMAGE;
+      img.style.opacity = '0.7';
+    };
+    wrap.appendChild(img);
+
+    const actions = document.createElement('div');
+    actions.className = 'preview-external-actions';
+
+    const openBtn = document.createElement('a');
+    openBtn.className = 'btn primary';
+    openBtn.href = (file?.external?.url || file?.url || '').toString();
+    openBtn.target = '_blank';
+    openBtn.rel = 'noopener noreferrer';
+    const label = provider?.label ? `Open ${provider.label}` : 'Open link';
+    openBtn.textContent = label;
+    actions.appendChild(openBtn);
+
+    wrap.appendChild(actions);
+    this.elements.previewContainer.appendChild(wrap);
+  }
+
+  _renderExternalInlineEmbed(file, provider) {
+    const rawUrl = String(file?.external?.url || file?.path || '').trim();
+    const prov = String(file?.external?.provider || provider?.key || '').toLowerCase();
+    const url = this._buildEmbedUrl(rawUrl, prov);
+    if (!url) {
+      this._renderExternalPreviewFallback(file, provider);
+      return;
+    }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'preview-external-embed';
+
+    const iframe = document.createElement('iframe');
+    iframe.className = 'preview-external-embed__frame';
+    iframe.src = url;
+    iframe.loading = 'lazy';
+    iframe.referrerPolicy = 'no-referrer-when-downgrade';
+    iframe.allow =
+      prov === 'vkvideo'
+        ? 'autoplay; encrypted-media; fullscreen; picture-in-picture; screen-wake-lock;'
+        : 'clipboard-write; autoplay; fullscreen; picture-in-picture;';
+    iframe.allowFullscreen = true;
+    iframe.setAttribute('title', file.external?.title || url);
+    wrap.appendChild(iframe);
+
+    const footer = document.createElement('div');
+    footer.className = 'preview-external-embed__footer';
+    const btn = document.createElement('a');
+    btn.href = rawUrl;
+    btn.target = '_blank';
+    btn.rel = 'noopener noreferrer';
+    btn.className = 'btn secondary preview-external-embed__open';
+    btn.textContent = provider?.label ? `Open on ${provider.label}` : 'Open link';
+    footer.appendChild(btn);
+    wrap.appendChild(footer);
+
+    this.elements.previewContainer.appendChild(wrap);
+  }
+
+  /**
+   * Build provider-specific embed URL from a canonical page URL or existing embed URL.
+   * @param {string} url
+   * @param {string} provider
+   * @returns {string}
+   */
+  _buildEmbedUrl(url, provider) {
+    const u = String(url || '').trim();
+    if (!u) return '';
+    // If user already gave an embed src, keep it.
+    if (/\/play\/embed\//i.test(u) || /\/video_ext\.php/i.test(u) || /\/embed\//i.test(u)) {
+      return u;
+    }
+
+    // Rutube: https://rutube.ru/video/<id>/ -> https://rutube.ru/play/embed/<id>/
+    if (provider === 'rutube' || /rutube\.ru/i.test(u)) {
+      const m = u.match(/rutube\.ru\/video\/([0-9a-f]{16,})/i);
+      if (m && m[1]) return `https://rutube.ru/play/embed/${m[1]}/`;
+      const m2 = u.match(/rutube\.ru\/(?:play\/)?embed\/([0-9a-f]{16,})/i);
+      if (m2 && m2[1]) return `https://rutube.ru/play/embed/${m2[1]}/`;
+      return u;
+    }
+
+    // VK Video: accept both vk.com/video and vkvideo.ru/video
+    if (provider === 'vkvideo' || /vkvideo\.ru/i.test(u) || /vk\.com\/video/i.test(u)) {
+      // vkvideo.ru/video-<oid>_<id>
+      let m = u.match(/vkvideo\.ru\/video(-?\d+)_(\d+)/i);
+      if (!m) m = u.match(/vk\.com\/video(-?\d+)_(\d+)/i);
+      if (m && m[1] && m[2]) {
+        const oid = m[1];
+        const id = m[2];
+        // Use vk.com embed endpoint (works for VK Video player)
+        return `https://vk.com/video_ext.php?oid=${encodeURIComponent(oid)}&id=${encodeURIComponent(id)}&hd=2`;
+      }
+      return u;
+    }
+
+    return u;
   }
 
   closePreview() {
@@ -518,9 +657,11 @@ class MediaGallery {
     });
     
     if (this.elements.selectAllBtn) {
-      this.elements.selectAllBtn.innerHTML = allSelected ? 
-        '<i class="fas fa-check-square"></i> Select All' : 
-        '<i class="fas fa-times"></i> Deselect All';
+      const newAll = Array.from(checkboxes).every((cb) => cb.checked);
+      const lang = getUiLang();
+      const label = newAll ? t('deselect_all', lang) : t('select_all', lang);
+      const icon = newAll ? '✕' : '✓';
+      this.elements.selectAllBtn.innerHTML = `${icon} ${label}`;
     }
   }
 
@@ -642,7 +783,7 @@ class MediaGallery {
     const icon = btn.querySelector('.upload-btn__icon');
     const text = btn.querySelector('.upload-btn__text');
     const fill = btn.querySelector('.upload-btn__fill');
-    if (icon) icon.className = 'fas fa-circle-notch fa-spin upload-btn__icon';
+    if (icon) icon.textContent = '⏳';
     if (text) text.textContent = '0%';
     if (fill) {
       fill.style.width = '0%';
@@ -659,7 +800,7 @@ class MediaGallery {
     if (percent == null || !Number.isFinite(percent)) {
       fill.classList.add('upload-btn__fill--pulse');
       fill.style.width = '100%';
-      text.textContent = 'Uploading…';
+      text.textContent = t('upload_ellipsis', getUiLang());
       return;
     }
     fill.classList.remove('upload-btn__fill--pulse');
@@ -682,8 +823,8 @@ class MediaGallery {
       fill.classList.add('upload-btn__fill--pulse');
       fill.style.width = '100%';
     }
-    if (text) text.textContent = 'Processing…';
-    if (icon) icon.className = 'fas fa-circle-notch fa-spin upload-btn__icon';
+    if (text) text.textContent = t('processing_ellipsis', getUiLang());
+    if (icon) icon.textContent = '⏳';
   }
 
   resetUploadButton() {
@@ -699,8 +840,8 @@ class MediaGallery {
       fill.classList.remove('upload-btn__fill--pulse');
       fill.style.opacity = '';
     }
-    if (text) text.textContent = 'Upload';
-    if (icon) icon.className = 'fas fa-upload upload-btn__icon';
+    if (text) text.textContent = t('btn_upload', getUiLang());
+    if (icon) icon.textContent = '⭳';
   }
 
   async deleteSelectedMedia() {
@@ -760,10 +901,10 @@ class MediaGallery {
 
     if (isLoading) {
       button.disabled = true;
-      button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Deleting...';
+      button.innerHTML = `⏳ ${t('deleting_ellipsis', getUiLang())}`;
     } else {
       button.disabled = false;
-      button.innerHTML = '<i class="fas fa-trash"></i> Delete Selected';
+      button.innerHTML = `🗑 ${t('delete_selected', getUiLang())}`;
     }
   }
 
@@ -845,9 +986,27 @@ class MediaGallery {
       }
     });
 
+    document.addEventListener('dsign:language-changed', () => {
+      applyI18n();
+      this._syncSelectAllLabel();
+    });
+
     window.addEventListener('visibilitychange', () => {
       if (!document.hidden) this.loadMediaFiles();
     });
+  }
+
+  _syncSelectAllLabel() {
+    if (!this.elements.selectAllBtn) return;
+    const checkboxes = document.querySelectorAll('.file-checkbox');
+    const lang = getUiLang();
+    if (!checkboxes.length) {
+      this.elements.selectAllBtn.textContent = `☑ ${t('select_all', lang)}`;
+      return;
+    }
+    const allSelected = Array.from(checkboxes).every((cb) => cb.checked);
+    const label = allSelected ? t('deselect_all', lang) : t('select_all', lang);
+    this.elements.selectAllBtn.textContent = `${allSelected ? '✖' : '☑'} ${label}`;
   }
 }
 

@@ -1,16 +1,17 @@
-{% extends "base.html" %}
+{% extends "layout.html" %}
+
+{% block body_extra_attrs %} data-page-title-i18n="page_settings_title"{% endblock %}
 
 {% block styles %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}?v={{ timestamp|default(0) }}">
 {% endblock %}
 
 {% block content %}
 <div class="settings-container">
-    <!-- Status + quick controls (todo: dashboard) -->
     <div class="settings-panel current-settings-panel">
         <div class="settings-panel-heading-row">
-            <h2>Status</h2>
-            <button type="button" id="btn-mpv-advanced" class="btn-mpv-advanced">Advanced MPV…</button>
+            <h2 id="settings-status-heading" data-i18n="settings_status_h">Status</h2>
+            <button type="button" id="btn-mpv-advanced" class="btn-mpv-advanced" data-i18n="btn_advanced_mpv">Advanced MPV…</button>
         </div>
         <div id="current-profile-indicator" class="profile-indicator" hidden></div>
         <div id="system-dashboard" class="status-dashboard">
@@ -105,9 +106,9 @@
 
     <!-- Playlist playback settings (overrides) -->
     <div class="settings-panel playlist-overrides-panel">
-        <h2>Playlist playback settings</h2>
-        <p class="text-muted">
-            Toggle <strong>Override</strong> to customize playback per playlist. Changes save automatically. Turn Override off to return to Default.
+        <h2 id="settings-playback-heading" data-i18n="settings_playback_h">Playlist playback settings</h2>
+        <p class="text-muted" data-i18n="settings_playback_lead" id="settings-playback-lead">
+            Override playback per playlist. Changes save automatically.
         </p>
         <div id="playlist-overrides" class="playlist-overrides">
             <!-- Filled by JS -->
@@ -119,12 +120,12 @@
 <div id="error-modal" class="modal" style="display:none;">
     <div class="modal-content">
         <span class="close">&times;</span>
-        <h3>Error</h3>
+        <h3 data-i18n="err_title">Error</h3>
         <p id="error-message"></p>
     </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="{{ url_for('static', filename='js/settings.js') }}"></script>
+<script type="module" src="{{ url_for('static', filename='js/settings.js') }}?v={{ timestamp|default(0) }}"></script>
 {% endblock %}
