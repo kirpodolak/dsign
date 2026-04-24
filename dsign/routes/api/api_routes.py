@@ -42,6 +42,12 @@ def init_api_routes(api_bp, services):
     _system_status_cache_lock = Lock()
     _system_status_cache_ttl_sec: float = 2.0
 
+    def _invalidate_system_status_cache() -> None:
+        """So the next /api/system/status poll returns fresh audio (not a 2s stale snapshot)."""
+        with _system_status_cache_lock:
+            _system_status_cache["payload"] = None
+            _system_status_cache["ts"] = 0.0
+
     _network_status_cache: dict = {"ts": 0.0, "payload": None}
     _network_status_cache_lock = Lock()
     _network_status_cache_ttl_sec: float = 5.0
@@ -50,7 +56,7 @@ def init_api_routes(api_bp, services):
     _amixer_pick_cache_lock = Lock()
     _amixer_pick_cache_ttl_sec: float = 60.0
     # Bump when heuristics change so a stale (wrong) card/ctl is not served for 60s.
-    _amixer_pick_cache_version: int = 6
+    _amixer_pick_cache_version: int = 7
     def _read_cpu_temp_c() -> float | None:
         # Raspberry Pi / Linux common path
         for p in (
@@ -290,24 +296,15 @@ def init_api_routes(api_bp, services):
 
     def _audio_path_is_mpv_direct_hdmi() -> bool:
         """
-        True when HDMI has no ALSA simple controls (vc4hdmi) but Headphones card still has Master.
-        In that case amixer/wrong-card readings (e.g. 77% on Master) must not drive the dashboard.
+        True when the Pi exposes vc4hdmi* ALSA cards but no simple PCM mixers on them (Bookworm
+        direct HDMI). Then the only meaningful volume is MPV's `volume` property — not card0
+        Master / unrelated sinks (which caused a stuck dashboard, e.g. 77%).
         """
         if not _amixer_available():
             return False
         if _alsa_hdmi_has_simple_pcm():
             return False
-        try:
-            out = subprocess.check_output(
-                ["amixer", "-c", "0", "scontrols"],
-                text=True,
-                stderr=subprocess.STDOUT,
-                timeout=2.0,
-            )
-            names = re.findall(r"Simple mixer control '([^']+)'", out)
-        except Exception:
-            return False
-        return "Master" in names
+        return len(_read_pi_hdmi_card_ids()) > 0
 
     def _audio_get_mpv() -> dict | None:
         """MPV software volume (0..100) when output bypasses amixer (common on Bookworm + direct HDMI)."""
@@ -557,6 +554,7 @@ def init_api_routes(api_bp, services):
                 )
 
         if alsa_targs:
+            _invalidate_system_status_cache()
             return _audio_get()
 
         if use_pw:
@@ -564,6 +562,7 @@ def init_api_routes(api_bp, services):
         else:
             _audio_set_mpv(v_pct, muted)
 
+        _invalidate_system_status_cache()
         return _audio_get()
 
     def _is_nmcli_available() -> bool:
@@ -882,9 +881,8 @@ def init_api_routes(api_bp, services):
             muted = data.get("muted")
             vol_i = int(vol) if vol is not None else None
             muted_b = bool(muted) if muted is not None else None
-            # Volume/mute: ALSA only. Do not mirror into MPV `volume`/`mute` — that stacks with the
-            # hardware sink and adds IPC work on every slider tick (can cause micro-stutters).
             state = _audio_set(volume_percent=vol_i, muted=muted_b)
+            _invalidate_system_status_cache()
             return jsonify({"success": True, "audio": state})
         except Exception as e:
             current_app.logger.error(f"Error setting system audio: {str(e)}")
