@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block document_title %}Sign in · Digital Signage{% endblock %}
-{% block body_class %}page-login{% endblock %}
+{% block body_class %} page-login{% endblock %}
 {% block site_nav %}{% endblock %}
 
 {% block styles %}
@@ -12,18 +12,38 @@
 <div class="login-shell">
     <div class="login-card">
         <div class="login-brand">
-            <span class="login-brand-mark" aria-hidden="true">▣</span>
+            <div class="login-brand-mark" aria-hidden="true">
+                <svg class="login-brand-svg" viewBox="0 0 64 64" width="40" height="40" focusable="false">
+                    <defs>
+                        <linearGradient id="login-brand-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#5c6bc0"/>
+                            <stop offset="100%" stop-color="#3949ab"/>
+                        </linearGradient>
+                    </defs>
+                    <rect x="6" y="10" width="52" height="36" rx="6" fill="url(#login-brand-grad)" opacity="0.95"/>
+                    <rect x="10" y="14" width="44" height="26" rx="3" fill="#0f172a" opacity="0.35"/>
+                    <rect x="12" y="16" width="40" height="22" rx="2" fill="#e8eaf6"/>
+                    <path d="M18 36 L26 28 L34 34 L46 22" fill="none" stroke="#3949ab" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+                    <circle cx="46" cy="22" r="3" fill="#3949ab"/>
+                    <rect x="26" y="48" width="12" height="5" rx="2" fill="#9fa8da"/>
+                    <rect x="22" y="52" width="20" height="3" rx="1.5" fill="#c5cae9"/>
+                </svg>
+            </div>
             <h1 class="login-title">Digital Signage</h1>
             <p class="login-subtitle">Sign in to manage playlists and displays</p>
         </div>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
-                <ul class="login-flash-list" role="status">
+                {% set ns = namespace(seen=[]) %}
+                <div class="login-flash-banner" role="status">
                     {% for category, message in messages %}
-                        <li class="login-flash login-flash--{{ (category or 'message') | replace(' ', '-') }}">{{ message }}</li>
+                        {% if message not in ns.seen %}
+                            {% set _ = ns.seen.append(message) %}
+                            <p class="login-flash login-flash--{{ (category or 'message') | replace(' ', '-') }}">{{ message }}</p>
+                        {% endif %}
                     {% endfor %}
-                </ul>
+                </div>
             {% endif %}
         {% endwith %}
 
