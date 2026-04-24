@@ -50,7 +50,7 @@ def init_api_routes(api_bp, services):
     _amixer_pick_cache_lock = Lock()
     _amixer_pick_cache_ttl_sec: float = 60.0
     # Bump when heuristics change so a stale (wrong) card/ctl is not served for 60s.
-    _amixer_pick_cache_version: int = 3
+    _amixer_pick_cache_version: int = 4
     def _read_cpu_temp_c() -> float | None:
         # Raspberry Pi / Linux common path
         for p in (
@@ -208,6 +208,82 @@ def init_api_routes(api_bp, services):
                 out.append(i)
         return out
 
+    def _vc4hdmi_pcm_targets() -> list[tuple[int, str]]:
+        """All Pi HDMI cards that expose a PCM simple control (both HDMI ports when present)."""
+        out: list[tuple[int, str]] = []
+        for cid in _read_pi_hdmi_card_ids():
+            try:
+                am_out = subprocess.check_output(
+                    ["amixer", "-c", str(cid), "scontrols"],
+                    text=True,
+                    stderr=subprocess.STDOUT,
+                    timeout=3.0,
+                )
+                names = re.findall(r"Simple mixer control '([^']+)'", am_out)
+            except Exception:
+                continue
+            if "PCM" in names:
+                out.append((cid, "PCM"))
+        return out
+
+    def _wpctl_available() -> bool:
+        return shutil.which("wpctl") is not None
+
+    def _wpctl_get_default_sink() -> dict:
+        """
+        PipeWire: default audio sink volume (when MPV/PipeWire route through it, amixer may not affect output).
+        Returns { available, volume_percent, muted } or { available: False }.
+        """
+        if not _wpctl_available():
+            return {"available": False, "volume_percent": None, "muted": None}
+        try:
+            out = subprocess.check_output(
+                ["wpctl", "get", "@DEFAULT_AUDIO_SINK@"],
+                text=True,
+                stderr=subprocess.STDOUT,
+                timeout=3.0,
+            )
+        except Exception:
+            return {"available": False, "volume_percent": None, "muted": None}
+        vol = None
+        muted = None
+        mv = re.search(r"Volume:\s*([0-9.]+)", out) or re.search(r"(\d+)\s*%", out)
+        if mv:
+            s = mv.group(1)
+            try:
+                v = float(s)
+                vol = int(round(v * 100.0)) if v <= 1.5 else int(round(v))
+            except ValueError:
+                pass
+        if re.search(r"Muted:\s*yes", out, re.I):
+            muted = True
+        elif re.search(r"Muted:\s*no", out, re.I):
+            muted = False
+        return {"available": True, "volume_percent": vol, "muted": muted}
+
+    def _wpctl_set_default_sink(
+        vol_pct: int | None = None,
+        muted: bool | None = None,
+    ) -> None:
+        if not _wpctl_available():
+            return
+        try:
+            if vol_pct is not None:
+                v = int(max(0, min(100, int(vol_pct))))
+                subprocess.run(
+                    ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{v}%"],
+                    check=False,
+                    timeout=3.0,
+                )
+            if muted is not None:
+                subprocess.run(
+                    ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "1" if muted else "0"],
+                    check=False,
+                    timeout=3.0,
+                )
+        except Exception:
+            pass
+
     def _amixer_pick_control() -> tuple[int, str] | None:
         """
         Pick ALSA simple mixer control for global volume. On Pi HDMI the effective control is
@@ -320,40 +396,86 @@ def init_api_routes(api_bp, services):
             _amixer_pick_cache["v"] = _amixer_pick_cache_version
         return None
 
+    def _amixer_sget_parsed(card: int, ctl: str) -> tuple[int | None, bool | None]:
+        try:
+            out = subprocess.check_output(
+                ["amixer", "-c", str(card), "sget", ctl],
+                text=True,
+                stderr=subprocess.STDOUT,
+            )
+        except Exception:
+            return (None, None)
+        m_vol = re.search(r"\[(\d{1,3})%\]", out)
+        m_mute = re.findall(r"\[(on|off)\]", out)
+        vol = int(m_vol.group(1)) if m_vol else None
+        umuted = (m_mute[-1] == "off") if m_mute else None
+        return (vol, umuted)
+
     def _audio_get() -> dict:
         """
-        Best-effort global audio status via ALSA amixer.
-        Returns: { available, volume_percent, muted }
+        Best-effort global volume: prefer PipeWire default sink (wpctl) if present, else ALSA
+        (all vc4hdmi* PCM when possible).
         """
+        wp = _wpctl_get_default_sink()
+        if wp.get("available") and (wp.get("volume_percent") is not None or wp.get("muted") is not None):
+            return {"available": True, "volume_percent": wp.get("volume_percent"), "muted": wp.get("muted")}
+
         if not _amixer_available():
             return {"available": False, "volume_percent": None, "muted": None}
-        try:
+        targs = _vc4hdmi_pcm_targets()
+        if not targs:
             picked = _amixer_pick_control()
             if not picked:
                 return {"available": False, "volume_percent": None, "muted": None}
-            card, ctl = picked
-            out = subprocess.check_output(["amixer", "-c", str(card), "sget", ctl], text=True, stderr=subprocess.STDOUT)
-            # Parse first "[NN%]" and last "[on]/[off]"
-            m_vol = re.search(r"\[(\d{1,3})%\]", out)
-            m_mute = re.findall(r"\[(on|off)\]", out)
-            vol = int(m_vol.group(1)) if m_vol else None
-            muted = (m_mute[-1] == "off") if m_mute else None
-            return {"available": True, "volume_percent": vol, "muted": muted}
-        except Exception:
-            return {"available": True, "volume_percent": None, "muted": None}
+            targs = [picked]
+        vsum = 0
+        vcount = 0
+        m_any_off = False
+        m_any = False
+        for card, ctl in targs:
+            v, m = _amixer_sget_parsed(card, ctl)
+            if v is not None:
+                vsum += v
+                vcount += 1
+            if m is not None:
+                m_any = True
+                if m:
+                    m_any_off = True
+        if vcount:
+            return {
+                "available": True,
+                "volume_percent": int(round(vsum / vcount)),
+                "muted": m_any_off if m_any else None,
+            }
+        return {"available": True, "volume_percent": None, "muted": None}
 
     def _audio_set(volume_percent: int | None = None, muted: bool | None = None) -> dict:
+        """
+        Apply volume/mute: PipeWire default sink (if wpctl exists) and all vc4hdmi PCM ALSA
+        controls so both HDMI outputs stay in sync on pure-ALSA setups.
+        """
+        use_pw = (os.getenv("DSIGN_USE_PIPEWIRE_AUDIO", "1").strip().lower() in ("1", "true", "yes", "on")) and _wpctl_available()
+        if use_pw:
+            _wpctl_set_default_sink(vol_pct=volume_percent, muted=muted)
+
         if not _amixer_available():
-            return {"available": False, "volume_percent": None, "muted": None}
-        picked = _amixer_pick_control()
-        if not picked:
-            return {"available": False, "volume_percent": None, "muted": None}
-        card, ctl = picked
-        if volume_percent is not None:
-            volume_percent = int(max(0, min(100, volume_percent)))
-            subprocess.run(["amixer", "-c", str(card), "sset", ctl, f"{volume_percent}%"], check=False)
-        if muted is not None:
-            subprocess.run(["amixer", "-c", str(card), "sset", ctl, "mute" if muted else "unmute"], check=False)
+            return _audio_get()
+        targs = _vc4hdmi_pcm_targets()
+        if not targs:
+            picked = _amixer_pick_control()
+            targs = [picked] if picked else []
+        v_pct = int(max(0, min(100, int(volume_percent)))) if volume_percent is not None else None
+        for card, ctl in targs:
+            if v_pct is not None:
+                subprocess.run(
+                    ["amixer", "-c", str(card), "sset", ctl, f"{v_pct}%"],
+                    check=False,
+                )
+            if muted is not None:
+                subprocess.run(
+                    ["amixer", "-c", str(card), "sset", ctl, "mute" if muted else "unmute"],
+                    check=False,
+                )
         return _audio_get()
 
     def _is_nmcli_available() -> bool:
