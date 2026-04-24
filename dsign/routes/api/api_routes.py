@@ -42,14 +42,21 @@ def init_api_routes(api_bp, services):
     _system_status_cache_lock = Lock()
     _system_status_cache_ttl_sec: float = 2.0
 
+    def _invalidate_system_status_cache() -> None:
+        """So the next /api/system/status poll returns fresh audio (not a 2s stale snapshot)."""
+        with _system_status_cache_lock:
+            _system_status_cache["payload"] = None
+            _system_status_cache["ts"] = 0.0
+
     _network_status_cache: dict = {"ts": 0.0, "payload": None}
     _network_status_cache_lock = Lock()
     _network_status_cache_ttl_sec: float = 5.0
 
-    _amixer_pick_cache: dict = {"ts": 0.0, "value": None, "v": 2}
+    _amixer_pick_cache: dict = {"ts": 0.0, "value": None, "v": 0}
     _amixer_pick_cache_lock = Lock()
     _amixer_pick_cache_ttl_sec: float = 60.0
-    _amixer_pick_cache_version: int = 2
+    # Bump when heuristics change so a stale (wrong) card/ctl is not served for 60s.
+    _amixer_pick_cache_version: int = 7
     def _read_cpu_temp_c() -> float | None:
         # Raspberry Pi / Linux common path
         for p in (
@@ -180,15 +187,166 @@ def init_api_routes(api_bp, services):
         except Exception:
             return False
 
+    def _read_pi_hdmi_card_ids() -> list[int]:
+        """
+        Raspberry Pi: HDMI audio is on vc4hdmi0 / vc4hdmi1 (cards 1 and 2 on many images).
+        /proc/asound/cards is the most reliable way to get the right card index.
+        """
+        ids: list[int] = []
+        try:
+            p = Path("/proc/asound/cards")
+            if not p.exists():
+                return ids
+            for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                m = re.match(r"^\s*(\d+)\s+\[([^\]]+)\]", line)
+                if not m:
+                    continue
+                cid = int(m.group(1))
+                br = (m.group(2) or "").lower()
+                if "vc4hdmi" in br or "vc4-hdmi" in br or "vc4_hdmi" in br:
+                    ids.append(cid)
+        except Exception:
+            return ids
+        # De-dupe, stable order
+        out: list[int] = []
+        for i in ids:
+            if i not in out:
+                out.append(i)
+        return out
+
+    def _vc4hdmi_pcm_targets() -> list[tuple[int, str]]:
+        """All Pi HDMI cards that expose a PCM simple control (both HDMI ports when present)."""
+        out: list[tuple[int, str]] = []
+        for cid in _read_pi_hdmi_card_ids():
+            try:
+                am_out = subprocess.check_output(
+                    ["amixer", "-c", str(cid), "scontrols"],
+                    text=True,
+                    stderr=subprocess.STDOUT,
+                    timeout=3.0,
+                )
+                names = re.findall(r"Simple mixer control '([^']+)'", am_out)
+            except Exception:
+                continue
+            if "PCM" in names:
+                out.append((cid, "PCM"))
+        return out
+
+    def _wpctl_available() -> bool:
+        return shutil.which("wpctl") is not None
+
+    def _wpctl_get_default_sink() -> dict:
+        """
+        PipeWire: default audio sink volume (when MPV/PipeWire route through it, amixer may not affect output).
+        Returns { available, volume_percent, muted } or { available: False }.
+        """
+        if not _wpctl_available():
+            return {"available": False, "volume_percent": None, "muted": None}
+        try:
+            out = subprocess.check_output(
+                ["wpctl", "get", "@DEFAULT_AUDIO_SINK@"],
+                text=True,
+                stderr=subprocess.STDOUT,
+                timeout=3.0,
+            )
+        except Exception:
+            return {"available": False, "volume_percent": None, "muted": None}
+        vol = None
+        muted = None
+        mv = re.search(r"Volume:\s*([0-9.]+)", out) or re.search(r"(\d+)\s*%", out)
+        if mv:
+            s = mv.group(1)
+            try:
+                v = float(s)
+                vol = int(round(v * 100.0)) if v <= 1.5 else int(round(v))
+            except ValueError:
+                pass
+        if re.search(r"Muted:\s*yes", out, re.I):
+            muted = True
+        elif re.search(r"Muted:\s*no", out, re.I):
+            muted = False
+        return {"available": True, "volume_percent": vol, "muted": muted}
+
+    def _wpctl_set_default_sink(
+        vol_pct: int | None = None,
+        muted: bool | None = None,
+    ) -> None:
+        if not _wpctl_available():
+            return
+        try:
+            if vol_pct is not None:
+                v = int(max(0, min(100, int(vol_pct))))
+                subprocess.run(
+                    ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{v}%"],
+                    check=False,
+                    timeout=3.0,
+                )
+            if muted is not None:
+                subprocess.run(
+                    ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "1" if muted else "0"],
+                    check=False,
+                    timeout=3.0,
+                )
+        except Exception:
+            pass
+
+    def _alsa_hdmi_has_simple_pcm() -> bool:
+        """True if vc4hdmi* cards expose a PCM simple mixer (amixer scontrols is non-empty on Pi)."""
+        return len(_vc4hdmi_pcm_targets()) > 0
+
+    def _audio_path_is_mpv_direct_hdmi() -> bool:
+        """
+        True when the Pi exposes vc4hdmi* ALSA cards but no simple PCM mixers on them (Bookworm
+        direct HDMI). Then the only meaningful volume is MPV's `volume` property — not card0
+        Master / unrelated sinks (which caused a stuck dashboard, e.g. 77%).
+        """
+        if not _amixer_available():
+            return False
+        if _alsa_hdmi_has_simple_pcm():
+            return False
+        return len(_read_pi_hdmi_card_ids()) > 0
+
+    def _audio_get_mpv() -> dict | None:
+        """MPV software volume (0..100) when output bypasses amixer (common on Bookworm + direct HDMI)."""
+        try:
+            mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
+            if not mgr:
+                return None
+            vr = mgr._send_command({"command": ["get_property", "volume"]}, timeout=2.0)
+            mr = mgr._send_command({"command": ["get_property", "mute"]}, timeout=2.0)
+            if not vr or vr.get("error") != "success" or "data" not in vr:
+                return None
+            vraw = vr["data"]
+            try:
+                vnum = int(round(float(vraw)))
+            except (TypeError, ValueError):
+                vnum = None
+            mdata = bool(mr["data"]) if (mr and mr.get("error") == "success" and "data" in mr) else None
+            return {
+                "available": True,
+                "volume_percent": vnum,
+                "muted": mdata,
+            }
+        except Exception:
+            return None
+
+    def _audio_set_mpv(volume_percent: int | None, muted: bool | None) -> None:
+        try:
+            mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
+            if not mgr:
+                return
+            if volume_percent is not None:
+                v = float(max(0, min(100, int(volume_percent))))
+                mgr._send_command({"command": ["set_property", "volume", v]}, timeout=2.0)
+            if muted is not None:
+                mgr._send_command({"command": ["set_property", "mute", bool(muted)]}, timeout=2.0)
+        except Exception:
+            pass
+
     def _amixer_pick_control() -> tuple[int, str] | None:
         """
-        Pick a reasonable ALSA simple control for volume/mute.
-        Different images/cards expose different names (e.g. Master, PCM, Headphone).
-
-        On Raspberry Pi, MPV usually outputs to **HDMI** (vc4hdmi0/vc4hdmi1). The default ALSA
-        card often exposes "Master" on **Headphones** (card 0) first; preferring "Master" breaks
-        the Settings volume knob — it changes the wrong sink. Prefer any control whose name
-        suggests HDMI, then fall back to the old priority list.
+        Pick ALSA simple mixer control for global volume. On Pi HDMI the effective control is
+        usually **PCM** on card **vc4hdmi0** — not a control whose *name* contains "HDMI".
         """
         now = time.time()
         with _amixer_pick_cache_lock:
@@ -207,134 +365,205 @@ def init_api_routes(api_bp, services):
                 _amixer_pick_cache["v"] = _amixer_pick_cache_version
             return None
         try:
-            preferred = ["HDMI", "PCM", "Master", "Headphone", "Speaker", "Line Out", "Line", "Digital"]
-            candidates: list[tuple[int, list[str]]] = []
-
-            def read_names(args: list[str]) -> list[str]:
-                out = subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
+            def read_scontrol_names(card: int) -> list[str]:
+                out = subprocess.check_output(
+                    ["amixer", "-c", str(card), "scontrols"],
+                    text=True,
+                    stderr=subprocess.STDOUT,
+                )
                 return re.findall(r"Simple mixer control '([^']+)'", out)
 
-            # Default card (no -c) is sometimes HDMI and can have no simple controls.
-            try:
-                names0 = read_names(["amixer", "scontrols"])
-                if names0:
-                    candidates.append((-1, names0))
-            except Exception:
-                pass
-
-            for card in range(0, 6):
+            def try_card_ctl(card: int, ctl: str) -> tuple[int, str] | None:
+                if not ctl:
+                    return None
                 try:
-                    names = read_names(["amixer", "-c", str(card), "scontrols"])
-                    if names:
-                        candidates.append((card, names))
+                    subprocess.check_output(
+                        ["amixer", "-c", str(card), "sget", ctl],
+                        text=True,
+                        stderr=subprocess.STDOUT,
+                        timeout=3.0,
+                    )
+                    return (card, ctl)
+                except Exception:
+                    return None
+
+            # Optional override: DSIGN_ALSA_CARD=1 DSIGN_ALSA_CTL=PCM
+            env_card = (os.getenv("DSIGN_ALSA_CARD") or "").strip()
+            env_ctl = (os.getenv("DSIGN_ALSA_CTL") or "PCM").strip() or "PCM"
+            if env_card.isdigit():
+                picked = try_card_ctl(int(env_card), env_ctl)
+                if picked:
+                    with _amixer_pick_cache_lock:
+                        _amixer_pick_cache["value"] = picked
+                        _amixer_pick_cache["ts"] = now
+                        _amixer_pick_cache["v"] = _amixer_pick_cache_version
+                    return picked
+
+            hdmi_card_ids = _read_pi_hdmi_card_ids()
+            # Typical Pi4: 1=vc4hdmi0, 2=vc4hdmi1. Prefer first detected (HDMI-0) when active.
+            card_order: list[int] = list(hdmi_card_ids) if hdmi_card_ids else [1, 2, 0, 3, 4, 5]
+
+            picked: tuple[int, str] | None = None
+            for card in card_order:
+                try:
+                    names = read_scontrol_names(card)
                 except Exception:
                     continue
-
-            if not candidates:
-                with _amixer_pick_cache_lock:
-                    _amixer_pick_cache["value"] = None
-                    _amixer_pick_cache["ts"] = now
-                    _amixer_pick_cache["v"] = _amixer_pick_cache_version
-                return None
-
-            def card_index(c: int) -> int:
-                return 0 if c < 0 else c
-
-            # 1) Any control name that looks like HDMI (VC4 HDMI sinks on Pi).
-            hdmi_pairs: list[tuple[int, str]] = []
-            for card, names in candidates:
+                if not names:
+                    continue
+                # VC4 HDMI: volume lives on "PCM" (aplay -L: hdmi:CARD=vc4hdmi0,...)
+                if "PCM" in names:
+                    picked = (card, "PCM")
+                    break
                 for n in names:
-                    nl = n.lower()
-                    if "hdmi" in nl:
-                        hdmi_pairs.append((card_index(card), n))
-            if hdmi_pairs:
-                # Prefer typical Pi HDMI cards (1/2) over analog card 0 when both exist.
-                hdmi_pairs.sort(key=lambda t: (0 if t[0] in (1, 2) else 1, t[0], t[1]))
-                picked = hdmi_pairs[0]
+                    if "hdmi" in n.lower():
+                        picked = (card, n)
+                        break
+                if picked is not None:
+                    break
+
+            if not picked:
+                # Fallback: first matching name in preferred order on any card
+                preferred = ["HDMI", "PCM", "Master", "Headphone", "Speaker", "Line", "Digital"]
+                for card in range(0, 6):
+                    try:
+                        names = read_scontrol_names(card)
+                    except Exception:
+                        continue
+                    for p in preferred:
+                        if p in names:
+                            picked = (card, p)
+                            break
+                    if picked:
+                        break
+
+            if picked:
                 with _amixer_pick_cache_lock:
                     _amixer_pick_cache["value"] = picked
                     _amixer_pick_cache["ts"] = now
                     _amixer_pick_cache["v"] = _amixer_pick_cache_version
                 return picked
-
-            # 2) Legacy: first matching name in preferred order across all cards.
-            for p in preferred:
-                for card, names in candidates:
-                    if p in names:
-                        picked = (card_index(card), p)
-                        with _amixer_pick_cache_lock:
-                            _amixer_pick_cache["value"] = picked
-                            _amixer_pick_cache["ts"] = now
-                            _amixer_pick_cache["v"] = _amixer_pick_cache_version
-                        return picked
-
-            # 3) Fall back to first control on first candidate card.
-            card, names = candidates[0]
-            picked = (card_index(card), names[0]) if names else None
-            with _amixer_pick_cache_lock:
-                _amixer_pick_cache["value"] = picked
-                _amixer_pick_cache["ts"] = now
-                _amixer_pick_cache["v"] = _amixer_pick_cache_version
-            return picked
         except Exception:
             with _amixer_pick_cache_lock:
                 _amixer_pick_cache["value"] = None
                 _amixer_pick_cache["ts"] = now
                 _amixer_pick_cache["v"] = _amixer_pick_cache_version
             return None
+        with _amixer_pick_cache_lock:
+            _amixer_pick_cache["value"] = None
+            _amixer_pick_cache["ts"] = now
+            _amixer_pick_cache["v"] = _amixer_pick_cache_version
+        return None
+
+    def _amixer_sget_parsed(card: int, ctl: str) -> tuple[int | None, bool | None]:
+        try:
+            out = subprocess.check_output(
+                ["amixer", "-c", str(card), "sget", ctl],
+                text=True,
+                stderr=subprocess.STDOUT,
+            )
+        except Exception:
+            return (None, None)
+        m_vol = re.search(r"\[(\d{1,3})%\]", out)
+        m_mute = re.findall(r"\[(on|off)\]", out)
+        vol = int(m_vol.group(1)) if m_vol else None
+        umuted = (m_mute[-1] == "off") if m_mute else None
+        return (vol, umuted)
 
     def _audio_get() -> dict:
         """
-        Best-effort global audio status via ALSA amixer.
-        Returns: { available, volume_percent, muted }
+        Global volume display for the dashboard:
+        - vc4hdmi ALSA simple PCM when present (true dual-HDMI hardware mixers),
+        - else MPV volume when output is direct HDMI without vc4 scontrols (do NOT read card0
+          Master — it is unrelated and sticks e.g. at 77%),
+        - else PipeWire default sink,
+        - else other ALSA picks.
         """
-        if not _amixer_available():
-            return {"available": False, "volume_percent": None, "muted": None}
-        try:
-            picked = _amixer_pick_control()
-            if not picked:
-                return {"available": False, "volume_percent": None, "muted": None}
-            card, ctl = picked
-            out = subprocess.check_output(["amixer", "-c", str(card), "sget", ctl], text=True, stderr=subprocess.STDOUT)
-            # Parse first "[NN%]" and last "[on]/[off]"
-            m_vol = re.search(r"\[(\d{1,3})%\]", out)
-            m_mute = re.findall(r"\[(on|off)\]", out)
-            vol = int(m_vol.group(1)) if m_vol else None
-            muted = (m_mute[-1] == "off") if m_mute else None
-            return {"available": True, "volume_percent": vol, "muted": muted}
-        except Exception:
-            return {"available": True, "volume_percent": None, "muted": None}
+        # 1) Real HDMI hardware mixers on Pi (rare on Bookworm; often empty)
+        if _amixer_available() and _alsa_hdmi_has_simple_pcm():
+            targs = _vc4hdmi_pcm_targets()
+            vsum = 0
+            vcount = 0
+            m_any_off = False
+            m_any = False
+            for card, ctl in targs:
+                v, m = _amixer_sget_parsed(card, ctl)
+                if v is not None:
+                    vsum += v
+                    vcount += 1
+                if m is not None:
+                    m_any = True
+                    if m:
+                        m_any_off = True
+            if vcount:
+                return {
+                    "available": True,
+                    "volume_percent": int(round(vsum / vcount)),
+                    "muted": m_any_off if m_any else None,
+                }
 
-    def _audio_set(volume_percent: int | None = None, muted: bool | None = None) -> dict:
-        if not _amixer_available():
+        # 2) MPV is the real volume knob for `alsa/hdmi:CARD=vc4hdmi0` when vc4 has no scontrols
+        if _audio_path_is_mpv_direct_hdmi():
+            mpv = _audio_get_mpv()
+            if mpv:
+                return mpv
+            # Do not fall through to card0 Master / unrelated sinks — that caused stuck ~77% UI.
             return {"available": False, "volume_percent": None, "muted": None}
+
+        # 3) PipeWire (only when not in MPV-direct-HDMI mode, to avoid wrong default sink %)
+        wp = _wpctl_get_default_sink()
+        if wp.get("available") and (wp.get("volume_percent") is not None or wp.get("muted") is not None):
+            return {"available": True, "volume_percent": wp.get("volume_percent"), "muted": wp.get("muted")}
+
+        if not _amixer_available():
+            mpv = _audio_get_mpv()
+            return mpv if mpv else {"available": False, "volume_percent": None, "muted": None}
+
         picked = _amixer_pick_control()
         if not picked:
-            return {"available": False, "volume_percent": None, "muted": None}
-        card, ctl = picked
-        if volume_percent is not None:
-            volume_percent = int(max(0, min(100, volume_percent)))
-            subprocess.run(["amixer", "-c", str(card), "sset", ctl, f"{volume_percent}%"], check=False)
-        if muted is not None:
-            subprocess.run(["amixer", "-c", str(card), "sset", ctl, "mute" if muted else "unmute"], check=False)
-        return _audio_get()
+            mpv = _audio_get_mpv()
+            return mpv if mpv else {"available": False, "volume_percent": None, "muted": None}
+        v, m = _amixer_sget_parsed(picked[0], picked[1])
+        if v is not None or m is not None:
+            return {"available": True, "volume_percent": v, "muted": m}
+        mpv = _audio_get_mpv()
+        return mpv if mpv else {"available": True, "volume_percent": None, "muted": None}
 
-    def _sync_mpv_volume_mute(volume_percent: int | None, muted: bool | None) -> None:
+    def _audio_set(volume_percent: int | None = None, muted: bool | None = None) -> dict:
         """
-        MPV software volume/mute is separate from ALSA. Settings controls global sink via amixer;
-        also push the same values to MPV so playback level changes immediately during video.
+        Apply volume: (1) ALSA simple controls on all vc4hdmi* if they exist, else
+        (2) PipeWire @DEFAULT_AUDIO_SINK@ if enabled, else
+        (3) MPV volume/mute (when MPV uses direct HDMI and amixer scontrols is empty for vc4).
         """
-        try:
-            mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
-            if not mgr:
-                return
-            if volume_percent is not None:
-                v = float(max(0, min(100, int(volume_percent))))
-                mgr._send_command({"command": ["set_property", "volume", v]}, timeout=2.0)
+        use_pw = (os.getenv("DSIGN_USE_PIPEWIRE_AUDIO", "1").strip().lower() in ("1", "true", "yes", "on")) and _wpctl_available()
+        v_pct = int(max(0, min(100, int(volume_percent)))) if volume_percent is not None else None
+
+        alsa_targs: list[tuple[int, str]] = []
+        if _amixer_available() and _alsa_hdmi_has_simple_pcm():
+            alsa_targs = list(_vc4hdmi_pcm_targets())
+        for card, ctl in alsa_targs:
+            if v_pct is not None:
+                subprocess.run(
+                    ["amixer", "-c", str(card), "sset", ctl, f"{v_pct}%"],
+                    check=False,
+                )
             if muted is not None:
-                mgr._send_command({"command": ["set_property", "mute", bool(muted)]}, timeout=2.0)
-        except Exception:
-            pass
+                subprocess.run(
+                    ["amixer", "-c", str(card), "sset", ctl, "mute" if muted else "unmute"],
+                    check=False,
+                )
+
+        if alsa_targs:
+            _invalidate_system_status_cache()
+            return _audio_get()
+
+        if use_pw:
+            _wpctl_set_default_sink(vol_pct=v_pct, muted=muted)
+        else:
+            _audio_set_mpv(v_pct, muted)
+
+        _invalidate_system_status_cache()
+        return _audio_get()
 
     def _is_nmcli_available() -> bool:
         return shutil.which("nmcli") is not None
@@ -653,7 +882,7 @@ def init_api_routes(api_bp, services):
             vol_i = int(vol) if vol is not None else None
             muted_b = bool(muted) if muted is not None else None
             state = _audio_set(volume_percent=vol_i, muted=muted_b)
-            _sync_mpv_volume_mute(vol_i, muted_b)
+            _invalidate_system_status_cache()
             return jsonify({"success": True, "audio": state})
         except Exception as e:
             current_app.logger.error(f"Error setting system audio: {str(e)}")
