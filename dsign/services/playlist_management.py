@@ -335,6 +335,21 @@ class PlaylistManager:
             )
         except Exception:
             pass
+        # Clear any file-local buffering options we may set for network streams.
+        for key, value in (
+            ("file-local-options/cache", "no"),
+            ("file-local-options/cache-secs", 0),
+            ("file-local-options/demuxer-max-bytes", 0),
+            ("file-local-options/demuxer-max-back-bytes", 0),
+            ("file-local-options/demuxer-readahead-secs", 0),
+        ):
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", key, value]},
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
         try:
             self._mpv_manager._send_command(
                 {"command": ["set_property", "user-agent", ""]},
@@ -663,6 +678,10 @@ class PlaylistManager:
         )
         self._clear_mpv_http_options()
 
+        # Optional: reduce micro-stutters on HLS/network streams by enabling a small demux cache.
+        # Kept behind an env flag and applied via file-local-options so local playback isn't affected.
+        self._apply_mpv_network_buffering(item, stream_url=stream_url)
+
         # For network streams opened via lavf/ffmpeg (incl. direct Rutube river/rtbcdn URLs),
         # also apply `stream-lavf-o` so ffmpeg uses the same request context as mpv.
         is_network = isinstance(stream_url, str) and stream_url.startswith(("http://", "https://", "ytdl://"))
@@ -712,6 +731,67 @@ class PlaylistManager:
             except Exception:
                 pass
         return normalized
+
+    def _apply_mpv_network_buffering(self, item: dict, *, stream_url: str) -> None:
+        """
+        Apply per-file buffering options for external network streams to reduce microfreezes.
+
+        This is best-effort and intentionally OFF by default.
+        Enable with DSIGN_MPV_NETBUF=1 (or true/yes/on).
+        """
+        enabled = (os.getenv("DSIGN_MPV_NETBUF", "").strip().lower() in ("1", "true", "yes", "on"))
+        if not enabled:
+            return
+        if not isinstance(stream_url, str) or not stream_url.startswith(("http://", "https://", "ytdl://")):
+            return
+        try:
+            provider = str(item.get("provider") or "").strip().lower()
+        except Exception:
+            provider = ""
+        su = stream_url.lower()
+        is_external = (
+            provider in ("vkvideo", "rutube")
+            or "vkvideo.ru" in su
+            or "vk.com/video" in su
+            or "rutube.ru" in su
+            or su.startswith("ytdl://")
+        )
+        if not is_external:
+            return
+
+        def _int_env(name: str, default: int, *, lo: int, hi: int) -> int:
+            raw = os.getenv(name, "").strip()
+            try:
+                v = int(raw) if raw != "" else int(default)
+            except Exception:
+                v = int(default)
+            if v < lo:
+                return lo
+            if v > hi:
+                return hi
+            return v
+
+        cache_secs = _int_env("DSIGN_MPV_NETBUF_SECS", 12, lo=2, hi=60)
+        max_bytes_mb = _int_env("DSIGN_MPV_NETBUF_MAX_MB", 96, lo=16, hi=512)
+        back_bytes_mb = _int_env("DSIGN_MPV_NETBUF_BACK_MB", 16, lo=0, hi=128)
+        readahead_secs = _int_env("DSIGN_MPV_NETBUF_READAHEAD_SECS", 20, lo=0, hi=120)
+
+        # Apply as file-local options so they only affect the next loaded file.
+        opts = (
+            ("file-local-options/cache", "yes"),
+            ("file-local-options/cache-secs", cache_secs),
+            ("file-local-options/demuxer-max-bytes", int(max_bytes_mb) * 1024 * 1024),
+            ("file-local-options/demuxer-max-back-bytes", int(back_bytes_mb) * 1024 * 1024),
+            ("file-local-options/demuxer-readahead-secs", readahead_secs),
+        )
+        for key, value in opts:
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", key, value]},
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
 
     def _wait_mpv_leave_idle(self, timeout_sec: float = 45.0) -> bool:
         """
@@ -830,6 +910,19 @@ class PlaylistManager:
             eof = self._mpv_get_prop_bool("eof-reached", timeout=3.0)
             if eof is True:
                 break
+
+            # Local files: reliable end detection when idle/eof properties are sticky (e.g. after
+            # keep-open on a previous still image).
+            if not is_network:
+                dur = self._mpv_get_prop_number("duration", timeout=2.0)
+                tp = self._mpv_get_prop_number("time-pos", timeout=2.0)
+                if (
+                    dur is not None
+                    and dur > 0.5
+                    and tp is not None
+                    and (tp + 0.2) >= dur
+                ):
+                    break
 
             idle = self._mpv_get_prop_bool("idle-active", timeout=3.0)
             if idle is True and time.monotonic() >= grace_until:
@@ -960,6 +1053,18 @@ class PlaylistManager:
                     )
                 except Exception:
                     pass
+
+                # Still images use keep-open=yes to avoid close/reopen flicker. If we then load a
+                # video, that sticky property can prevent a clean EOF/idle transition and the
+                # playlist thread never advances. Reset before every video load.
+                if is_video:
+                    try:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "keep-open", "no"]},
+                            timeout=3.0,
+                        )
+                    except Exception:
+                        pass
 
                 # Load next media file
                 load_started = time.monotonic()
