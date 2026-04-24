@@ -1019,6 +1019,9 @@ class PlaylistManager:
             start_index = 0
 
         default_duration = 10
+        # Single-item playlists: first `loadfile` is done in play(); skip only that one iteration.
+        # Without this flag, skip_load stays true forever and the file never reloads for cycle 2+.
+        did_skip_first_preload = False
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
             # Iterate cyclically starting from start_index.
             for offset in range(len(items)):
@@ -1041,14 +1044,6 @@ class PlaylistManager:
                         # Do NOT loop files. We control the loop at application level,
                         # and looping still images can cause visible "blink" on some builds.
                         {"command": ["set_property", "loop-file", "no"]},
-                        timeout=5.0,
-                    )
-                except Exception:
-                    pass
-
-                try:
-                    self._mpv_manager._send_command(
-                        {"command": ["set_property", "mute", "yes" if muted else "no"]},
                         timeout=5.0,
                     )
                 except Exception:
@@ -1084,8 +1079,14 @@ class PlaylistManager:
                     if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                         break
                 skip_load = bool(
-                    first_item_preloaded and start_index == 0 and offset == 0
+                    first_item_preloaded
+                    and start_index == 0
+                    and offset == 0
+                    and not did_skip_first_preload
                 )
+                if skip_load:
+                    did_skip_first_preload = True
+                normalized_headers: Dict[str, Any] = {}
                 if not skip_load:
                     # External streams: Referer/UA must be set before loadfile (and cleared between items).
                     normalized_headers = self._apply_mpv_http_headers(item, stream_url=str(path))
@@ -1094,6 +1095,15 @@ class PlaylistManager:
                         {"command": ["loadfile", path, "replace"]}, timeout=20.0
                     )
                     self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
+                    # Apply after loadfile: mpv may reset mute on a new file; doing this before load
+                    # left repeat cycles stuck muted / out of sync with the playlist row.
+                    try:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "mute", "yes" if muted else "no"]},
+                            timeout=5.0,
+                        )
+                    except Exception:
+                        pass
                     if not load_resp or load_resp.get("error") != "success":
                         self.logger.warning(
                             "MPV loadfile failed",
