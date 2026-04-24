@@ -911,6 +911,19 @@ class PlaylistManager:
             if eof is True:
                 break
 
+            # Local files: reliable end detection when idle/eof properties are sticky (e.g. after
+            # keep-open on a previous still image).
+            if not is_network:
+                dur = self._mpv_get_prop_number("duration", timeout=2.0)
+                tp = self._mpv_get_prop_number("time-pos", timeout=2.0)
+                if (
+                    dur is not None
+                    and dur > 0.5
+                    and tp is not None
+                    and (tp + 0.2) >= dur
+                ):
+                    break
+
             idle = self._mpv_get_prop_bool("idle-active", timeout=3.0)
             if idle is True and time.monotonic() >= grace_until:
                 if is_network:
@@ -1040,6 +1053,18 @@ class PlaylistManager:
                     )
                 except Exception:
                     pass
+
+                # Still images use keep-open=yes to avoid close/reopen flicker. If we then load a
+                # video, that sticky property can prevent a clean EOF/idle transition and the
+                # playlist thread never advances. Reset before every video load.
+                if is_video:
+                    try:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "keep-open", "no"]},
+                            timeout=3.0,
+                        )
+                    except Exception:
+                        pass
 
                 # Load next media file
                 load_started = time.monotonic()
