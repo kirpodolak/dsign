@@ -46,9 +46,10 @@ def init_api_routes(api_bp, services):
     _network_status_cache_lock = Lock()
     _network_status_cache_ttl_sec: float = 5.0
 
-    _amixer_pick_cache: dict = {"ts": 0.0, "value": None}
+    _amixer_pick_cache: dict = {"ts": 0.0, "value": None, "v": 2}
     _amixer_pick_cache_lock = Lock()
     _amixer_pick_cache_ttl_sec: float = 60.0
+    _amixer_pick_cache_version: int = 2
     def _read_cpu_temp_c() -> float | None:
         # Raspberry Pi / Linux common path
         for p in (
@@ -183,11 +184,18 @@ def init_api_routes(api_bp, services):
         """
         Pick a reasonable ALSA simple control for volume/mute.
         Different images/cards expose different names (e.g. Master, PCM, Headphone).
+
+        On Raspberry Pi, MPV usually outputs to **HDMI** (vc4hdmi0/vc4hdmi1). The default ALSA
+        card often exposes "Master" on **Headphones** (card 0) first; preferring "Master" breaks
+        the Settings volume knob — it changes the wrong sink. Prefer any control whose name
+        suggests HDMI, then fall back to the old priority list.
         """
         now = time.time()
         with _amixer_pick_cache_lock:
+            ver_ok = int(_amixer_pick_cache.get("v") or 0) == _amixer_pick_cache_version
             if (
-                _amixer_pick_cache["value"] is not None
+                ver_ok
+                and _amixer_pick_cache["value"] is not None
                 and (now - float(_amixer_pick_cache["ts"] or 0.0)) < _amixer_pick_cache_ttl_sec
             ):
                 return _amixer_pick_cache["value"]
@@ -196,10 +204,10 @@ def init_api_routes(api_bp, services):
             with _amixer_pick_cache_lock:
                 _amixer_pick_cache["value"] = None
                 _amixer_pick_cache["ts"] = now
+                _amixer_pick_cache["v"] = _amixer_pick_cache_version
             return None
         try:
-            # Try default card first, then a few numeric cards.
-            preferred = ["Master", "PCM", "Headphone", "Speaker", "Line Out", "Line", "Digital", "HDMI"]
+            preferred = ["HDMI", "PCM", "Master", "Headphone", "Speaker", "Line Out", "Line", "Digital"]
             candidates: list[tuple[int, list[str]]] = []
 
             def read_names(args: list[str]) -> list[str]:
@@ -226,29 +234,53 @@ def init_api_routes(api_bp, services):
                 with _amixer_pick_cache_lock:
                     _amixer_pick_cache["value"] = None
                     _amixer_pick_cache["ts"] = now
+                    _amixer_pick_cache["v"] = _amixer_pick_cache_version
                 return None
 
-            # Prefer cards with preferred control names.
+            def card_index(c: int) -> int:
+                return 0 if c < 0 else c
+
+            # 1) Any control name that looks like HDMI (VC4 HDMI sinks on Pi).
+            hdmi_pairs: list[tuple[int, str]] = []
+            for card, names in candidates:
+                for n in names:
+                    nl = n.lower()
+                    if "hdmi" in nl:
+                        hdmi_pairs.append((card_index(card), n))
+            if hdmi_pairs:
+                # Prefer typical Pi HDMI cards (1/2) over analog card 0 when both exist.
+                hdmi_pairs.sort(key=lambda t: (0 if t[0] in (1, 2) else 1, t[0], t[1]))
+                picked = hdmi_pairs[0]
+                with _amixer_pick_cache_lock:
+                    _amixer_pick_cache["value"] = picked
+                    _amixer_pick_cache["ts"] = now
+                    _amixer_pick_cache["v"] = _amixer_pick_cache_version
+                return picked
+
+            # 2) Legacy: first matching name in preferred order across all cards.
             for p in preferred:
                 for card, names in candidates:
                     if p in names:
-                        picked = (card if card >= 0 else 0, p) if card == -1 else (card, p)
+                        picked = (card_index(card), p)
                         with _amixer_pick_cache_lock:
                             _amixer_pick_cache["value"] = picked
                             _amixer_pick_cache["ts"] = now
+                            _amixer_pick_cache["v"] = _amixer_pick_cache_version
                         return picked
 
-            # Fall back to first control on first candidate card.
+            # 3) Fall back to first control on first candidate card.
             card, names = candidates[0]
-            picked = (card if card >= 0 else 0, names[0]) if names else None
+            picked = (card_index(card), names[0]) if names else None
             with _amixer_pick_cache_lock:
                 _amixer_pick_cache["value"] = picked
                 _amixer_pick_cache["ts"] = now
+                _amixer_pick_cache["v"] = _amixer_pick_cache_version
             return picked
         except Exception:
             with _amixer_pick_cache_lock:
                 _amixer_pick_cache["value"] = None
                 _amixer_pick_cache["ts"] = now
+                _amixer_pick_cache["v"] = _amixer_pick_cache_version
             return None
 
     def _audio_get() -> dict:
@@ -286,6 +318,23 @@ def init_api_routes(api_bp, services):
         if muted is not None:
             subprocess.run(["amixer", "-c", str(card), "sset", ctl, "mute" if muted else "unmute"], check=False)
         return _audio_get()
+
+    def _sync_mpv_volume_mute(volume_percent: int | None, muted: bool | None) -> None:
+        """
+        MPV software volume/mute is separate from ALSA. Settings controls global sink via amixer;
+        also push the same values to MPV so playback level changes immediately during video.
+        """
+        try:
+            mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
+            if not mgr:
+                return
+            if volume_percent is not None:
+                v = float(max(0, min(100, int(volume_percent))))
+                mgr._send_command({"command": ["set_property", "volume", v]}, timeout=2.0)
+            if muted is not None:
+                mgr._send_command({"command": ["set_property", "mute", bool(muted)]}, timeout=2.0)
+        except Exception:
+            pass
 
     def _is_nmcli_available() -> bool:
         return shutil.which("nmcli") is not None
@@ -604,6 +653,7 @@ def init_api_routes(api_bp, services):
             vol_i = int(vol) if vol is not None else None
             muted_b = bool(muted) if muted is not None else None
             state = _audio_set(volume_percent=vol_i, muted=muted_b)
+            _sync_mpv_volume_mute(vol_i, muted_b)
             return jsonify({"success": True, "audio": state})
         except Exception as e:
             current_app.logger.error(f"Error setting system audio: {str(e)}")
