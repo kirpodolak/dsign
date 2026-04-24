@@ -50,7 +50,7 @@ def init_api_routes(api_bp, services):
     _amixer_pick_cache_lock = Lock()
     _amixer_pick_cache_ttl_sec: float = 60.0
     # Bump when heuristics change so a stale (wrong) card/ctl is not served for 60s.
-    _amixer_pick_cache_version: int = 4
+    _amixer_pick_cache_version: int = 5
     def _read_cpu_temp_c() -> float | None:
         # Raspberry Pi / Linux common path
         for p in (
@@ -284,6 +284,47 @@ def init_api_routes(api_bp, services):
         except Exception:
             pass
 
+    def _alsa_hdmi_has_simple_pcm() -> bool:
+        """True if vc4hdmi* cards expose a PCM simple mixer (amixer scontrols is non-empty on Pi)."""
+        return len(_vc4hdmi_pcm_targets()) > 0
+
+    def _audio_get_mpv() -> dict | None:
+        """MPV software volume (0..100) when output bypasses amixer (common on Bookworm + direct HDMI)."""
+        try:
+            mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
+            if not mgr:
+                return None
+            vr = mgr._send_command({"command": ["get_property", "volume"]}, timeout=2.0)
+            mr = mgr._send_command({"command": ["get_property", "mute"]}, timeout=2.0)
+            if not vr or vr.get("error") != "success" or "data" not in vr:
+                return None
+            vraw = vr["data"]
+            try:
+                vnum = int(round(float(vraw)))
+            except (TypeError, ValueError):
+                vnum = None
+            mdata = bool(mr["data"]) if (mr and mr.get("error") == "success" and "data" in mr) else None
+            return {
+                "available": True,
+                "volume_percent": vnum,
+                "muted": mdata,
+            }
+        except Exception:
+            return None
+
+    def _audio_set_mpv(volume_percent: int | None, muted: bool | None) -> None:
+        try:
+            mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
+            if not mgr:
+                return
+            if volume_percent is not None:
+                v = float(max(0, min(100, int(volume_percent))))
+                mgr._send_command({"command": ["set_property", "volume", v]}, timeout=2.0)
+            if muted is not None:
+                mgr._send_command({"command": ["set_property", "mute", bool(muted)]}, timeout=2.0)
+        except Exception:
+            pass
+
     def _amixer_pick_control() -> tuple[int, str] | None:
         """
         Pick ALSA simple mixer control for global volume. On Pi HDMI the effective control is
@@ -413,20 +454,22 @@ def init_api_routes(api_bp, services):
 
     def _audio_get() -> dict:
         """
-        Best-effort global volume: prefer PipeWire default sink (wpctl) if present, else ALSA
-        (all vc4hdmi* PCM when possible).
+        Global volume: PipeWire (wpctl) if present, else ALSA simple controls, else MPV
+        (direct HDMI/ALSA on Pi often has no scontrols; MPV is the only knob).
         """
         wp = _wpctl_get_default_sink()
         if wp.get("available") and (wp.get("volume_percent") is not None or wp.get("muted") is not None):
             return {"available": True, "volume_percent": wp.get("volume_percent"), "muted": wp.get("muted")}
 
         if not _amixer_available():
-            return {"available": False, "volume_percent": None, "muted": None}
+            mpv = _audio_get_mpv()
+            return mpv if mpv else {"available": False, "volume_percent": None, "muted": None}
         targs = _vc4hdmi_pcm_targets()
         if not targs:
             picked = _amixer_pick_control()
             if not picked:
-                return {"available": False, "volume_percent": None, "muted": None}
+                mpv = _audio_get_mpv()
+                return mpv if mpv else {"available": False, "volume_percent": None, "muted": None}
             targs = [picked]
         vsum = 0
         vcount = 0
@@ -447,25 +490,26 @@ def init_api_routes(api_bp, services):
                 "volume_percent": int(round(vsum / vcount)),
                 "muted": m_any_off if m_any else None,
             }
-        return {"available": True, "volume_percent": None, "muted": None}
+        mpv = _audio_get_mpv()
+        return (
+            mpv
+            if mpv
+            else {"available": True, "volume_percent": None, "muted": None}
+        )
 
     def _audio_set(volume_percent: int | None = None, muted: bool | None = None) -> dict:
         """
-        Apply volume/mute: PipeWire default sink (if wpctl exists) and all vc4hdmi PCM ALSA
-        controls so both HDMI outputs stay in sync on pure-ALSA setups.
+        Apply volume: (1) ALSA simple controls on all vc4hdmi* if they exist, else
+        (2) PipeWire @DEFAULT_AUDIO_SINK@ if enabled, else
+        (3) MPV volume/mute (when MPV uses direct HDMI and amixer scontrols is empty for vc4).
         """
         use_pw = (os.getenv("DSIGN_USE_PIPEWIRE_AUDIO", "1").strip().lower() in ("1", "true", "yes", "on")) and _wpctl_available()
-        if use_pw:
-            _wpctl_set_default_sink(vol_pct=volume_percent, muted=muted)
-
-        if not _amixer_available():
-            return _audio_get()
-        targs = _vc4hdmi_pcm_targets()
-        if not targs:
-            picked = _amixer_pick_control()
-            targs = [picked] if picked else []
         v_pct = int(max(0, min(100, int(volume_percent)))) if volume_percent is not None else None
-        for card, ctl in targs:
+
+        alsa_targs: list[tuple[int, str]] = []
+        if _amixer_available() and _alsa_hdmi_has_simple_pcm():
+            alsa_targs = list(_vc4hdmi_pcm_targets())
+        for card, ctl in alsa_targs:
             if v_pct is not None:
                 subprocess.run(
                     ["amixer", "-c", str(card), "sset", ctl, f"{v_pct}%"],
@@ -476,6 +520,15 @@ def init_api_routes(api_bp, services):
                     ["amixer", "-c", str(card), "sset", ctl, "mute" if muted else "unmute"],
                     check=False,
                 )
+
+        if alsa_targs:
+            return _audio_get()
+
+        if use_pw:
+            _wpctl_set_default_sink(vol_pct=v_pct, muted=muted)
+        else:
+            _audio_set_mpv(v_pct, muted)
+
         return _audio_get()
 
     def _is_nmcli_available() -> bool:
