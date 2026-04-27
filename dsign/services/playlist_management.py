@@ -31,6 +31,32 @@ class PlaylistManager:
         """Monotonic timestamp in milliseconds for reliable interval diagnostics."""
         return int(time.monotonic() * 1000)
 
+    def _mpv_paths_match(self, expected: str, actual) -> bool:
+        """
+        Compare playlist paths to mpv's `path` property.
+
+        mpv may report a different string than we passed to `loadfile` (symlinks,
+        trailing slashes, URI forms). If we only compare raw strings, `_wait_for_mpv_loaded_path`
+        can time out and add multi-second drift to image timers.
+        """
+        if not expected or actual is None:
+            return False
+        exp = str(expected).strip()
+        act = str(actual).strip()
+        if exp == act:
+            return True
+        try:
+            ep = Path(exp).expanduser()
+            ap = Path(act).expanduser()
+            if ep.exists() and ap.exists() and ep.resolve() == ap.resolve():
+                return True
+        except Exception:
+            pass
+        try:
+            return os.path.normpath(exp) == os.path.normpath(act)
+        except Exception:
+            return False
+
     def _wait_for_mpv_loaded_path(self, expected_path: str, timeout: float = 10.0) -> bool:
         """
         Wait until MPV reports the expected `path` as loaded.
@@ -53,7 +79,7 @@ class PlaylistManager:
                 )
                 if resp and resp.get("error") == "success":
                     last_seen = resp.get("data")
-                    if last_seen == expected_path:
+                    if self._mpv_paths_match(expected_path, last_seen):
                         return True
             except Exception:
                 pass
@@ -312,9 +338,14 @@ class PlaylistManager:
 
                 ext = file_path.suffix.lower()
                 is_video = ext in (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
+                # Canonical path so `get_property path` matches what mpv reports after symlinks.
+                try:
+                    canonical_path = str(file_path.resolve())
+                except Exception:
+                    canonical_path = str(file_path)
                 items.append(
                     {
-                        "path": str(file_path),
+                        "path": canonical_path,
                         "duration": int(getattr(pf, "duration", 0) or 0),
                         "is_video": is_video,
                         "muted": bool(getattr(pf, "muted", False)) if is_video else False,
