@@ -58,6 +58,35 @@ def init_api_routes(api_bp, services):
     # Bump when heuristics change so a stale (wrong) card/ctl is not served for 60s.
     _amixer_pick_cache_version: int = 7
     def _read_cpu_temp_c() -> float | None:
+        # Prefer x86 "coretemp" / package temperature when available.
+        #
+        # On many x86 boxes, thermal_zone0 points to ACPI zones (often bogus, e.g. -269.9°C),
+        # while /sys/class/thermal/*/type may contain "x86_pkg_temp" with a correct value.
+        try:
+            base = Path("/sys/class/thermal")
+            for tp in sorted(base.glob("thermal_zone*/type")):
+                try:
+                    t = tp.read_text(encoding="utf-8", errors="ignore").strip().lower()
+                except Exception:
+                    continue
+                if t not in ("x86_pkg_temp", "coretemp"):
+                    continue
+                temp_p = tp.parent / "temp"
+                if not temp_p.exists():
+                    continue
+                try:
+                    raw = temp_p.read_text(encoding="utf-8", errors="ignore").strip()
+                    v = float(raw)
+                    # Filter obvious bogus values
+                    c = (v / 1000.0) if v > 1000 else v
+                    if c < -20 or c > 125:
+                        continue
+                    return round(c, 1)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
         # Raspberry Pi / Linux common path
         for p in (
             "/sys/class/thermal/thermal_zone0/temp",
@@ -67,7 +96,10 @@ def init_api_routes(api_bp, services):
                 if os.path.exists(p):
                     raw = Path(p).read_text(encoding="utf-8").strip()
                     v = float(raw)
-                    return round(v / 1000.0, 1) if v > 1000 else round(v, 1)
+                    c = (v / 1000.0) if v > 1000 else v
+                    if c < -20 or c > 125:
+                        continue
+                    return round(c, 1)
             except Exception:
                 continue
         return None

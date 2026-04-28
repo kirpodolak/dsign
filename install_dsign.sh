@@ -41,6 +41,7 @@ apt-get install -y \
     python3-pip python3-venv python3-dev \
     sqlite3 libsqlite3-dev \
     mpv ffmpeg yt-dlp \
+    alsa-utils \
     socat \
     nginx git \
     acl libdrm-dev \

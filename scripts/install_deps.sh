@@ -51,7 +51,8 @@ install_apt() {
     nginx \
     acl \
     libdrm-dev \
-    network-manager
+    network-manager \
+    alsa-utils
 }
 
 install_dnf() {
