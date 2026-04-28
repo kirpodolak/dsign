@@ -97,7 +97,8 @@ class Config:
     UPLOAD_FOLDER = '$UPLOAD_DIR'
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
     LOG_DIR = '$LOG_DIR'
-    MPV_SOCKET = '/tmp/mpv-socket'
+    # Keep this in sync with systemd `dsign-mpv.service --input-ipc-server=...`
+    MPV_SOCKET = '/var/lib/dsign/mpv/socket'
 EOL
 
 # Инициализация базы данных
@@ -134,13 +135,15 @@ rm "$PROJECT_DIR/init_db.py"
 cat > /etc/systemd/system/digital-signage.service <<EOL
 [Unit]
 Description=Digital Signage Service (DRM)
-After=graphical.target dsign-network-assistant.service dsign-mpv.service
+After=network.target dsign-network-assistant.service dsign-mpv.service
+Wants=network.target
 Wants=dsign-network-assistant.service
 Wants=dsign-mpv.service
 
 [Service]
 User=$DSIGN_USER
 Group=$DSIGN_USER
+SupplementaryGroups=video audio
 WorkingDirectory=/home/dsign
 Environment="FLASK_APP=dsign.server:create_app()"
 Environment="FLASK_ENV=production"
@@ -153,6 +156,7 @@ StandardOutput=journal
 StandardError=journal
 MemoryMax=500M
 CPUQuota=50%
+LimitNOFILE=65536
 
 # Особенно важные настройки:
 KillMode=process
@@ -192,7 +196,7 @@ Conflicts=getty@tty1.service
 User=$DSIGN_USER
 Group=video
 Type=simple
-SupplementaryGroups=tty
+SupplementaryGroups=tty audio
 PermissionsStartOnly=true
 Environment="TERM=linux"
 WorkingDirectory=/home/dsign
@@ -213,6 +217,7 @@ Restart=always
 RestartSec=5s
 StartLimitInterval=60s
 StartLimitBurst=3
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
@@ -284,6 +289,7 @@ udevadm trigger
 
 systemctl daemon-reload
 systemctl enable digital-signage.service dsign-mpv.service dsign-network-assistant.service
+systemctl enable screenshot.timer || true
 systemctl disable dsign-show-startup-ip.service || true
 systemctl start dsign-network-assistant.service dsign-mpv.service digital-signage.service || true
 
