@@ -225,7 +225,7 @@ install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bi
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-capture" /usr/local/bin/dsign-capture
 sed -i 's/\r$//' /usr/local/bin/dsign-capture
-chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip
+chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-capture
 
 # Screenshot service + timer (web UI "on air" preview)
 install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.service" /etc/systemd/system/screenshot.service
