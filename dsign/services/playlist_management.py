@@ -1176,25 +1176,51 @@ class PlaylistManager:
                         pass
 
                     # Deterministic image timer:
-                    # wait until MPV loaded the file *and* VO is configured, then start countdown.
+                    # wait until MPV loaded the file *and* VO is configured, then schedule switch.
+                    #
+                    # IMPORTANT:
+                    # Historically we started the countdown after mpv confirmed the file was loaded.
+                    # That makes the *perceived* duration more stable when IO/decoding is slow, but
+                    # it also creates a constant drift vs the DB duration (duration + load time).
+                    # Default behavior here is to match DB duration from the moment we initiate loadfile.
+                    # Use DSIGN_IMAGE_TIMER_MODE=from_ready to restore the old behavior.
                     loaded = self._wait_for_mpv_loaded_path(path, timeout=15.0)
                     vo_ready = self._wait_for_mpv_vo_configured(timeout=5.0)
-                    timer_start = time.monotonic()
-                    load_wait_sec = round(timer_start - load_started, 3)
+                    ready_at = time.monotonic()
+                    load_wait_sec = round(ready_at - load_started, 3)
 
                     dur_sec = max(1, int(duration))
-                    switch_at = timer_start + dur_sec
+                    timer_mode = os.getenv("DSIGN_IMAGE_TIMER_MODE", "from_load").strip().lower()
+                    if timer_mode not in ("from_load", "from_ready"):
+                        timer_mode = "from_load"
+                    base_t = load_started if timer_mode == "from_load" else ready_at
+                    switch_at = base_t + dur_sec
                     self.logger.debug(
                         "Image timer scheduled",
                         extra={
                             "path": path,
                             "duration_sec": dur_sec,
+                            "timer_mode": timer_mode,
                             "loaded_confirmed": loaded,
                             "vo_configured": vo_ready,
                             "load_wait_sec": load_wait_sec,
                         },
                     )
-                    self._sleep_until(switch_at, step=0.2)
+                    reached = self._sleep_until(switch_at, step=0.2)
+                    if reached:
+                        fired_at = time.monotonic()
+                        drift_sec = round(fired_at - (base_t + dur_sec), 3)
+                        # Positive drift means we switched later than scheduled (thread wake / load spikes).
+                        self.logger.debug(
+                            "Image timer fired",
+                            extra={
+                                "path": path,
+                                "duration_sec": dur_sec,
+                                "timer_mode": timer_mode,
+                                "drift_sec": drift_sec,
+                                "load_wait_sec": load_wait_sec,
+                            },
+                        )
 
     def _register_media_failure(self, media_key: str, reason: str = "unknown") -> None:
         """Exponential backoff for media that fails to start/open."""
