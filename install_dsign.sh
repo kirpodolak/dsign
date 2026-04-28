@@ -238,9 +238,8 @@ install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.timer" /etc/systemd/
 
 # Allow the web UI to start the screenshot service without a password prompt.
 # Keep it narrow: only `systemctl start screenshot.service`.
+# NOPASSWD alone allows non-interactive sudo (no requiretty; older sudo rejects !requiretty).
 cat > /etc/sudoers.d/dsign-screenshot <<'EOL'
-Defaults:www-data !requiretty
-Defaults:dsign !requiretty
 www-data ALL=(root) NOPASSWD: /bin/systemctl start screenshot.service
 www-data ALL=(root) NOPASSWD: /usr/bin/systemctl start screenshot.service
 dsign ALL=(root) NOPASSWD: /bin/systemctl start screenshot.service
