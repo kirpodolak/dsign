@@ -223,7 +223,21 @@ install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/
 sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-capture" /usr/local/bin/dsign-capture
+sed -i 's/\r$//' /usr/local/bin/dsign-capture
 chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip
+
+# Screenshot service + timer (web UI "on air" preview)
+install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.service" /etc/systemd/system/screenshot.service
+install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.timer" /etc/systemd/system/screenshot.timer
+
+# Allow the web UI to start the screenshot service without a password prompt.
+# Keep it narrow: only `systemctl start screenshot.service`.
+cat > /etc/sudoers.d/dsign-screenshot <<'EOL'
+Defaults:www-data !requiretty
+www-data ALL=(root) NOPASSWD: /bin/systemctl start screenshot.service
+EOL
+chmod 440 /etc/sudoers.d/dsign-screenshot
 
 cat > /etc/systemd/system/dsign-network-assistant.service <<EOL
 [Unit]
