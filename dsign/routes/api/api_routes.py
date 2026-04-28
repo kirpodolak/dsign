@@ -2178,10 +2178,18 @@ def init_api_routes(api_bp, services):
 
             # Import subprocess here to avoid UnboundLocalError
             import subprocess
+            import shutil
         
             # Start service
+            systemctl = (
+                os.getenv("DSIGN_SYSTEMCTL_PATH", "").strip()
+                or shutil.which("systemctl")
+                or "/bin/systemctl"
+            )
+            # Use full paths to avoid sudo secure_path issues.
+            sudo = shutil.which("sudo") or "/usr/bin/sudo"
             result = subprocess.run(
-                ['sudo', '/bin/systemctl', 'start', 'screenshot.service'],
+                [sudo, systemctl, 'start', 'screenshot.service'],
                 check=True,
                 timeout=10,
                 stdout=subprocess.PIPE,
@@ -2209,15 +2217,25 @@ def init_api_routes(api_bp, services):
             if not msg:
                 msg = str(e) or "timeout"
             current_app.logger.error(f"Service timeout: {msg}")
-            return jsonify({"success": False, "error": "Service timeout"}), 500
+            return jsonify({"success": False, "error": "Service timeout", "details": msg}), 500
     
         except subprocess.CalledProcessError as e:
-            current_app.logger.error(f"Service failed: {e.stderr}")
-            return jsonify({"success": False, "error": "Service failed"}), 500
+            stderr = (e.stderr or "").strip()
+            stdout = (e.stdout or "").strip()
+            current_app.logger.error(
+                "Service failed",
+                extra={
+                    "exit_code": getattr(e, "returncode", None),
+                    "stdout": stdout[-2000:] if stdout else "",
+                    "stderr": stderr[-2000:] if stderr else "",
+                },
+            )
+            details = stderr or stdout or f"exit_code={getattr(e, 'returncode', None)}"
+            return jsonify({"success": False, "error": "Service failed", "details": details}), 500
     
         except Exception as e:
             current_app.logger.error(f"Unexpected error: {str(e)}", exc_info=True)
-            return jsonify({"success": False, "error": "Internal error"}), 500
+            return jsonify({"success": False, "error": "Internal error", "details": str(e)}), 500
             
     @api_bp.route('/media/thumbnail/<filename>', methods=['GET'])
     @login_required

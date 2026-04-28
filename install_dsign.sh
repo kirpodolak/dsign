@@ -241,6 +241,7 @@ install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.timer" /etc/systemd/
 cat > /etc/sudoers.d/dsign-screenshot <<'EOL'
 Defaults:www-data !requiretty
 www-data ALL=(root) NOPASSWD: /bin/systemctl start screenshot.service
+www-data ALL=(root) NOPASSWD: /usr/bin/systemctl start screenshot.service
 EOL
 chmod 440 /etc/sudoers.d/dsign-screenshot
 
