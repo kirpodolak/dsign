@@ -37,7 +37,9 @@ ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 # hwdec=v4l2m2m-copy: более предсказуемо на Pi 3B+; v4l2m2m без -copy у нас давал ещё большие тормоза.
 # --video-sync=display-vdrop: меньше CPU, чем display-resample. Звук по mute — через IPC/плейлист.
 # Без --audio-samplerate: меньше принудительного ресемплинга на ARM (при необходимости верните 48000).
-ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --no-ytdl --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --log-file=/var/lib/dsign/mpv/mpv.log
+# External media playback (VK Video) relies on mpv's `ytdl_hook`, so do NOT disable ytdl.
+# Also avoid hardcoding an ALSA card name: Pi exposes vc4hdmi0/vc4hdmi1; `vc4hdmi` may not exist.
+ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=auto --script-opts=ytdl_hook-ytdl_path=/usr/bin/yt-dlp --log-file=/var/lib/dsign/mpv/mpv.log
 # Startup IP OSD is best-effort; never fail MPV startup if helper is unavailable.
 ExecStartPost=-/bin/systemctl --no-block start dsign-show-startup-ip.service
 
