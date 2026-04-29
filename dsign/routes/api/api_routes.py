@@ -2198,10 +2198,20 @@ def init_api_routes(api_bp, services):
             )
             # Use full paths to avoid sudo secure_path issues.
             sudo = shutil.which("sudo") or "/usr/bin/sudo"
+            # `dsign-capture` may legitimately take >10s on 4K/DRM (wait for MPV IPC replies, file flush).
+            # Keep this reasonably bounded but not so small that normal capture fails.
+            try:
+                screenshot_systemctl_timeout = float(os.getenv("DSIGN_SCREENSHOT_SYSTEMCTL_TIMEOUT_SEC", "45") or 45)
+            except Exception:
+                screenshot_systemctl_timeout = 45.0
+            if screenshot_systemctl_timeout < 5:
+                screenshot_systemctl_timeout = 5.0
+            if screenshot_systemctl_timeout > 120:
+                screenshot_systemctl_timeout = 120.0
             result = subprocess.run(
                 [sudo, systemctl, 'start', 'screenshot.service'],
                 check=True,
-                timeout=10,
+                timeout=screenshot_systemctl_timeout,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True
