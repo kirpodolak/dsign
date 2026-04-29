@@ -852,6 +852,16 @@ class PlaylistManager:
                 if (cur_stream and len(str(cur_stream)) > 0) or (cur_path and len(str(cur_path)) > 0):
                     # do not early-return; keep probing time-pos/duration below
                     pass
+                # HLS/DASH: demuxer can expose a manifest URL while time-pos/duration stay unset for a long time
+                # (especially under IPC load). Treat an opened .m3u8/.mpd as "ready enough" to avoid false not_ready.
+                def _looks_like_manifest(p: Optional[str]) -> bool:
+                    if not p:
+                        return False
+                    s = str(p).lower()
+                    return ".m3u8" in s or ".mpd" in s
+
+                if _looks_like_manifest(cur_stream) or _looks_like_manifest(cur_path):
+                    return True
             tick += 1
             if heavy_every > 1 and (tick % heavy_every) != 0:
                 self._stop_event.wait(timeout=max(0.15, float(poll_sec)))

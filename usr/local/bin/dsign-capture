@@ -8,6 +8,8 @@ OUTPUT_DIR="/home/dsign/dsign/static/images"
 OUTPUT_FILE="on_air_screen.jpg"
 FB_DEV="/dev/fb0"
 MPV_SOCKET="/var/lib/dsign/mpv/socket"
+# Serialize JSON-IPC with digital-signage (MPVManager uses one persistent socket + same lock file).
+MPV_IPC_LOCK="${MPV_SOCKET%/*}/.json-ipc.lock"
 # mpv creates the screenshot file itself. Keep it in OUTPUT_DIR so `screenshot.service`
 # (with ProtectSystem=strict) doesn't need write access to /var/lib.
 MPV_WRITE_DIR="$OUTPUT_DIR"
@@ -138,13 +140,24 @@ commit_preview() {
     return 0
 }
 
+_mpv_ipc_ensure_lock() {
+    mkdir -p "$(dirname "$MPV_IPC_LOCK")" 2>/dev/null || true
+    touch "$MPV_IPC_LOCK" 2>/dev/null || true
+}
+
 _mpv_ipc_line() {
-    printf '%s\n' "$1" | socat - "$MPV_SOCKET" 2>/dev/null || true
+    _mpv_ipc_ensure_lock
+    export DSIGN_MPV_IPC_LINE="$1"
+    export DSIGN_MPV_SOCK="$MPV_SOCKET"
+    flock -w 180 "$MPV_IPC_LOCK" sh -c 'printf "%s\n" "$DSIGN_MPV_IPC_LINE" | socat - "$DSIGN_MPV_SOCK" 2>/dev/null || true'
 }
 
 _mpv_get_prop_json() {
     local req="$1"
-    printf '%s\n' "$req" | socat - "$MPV_SOCKET" 2>/dev/null || true
+    _mpv_ipc_ensure_lock
+    export DSIGN_MPV_IPC_REQ="$req"
+    export DSIGN_MPV_SOCK="$MPV_SOCKET"
+    flock -w 180 "$MPV_IPC_LOCK" sh -c 'printf "%s\n" "$DSIGN_MPV_IPC_REQ" | socat - "$DSIGN_MPV_SOCK" 2>/dev/null || true'
 }
 
 _mpv_ipc_data_string() {
@@ -195,7 +208,22 @@ capture_via_playing_media() {
     raw=$(_mpv_get_prop_json '{"command": ["get_property", "idle-active"]}')
     idle=$(printf '%s' "$raw" | _mpv_ipc_data_bool_yesno)
     if [ "$idle" = "yes" ]; then
-        echo "Playing-media capture skipped: idle-active." >&2
+        local logo
+        for logo in \
+            "$OUTPUT_DIR/idle_logo.jpg" \
+            "/var/lib/dsign/media/idle_logo.jpg" \
+            ; do
+            if [ -f "$logo" ] && [ -r "$logo" ]; then
+                printf 'Idle-active: using idle logo %s\n' "$logo" >&2
+                if ffmpeg -hide_banner -nostdin -loglevel error -y -i "$logo" -frames:v 1 -q:v 5 "$out" 2>/dev/null \
+                    && mpv_screenshot_ok "$out"; then
+                    printf '%s' "$out"
+                    return 0
+                fi
+                rm -f "$out"
+            fi
+        done
+        echo "Playing-media capture skipped: idle-active and no readable idle_logo.jpg." >&2
         return 1
     fi
 
