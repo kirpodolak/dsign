@@ -8,12 +8,14 @@ OUTPUT_DIR="/home/dsign/dsign/static/images"
 OUTPUT_FILE="on_air_screen.jpg"
 FB_DEV="/dev/fb0"
 MPV_SOCKET="/var/lib/dsign/mpv/socket"
+# mpv creates the screenshot file itself — path must live where the mpv process can write
+# (same dir as IPC socket; NOT /var/tmp — systemd/hardening may block mpv from writing there).
+MPV_WRITE_DIR="/var/lib/dsign/mpv"
 
-# Work in /var/tmp: static/images may be root-owned or not writable for new files (ffmpeg/mv need create).
+# ffmpeg framebuffer fallback: tmp dir for raw+bgra→jpeg (this process writes, not mpv)
 WORK_DIR=$(mktemp -d "${TMPDIR:-/var/tmp}/dsign-capture.XXXXXX")
 trap 'rm -rf "$WORK_DIR"' EXIT
-# Must end in .jpg so ffmpeg infers muxer.
-OUTPUT_TMP_PATH="$WORK_DIR/on_air_screen.work.jpg"
+FFMPEG_TMP_JPG="$WORK_DIR/on_air_screen.fb.jpg"
 
 get_resolution() {
     if [ -f /sys/class/graphics/fb0/virtual_size ]; then
@@ -89,21 +91,21 @@ _mpv_ipc_line() {
 }
 
 # Try MPV IPC: vo=drm often rejects screenshot-to-file unless screenshot-sw=yes (see mpv.conf).
+# On success sets CAPTURE_MPV_OUT to the jpeg path (mpv creates this file).
 screenshot_with_mpv() {
+    CAPTURE_MPV_OUT=""
     if ! command -v socat &> /dev/null || [ ! -S "$MPV_SOCKET" ]; then
         return 1
     fi
-    local out="$OUTPUT_TMP_PATH"
+    mkdir -p "$MPV_WRITE_DIR"
+    local out="$MPV_WRITE_DIR/preview-capture-$$.jpg"
     rm -f "$out" 2>/dev/null || true
     local jpath
     jpath=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')
 
-    # Pass 1: VO paths (video / subtitles / window)
-    # Pass 2: enable software screenshot pipeline when VO blocks HW readback (DRM/KMS)
-    local pass
+    local pass mode
     for pass in 1 2; do
         if [ "$pass" = "2" ]; then
-            # Prefer SW path when VO cannot hand pixels to screenshot-to-file (common with drm).
             _mpv_ipc_line '{"command": ["set_property", "screenshot-sw", true]}'
             sleep 0.08
         fi
@@ -116,6 +118,7 @@ screenshot_with_mpv() {
             fi
             sleep 0.2
             if mpv_screenshot_ok "$out"; then
+                CAPTURE_MPV_OUT="$out"
                 return 0
             fi
         done
@@ -170,21 +173,22 @@ ffmpeg_fb_to_jpeg() {
     esac
     ffmpeg -hide_banner -loglevel error \
         -f rawvideo -pixel_format "$pixfmt" -video_size "${w}x${h}" \
-        -i "$temp" -pix_fmt yuvj420p -frames:v 1 "$OUTPUT_TMP_PATH" -y
+        -i "$temp" -pix_fmt yuvj420p -frames:v 1 "$FFMPEG_TMP_JPG" -y
 }
 
 mkdir -p "$OUTPUT_DIR"
 
-if screenshot_with_mpv; then
-    if commit_preview "$OUTPUT_TMP_PATH"; then
+if screenshot_with_mpv && [ -n "${CAPTURE_MPV_OUT:-}" ]; then
+    if commit_preview "$CAPTURE_MPV_OUT"; then
+        rm -f "$MPV_WRITE_DIR"/preview-capture-*.jpg 2>/dev/null || true
         echo "Screenshot taken from MPV."
         exit 0
     fi
 fi
 
 if command -v raspi2png &> /dev/null; then
-    rm -f "$OUTPUT_TMP_PATH" 2>/dev/null || true
-    if raspi2png -p "$OUTPUT_TMP_PATH" 2>/dev/null && commit_preview "$OUTPUT_TMP_PATH"; then
+    rm -f "$FFMPEG_TMP_JPG" 2>/dev/null || true
+    if raspi2png -p "$FFMPEG_TMP_JPG" 2>/dev/null && commit_preview "$FFMPEG_TMP_JPG"; then
         echo "Screenshot taken via raspi2png."
         exit 0
     fi
