@@ -6,7 +6,7 @@ import socket
 import traceback
 import time
 from pathlib import Path 
-from flask import jsonify, request, send_from_directory, abort, current_app, send_file
+from flask import jsonify, request, send_from_directory, abort, current_app, send_file, make_response
 from flask_login import login_required, current_user, login_user, logout_user
 from flask_wtf.csrf import validate_csrf
 from werkzeug.utils import secure_filename
@@ -58,6 +58,35 @@ def init_api_routes(api_bp, services):
     # Bump when heuristics change so a stale (wrong) card/ctl is not served for 60s.
     _amixer_pick_cache_version: int = 7
     def _read_cpu_temp_c() -> float | None:
+        # Prefer x86 "coretemp" / package temperature when available.
+        #
+        # On many x86 boxes, thermal_zone0 points to ACPI zones (often bogus, e.g. -269.9°C),
+        # while /sys/class/thermal/*/type may contain "x86_pkg_temp" with a correct value.
+        try:
+            base = Path("/sys/class/thermal")
+            for tp in sorted(base.glob("thermal_zone*/type")):
+                try:
+                    t = tp.read_text(encoding="utf-8", errors="ignore").strip().lower()
+                except Exception:
+                    continue
+                if t not in ("x86_pkg_temp", "coretemp"):
+                    continue
+                temp_p = tp.parent / "temp"
+                if not temp_p.exists():
+                    continue
+                try:
+                    raw = temp_p.read_text(encoding="utf-8", errors="ignore").strip()
+                    v = float(raw)
+                    # Filter obvious bogus values
+                    c = (v / 1000.0) if v > 1000 else v
+                    if c < -20 or c > 125:
+                        continue
+                    return round(c, 1)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
         # Raspberry Pi / Linux common path
         for p in (
             "/sys/class/thermal/thermal_zone0/temp",
@@ -67,7 +96,10 @@ def init_api_routes(api_bp, services):
                 if os.path.exists(p):
                     raw = Path(p).read_text(encoding="utf-8").strip()
                     v = float(raw)
-                    return round(v / 1000.0, 1) if v > 1000 else round(v, 1)
+                    c = (v / 1000.0) if v > 1000 else v
+                    if c < -20 or c > 125:
+                        continue
+                    return round(c, 1)
             except Exception:
                 continue
         return None
@@ -2060,19 +2092,29 @@ def init_api_routes(api_bp, services):
             # Hot path: this endpoint is polled by the UI.
             # Avoid expensive PIL open/verify here; do validation in the capture endpoint instead.
             if os.path.exists(screenshot_path) and os.path.getsize(screenshot_path) > 1024:
-                return send_file(
-                    screenshot_path,
-                    mimetype='image/jpeg',
-                    conditional=True,
-                    max_age=0
+                resp = make_response(
+                    send_file(
+                        screenshot_path,
+                        mimetype="image/jpeg",
+                        conditional=True,
+                        max_age=0,
+                    )
                 )
-        
-            return send_file(
-                default_path,
-                mimetype='image/jpeg',
-                conditional=True,
-                max_age=0
+                resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                resp.headers["Pragma"] = "no-cache"
+                return resp
+
+            resp = make_response(
+                send_file(
+                    default_path,
+                    mimetype="image/jpeg",
+                    conditional=True,
+                    max_age=0,
+                )
             )
+            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            resp.headers["Pragma"] = "no-cache"
+            return resp
         
         except Exception as e:
             current_app.logger.error(f"Screenshot error: {str(e)}")
@@ -2146,10 +2188,18 @@ def init_api_routes(api_bp, services):
 
             # Import subprocess here to avoid UnboundLocalError
             import subprocess
+            import shutil
         
             # Start service
+            systemctl = (
+                os.getenv("DSIGN_SYSTEMCTL_PATH", "").strip()
+                or shutil.which("systemctl")
+                or "/bin/systemctl"
+            )
+            # Use full paths to avoid sudo secure_path issues.
+            sudo = shutil.which("sudo") or "/usr/bin/sudo"
             result = subprocess.run(
-                ['sudo', '/bin/systemctl', 'start', 'screenshot.service'],
+                [sudo, systemctl, 'start', 'screenshot.service'],
                 check=True,
                 timeout=10,
                 stdout=subprocess.PIPE,
@@ -2177,15 +2227,25 @@ def init_api_routes(api_bp, services):
             if not msg:
                 msg = str(e) or "timeout"
             current_app.logger.error(f"Service timeout: {msg}")
-            return jsonify({"success": False, "error": "Service timeout"}), 500
+            return jsonify({"success": False, "error": "Service timeout", "details": msg}), 500
     
         except subprocess.CalledProcessError as e:
-            current_app.logger.error(f"Service failed: {e.stderr}")
-            return jsonify({"success": False, "error": "Service failed"}), 500
+            stderr = (e.stderr or "").strip()
+            stdout = (e.stdout or "").strip()
+            current_app.logger.error(
+                "Service failed",
+                extra={
+                    "exit_code": getattr(e, "returncode", None),
+                    "stdout": stdout[-2000:] if stdout else "",
+                    "stderr": stderr[-2000:] if stderr else "",
+                },
+            )
+            details = stderr or stdout or f"exit_code={getattr(e, 'returncode', None)}"
+            return jsonify({"success": False, "error": "Service failed", "details": details}), 500
     
         except Exception as e:
             current_app.logger.error(f"Unexpected error: {str(e)}", exc_info=True)
-            return jsonify({"success": False, "error": "Internal error"}), 500
+            return jsonify({"success": False, "error": "Internal error", "details": str(e)}), 500
             
     @api_bp.route('/media/thumbnail/<filename>', methods=['GET'])
     @login_required
