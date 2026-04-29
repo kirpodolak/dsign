@@ -130,10 +130,12 @@ capture_fb_raw() {
         fi
         return 0
     fi
+    # sysfs line_length/yres often missing on DRM/KMS (i915); we still have `bytes` from virtual_size × bpp.
+    # Never read only 1 MiB — ffmpeg expects w*h*bpp/8 (e.g. ~33 MiB for 5760x1080x32).
     if [ -r "$FB_DEV" ]; then
-        dd if="$FB_DEV" of="$temp" bs=1048576 count=1 status=none 2>/dev/null || return 1
+        head -c "$bytes" "$FB_DEV" >"$temp" 2>/dev/null || return 1
     else
-        sudo dd if="$FB_DEV" of="$temp" bs=1048576 count=1 status=none 2>/dev/null || return 1
+        sudo sh -c "head -c \"$bytes\" \"$FB_DEV\" >\"$temp\"" 2>/dev/null || return 1
     fi
     return 0
 }
