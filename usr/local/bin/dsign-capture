@@ -6,10 +6,14 @@ set -euo pipefail
 
 OUTPUT_DIR="/home/dsign/dsign/static/images"
 OUTPUT_FILE="on_air_screen.jpg"
-# Temp name must end in .jpg so ffmpeg infers muxer; .tmp.$$ breaks "Unable to choose an output format".
-OUTPUT_TMP="on_air_screen.work-$$.jpg"
 FB_DEV="/dev/fb0"
 MPV_SOCKET="/var/lib/dsign/mpv/socket"
+
+# Work in /var/tmp: static/images may be root-owned or not writable for new files (ffmpeg/mv need create).
+WORK_DIR=$(mktemp -d "${TMPDIR:-/var/tmp}/dsign-capture.XXXXXX")
+trap 'rm -rf "$WORK_DIR"' EXIT
+# Must end in .jpg so ffmpeg infers muxer.
+OUTPUT_TMP_PATH="$WORK_DIR/on_air_screen.work.jpg"
 
 get_resolution() {
     if [ -f /sys/class/graphics/fb0/virtual_size ]; then
@@ -85,7 +89,7 @@ screenshot_with_mpv() {
     if ! command -v socat &> /dev/null || [ ! -S "$MPV_SOCKET" ]; then
         return 1
     fi
-    local out="$OUTPUT_DIR/$OUTPUT_TMP"
+    local out="$OUTPUT_TMP_PATH"
     rm -f "$out" 2>/dev/null || true
     # JSON-escape path for backslashes
     local jpath
@@ -153,33 +157,31 @@ ffmpeg_fb_to_jpeg() {
     esac
     ffmpeg -hide_banner -loglevel error \
         -f rawvideo -pixel_format "$pixfmt" -video_size "${w}x${h}" \
-        -i "$temp" -pix_fmt yuvj420p -frames:v 1 "$OUTPUT_DIR/$OUTPUT_TMP" -y
+        -i "$temp" -pix_fmt yuvj420p -frames:v 1 "$OUTPUT_TMP_PATH" -y
 }
 
 mkdir -p "$OUTPUT_DIR"
-trap 'rm -f "$OUTPUT_DIR/$OUTPUT_TMP"' EXIT
 
 if screenshot_with_mpv; then
-    if commit_preview "$OUTPUT_DIR/$OUTPUT_TMP"; then
+    if commit_preview "$OUTPUT_TMP_PATH"; then
         echo "Screenshot taken from MPV."
         exit 0
     fi
 fi
 
 if command -v raspi2png &> /dev/null; then
-    rm -f "$OUTPUT_DIR/$OUTPUT_TMP" 2>/dev/null || true
-    if raspi2png -p "$OUTPUT_DIR/$OUTPUT_TMP" 2>/dev/null && commit_preview "$OUTPUT_DIR/$OUTPUT_TMP"; then
+    rm -f "$OUTPUT_TMP_PATH" 2>/dev/null || true
+    if raspi2png -p "$OUTPUT_TMP_PATH" 2>/dev/null && commit_preview "$OUTPUT_TMP_PATH"; then
         echo "Screenshot taken via raspi2png."
         exit 0
     fi
 fi
 
 echo "Using framebuffer fallback..."
-TEMP_RAW=$(mktemp)
-trap 'rm -f "$TEMP_RAW" "$OUTPUT_DIR/$OUTPUT_TMP"' EXIT
+TEMP_RAW=$(mktemp "$WORK_DIR/fb.raw.XXXXXX")
 
 if [ -c "$FB_DEV" ] && capture_fb_raw "$TEMP_RAW"; then
-    if ffmpeg_fb_to_jpeg "$TEMP_RAW" && commit_preview "$OUTPUT_DIR/$OUTPUT_TMP"; then
+    if ffmpeg_fb_to_jpeg "$TEMP_RAW" && commit_preview "$OUTPUT_TMP_PATH"; then
         echo "Screenshot taken from framebuffer."
         exit 0
     fi

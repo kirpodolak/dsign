@@ -63,6 +63,11 @@ fi
 setfacl -R -m u:"$WWW_USER":rwX "$PROJECT_DIR" "$UPLOAD_DIR" "$DB_DIR"
 setfacl -Rd -m u:"$WWW_USER":rwX "$PROJECT_DIR" "$UPLOAD_DIR" "$DB_DIR"
 
+# Preview capture writes new temp files under static/images; must be owned by dsign (not root).
+mkdir -p "$PROJECT_DIR/static/images"
+chown -R "$DSIGN_USER:$DSIGN_USER" "$PROJECT_DIR/static/images"
+chmod 775 "$PROJECT_DIR/static/images"
+
 # Получение репозитория (идемпотентно)
 if [ -d "$PROJECT_DIR/.git" ]; then
   sudo -u "$DSIGN_USER" git -C "$PROJECT_DIR" fetch --all --prune
