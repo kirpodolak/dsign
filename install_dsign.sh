@@ -68,6 +68,12 @@ mkdir -p "$PROJECT_DIR/static/images"
 chown -R "$DSIGN_USER:$DSIGN_USER" "$PROJECT_DIR/static/images"
 chmod 775 "$PROJECT_DIR/static/images"
 
+# M3U export writes playlist files under static/playlists.
+# Ensure it's writable by the dsign service user (not root).
+mkdir -p "$PROJECT_DIR/static/playlists"
+chown -R "$DSIGN_USER:$DSIGN_USER" "$PROJECT_DIR/static/playlists"
+chmod 775 "$PROJECT_DIR/static/playlists"
+
 # Получение репозитория (идемпотентно)
 if [ -d "$PROJECT_DIR/.git" ]; then
   sudo -u "$DSIGN_USER" git -C "$PROJECT_DIR" fetch --all --prune
