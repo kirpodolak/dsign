@@ -8,9 +8,9 @@ OUTPUT_DIR="/home/dsign/dsign/static/images"
 OUTPUT_FILE="on_air_screen.jpg"
 FB_DEV="/dev/fb0"
 MPV_SOCKET="/var/lib/dsign/mpv/socket"
-# mpv creates the screenshot file itself — path must live where the mpv process can write
-# (same dir as IPC socket; NOT /var/tmp — systemd/hardening may block mpv from writing there).
-MPV_WRITE_DIR="/var/lib/dsign/mpv"
+# mpv creates the screenshot file itself. Keep it in OUTPUT_DIR so `screenshot.service`
+# (with ProtectSystem=strict) doesn't need write access to /var/lib.
+MPV_WRITE_DIR="$OUTPUT_DIR"
 
 # ffmpeg framebuffer fallback: tmp dir for raw+bgra→jpeg (this process writes, not mpv)
 WORK_DIR=$(mktemp -d "${TMPDIR:-/var/tmp}/dsign-capture.XXXXXX")
