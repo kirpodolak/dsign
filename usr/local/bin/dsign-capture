@@ -8,6 +8,14 @@ OUTPUT_DIR="/home/dsign/dsign/static/images"
 OUTPUT_FILE="on_air_screen.jpg"
 FB_DEV="/dev/fb0"
 MPV_SOCKET="/var/lib/dsign/mpv/socket"
+# mpv creates the screenshot file itself — path must live where the mpv process can write
+# (same dir as IPC socket; NOT /var/tmp — systemd/hardening may block mpv from writing there).
+MPV_WRITE_DIR="/var/lib/dsign/mpv"
+
+# ffmpeg framebuffer fallback: tmp dir for raw+bgra→jpeg (this process writes, not mpv)
+WORK_DIR=$(mktemp -d "${TMPDIR:-/var/tmp}/dsign-capture.XXXXXX")
+trap 'rm -rf "$WORK_DIR"' EXIT
+FFMPEG_TMP_JPG="$WORK_DIR/on_air_screen.fb.jpg"
 
 get_resolution() {
     if [ -f /sys/class/graphics/fb0/virtual_size ]; then
@@ -64,32 +72,56 @@ if ! command -v ffmpeg &> /dev/null; then
 fi
 
 mpv_screenshot_ok() {
-    local f="$OUTPUT_DIR/$OUTPUT_FILE"
+    local f="$1"
     [ -f "$f" ] && [ "$(wc -c < "$f" 2>/dev/null | tr -d ' ')" -ge 512 ]
 }
 
-# Try MPV IPC: vo=drm often fails for "video"; try several modes and verify file size.
+commit_preview() {
+    local src="$1"
+    if ! mpv_screenshot_ok "$src"; then
+        return 1
+    fi
+    chmod 0644 "$src" 2>/dev/null || true
+    mv -f "$src" "$OUTPUT_DIR/$OUTPUT_FILE"
+    return 0
+}
+
+_mpv_ipc_line() {
+    printf '%s\n' "$1" | socat - "$MPV_SOCKET" 2>/dev/null || true
+}
+
+# Try MPV IPC: vo=drm often rejects screenshot-to-file unless screenshot-sw=yes (see mpv.conf).
+# On success sets CAPTURE_MPV_OUT to the jpeg path (mpv creates this file).
 screenshot_with_mpv() {
+    CAPTURE_MPV_OUT=""
     if ! command -v socat &> /dev/null || [ ! -S "$MPV_SOCKET" ]; then
         return 1
     fi
-    local out="$OUTPUT_DIR/$OUTPUT_FILE"
+    mkdir -p "$MPV_WRITE_DIR"
+    local out="$MPV_WRITE_DIR/preview-capture-$$.jpg"
     rm -f "$out" 2>/dev/null || true
-    # JSON-escape path for backslashes
     local jpath
     jpath=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')
 
-    for mode in video subtitles window; do
-        rm -f "$out" 2>/dev/null || true
-        if [ "$mode" = "window" ]; then
-            printf '{"command": ["screenshot-to-file", %s]}\n' "$jpath" | socat - "$MPV_SOCKET" 2>/dev/null || true
-        else
-            printf '{"command": ["screenshot-to-file", %s, "%s"]}\n' "$jpath" "$mode" | socat - "$MPV_SOCKET" 2>/dev/null || true
+    local pass mode
+    for pass in 1 2; do
+        if [ "$pass" = "2" ]; then
+            _mpv_ipc_line '{"command": ["set_property", "screenshot-sw", true]}'
+            sleep 0.08
         fi
-        sleep 0.15
-        if mpv_screenshot_ok; then
-            return 0
-        fi
+        for mode in video subtitles window; do
+            rm -f "$out" 2>/dev/null || true
+            if [ "$mode" = "window" ]; then
+                _mpv_ipc_line "$(printf '{"command": ["screenshot-to-file", %s]}' "$jpath")"
+            else
+                _mpv_ipc_line "$(printf '{"command": ["screenshot-to-file", %s, "%s"]}' "$jpath" "$mode")"
+            fi
+            sleep 0.2
+            if mpv_screenshot_ok "$out"; then
+                CAPTURE_MPV_OUT="$out"
+                return 0
+            fi
+        done
     done
     return 1
 }
@@ -118,10 +150,12 @@ capture_fb_raw() {
         fi
         return 0
     fi
+    # sysfs line_length/yres often missing on DRM/KMS (i915); we still have `bytes` from virtual_size × bpp.
+    # Never read only 1 MiB — ffmpeg expects w*h*bpp/8 (e.g. ~33 MiB for 5760x1080x32).
     if [ -r "$FB_DEV" ]; then
-        dd if="$FB_DEV" of="$temp" bs=1048576 count=1 status=none 2>/dev/null || return 1
+        head -c "$bytes" "$FB_DEV" >"$temp" 2>/dev/null || return 1
     else
-        sudo dd if="$FB_DEV" of="$temp" bs=1048576 count=1 status=none 2>/dev/null || return 1
+        sudo sh -c "head -c \"$bytes\" \"$FB_DEV\" >\"$temp\"" 2>/dev/null || return 1
     fi
     return 0
 }
@@ -139,32 +173,40 @@ ffmpeg_fb_to_jpeg() {
     esac
     ffmpeg -hide_banner -loglevel error \
         -f rawvideo -pixel_format "$pixfmt" -video_size "${w}x${h}" \
-        -i "$temp" -pix_fmt yuvj420p -frames:v 1 "$OUTPUT_DIR/$OUTPUT_FILE" -y
+        -i "$temp" -pix_fmt yuvj420p -frames:v 1 "$FFMPEG_TMP_JPG" -y
 }
 
 mkdir -p "$OUTPUT_DIR"
 
-if screenshot_with_mpv; then
-    echo "Screenshot taken from MPV."
-    exit 0
+if screenshot_with_mpv && [ -n "${CAPTURE_MPV_OUT:-}" ]; then
+    if commit_preview "$CAPTURE_MPV_OUT"; then
+        rm -f "$MPV_WRITE_DIR"/preview-capture-*.jpg 2>/dev/null || true
+        echo "Screenshot taken from MPV."
+        exit 0
+    fi
 fi
 
 if command -v raspi2png &> /dev/null; then
-    if raspi2png -p "$OUTPUT_DIR/$OUTPUT_FILE" 2>/dev/null && mpv_screenshot_ok; then
+    rm -f "$FFMPEG_TMP_JPG" 2>/dev/null || true
+    if raspi2png -p "$FFMPEG_TMP_JPG" 2>/dev/null && commit_preview "$FFMPEG_TMP_JPG"; then
         echo "Screenshot taken via raspi2png."
         exit 0
     fi
 fi
 
-echo "Using framebuffer fallback..."
-TEMP_RAW=$(mktemp)
-trap 'rm -f "$TEMP_RAW"' EXIT
-
-if [ -c "$FB_DEV" ] && capture_fb_raw "$TEMP_RAW"; then
-    if ffmpeg_fb_to_jpeg "$TEMP_RAW" && mpv_screenshot_ok; then
-        echo "Screenshot taken from framebuffer."
-        exit 0
+# With vo=drm, Linux fbcon (/dev/fb0) often does not contain the decoded video — captures look black.
+# Opt in with DSIGN_CAPTURE_USE_FB=1 if you really use a classic framebuffer console mirror.
+if [ "${DSIGN_CAPTURE_USE_FB:-0}" = "1" ] && [ -c "$FB_DEV" ]; then
+    echo "Using framebuffer fallback (DSIGN_CAPTURE_USE_FB=1)..."
+    TEMP_RAW=$(mktemp "$WORK_DIR/fb.raw.XXXXXX")
+    if capture_fb_raw "$TEMP_RAW"; then
+        if ffmpeg_fb_to_jpeg "$TEMP_RAW" && commit_preview "$OUTPUT_TMP_PATH"; then
+            echo "Screenshot taken from framebuffer."
+            exit 0
+        fi
     fi
+else
+    echo "Skipping framebuffer fallback (vo=drm: fb is usually black; set DSIGN_CAPTURE_USE_FB=1 to force)." >&2
 fi
 
 echo "All capture methods failed." >&2
