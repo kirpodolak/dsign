@@ -76,6 +76,31 @@ mpv_screenshot_ok() {
     [ -f "$f" ] && [ "$(wc -c < "$f" 2>/dev/null | tr -d ' ')" -ge 512 ]
 }
 
+wait_for_file_ok() {
+    local f="$1"
+    local timeout_sec="${2:-2.0}"
+    local deadline
+    deadline=$(python3 - "$timeout_sec" <<'PY'
+import sys, time
+print(time.time() + float(sys.argv[1]))
+PY
+)
+    while true; do
+        if mpv_screenshot_ok "$f"; then
+            return 0
+        fi
+        if python3 - "$deadline" <<'PY'
+import sys, time
+sys.exit(0 if time.time() < float(sys.argv[1]) else 1)
+PY
+        then
+            sleep 0.05
+            continue
+        fi
+        return 1
+    done
+}
+
 commit_preview() {
     local src="$1"
     if ! mpv_screenshot_ok "$src"; then
@@ -116,8 +141,9 @@ screenshot_with_mpv() {
             else
                 _mpv_ipc_line "$(printf '{"command": ["screenshot-to-file", %s, "%s"]}' "$jpath" "$mode")"
             fi
-            sleep 0.2
-            if mpv_screenshot_ok "$out"; then
+            # MPV can return success before the file is fully written (especially on 4K/DRM).
+            # Poll briefly for the file to appear with a non-trivial size.
+            if wait_for_file_ok "$out" 2.0; then
                 CAPTURE_MPV_OUT="$out"
                 return 0
             fi
@@ -200,7 +226,7 @@ if [ "${DSIGN_CAPTURE_USE_FB:-0}" = "1" ] && [ -c "$FB_DEV" ]; then
     echo "Using framebuffer fallback (DSIGN_CAPTURE_USE_FB=1)..."
     TEMP_RAW=$(mktemp "$WORK_DIR/fb.raw.XXXXXX")
     if capture_fb_raw "$TEMP_RAW"; then
-        if ffmpeg_fb_to_jpeg "$TEMP_RAW" && commit_preview "$OUTPUT_TMP_PATH"; then
+        if ffmpeg_fb_to_jpeg "$TEMP_RAW" && commit_preview "$FFMPEG_TMP_JPG"; then
             echo "Screenshot taken from framebuffer."
             exit 0
         fi
