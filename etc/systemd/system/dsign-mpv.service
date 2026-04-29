@@ -42,6 +42,7 @@ ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=auto --script-opts=ytdl_hook-ytdl_path=/usr/bin/yt-dlp --log-file=/var/lib/dsign/mpv/mpv.log
 # Startup IP OSD is best-effort; never fail MPV startup if helper is unavailable.
 ExecStartPost=-/bin/systemctl --no-block start dsign-show-startup-ip.service
+ExecStartPost=-/usr/local/bin/dsign-mpv-post-start
 
 # Настройки перезапуска
 Restart=always
