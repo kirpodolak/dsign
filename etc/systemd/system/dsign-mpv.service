@@ -18,9 +18,13 @@ WorkingDirectory=/home/dsign
 # Attach to tty1 so DRM can switch to graphics mode
 StandardInput=tty
 TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
-TTYVTDisallocate=yes
+# Be conservative with TTY flags:
+# - TTYVHangup/TTYVTDisallocate can deliver SIGHUP / tear down the VT in ways that
+#   make mpv exit immediately, causing restart loops and start-limit-hit.
+# - Keep only the minimum needed for DRM/KMS.
+TTYReset=no
+TTYVHangup=no
+TTYVTDisallocate=no
 
 # Подготовка директории и прав
 ExecStartPre=/bin/chvt 1
