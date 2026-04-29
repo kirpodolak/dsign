@@ -24,6 +24,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/dsign/dsign/static/images/
+# playing-media fallback reads playlist files under UPLOAD_FOLDER (install default)
+BindReadOnlyPaths=/var/lib/dsign/media
 
 # ffmpeg kmsgrab needs KMS nodes when mpv IPC cannot save screenshots (vo=drm)
 DeviceAllow=/dev/dri rw

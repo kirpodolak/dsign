@@ -142,6 +142,124 @@ _mpv_ipc_line() {
     printf '%s\n' "$1" | socat - "$MPV_SOCKET" 2>/dev/null || true
 }
 
+_mpv_get_prop_json() {
+    local req="$1"
+    printf '%s\n' "$req" | socat - "$MPV_SOCKET" 2>/dev/null || true
+}
+
+_mpv_ipc_data_string() {
+    # Prints mpv IPC "data" when it is a string (stdin = one JSON line).
+    python3 -c '
+import json, sys
+try:
+    j = json.load(sys.stdin)
+    if j.get("error") not in (None, "success"):
+        print("")
+        sys.exit(0)
+    d = j.get("data")
+    print(d if isinstance(d, str) else "")
+except Exception:
+    print("")
+'
+}
+
+_mpv_ipc_data_bool_yesno() {
+    # Prints yes/no for boolean property, empty on failure (stdin = one JSON line).
+    python3 -c '
+import json, sys
+try:
+    j = json.load(sys.stdin)
+    if j.get("error") not in (None, "success"):
+        print("")
+        sys.exit(0)
+    d = j.get("data")
+    if isinstance(d, bool):
+        print("yes" if d else "no")
+    else:
+        print("")
+except Exception:
+    print("")
+'
+}
+
+# ffmpeg kmsgrab often fails while mpv holds DRM master on the same card — decode a frame from what mpv is playing instead.
+capture_via_playing_media() {
+    local out="$WORK_DIR/media-thumb.jpg"
+    local path idle raw
+    rm -f "$out"
+
+    if ! command -v socat &> /dev/null || [ ! -S "$MPV_SOCKET" ]; then
+        return 1
+    fi
+
+    raw=$(_mpv_get_prop_json '{"command": ["get_property", "idle-active"]}')
+    idle=$(printf '%s' "$raw" | _mpv_ipc_data_bool_yesno)
+    if [ "$idle" = "yes" ]; then
+        echo "Playing-media capture skipped: idle-active." >&2
+        return 1
+    fi
+
+    raw=$(_mpv_get_prop_json '{"command": ["get_property", "path"]}')
+    path=$(printf '%s' "$raw" | _mpv_ipc_data_string | tr -d '\r')
+    if [ -z "$path" ] || [ "$path" = "null" ]; then
+        raw=$(_mpv_get_prop_json '{"command": ["get_property", "filename"]}')
+        path=$(printf '%s' "$raw" | _mpv_ipc_data_string | tr -d '\r')
+    fi
+    if [ -z "$path" ] || [ "$path" = "null" ]; then
+        echo "Playing-media capture skipped: no path/filename." >&2
+        return 1
+    fi
+
+    printf 'Playing-media capture trying: %.120s%s\n' "$path" "$([ ${#path} -gt 120 ] && echo …)" >&2
+
+    # Local file (image/video playlist item).
+    if [ -f "$path" ] && [ -r "$path" ]; then
+        local ssargs=()
+        case "${path,,}" in
+            *.mp4|*.mkv|*.webm|*.mov|*.avi|*.ts|*.m4v|*.mpeg|*.mpg)
+                ssargs=(-ss 2)
+                ;;
+        esac
+        if ffmpeg -hide_banner -nostdin -loglevel error -y \
+            "${ssargs[@]}" -i "$path" -vf 'thumbnail' -frames:v 1 -q:v 5 "$out" 2>"$WORK_DIR/ffmpeg-media.err" \
+            && mpv_screenshot_ok "$out"; then
+            printf '%s' "$out"
+            return 0
+        fi
+        rm -f "$out"
+        # thumbnail filter can fail on tiny inputs; single-frame grab.
+        if ffmpeg -hide_banner -nostdin -loglevel error -y \
+            "${ssargs[@]}" -i "$path" -frames:v 1 -q:v 5 "$out" 2>>"$WORK_DIR/ffmpeg-media.err" \
+            && mpv_screenshot_ok "$out"; then
+            printf '%s' "$out"
+            return 0
+        fi
+        rm -f "$out"
+        tail -n 8 "$WORK_DIR/ffmpeg-media.err" >&2 || true
+        return 1
+    fi
+
+    # Remote URL (best-effort; may fail offline / slow).
+    case "$path" in
+        http://*|https://*)
+            if ffmpeg -hide_banner -nostdin -loglevel error -y \
+                -headers "Connection: close\r\n" \
+                -rw_timeout 15000000 \
+                -ss 2 -i "$path" -frames:v 1 -q:v 6 "$out" 2>"$WORK_DIR/ffmpeg-url.err" \
+                && mpv_screenshot_ok "$out"; then
+                printf '%s' "$out"
+                return 0
+            fi
+            rm -f "$out"
+            tail -n 8 "$WORK_DIR/ffmpeg-url.err" >&2 || true
+            ;;
+        *)
+            echo "Playing-media capture skipped: path not a readable local file (DRM-only buffer?)." >&2
+            ;;
+    esac
+    return 1
+}
+
 # vo=drm often returns JSON "error":"error running command" for screenshot-to-file; builtin `screenshot` may still work.
 try_mpv_builtin_screenshot() {
     CAPTURE_MPV_OUT=""
@@ -300,22 +418,26 @@ capture_via_kmsgrab() {
     # does NOT select the DRM node — use -device PATH before -f kmsgrab and -i - .
     for card in "${cards[@]}"; do
         [ -r "$card" ] || continue
-        if ffmpeg -hide_banner -nostdin -loglevel error -y \
+        if ffmpeg -hide_banner -nostdin -loglevel warning -y \
             -device "$card" -f kmsgrab -i - \
             -vf 'hwdownload,format=bgra' \
-            -frames:v 1 -q:v 6 "$out" 2>/dev/null \
+            -frames:v 1 -q:v 6 "$out" 2>"$WORK_DIR/ffmpeg-kmsgrab.err" \
             && mpv_screenshot_ok "$out"; then
             printf '%s' "$out"
             return 0
         fi
+        echo "kmsgrab ($card, vf=bgra) failed:" >&2
+        tail -n 15 "$WORK_DIR/ffmpeg-kmsgrab.err" >&2 || true
         rm -f "$out"
-        if ffmpeg -hide_banner -nostdin -loglevel error -y \
+        if ffmpeg -hide_banner -nostdin -loglevel warning -y \
             -device "$card" -f kmsgrab -i - \
-            -frames:v 1 -q:v 6 "$out" 2>/dev/null \
+            -frames:v 1 -q:v 6 "$out" 2>"$WORK_DIR/ffmpeg-kmsgrab.err" \
             && mpv_screenshot_ok "$out"; then
             printf '%s' "$out"
             return 0
         fi
+        echo "kmsgrab ($card, raw) failed:" >&2
+        tail -n 15 "$WORK_DIR/ffmpeg-kmsgrab.err" >&2 || true
         rm -f "$out"
     done
     return 1
@@ -345,6 +467,13 @@ if command -v raspi2png &> /dev/null; then
         echo "Screenshot taken via raspi2png."
         exit 0
     fi
+fi
+
+media_out=""
+media_out=$(capture_via_playing_media || true)
+if [ -n "$media_out" ] && commit_preview "$media_out"; then
+    echo "Screenshot taken from playing media (ffmpeg thumb)."
+    exit 0
 fi
 
 kms_out=""
