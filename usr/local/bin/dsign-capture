@@ -296,10 +296,12 @@ capture_via_kmsgrab() {
         echo "kmsgrab unavailable: no /dev/dri/card* (DRM primary nodes missing — load GPU driver, check boot/display)." >&2
         return 1
     fi
+    # FFmpeg kmsgrab defaults to device /dev/dri/card0 (see ffmpeg docs); passing -i /dev/dri/card1
+    # does NOT select the DRM node — use -device PATH before -f kmsgrab and -i - .
     for card in "${cards[@]}"; do
         [ -r "$card" ] || continue
         if ffmpeg -hide_banner -nostdin -loglevel error -y \
-            -f kmsgrab -i "$card" \
+            -device "$card" -f kmsgrab -i - \
             -vf 'hwdownload,format=bgra' \
             -frames:v 1 -q:v 6 "$out" 2>/dev/null \
             && mpv_screenshot_ok "$out"; then
@@ -308,7 +310,7 @@ capture_via_kmsgrab() {
         fi
         rm -f "$out"
         if ffmpeg -hide_banner -nostdin -loglevel error -y \
-            -f kmsgrab -i "$card" \
+            -device "$card" -f kmsgrab -i - \
             -frames:v 1 -q:v 6 "$out" 2>/dev/null \
             && mpv_screenshot_ok "$out"; then
             printf '%s' "$out"
