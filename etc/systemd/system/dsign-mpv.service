@@ -1,53 +1,34 @@
 [Unit]
-Description=MPV Player for Digital Signage
-# Не указывать After=multi-user.target: оба юнита WantedBy=multi-user.target, а digital-signage
-# Requires=dsign-mpv — получится цикл «multi-user → signage → mpv → после multi-user».
-# MPV with DRM/KMS needs a controlling TTY/VT. Pi 3B+: --vo=drm is lighter than --vo=gpu.
-After=network.target getty@tty1.service dsign-network-assistant.service
-Wants=dsign-network-assistant.service
+Description=Digital Signage MPV Player
+After=network.target getty@tty1.service
 Conflicts=getty@tty1.service
 
 [Service]
 User=dsign
 Group=video
+Type=simple
 SupplementaryGroups=tty
 PermissionsStartOnly=true
 Environment="TERM=linux"
 WorkingDirectory=/home/dsign
-
-# Attach to tty1 so DRM can switch to graphics mode
 StandardInput=tty
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
 TTYVTDisallocate=yes
-
-# Подготовка директории и прав
+UMask=0002
 ExecStartPre=/bin/chvt 1
-ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv
-ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv
-ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
+ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
+ExecStartPre=/bin/chown -R dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
+ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
-
-# Основная команда запуска
-# NOTE: On Raspberry Pi OS mpv is typically at /usr/bin/mpv (not /usr/local/bin/mpv).
-# --vo=drm + connector/mode: стабильный вывод на Pi 3; без vf=scale если ролики уже 1080p.
-# --drm-drmprime-video-plane=primary: избегаем overlay plane для drmprime (на Pi 3 это часто даёт pin disconnect).
-# --drm-draw-plane=primary: рисуем на primary plane для предсказуемости.
-# hwdec=v4l2m2m-copy: более предсказуемо на Pi 3B+; v4l2m2m без -copy у нас давал ещё большие тормоза.
-# --video-sync=display-vdrop: меньше CPU, чем display-resample. Звук по mute — через IPC/плейлист.
-# Без --audio-samplerate: меньше принудительного ресемплинга на ARM (при необходимости верните 48000).
-# External media playback (VK Video) relies on mpv's `ytdl_hook`, so do NOT disable ytdl.
-# Also avoid hardcoding an ALSA card name: Pi exposes vc4hdmi0/vc4hdmi1; `vc4hdmi` may not exist.
-ExecStart=/usr/bin/mpv --idle=yes --no-terminal --no-config --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=auto --script-opts=ytdl_hook-ytdl_path=/usr/bin/yt-dlp --log-file=/var/lib/dsign/mpv/mpv.log
-# Startup IP OSD is best-effort; never fail MPV startup if helper is unavailable.
-ExecStartPost=-/bin/systemctl --no-block start dsign-show-startup-ip.service
-
-# Настройки перезапуска
+ExecStart=/usr/bin/mpv --idle=yes --no-terminal --config-dir=/var/lib/dsign/mpv-minimal --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-device=/dev/dri/card1 --drm-connector=DP-1 --fullscreen --demuxer-lavf-o=safe=0 --hwdec=auto --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/hdmi:CARD=PCH,DEV=0 --script-opts=ytdl_hook-ytdl_path=/usr/bin/yt-dlp --log-file=/var/log/dsign/mpv.log
+ExecStartPost=-/usr/local/bin/dsign-show-startup-ip
 Restart=always
 RestartSec=5s
 StartLimitInterval=60s
 StartLimitBurst=3
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
