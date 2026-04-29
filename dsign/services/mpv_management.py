@@ -66,6 +66,12 @@ class MPVManager:
         self._mpv_ready = False
         self._managed_by_systemd = True
 
+        # IPC watchdog: if MPV stops answering JSON-IPC (timeouts / empty buffer),
+        # the playback thread can get stuck polling. After repeated timeouts we
+        # restart MPV service to recover.
+        self._ipc_timeout_streak = 0
+        self._last_ipc_restart_monotonic = 0.0
+
         # Логирование инициализации
         self.logger.info(
             "Initializing MPVManager",
@@ -454,6 +460,13 @@ class MPVManager:
                     raise TimeoutError("No command reply from MPV (events only or empty buffer)")
 
             except Exception as e:
+                is_ipc_timeout = isinstance(e, TimeoutError)
+                if is_ipc_timeout:
+                    self._ipc_timeout_streak += 1
+                else:
+                    # Reset streak on non-timeout IPC errors (broken pipe, property unavailable, etc.).
+                    self._ipc_timeout_streak = 0
+
                 self.logger.warning(
                     f"Attempt {attempt+1} failed",
                     extra={
@@ -468,6 +481,37 @@ class MPVManager:
                 )
                 if attempt < PlaybackConstants.MAX_RETRIES - 1:
                     time.sleep(PlaybackConstants.RETRY_DELAY)
+
+                # Restart MPV after a short streak of IPC timeouts, but throttle restarts.
+                # This targets the "MPV is alive but never replies to get_property" situation.
+                if is_ipc_timeout:
+                    streak = int(os.getenv("DSIGN_MPV_IPC_TIMEOUT_RESTART_STREAK", "3") or 3)
+                    cooldown = float(os.getenv("DSIGN_MPV_IPC_TIMEOUT_RESTART_COOLDOWN_SEC", "30") or 30)
+                    now_mono = time.monotonic()
+                    if (
+                        self._ipc_timeout_streak >= max(1, streak)
+                        and (now_mono - self._last_ipc_restart_monotonic) >= max(5.0, cooldown)
+                    ):
+                        self._last_ipc_restart_monotonic = now_mono
+                        self._ipc_timeout_streak = 0
+                        self.logger.error(
+                            "MPV IPC watchdog restarting MPV after repeated get_property timeouts",
+                            extra={
+                                "operation": "MPVCommand",
+                                "command": command_name,
+                                "timeout_sec": timeout,
+                                "streak": streak,
+                                "cooldown_sec": cooldown,
+                                "request_id": ipc_request_id,
+                            },
+                        )
+                        # Best-effort restart; ignore errors so playback loop can proceed/fallback.
+                        try:
+                            self._restart_systemd_service()
+                            self._wait_for_socket(timeout=20.0)
+                            self._ensure_ipc_connected(connect_timeout=min(5.0, float(timeout)))
+                        except Exception:
+                            pass
                 continue
         
         self.logger.error(
