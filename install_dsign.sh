@@ -249,6 +249,10 @@ www-data ALL=(root) NOPASSWD: /bin/systemctl start screenshot.service
 www-data ALL=(root) NOPASSWD: /usr/bin/systemctl start screenshot.service
 dsign ALL=(root) NOPASSWD: /bin/systemctl start screenshot.service
 dsign ALL=(root) NOPASSWD: /usr/bin/systemctl start screenshot.service
+# Allow the app (user dsign) to recover MPV when IPC gets stuck.
+# Keep it narrow: only restart dsign-mpv.service.
+dsign ALL=(root) NOPASSWD: /bin/systemctl restart dsign-mpv.service
+dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart dsign-mpv.service
 EOL
 chmod 440 /etc/sudoers.d/dsign-screenshot
 

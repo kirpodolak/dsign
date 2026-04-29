@@ -170,13 +170,33 @@ class MPVManager:
         """Перезапуск systemd сервиса"""
         try:
             start_time = time.time()
-            result = subprocess.run(
-                ["systemctl", "restart", "dsign-mpv.service"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10.0
-            )
+            # In typical deployments `digital-signage.service` runs as user `dsign` and can't
+            # restart system units directly (polkit). Prefer plain systemctl, but fall back to
+            # `sudo -n systemctl ...` when needed (paired with a narrow NOPASSWD sudoers rule).
+            systemctl = "/bin/systemctl" if os.path.exists("/bin/systemctl") else "systemctl"
+            cmd = [systemctl, "restart", "dsign-mpv.service"]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10.0,
+                )
+            except subprocess.CalledProcessError as e:
+                stderr = (e.stderr or "").strip()
+                if "interactive authentication" in stderr.lower() or "access denied" in stderr.lower():
+                    # Non-interactive sudo: must be allowed by sudoers, otherwise this will fail too.
+                    sudo_cmd = ["sudo", "-n", systemctl, "restart", "dsign-mpv.service"]
+                    result = subprocess.run(
+                        sudo_cmd,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=15.0,
+                    )
+                else:
+                    raise
             duration = time.time() - start_time
             
             self._log_operation(
