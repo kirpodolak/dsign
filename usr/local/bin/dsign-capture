@@ -76,6 +76,33 @@ mpv_screenshot_ok() {
     [ -f "$f" ] && [ "$(wc -c < "$f" 2>/dev/null | tr -d ' ')" -ge 512 ]
 }
 
+pick_recent_capture() {
+    # If MPV wrote the screenshot under a slightly different name/path than expected,
+    # pick the newest preview-capture-*.jpg from MPV_WRITE_DIR within a small time window.
+    local max_age_sec="${1:-5}"
+    local now_ts newest newest_ts
+    now_ts=$(date +%s)
+    newest=""
+    newest_ts=0
+
+    # ls -t: newest first; suppress errors if no matches.
+    for f in $(ls -t "$MPV_WRITE_DIR"/preview-capture-*.jpg 2>/dev/null | head -n 5); do
+        [ -f "$f" ] || continue
+        # GNU stat on Ubuntu
+        ts=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+        if [ "$ts" -gt "$newest_ts" ]; then
+            newest="$f"
+            newest_ts="$ts"
+        fi
+    done
+
+    if [ -n "$newest" ] && [ $((now_ts - newest_ts)) -le "$max_age_sec" ] && mpv_screenshot_ok "$newest"; then
+        printf '%s' "$newest"
+        return 0
+    fi
+    return 1
+}
+
 wait_for_file_ok() {
     local f="$1"
     local timeout_sec="${2:-2.0}"
@@ -145,6 +172,13 @@ screenshot_with_mpv() {
             # Poll briefly for the file to appear with a non-trivial size.
             if wait_for_file_ok "$out" 2.0; then
                 CAPTURE_MPV_OUT="$out"
+                return 0
+            fi
+            # Fallback: if mpv wrote a file but not exactly at $out, grab the newest capture.
+            local picked
+            picked="$(pick_recent_capture 5 2>/dev/null || true)"
+            if [ -n "$picked" ]; then
+                CAPTURE_MPV_OUT="$picked"
                 return 0
             fi
         done
