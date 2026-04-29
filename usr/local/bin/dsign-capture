@@ -6,6 +6,7 @@ set -euo pipefail
 
 OUTPUT_DIR="/home/dsign/dsign/static/images"
 OUTPUT_FILE="on_air_screen.jpg"
+OUTPUT_TMP="${OUTPUT_FILE}.tmp.$$"
 FB_DEV="/dev/fb0"
 MPV_SOCKET="/var/lib/dsign/mpv/socket"
 
@@ -64,8 +65,18 @@ if ! command -v ffmpeg &> /dev/null; then
 fi
 
 mpv_screenshot_ok() {
-    local f="$OUTPUT_DIR/$OUTPUT_FILE"
+    local f="$1"
     [ -f "$f" ] && [ "$(wc -c < "$f" 2>/dev/null | tr -d ' ')" -ge 512 ]
+}
+
+commit_preview() {
+    local src="$1"
+    if ! mpv_screenshot_ok "$src"; then
+        return 1
+    fi
+    chmod 0644 "$src" 2>/dev/null || true
+    mv -f "$src" "$OUTPUT_DIR/$OUTPUT_FILE"
+    return 0
 }
 
 # Try MPV IPC: vo=drm often fails for "video"; try several modes and verify file size.
@@ -73,7 +84,7 @@ screenshot_with_mpv() {
     if ! command -v socat &> /dev/null || [ ! -S "$MPV_SOCKET" ]; then
         return 1
     fi
-    local out="$OUTPUT_DIR/$OUTPUT_FILE"
+    local out="$OUTPUT_DIR/$OUTPUT_TMP"
     rm -f "$out" 2>/dev/null || true
     # JSON-escape path for backslashes
     local jpath
@@ -87,7 +98,7 @@ screenshot_with_mpv() {
             printf '{"command": ["screenshot-to-file", %s, "%s"]}\n' "$jpath" "$mode" | socat - "$MPV_SOCKET" 2>/dev/null || true
         fi
         sleep 0.15
-        if mpv_screenshot_ok; then
+        if mpv_screenshot_ok "$out"; then
             return 0
         fi
     done
@@ -139,18 +150,22 @@ ffmpeg_fb_to_jpeg() {
     esac
     ffmpeg -hide_banner -loglevel error \
         -f rawvideo -pixel_format "$pixfmt" -video_size "${w}x${h}" \
-        -i "$temp" -pix_fmt yuvj420p -frames:v 1 "$OUTPUT_DIR/$OUTPUT_FILE" -y
+        -i "$temp" -pix_fmt yuvj420p -frames:v 1 "$OUTPUT_DIR/$OUTPUT_TMP" -y
 }
 
 mkdir -p "$OUTPUT_DIR"
+trap 'rm -f "$OUTPUT_DIR/$OUTPUT_TMP"' EXIT
 
 if screenshot_with_mpv; then
-    echo "Screenshot taken from MPV."
-    exit 0
+    if commit_preview "$OUTPUT_DIR/$OUTPUT_TMP"; then
+        echo "Screenshot taken from MPV."
+        exit 0
+    fi
 fi
 
 if command -v raspi2png &> /dev/null; then
-    if raspi2png -p "$OUTPUT_DIR/$OUTPUT_FILE" 2>/dev/null && mpv_screenshot_ok; then
+    rm -f "$OUTPUT_DIR/$OUTPUT_TMP" 2>/dev/null || true
+    if raspi2png -p "$OUTPUT_DIR/$OUTPUT_TMP" 2>/dev/null && commit_preview "$OUTPUT_DIR/$OUTPUT_TMP"; then
         echo "Screenshot taken via raspi2png."
         exit 0
     fi
@@ -158,10 +173,10 @@ fi
 
 echo "Using framebuffer fallback..."
 TEMP_RAW=$(mktemp)
-trap 'rm -f "$TEMP_RAW"' EXIT
+trap 'rm -f "$TEMP_RAW" "$OUTPUT_DIR/$OUTPUT_TMP"' EXIT
 
 if [ -c "$FB_DEV" ] && capture_fb_raw "$TEMP_RAW"; then
-    if ffmpeg_fb_to_jpeg "$TEMP_RAW" && mpv_screenshot_ok; then
+    if ffmpeg_fb_to_jpeg "$TEMP_RAW" && commit_preview "$OUTPUT_DIR/$OUTPUT_TMP"; then
         echo "Screenshot taken from framebuffer."
         exit 0
     fi

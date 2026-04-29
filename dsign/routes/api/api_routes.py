@@ -6,7 +6,7 @@ import socket
 import traceback
 import time
 from pathlib import Path 
-from flask import jsonify, request, send_from_directory, abort, current_app, send_file
+from flask import jsonify, request, send_from_directory, abort, current_app, send_file, make_response
 from flask_login import login_required, current_user, login_user, logout_user
 from flask_wtf.csrf import validate_csrf
 from werkzeug.utils import secure_filename
@@ -2092,19 +2092,29 @@ def init_api_routes(api_bp, services):
             # Hot path: this endpoint is polled by the UI.
             # Avoid expensive PIL open/verify here; do validation in the capture endpoint instead.
             if os.path.exists(screenshot_path) and os.path.getsize(screenshot_path) > 1024:
-                return send_file(
-                    screenshot_path,
-                    mimetype='image/jpeg',
-                    conditional=True,
-                    max_age=0
+                resp = make_response(
+                    send_file(
+                        screenshot_path,
+                        mimetype="image/jpeg",
+                        conditional=True,
+                        max_age=0,
+                    )
                 )
-        
-            return send_file(
-                default_path,
-                mimetype='image/jpeg',
-                conditional=True,
-                max_age=0
+                resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                resp.headers["Pragma"] = "no-cache"
+                return resp
+
+            resp = make_response(
+                send_file(
+                    default_path,
+                    mimetype="image/jpeg",
+                    conditional=True,
+                    max_age=0,
+                )
             )
+            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            resp.headers["Pragma"] = "no-cache"
+            return resp
         
         except Exception as e:
             current_app.logger.error(f"Screenshot error: {str(e)}")

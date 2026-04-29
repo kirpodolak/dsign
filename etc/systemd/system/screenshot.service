@@ -4,7 +4,9 @@ After=dsign-mpv.service
 Wants=dsign-mpv.service
 
 [Service]
-Type=simple
+# Wait until dsign-capture exits so `systemctl start` means "capture finished"
+# (Type=simple returns immediately and the UI can reload before the file exists).
+Type=oneshot
 User=dsign
 Group=video
 WorkingDirectory=/home/dsign/dsign/static/images
