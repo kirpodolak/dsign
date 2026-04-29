@@ -91,7 +91,10 @@ const state = {
     usingSocketPush: false,
     refreshTimerId: null,
     refreshInFlight: false,
-    refreshBackoffMs: 0
+    refreshBackoffMs: 0,
+    // Generation token to prevent "old" timers from continuing after reconnect/restart.
+    // This avoids multiple overlapping tick loops that can freeze the UI.
+    refreshGen: 0
 };
 
 // API functions
@@ -1131,6 +1134,10 @@ const handlers = {
     },
 
     startAutoRefresh() {
+        // Bump generation: all previous tick closures must become no-ops.
+        state.refreshGen = (Number(state.refreshGen) || 0) + 1;
+        const gen = state.refreshGen;
+
         // Stop previous loop (if any).
         if (state.refreshIntervalId) {
             clearInterval(state.refreshIntervalId);
@@ -1158,6 +1165,9 @@ const handlers = {
         };
 
         const tick = async () => {
+            // Abort if this tick belongs to an older generation.
+            if (state.refreshGen !== gen) return;
+
             // Prevent overlapping refreshes (important when network is slow).
             if (state.refreshInFlight) {
                 scheduleNext(computeBaseIntervalMs());
@@ -1226,6 +1236,8 @@ const handlers = {
             } finally {
                 state.refreshInFlight = false;
             }
+            // If generation changed while we were awaiting network, don't schedule another tick.
+            if (state.refreshGen !== gen) return;
             const base = computeBaseIntervalMs();
             const delay = Math.max(base, state.refreshBackoffMs || 0);
             scheduleNext(delay);

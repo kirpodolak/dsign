@@ -4,38 +4,37 @@ import socket
 import time
 import subprocess
 from threading import Lock
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Tuple
 from pathlib import Path
 
 from .playback_constants import PlaybackConstants
 from .logger import ServiceLogger
 
 
-def _pick_mpv_ipc_command_reply(data: bytes, expect_request_id: Optional[int]) -> Optional[Dict[str, Any]]:
+def _take_one_mpv_ipc_reply_from_buffer(
+    buf: bytes, expect_request_id: int
+) -> Tuple[Optional[Dict[str, Any]], bytes]:
     """
-    MPV IPC: в одном recv() часто приходит несколько JSON-строк (события + ответ команды).
-    Ответ команды всегда содержит ключ "error"; события — нет (только "event", ...).
+    Split `buf` on newlines; return (reply_for_expect_request_id, remainder_bytes).
+    Incomplete trailing line stays in remainder.
     """
-    if not data:
-        return None
-    text = data.decode("utf-8", errors="replace")
-    exact: Optional[Dict[str, Any]] = None
-    any_reply: Optional[Dict[str, Any]] = None
-    for line in text.split("\n"):
-        line = line.strip()
+    if not buf:
+        return None, buf
+    lines = buf.split(b"\n")
+    remainder = lines[-1]
+    for raw in lines[:-1]:
+        line = raw.strip()
         if not line:
             continue
         try:
-            obj = json.loads(line)
+            obj = json.loads(line.decode("utf-8", errors="replace"))
         except json.JSONDecodeError:
             continue
         if not isinstance(obj, dict) or "error" not in obj:
             continue
-        any_reply = obj
-        if expect_request_id is None or obj.get("request_id") == expect_request_id:
-            exact = obj
-            break
-    return exact if exact is not None else any_reply
+        if obj.get("request_id") == expect_request_id:
+            return obj, remainder
+    return None, buf
 
 
 class MPVManager:
@@ -58,6 +57,11 @@ class MPVManager:
         self.mpv_socket = mpv_socket or PlaybackConstants.SOCKET_PATH
         self.upload_folder = upload_folder
         self._ipc_lock = Lock()
+        # One long-lived Unix socket for all IPC. Opening a new socket per command makes mpv
+        # spawn a client thread each time; overnight polling can exhaust resources and stall IPC.
+        self._ipc_sock: Optional[socket.socket] = None
+        # Leftover bytes after the last parsed IPC line (persistent socket can recv multiple lines).
+        self._ipc_recv_buf: bytes = b""
         self._current_settings = {}
         self._mpv_ready = False
         self._managed_by_systemd = True
@@ -208,6 +212,35 @@ class MPVManager:
             )
             return False
 
+    def _drop_ipc_socket(self) -> None:
+        """Close persistent IPC socket (call with _ipc_lock held)."""
+        if self._ipc_sock is not None:
+            try:
+                self._ipc_sock.close()
+            except Exception:
+                pass
+            self._ipc_sock = None
+            self._ipc_recv_buf = b""
+
+    def _ensure_ipc_connected(self, *, connect_timeout: float = 5.0) -> bool:
+        """Ensure self._ipc_sock is connected (call with _ipc_lock held)."""
+        if self._ipc_sock is not None:
+            return True
+        if not os.path.exists(self.mpv_socket):
+            return False
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(connect_timeout)
+        try:
+            s.connect(self.mpv_socket)
+            self._ipc_sock = s
+            return True
+        except (ConnectionRefusedError, FileNotFoundError, OSError):
+            try:
+                s.close()
+            except Exception:
+                pass
+            return False
+
     def _check_mpv_socket(self, timeout=5) -> bool:
         """Проверка доступности сокета MPV"""
         end_time = time.time() + timeout
@@ -306,50 +339,66 @@ class MPVManager:
 
         for attempt in range(PlaybackConstants.MAX_RETRIES):
             try:
-                with self._ipc_lock, \
-                     socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                    
-                    s.settimeout(timeout)
-                    
-                    try:
-                        s.connect(self.mpv_socket)
-                    except (ConnectionRefusedError, FileNotFoundError):
+                with self._ipc_lock:
+                    s = self._ipc_sock
+                    if s is None:
+                        if os.path.exists(self.mpv_socket):
+                            self._ensure_ipc_connected(
+                                connect_timeout=min(5.0, float(timeout))
+                            )
+                        s = self._ipc_sock
+                    if s is None:
                         self.logger.warning(
                             "MPV socket not available, restarting service...",
                             extra={
                                 "operation": "MPVCommand",
                                 "command": command_name,
                                 "attempt": attempt + 1,
-                                "request_id": ipc_request_id
-                            }
+                                "request_id": ipc_request_id,
+                            },
                         )
+                        self._drop_ipc_socket()
                         if not self._restart_systemd_service() or not self._wait_for_socket():
                             time.sleep(PlaybackConstants.RETRY_DELAY)
                             continue
-                        s.connect(self.mpv_socket)
+                        if not self._ensure_ipc_connected(
+                            connect_timeout=min(5.0, float(timeout))
+                        ):
+                            time.sleep(PlaybackConstants.RETRY_DELAY)
+                            continue
+                        s = self._ipc_sock
+
+                    assert s is not None
 
                     payload = dict(command)
                     payload["request_id"] = ipc_request_id
                     cmd_str = json.dumps(payload, ensure_ascii=False) + "\n"
-                    s.sendall(cmd_str.encode())
+                    try:
+                        s.sendall(cmd_str.encode())
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        self._drop_ipc_socket()
+                        raise
 
-                    deadline = time.time() + timeout
-                    buffer = b""
+                    deadline = time.time() + float(timeout)
                     result: Optional[Dict[str, Any]] = None
                     while time.time() < deadline:
+                        result, self._ipc_recv_buf = _take_one_mpv_ipc_reply_from_buffer(
+                            self._ipc_recv_buf, ipc_request_id
+                        )
+                        if result is not None:
+                            break
                         s.settimeout(max(0.05, deadline - time.time()))
                         try:
                             chunk = s.recv(16384)
                         except socket.timeout:
-                            # No data yet; keep waiting until deadline.
                             continue
-                        buffer += chunk
-                        result = _pick_mpv_ipc_command_reply(buffer, ipc_request_id)
-                        if result is not None:
-                            break
-                        # recv() returns b"" only when the peer closed the connection.
+                        except (BrokenPipeError, ConnectionResetError, OSError):
+                            self._drop_ipc_socket()
+                            raise
                         if chunk == b"":
-                            break
+                            self._drop_ipc_socket()
+                            raise ConnectionError("MPV closed IPC connection")
+                        self._ipc_recv_buf += chunk
 
                     if result is not None:
                         duration_sec = round(time.time() - start_time, 3)
@@ -369,9 +418,6 @@ class MPVManager:
                                     },
                                 )
                         else:
-                            # For get_property, "property unavailable" is expected on some mpv builds / media types.
-                            # Treat it as a non-error and normalize to {"error":"success","data":None} so callers can
-                            # handle it without generating noisy logs.
                             if command_name == "get_property" and err == "property unavailable":
                                 if log_ipc_debug:
                                     self.logger.debug(
@@ -389,8 +435,6 @@ class MPVManager:
                                     "error": "success",
                                     "data": None,
                                 }
-                            # "property unavailable" is common on some mpv builds and is not actionable in production.
-                            # Keep it at DEBUG to avoid log spam.
                             log_fn = self.logger.debug if err == "property unavailable" else self.logger.warning
                             log_fn(
                                 "MPVCommand error response",
@@ -401,14 +445,14 @@ class MPVManager:
                                     "duration_sec": duration_sec,
                                     "attempt": attempt + 1,
                                     "mpv_error": err,
-                                    # Drop full response from warning logs (too noisy); keep essentials.
                                     **({} if err != "property unavailable" else {"response": result}),
                                 },
                             )
                         return result
 
+                    self._drop_ipc_socket()
                     raise TimeoutError("No command reply from MPV (events only or empty buffer)")
-                    
+
             except Exception as e:
                 self.logger.warning(
                     f"Attempt {attempt+1} failed",
@@ -498,6 +542,8 @@ class MPVManager:
             )
         finally:
             self._mpv_ready = False
+            with self._ipc_lock:
+                self._drop_ipc_socket()
 
     def update_settings(self, settings: Dict[str, Any]) -> bool:
         """Обновление настроек"""
