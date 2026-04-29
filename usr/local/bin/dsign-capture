@@ -142,6 +142,52 @@ _mpv_ipc_line() {
     printf '%s\n' "$1" | socat - "$MPV_SOCKET" 2>/dev/null || true
 }
 
+# vo=drm often returns JSON "error":"error running command" for screenshot-to-file; builtin `screenshot` may still work.
+try_mpv_builtin_screenshot() {
+    CAPTURE_MPV_OUT=""
+    if ! command -v socat &> /dev/null || [ ! -S "$MPV_SOCKET" ]; then
+        return 1
+    fi
+    mkdir -p "$OUTPUT_DIR"
+    local marker="$OUTPUT_DIR/.dsign-screenshot-marker"
+    rm -f "$marker" 2>/dev/null || true
+    touch "$marker" || return 1
+
+    local cmd f newest _oldglob
+    _oldglob=$(shopt -p nullglob 2>/dev/null || true)
+    shopt -s nullglob 2>/dev/null || true
+
+    for cmd in \
+        '{"command": ["screenshot", "video"]}' \
+        '{"command": ["screenshot"]}' \
+        '{"command": ["screenshot", "window"]}' \
+        ; do
+        _mpv_ipc_line "$cmd"
+        local i
+        for i in {1..70}; do
+            newest=""
+            for f in "$OUTPUT_DIR"/preview-ipc-* "$OUTPUT_DIR"/mpv-shot-* "$OUTPUT_DIR"/screenshot-*; do
+                [ -f "$f" ] || continue
+                if [ "$f" -nt "$marker" ] 2>/dev/null && mpv_screenshot_ok "$f"; then
+                    newest="$f"
+                    break
+                fi
+            done
+            if [ -n "$newest" ]; then
+                CAPTURE_MPV_OUT="$newest"
+                rm -f "$marker"
+                eval "$_oldglob" 2>/dev/null || true
+                return 0
+            fi
+            sleep 0.05
+        done
+    done
+
+    rm -f "$marker"
+    eval "$_oldglob" 2>/dev/null || true
+    return 1
+}
+
 # Try MPV IPC: vo=drm often rejects screenshot-to-file unless screenshot-sw=yes (see mpv.conf).
 # On success sets CAPTURE_MPV_OUT to the jpeg path (mpv creates this file).
 screenshot_with_mpv() {
@@ -242,6 +288,14 @@ if screenshot_with_mpv && [ -n "${CAPTURE_MPV_OUT:-}" ]; then
     if commit_preview "$CAPTURE_MPV_OUT"; then
         rm -f "$MPV_WRITE_DIR"/preview-capture-*.jpg 2>/dev/null || true
         echo "Screenshot taken from MPV."
+        exit 0
+    fi
+fi
+
+if try_mpv_builtin_screenshot && [ -n "${CAPTURE_MPV_OUT:-}" ]; then
+    if commit_preview "$CAPTURE_MPV_OUT"; then
+        rm -f "$OUTPUT_DIR"/preview-ipc-*.* "$MPV_WRITE_DIR"/preview-capture-*.jpg 2>/dev/null || true
+        echo "Screenshot taken from MPV (builtin screenshot)."
         exit 0
     fi
 fi
