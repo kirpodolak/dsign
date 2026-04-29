@@ -6,6 +6,8 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+set -euo pipefail
+
 # Конфигурация
 DSIGN_USER="dsign"
 WWW_USER="www-data"
@@ -18,6 +20,12 @@ DB_FILE="$DB_DIR/database.db"
 UPLOAD_DIR="/var/lib/dsign/media"
 SETTINGS_FILE="$DB_DIR/settings.json"
 X11_USER_DIR="/home/dsign/.X11"
+
+# Installer toggles (headless-friendly defaults)
+# - DSIGN_SETUP_X11=1 enables xauth setup (only useful if you run a real X session on :0)
+# - DSIGN_GIT_REF can pin a branch/tag/commit (default: main)
+DSIGN_SETUP_X11="${DSIGN_SETUP_X11:-0}"
+DSIGN_GIT_REF="${DSIGN_GIT_REF:-main}"
 
 # Создание пользователя и групп
 if ! id "$DSIGN_USER" &>/dev/null; then
@@ -33,27 +41,43 @@ apt-get install -y \
     python3-pip python3-venv python3-dev \
     sqlite3 libsqlite3-dev \
     mpv ffmpeg yt-dlp \
+    alsa-utils \
     socat \
     nginx git \
     acl libdrm-dev \
-    xauth  # Для X11 авторизации
+    xauth  # optional (only if DSIGN_SETUP_X11=1)
 
 # Создание структуры директорий
 mkdir -p "$PROJECT_DIR" "$VENV_DIR" "$CONFIG_DIR" "$LOG_DIR" "$UPLOAD_DIR" "$DB_DIR" "$X11_USER_DIR"
 chown -R "$DSIGN_USER:$DSIGN_USER" "/home/dsign" "$DB_DIR" "$LOG_DIR" "$X11_USER_DIR"
 chmod -R 775 "$UPLOAD_DIR" "$DB_DIR"
 
-# Настройка X11 авторизации
-sudo -u "$DSIGN_USER" xauth generate :0 . trusted
-chown "$DSIGN_USER:$DSIGN_USER" "$X11_USER_DIR/Xauthority"
-ln -sf "$X11_USER_DIR/Xauthority" "/home/dsign/.Xauthority"
+# Настройка X11 авторизации (не требуется для DRM/KMS headless)
+if [ "$DSIGN_SETUP_X11" = "1" ]; then
+  sudo -u "$DSIGN_USER" xauth generate :0 . trusted || true
+  chown "$DSIGN_USER:$DSIGN_USER" "$X11_USER_DIR/Xauthority" || true
+  ln -sf "$X11_USER_DIR/Xauthority" "/home/dsign/.Xauthority" || true
+fi
 
 # Настройка ACL
 setfacl -R -m u:"$WWW_USER":rwX "$PROJECT_DIR" "$UPLOAD_DIR" "$DB_DIR"
 setfacl -Rd -m u:"$WWW_USER":rwX "$PROJECT_DIR" "$UPLOAD_DIR" "$DB_DIR"
 
-# Клонирование репозитория
-sudo -u "$DSIGN_USER" git clone https://github.com/kirpodolak/dsign.git "$PROJECT_DIR"
+# Preview capture writes new temp files under static/images; must be owned by dsign (not root).
+mkdir -p "$PROJECT_DIR/static/images"
+chown -R "$DSIGN_USER:$DSIGN_USER" "$PROJECT_DIR/static/images"
+chmod 775 "$PROJECT_DIR/static/images"
+
+# Получение репозитория (идемпотентно)
+if [ -d "$PROJECT_DIR/.git" ]; then
+  sudo -u "$DSIGN_USER" git -C "$PROJECT_DIR" fetch --all --prune
+  sudo -u "$DSIGN_USER" git -C "$PROJECT_DIR" checkout -q "$DSIGN_GIT_REF" || true
+  sudo -u "$DSIGN_USER" git -C "$PROJECT_DIR" pull --ff-only || true
+else
+  rm -rf "$PROJECT_DIR"
+  sudo -u "$DSIGN_USER" git clone https://github.com/kirpodolak/dsign.git "$PROJECT_DIR"
+  sudo -u "$DSIGN_USER" git -C "$PROJECT_DIR" checkout -q "$DSIGN_GIT_REF" || true
+fi
 
 # Создание файлов БД и настроек
 touch "$DB_FILE" "$SETTINGS_FILE" "$LOG_DIR/dsign.log" "$LOG_DIR/app.log"
@@ -78,25 +102,29 @@ class Config:
     UPLOAD_FOLDER = '$UPLOAD_DIR'
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
     LOG_DIR = '$LOG_DIR'
-    MPV_SOCKET = '/tmp/mpv-socket'
+    # Keep this in sync with systemd `dsign-mpv.service --input-ipc-server=...`
+    MPV_SOCKET = '/var/lib/dsign/mpv/socket'
 EOL
 
 # Инициализация базы данных
 cat > "$PROJECT_DIR/init_db.py" <<EOL
-from app import create_app
-from extensions import db
-import models
+import os
 
-app = create_app('$CONFIG_DIR/config.py')
+from dsign import create_app
+from dsign.extensions import db
+from dsign.models import User
+
+# Point app to the generated config.py
+os.environ["DSIGN_CONFIG"] = "$CONFIG_DIR/config.py"
+
+app = create_app()
 
 with app.app_context():
     db.create_all()
-    
-    # Создаем администратора по умолчанию
-    admin = models.User.query.filter_by(username='admin').first()
+    admin = db.session.query(User).filter_by(username="admin").first()
     if not admin:
-        admin = models.User(username='admin', is_admin=True)
-        admin.set_password('admin123')
+        admin = User(username="admin", is_admin=True)
+        admin.set_password("admin123")
         db.session.add(admin)
         db.session.commit()
         print("Создан администратор: admin/admin123")
@@ -112,15 +140,15 @@ rm "$PROJECT_DIR/init_db.py"
 cat > /etc/systemd/system/digital-signage.service <<EOL
 [Unit]
 Description=Digital Signage Service (DRM)
-After=graphical.target dsign-network-assistant.service dsign-mpv.service
+After=network.target dsign-network-assistant.service dsign-mpv.service
+Wants=network.target
 Wants=dsign-network-assistant.service
 Wants=dsign-mpv.service
-Requires=dev-dri-card0.device
-ConditionPathExists=/dev/dri/card0
 
 [Service]
 User=$DSIGN_USER
 Group=$DSIGN_USER
+SupplementaryGroups=video audio
 WorkingDirectory=/home/dsign
 Environment="FLASK_APP=dsign.server:create_app()"
 Environment="FLASK_ENV=production"
@@ -131,8 +159,9 @@ Restart=on-failure
 RestartSec=30s
 StandardOutput=journal
 StandardError=journal
-MemoryLimit=500M
+MemoryMax=500M
 CPUQuota=50%
+LimitNOFILE=65536
 
 # Особенно важные настройки:
 KillMode=process
@@ -142,6 +171,7 @@ SendSIGKILL=no
 
 # Права доступа
 DeviceAllow=/dev/dri rw
+# /dev/vchiq is Raspberry Pi specific; ignore on x86
 DeviceAllow=/dev/vchiq rw
 
 # Директории для записи
@@ -153,9 +183,7 @@ EOL
 
 # MPV minimal config under /var/lib/dsign (owned by dsign — editable without root)
 mkdir -p "$DB_DIR/mpv-minimal"
-if [ ! -f "$DB_DIR/mpv-minimal/mpv.conf" ]; then
-    install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/mpv.conf" "$DB_DIR/mpv-minimal/mpv.conf"
-fi
+install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/mpv.conf" "$DB_DIR/mpv-minimal/mpv.conf"
 chown -R "$DSIGN_USER:video" "$DB_DIR/mpv-minimal"
 chmod 775 "$DB_DIR/mpv-minimal"
 chmod 664 "$DB_DIR/mpv-minimal/mpv.conf" 2>/dev/null || true
@@ -171,7 +199,7 @@ Conflicts=getty@tty1.service
 User=$DSIGN_USER
 Group=video
 Type=simple
-SupplementaryGroups=tty
+SupplementaryGroups=tty audio
 PermissionsStartOnly=true
 Environment="TERM=linux"
 WorkingDirectory=/home/dsign
@@ -186,12 +214,13 @@ ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/chown -R dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
-ExecStart=/usr/bin/mpv --idle=yes --no-terminal --config-dir=/var/lib/dsign/mpv-minimal --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --log-file=/var/log/dsign/mpv.log
+ExecStart=/usr/bin/mpv --idle=yes --no-terminal --config-dir=/var/lib/dsign/mpv-minimal --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --fullscreen --demuxer-lavf-o=safe=0 --hwdec=auto --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=auto --script-opts=ytdl_hook-ytdl_path=/usr/bin/yt-dlp --log-file=/var/log/dsign/mpv.log
 ExecStartPost=-/usr/local/bin/dsign-show-startup-ip
 Restart=always
 RestartSec=5s
 StartLimitInterval=60s
 StartLimitBurst=3
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
@@ -202,7 +231,24 @@ install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/
 sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
-chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-capture" /usr/local/bin/dsign-capture
+sed -i 's/\r$//' /usr/local/bin/dsign-capture
+chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-capture
+
+# Screenshot service + timer (web UI "on air" preview)
+install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.service" /etc/systemd/system/screenshot.service
+install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.timer" /etc/systemd/system/screenshot.timer
+
+# Allow the web UI to start the screenshot service without a password prompt.
+# Keep it narrow: only `systemctl start screenshot.service`.
+# NOPASSWD alone allows non-interactive sudo (no requiretty; older sudo rejects !requiretty).
+cat > /etc/sudoers.d/dsign-screenshot <<'EOL'
+www-data ALL=(root) NOPASSWD: /bin/systemctl start screenshot.service
+www-data ALL=(root) NOPASSWD: /usr/bin/systemctl start screenshot.service
+dsign ALL=(root) NOPASSWD: /bin/systemctl start screenshot.service
+dsign ALL=(root) NOPASSWD: /usr/bin/systemctl start screenshot.service
+EOL
+chmod 440 /etc/sudoers.d/dsign-screenshot
 
 cat > /etc/systemd/system/dsign-network-assistant.service <<EOL
 [Unit]
@@ -249,8 +295,9 @@ udevadm trigger
 
 systemctl daemon-reload
 systemctl enable digital-signage.service dsign-mpv.service dsign-network-assistant.service
+systemctl enable screenshot.timer || true
 systemctl disable dsign-show-startup-ip.service || true
-systemctl start dsign-network-assistant.service dsign-mpv.service digital-signage.service
+systemctl start dsign-network-assistant.service dsign-mpv.service digital-signage.service || true
 
 # Настройка Nginx
 cat > /etc/nginx/sites-available/dsign <<EOL
@@ -276,7 +323,7 @@ server {
 }
 EOL
 
-ln -s /etc/nginx/sites-available/dsign /etc/nginx/sites-enabled/
+ln -sf /etc/nginx/sites-available/dsign /etc/nginx/sites-enabled/dsign
 systemctl restart nginx
 
 echo "Установка завершена!"
