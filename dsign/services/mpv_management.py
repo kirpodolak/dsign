@@ -247,6 +247,73 @@ class MPVManager:
                 pass
             return False
 
+    def _best_effort_ipc_command(self, command_arr: list[Any], *, timeout: float = 2.0) -> bool:
+        """
+        Best-effort IPC call that does NOT raise.
+
+        Used after watchdog MPV restarts to avoid leaving the screen blank when Flask
+        doesn't immediately trigger an idle-logo transition.
+        """
+        with self._ipc_lock:
+            s = self._ipc_sock
+            if s is None:
+                return False
+
+            ipc_request_id = int(time.time() * 1_000_000) & 0x7FFFFFFF
+            payload = {"command": command_arr, "request_id": ipc_request_id}
+            cmd_str = json.dumps(payload, ensure_ascii=False) + "\n"
+            try:
+                s.sendall(cmd_str.encode())
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                self._drop_ipc_socket()
+                return False
+
+            deadline = time.time() + float(timeout)
+            while time.time() < deadline:
+                result, self._ipc_recv_buf = _take_one_mpv_ipc_reply_from_buffer(
+                    self._ipc_recv_buf, ipc_request_id
+                )
+                if result is not None:
+                    return result.get("error") == "success"
+
+                s.settimeout(max(0.05, deadline - time.time()))
+                try:
+                    chunk = s.recv(16384)
+                except socket.timeout:
+                    continue
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    self._drop_ipc_socket()
+                    return False
+                if chunk == b"":
+                    self._drop_ipc_socket()
+                    return False
+
+            return False
+
+    def _best_effort_restore_idle_logo(self) -> None:
+        """
+        Ensure `idle_logo.jpg` is loaded into MPV after an MPV restart.
+
+        This is intentionally best-effort: it should never break playback.
+        """
+        try:
+            logo_path = Path(self.upload_folder) / "idle_logo.jpg"
+            if not logo_path.exists() or not os.access(logo_path, os.R_OK):
+                return
+
+            # Keep this minimal and deterministic.
+            cmds = [
+                ["loadfile", str(logo_path), "replace"],
+                ["set_property", "loop-file", "inf"],
+                ["set_property", "pause", "no"],
+                ["set_property", "panscan", 0.0],
+            ]
+            for cmd in cmds:
+                self._best_effort_ipc_command(cmd, timeout=2.0)
+        except Exception:
+            # never let diagnostics break playback
+            return
+
     def _check_mpv_socket(self, timeout=5) -> bool:
         """Проверка доступности сокета MPV"""
         end_time = time.time() + timeout
@@ -510,6 +577,10 @@ class MPVManager:
                             self._restart_systemd_service()
                             self._wait_for_socket(timeout=20.0)
                             self._ensure_ipc_connected(connect_timeout=min(5.0, float(timeout)))
+                            # After an MPV restart, Flask may not re-trigger idle-logo transition
+                            # (it only happens at digital-signage start / playlist stop).
+                            # Restore idle logo best-effort so the screen doesn't stay blank.
+                            self._best_effort_restore_idle_logo()
                         except Exception:
                             pass
                 continue
