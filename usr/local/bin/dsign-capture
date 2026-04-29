@@ -105,7 +105,7 @@ pick_recent_capture() {
 
 wait_for_file_ok() {
     local f="$1"
-    local timeout_sec="${2:-8.0}"
+    local timeout_sec="${2:-2.0}"
     local deadline
     deadline=$(python3 - "$timeout_sec" <<'PY'
 import sys, time
@@ -164,7 +164,7 @@ try_mpv_builtin_screenshot() {
         ; do
         _mpv_ipc_line "$cmd"
         local i
-        for i in {1..160}; do
+        for i in {1..100}; do
             newest=""
             for f in "$OUTPUT_DIR"/preview-ipc-* "$OUTPUT_DIR"/mpv-shot-* "$OUTPUT_DIR"/screenshot-*; do
                 [ -f "$f" ] || continue
@@ -216,7 +216,8 @@ screenshot_with_mpv() {
             fi
             # MPV can return success before the file is fully written (especially on 4K/DRM).
             # Poll briefly for the file to appear with a non-trivial size.
-            if wait_for_file_ok "$out" 10.0; then
+            # Fail-fast when vo=drm rejects screenshots (IPC errors return immediately; long waits only burn CPU/time).
+            if wait_for_file_ok "$out" 2.0; then
                 CAPTURE_MPV_OUT="$out"
                 return 0
             fi
@@ -285,9 +286,17 @@ ffmpeg_fb_to_jpeg() {
 # When mpv IPC cannot save frames (vo=drm), ffmpeg kmsgrab reads the KMS plane (picture on the output).
 capture_via_kmsgrab() {
     local out="$WORK_DIR/kmsgrab.jpg"
-    local card
+    local card _oldglob cards
     rm -f "$out"
-    for card in /dev/dri/card0 /dev/dri/card1; do
+    _oldglob=$(shopt -p nullglob 2>/dev/null || true)
+    shopt -s nullglob 2>/dev/null || true
+    cards=(/dev/dri/card*)
+    eval "$_oldglob" 2>/dev/null || true
+    if [ "${#cards[@]}" -eq 0 ]; then
+        echo "kmsgrab unavailable: no /dev/dri/card* (DRM primary nodes missing — load GPU driver, check boot/display)." >&2
+        return 1
+    fi
+    for card in "${cards[@]}"; do
         [ -r "$card" ] || continue
         if ffmpeg -hide_banner -nostdin -loglevel error -y \
             -f kmsgrab -i "$card" \
