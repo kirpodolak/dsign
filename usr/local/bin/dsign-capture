@@ -6,7 +6,8 @@ set -euo pipefail
 
 OUTPUT_DIR="/home/dsign/dsign/static/images"
 OUTPUT_FILE="on_air_screen.jpg"
-OUTPUT_TMP="${OUTPUT_FILE}.tmp.$$"
+# Temp name must end in .jpg so ffmpeg infers muxer; .tmp.$$ breaks "Unable to choose an output format".
+OUTPUT_TMP="on_air_screen.work-$$.jpg"
 FB_DEV="/dev/fb0"
 MPV_SOCKET="/var/lib/dsign/mpv/socket"
 
