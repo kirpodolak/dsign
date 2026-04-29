@@ -183,9 +183,7 @@ EOL
 
 # MPV minimal config under /var/lib/dsign (owned by dsign — editable without root)
 mkdir -p "$DB_DIR/mpv-minimal"
-if [ ! -f "$DB_DIR/mpv-minimal/mpv.conf" ]; then
-    install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/mpv.conf" "$DB_DIR/mpv-minimal/mpv.conf"
-fi
+install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/mpv.conf" "$DB_DIR/mpv-minimal/mpv.conf"
 chown -R "$DSIGN_USER:video" "$DB_DIR/mpv-minimal"
 chmod 775 "$DB_DIR/mpv-minimal"
 chmod 664 "$DB_DIR/mpv-minimal/mpv.conf" 2>/dev/null || true

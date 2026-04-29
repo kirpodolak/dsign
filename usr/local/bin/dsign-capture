@@ -84,28 +84,41 @@ commit_preview() {
     return 0
 }
 
-# Try MPV IPC: vo=drm often fails for "video"; try several modes and verify file size.
+_mpv_ipc_line() {
+    printf '%s\n' "$1" | socat - "$MPV_SOCKET" 2>/dev/null || true
+}
+
+# Try MPV IPC: vo=drm often rejects screenshot-to-file unless screenshot-sw=yes (see mpv.conf).
 screenshot_with_mpv() {
     if ! command -v socat &> /dev/null || [ ! -S "$MPV_SOCKET" ]; then
         return 1
     fi
     local out="$OUTPUT_TMP_PATH"
     rm -f "$out" 2>/dev/null || true
-    # JSON-escape path for backslashes
     local jpath
     jpath=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')
 
-    for mode in video subtitles window; do
-        rm -f "$out" 2>/dev/null || true
-        if [ "$mode" = "window" ]; then
-            printf '{"command": ["screenshot-to-file", %s]}\n' "$jpath" | socat - "$MPV_SOCKET" 2>/dev/null || true
-        else
-            printf '{"command": ["screenshot-to-file", %s, "%s"]}\n' "$jpath" "$mode" | socat - "$MPV_SOCKET" 2>/dev/null || true
+    # Pass 1: VO paths (video / subtitles / window)
+    # Pass 2: enable software screenshot pipeline when VO blocks HW readback (DRM/KMS)
+    local pass
+    for pass in 1 2; do
+        if [ "$pass" = "2" ]; then
+            # Prefer SW path when VO cannot hand pixels to screenshot-to-file (common with drm).
+            _mpv_ipc_line '{"command": ["set_property", "screenshot-sw", true]}'
+            sleep 0.08
         fi
-        sleep 0.15
-        if mpv_screenshot_ok "$out"; then
-            return 0
-        fi
+        for mode in video subtitles window; do
+            rm -f "$out" 2>/dev/null || true
+            if [ "$mode" = "window" ]; then
+                _mpv_ipc_line "$(printf '{"command": ["screenshot-to-file", %s]}' "$jpath")"
+            else
+                _mpv_ipc_line "$(printf '{"command": ["screenshot-to-file", %s, "%s"]}' "$jpath" "$mode")"
+            fi
+            sleep 0.2
+            if mpv_screenshot_ok "$out"; then
+                return 0
+            fi
+        done
     done
     return 1
 }
@@ -177,14 +190,19 @@ if command -v raspi2png &> /dev/null; then
     fi
 fi
 
-echo "Using framebuffer fallback..."
-TEMP_RAW=$(mktemp "$WORK_DIR/fb.raw.XXXXXX")
-
-if [ -c "$FB_DEV" ] && capture_fb_raw "$TEMP_RAW"; then
-    if ffmpeg_fb_to_jpeg "$TEMP_RAW" && commit_preview "$OUTPUT_TMP_PATH"; then
-        echo "Screenshot taken from framebuffer."
-        exit 0
+# With vo=drm, Linux fbcon (/dev/fb0) often does not contain the decoded video — captures look black.
+# Opt in with DSIGN_CAPTURE_USE_FB=1 if you really use a classic framebuffer console mirror.
+if [ "${DSIGN_CAPTURE_USE_FB:-0}" = "1" ] && [ -c "$FB_DEV" ]; then
+    echo "Using framebuffer fallback (DSIGN_CAPTURE_USE_FB=1)..."
+    TEMP_RAW=$(mktemp "$WORK_DIR/fb.raw.XXXXXX")
+    if capture_fb_raw "$TEMP_RAW"; then
+        if ffmpeg_fb_to_jpeg "$TEMP_RAW" && commit_preview "$OUTPUT_TMP_PATH"; then
+            echo "Screenshot taken from framebuffer."
+            exit 0
+        fi
     fi
+else
+    echo "Skipping framebuffer fallback (vo=drm: fb is usually black; set DSIGN_CAPTURE_USE_FB=1 to force)." >&2
 fi
 
 echo "All capture methods failed." >&2
