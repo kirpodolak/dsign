@@ -9,11 +9,13 @@ Wants=dsign-mpv.service
 Type=oneshot
 User=dsign
 Group=video
+SupplementaryGroups=render
 WorkingDirectory=/home/dsign/dsign/static/images
 ExecStart=/usr/local/bin/dsign-capture
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=5
+TimeoutStartSec=120
 SuccessExitStatus=0 1
 
 # Security sandboxing
@@ -22,6 +24,9 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/dsign/dsign/static/images/
+
+# ffmpeg kmsgrab needs KMS nodes when mpv IPC cannot save screenshots (vo=drm)
+DeviceAllow=/dev/dri rw
 
 [Install]
 WantedBy=multi-user.target

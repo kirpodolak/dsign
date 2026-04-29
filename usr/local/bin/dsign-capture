@@ -86,7 +86,7 @@ pick_recent_capture() {
     newest_ts=0
 
     # ls -t: newest first; suppress errors if no matches.
-    for f in $(ls -t "$MPV_WRITE_DIR"/preview-capture-*.jpg 2>/dev/null | head -n 5); do
+    for f in $(ls -t "$MPV_WRITE_DIR"/preview-capture-*.jpg "$MPV_WRITE_DIR"/preview-capture-*.png 2>/dev/null | head -n 10); do
         [ -f "$f" ] || continue
         # GNU stat on Ubuntu
         ts=$(stat -c %Y "$f" 2>/dev/null || echo 0)
@@ -105,7 +105,7 @@ pick_recent_capture() {
 
 wait_for_file_ok() {
     local f="$1"
-    local timeout_sec="${2:-2.0}"
+    local timeout_sec="${2:-8.0}"
     local deadline
     deadline=$(python3 - "$timeout_sec" <<'PY'
 import sys, time
@@ -164,7 +164,7 @@ try_mpv_builtin_screenshot() {
         ; do
         _mpv_ipc_line "$cmd"
         local i
-        for i in {1..70}; do
+        for i in {1..160}; do
             newest=""
             for f in "$OUTPUT_DIR"/preview-ipc-* "$OUTPUT_DIR"/mpv-shot-* "$OUTPUT_DIR"/screenshot-*; do
                 [ -f "$f" ] || continue
@@ -216,7 +216,7 @@ screenshot_with_mpv() {
             fi
             # MPV can return success before the file is fully written (especially on 4K/DRM).
             # Poll briefly for the file to appear with a non-trivial size.
-            if wait_for_file_ok "$out" 2.0; then
+            if wait_for_file_ok "$out" 10.0; then
                 CAPTURE_MPV_OUT="$out"
                 return 0
             fi
@@ -282,6 +282,34 @@ ffmpeg_fb_to_jpeg() {
         -i "$temp" -pix_fmt yuvj420p -frames:v 1 "$FFMPEG_TMP_JPG" -y
 }
 
+# When mpv IPC cannot save frames (vo=drm), ffmpeg kmsgrab reads the KMS plane (picture on the output).
+capture_via_kmsgrab() {
+    local out="$WORK_DIR/kmsgrab.jpg"
+    local card
+    rm -f "$out"
+    for card in /dev/dri/card0 /dev/dri/card1; do
+        [ -r "$card" ] || continue
+        if ffmpeg -hide_banner -nostdin -loglevel error -y \
+            -f kmsgrab -i "$card" \
+            -vf 'hwdownload,format=bgra' \
+            -frames:v 1 -q:v 6 "$out" 2>/dev/null \
+            && mpv_screenshot_ok "$out"; then
+            printf '%s' "$out"
+            return 0
+        fi
+        rm -f "$out"
+        if ffmpeg -hide_banner -nostdin -loglevel error -y \
+            -f kmsgrab -i "$card" \
+            -frames:v 1 -q:v 6 "$out" 2>/dev/null \
+            && mpv_screenshot_ok "$out"; then
+            printf '%s' "$out"
+            return 0
+        fi
+        rm -f "$out"
+    done
+    return 1
+}
+
 mkdir -p "$OUTPUT_DIR"
 
 if screenshot_with_mpv && [ -n "${CAPTURE_MPV_OUT:-}" ]; then
@@ -306,6 +334,13 @@ if command -v raspi2png &> /dev/null; then
         echo "Screenshot taken via raspi2png."
         exit 0
     fi
+fi
+
+kms_out=""
+kms_out=$(capture_via_kmsgrab || true)
+if [ -n "$kms_out" ] && commit_preview "$kms_out"; then
+    echo "Screenshot taken via ffmpeg kmsgrab (DRM)."
+    exit 0
 fi
 
 # With vo=drm, Linux fbcon (/dev/fb0) often does not contain the decoded video — captures look black.
