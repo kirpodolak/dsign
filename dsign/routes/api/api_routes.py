@@ -588,20 +588,20 @@ def init_api_routes(api_bp, services):
             # Do not fall through to card0 Master / unrelated sinks — that caused stuck ~77% UI.
             return {"available": False, "volume_percent": None, "muted": None}
 
-        # 3) PipeWire (only when not in MPV-direct-HDMI mode, to avoid wrong default sink %)
-        # If MPV is active and uses ALSA directly, MPV volume is the authoritative knob.
-        mpv = _audio_get_mpv()
+        # 3) When MPV is under our control, its software volume is the dashboard source of truth.
+        # Do not require `get_property ao` to succeed: that property can be missing/transient while
+        # `volume`/`mute` still work; falling through to PipeWire/amixer then makes the knob jump.
+        mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
         prefer_mpv = os.getenv("DSIGN_PREFER_MPV_VOLUME", "1").strip().lower() in ("1", "true", "yes", "on")
-        mpv_ao = (mpv or {}).get("ao")
-        if prefer_mpv and mpv and mpv.get("available") and mpv_ao and str(mpv_ao).startswith("alsa"):
-            return {"available": True, "volume_percent": mpv.get("volume_percent"), "muted": mpv.get("muted")}
-        if prefer_mpv:
-            # If we have an MPV manager but couldn't read MPV state right now, don't fall back to
-            # unrelated sinks (which causes the knob to jump). Either return cached MPV state (handled
-            # in _audio_get_mpv) or mark audio unavailable.
-            mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
-            if mgr and mpv is None:
-                return {"available": False, "volume_percent": None, "muted": None}
+        mpv = _audio_get_mpv()
+        if prefer_mpv and mgr:
+            if mpv and mpv.get("available"):
+                return {
+                    "available": True,
+                    "volume_percent": mpv.get("volume_percent"),
+                    "muted": mpv.get("muted"),
+                }
+            return {"available": False, "volume_percent": None, "muted": None}
 
         wp = _wpctl_get_default_sink()
         if wp.get("available") and (wp.get("volume_percent") is not None or wp.get("muted") is not None):
