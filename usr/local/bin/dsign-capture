@@ -8,9 +8,11 @@ OUTPUT_DIR="/home/dsign/dsign/static/images"
 OUTPUT_FILE="on_air_screen.jpg"
 FB_DEV="/dev/fb0"
 MPV_SOCKET="/var/lib/dsign/mpv/socket"
-# mpv creates the screenshot file itself — path must live where the mpv process can write
-# (same dir as IPC socket; NOT /var/tmp — systemd/hardening may block mpv from writing there).
-MPV_WRITE_DIR="/var/lib/dsign/mpv"
+# Serialize JSON-IPC with digital-signage (MPVManager uses one persistent socket + same lock file).
+MPV_IPC_LOCK="${MPV_SOCKET%/*}/.json-ipc.lock"
+# mpv creates the screenshot file itself. Keep it in OUTPUT_DIR so `screenshot.service`
+# (with ProtectSystem=strict) doesn't need write access to /var/lib.
+MPV_WRITE_DIR="$OUTPUT_DIR"
 
 # ffmpeg framebuffer fallback: tmp dir for raw+bgra→jpeg (this process writes, not mpv)
 WORK_DIR=$(mktemp -d "${TMPDIR:-/var/tmp}/dsign-capture.XXXXXX")
@@ -76,6 +78,58 @@ mpv_screenshot_ok() {
     [ -f "$f" ] && [ "$(wc -c < "$f" 2>/dev/null | tr -d ' ')" -ge 512 ]
 }
 
+pick_recent_capture() {
+    # If MPV wrote the screenshot under a slightly different name/path than expected,
+    # pick the newest preview-capture-*.jpg from MPV_WRITE_DIR within a small time window.
+    local max_age_sec="${1:-5}"
+    local now_ts newest newest_ts
+    now_ts=$(date +%s)
+    newest=""
+    newest_ts=0
+
+    # ls -t: newest first; suppress errors if no matches.
+    for f in $(ls -t "$MPV_WRITE_DIR"/preview-capture-*.jpg "$MPV_WRITE_DIR"/preview-capture-*.png 2>/dev/null | head -n 10); do
+        [ -f "$f" ] || continue
+        # GNU stat on Ubuntu
+        ts=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+        if [ "$ts" -gt "$newest_ts" ]; then
+            newest="$f"
+            newest_ts="$ts"
+        fi
+    done
+
+    if [ -n "$newest" ] && [ $((now_ts - newest_ts)) -le "$max_age_sec" ] && mpv_screenshot_ok "$newest"; then
+        printf '%s' "$newest"
+        return 0
+    fi
+    return 1
+}
+
+wait_for_file_ok() {
+    local f="$1"
+    local timeout_sec="${2:-2.0}"
+    local deadline
+    deadline=$(python3 - "$timeout_sec" <<'PY'
+import sys, time
+print(time.time() + float(sys.argv[1]))
+PY
+)
+    while true; do
+        if mpv_screenshot_ok "$f"; then
+            return 0
+        fi
+        if python3 - "$deadline" <<'PY'
+import sys, time
+sys.exit(0 if time.time() < float(sys.argv[1]) else 1)
+PY
+        then
+            sleep 0.05
+            continue
+        fi
+        return 1
+    done
+}
+
 commit_preview() {
     local src="$1"
     if ! mpv_screenshot_ok "$src"; then
@@ -86,8 +140,198 @@ commit_preview() {
     return 0
 }
 
+_mpv_ipc_ensure_lock() {
+    mkdir -p "$(dirname "$MPV_IPC_LOCK")" 2>/dev/null || true
+    touch "$MPV_IPC_LOCK" 2>/dev/null || true
+}
+
 _mpv_ipc_line() {
-    printf '%s\n' "$1" | socat - "$MPV_SOCKET" 2>/dev/null || true
+    _mpv_ipc_ensure_lock
+    export DSIGN_MPV_IPC_LINE="$1"
+    export DSIGN_MPV_SOCK="$MPV_SOCKET"
+    flock -w 180 "$MPV_IPC_LOCK" sh -c 'printf "%s\n" "$DSIGN_MPV_IPC_LINE" | socat - "$DSIGN_MPV_SOCK" 2>/dev/null || true'
+}
+
+_mpv_get_prop_json() {
+    local req="$1"
+    _mpv_ipc_ensure_lock
+    export DSIGN_MPV_IPC_REQ="$req"
+    export DSIGN_MPV_SOCK="$MPV_SOCKET"
+    flock -w 180 "$MPV_IPC_LOCK" sh -c 'printf "%s\n" "$DSIGN_MPV_IPC_REQ" | socat - "$DSIGN_MPV_SOCK" 2>/dev/null || true'
+}
+
+_mpv_ipc_data_string() {
+    # Prints mpv IPC "data" when it is a string (stdin = one JSON line).
+    python3 -c '
+import json, sys
+try:
+    j = json.load(sys.stdin)
+    if j.get("error") not in (None, "success"):
+        print("")
+        sys.exit(0)
+    d = j.get("data")
+    print(d if isinstance(d, str) else "")
+except Exception:
+    print("")
+'
+}
+
+_mpv_ipc_data_bool_yesno() {
+    # Prints yes/no for boolean property, empty on failure (stdin = one JSON line).
+    python3 -c '
+import json, sys
+try:
+    j = json.load(sys.stdin)
+    if j.get("error") not in (None, "success"):
+        print("")
+        sys.exit(0)
+    d = j.get("data")
+    if isinstance(d, bool):
+        print("yes" if d else "no")
+    else:
+        print("")
+except Exception:
+    print("")
+'
+}
+
+# ffmpeg kmsgrab often fails while mpv holds DRM master on the same card — decode a frame from what mpv is playing instead.
+capture_via_playing_media() {
+    local out="$WORK_DIR/media-thumb.jpg"
+    local path idle raw
+    rm -f "$out"
+
+    if ! command -v socat &> /dev/null || [ ! -S "$MPV_SOCKET" ]; then
+        return 1
+    fi
+
+    raw=$(_mpv_get_prop_json '{"command": ["get_property", "idle-active"]}')
+    idle=$(printf '%s' "$raw" | _mpv_ipc_data_bool_yesno)
+    if [ "$idle" = "yes" ]; then
+        local logo
+        for logo in \
+            "$OUTPUT_DIR/idle_logo.jpg" \
+            "/var/lib/dsign/media/idle_logo.jpg" \
+            ; do
+            if [ -f "$logo" ] && [ -r "$logo" ]; then
+                printf 'Idle-active: using idle logo %s\n' "$logo" >&2
+                if ffmpeg -hide_banner -nostdin -loglevel error -y -i "$logo" -frames:v 1 -q:v 5 "$out" 2>/dev/null \
+                    && mpv_screenshot_ok "$out"; then
+                    printf '%s' "$out"
+                    return 0
+                fi
+                rm -f "$out"
+            fi
+        done
+        echo "Playing-media capture skipped: idle-active and no readable idle_logo.jpg." >&2
+        return 1
+    fi
+
+    raw=$(_mpv_get_prop_json '{"command": ["get_property", "path"]}')
+    path=$(printf '%s' "$raw" | _mpv_ipc_data_string | tr -d '\r')
+    if [ -z "$path" ] || [ "$path" = "null" ]; then
+        raw=$(_mpv_get_prop_json '{"command": ["get_property", "filename"]}')
+        path=$(printf '%s' "$raw" | _mpv_ipc_data_string | tr -d '\r')
+    fi
+    if [ -z "$path" ] || [ "$path" = "null" ]; then
+        echo "Playing-media capture skipped: no path/filename." >&2
+        return 1
+    fi
+
+    printf 'Playing-media capture trying: %.120s%s\n' "$path" "$([ ${#path} -gt 120 ] && echo …)" >&2
+
+    # Local file (image/video playlist item).
+    if [ -f "$path" ] && [ -r "$path" ]; then
+        local ssargs=()
+        case "${path,,}" in
+            *.mp4|*.mkv|*.webm|*.mov|*.avi|*.ts|*.m4v|*.mpeg|*.mpg)
+                ssargs=(-ss 2)
+                ;;
+        esac
+        if ffmpeg -hide_banner -nostdin -loglevel error -y \
+            "${ssargs[@]}" -i "$path" -vf 'thumbnail' -frames:v 1 -q:v 5 "$out" 2>"$WORK_DIR/ffmpeg-media.err" \
+            && mpv_screenshot_ok "$out"; then
+            printf '%s' "$out"
+            return 0
+        fi
+        rm -f "$out"
+        # thumbnail filter can fail on tiny inputs; single-frame grab.
+        if ffmpeg -hide_banner -nostdin -loglevel error -y \
+            "${ssargs[@]}" -i "$path" -frames:v 1 -q:v 5 "$out" 2>>"$WORK_DIR/ffmpeg-media.err" \
+            && mpv_screenshot_ok "$out"; then
+            printf '%s' "$out"
+            return 0
+        fi
+        rm -f "$out"
+        tail -n 8 "$WORK_DIR/ffmpeg-media.err" >&2 || true
+        return 1
+    fi
+
+    # Remote URL (best-effort; may fail offline / slow).
+    case "$path" in
+        http://*|https://*)
+            if ffmpeg -hide_banner -nostdin -loglevel error -y \
+                -headers "Connection: close\r\n" \
+                -rw_timeout 15000000 \
+                -ss 2 -i "$path" -frames:v 1 -q:v 6 "$out" 2>"$WORK_DIR/ffmpeg-url.err" \
+                && mpv_screenshot_ok "$out"; then
+                printf '%s' "$out"
+                return 0
+            fi
+            rm -f "$out"
+            tail -n 8 "$WORK_DIR/ffmpeg-url.err" >&2 || true
+            ;;
+        *)
+            echo "Playing-media capture skipped: path not a readable local file (DRM-only buffer?)." >&2
+            ;;
+    esac
+    return 1
+}
+
+# vo=drm often returns JSON "error":"error running command" for screenshot-to-file; builtin `screenshot` may still work.
+try_mpv_builtin_screenshot() {
+    CAPTURE_MPV_OUT=""
+    if ! command -v socat &> /dev/null || [ ! -S "$MPV_SOCKET" ]; then
+        return 1
+    fi
+    mkdir -p "$OUTPUT_DIR"
+    local marker="$OUTPUT_DIR/.dsign-screenshot-marker"
+    rm -f "$marker" 2>/dev/null || true
+    touch "$marker" || return 1
+
+    local cmd f newest _oldglob
+    _oldglob=$(shopt -p nullglob 2>/dev/null || true)
+    shopt -s nullglob 2>/dev/null || true
+
+    for cmd in \
+        '{"command": ["screenshot", "video"]}' \
+        '{"command": ["screenshot"]}' \
+        '{"command": ["screenshot", "window"]}' \
+        ; do
+        _mpv_ipc_line "$cmd"
+        local i
+        for i in {1..100}; do
+            newest=""
+            for f in "$OUTPUT_DIR"/preview-ipc-* "$OUTPUT_DIR"/mpv-shot-* "$OUTPUT_DIR"/screenshot-*; do
+                [ -f "$f" ] || continue
+                if [ "$f" -nt "$marker" ] 2>/dev/null && mpv_screenshot_ok "$f"; then
+                    newest="$f"
+                    break
+                fi
+            done
+            if [ -n "$newest" ]; then
+                CAPTURE_MPV_OUT="$newest"
+                rm -f "$marker"
+                eval "$_oldglob" 2>/dev/null || true
+                return 0
+            fi
+            sleep 0.05
+        done
+    done
+
+    rm -f "$marker"
+    eval "$_oldglob" 2>/dev/null || true
+    return 1
 }
 
 # Try MPV IPC: vo=drm often rejects screenshot-to-file unless screenshot-sw=yes (see mpv.conf).
@@ -116,9 +360,18 @@ screenshot_with_mpv() {
             else
                 _mpv_ipc_line "$(printf '{"command": ["screenshot-to-file", %s, "%s"]}' "$jpath" "$mode")"
             fi
-            sleep 0.2
-            if mpv_screenshot_ok "$out"; then
+            # MPV can return success before the file is fully written (especially on 4K/DRM).
+            # Poll briefly for the file to appear with a non-trivial size.
+            # Fail-fast when vo=drm rejects screenshots (IPC errors return immediately; long waits only burn CPU/time).
+            if wait_for_file_ok "$out" 2.0; then
                 CAPTURE_MPV_OUT="$out"
+                return 0
+            fi
+            # Fallback: if mpv wrote a file but not exactly at $out, grab the newest capture.
+            local picked
+            picked="$(pick_recent_capture 5 2>/dev/null || true)"
+            if [ -n "$picked" ]; then
+                CAPTURE_MPV_OUT="$picked"
                 return 0
             fi
         done
@@ -176,12 +429,62 @@ ffmpeg_fb_to_jpeg() {
         -i "$temp" -pix_fmt yuvj420p -frames:v 1 "$FFMPEG_TMP_JPG" -y
 }
 
+# When mpv IPC cannot save frames (vo=drm), ffmpeg kmsgrab reads the KMS plane (picture on the output).
+capture_via_kmsgrab() {
+    local out="$WORK_DIR/kmsgrab.jpg"
+    local card _oldglob cards
+    rm -f "$out"
+    _oldglob=$(shopt -p nullglob 2>/dev/null || true)
+    shopt -s nullglob 2>/dev/null || true
+    cards=(/dev/dri/card*)
+    eval "$_oldglob" 2>/dev/null || true
+    if [ "${#cards[@]}" -eq 0 ]; then
+        echo "kmsgrab unavailable: no /dev/dri/card* (DRM primary nodes missing — load GPU driver, check boot/display)." >&2
+        return 1
+    fi
+    # FFmpeg kmsgrab defaults to device /dev/dri/card0 (see ffmpeg docs); passing -i /dev/dri/card1
+    # does NOT select the DRM node — use -device PATH before -f kmsgrab and -i - .
+    for card in "${cards[@]}"; do
+        [ -r "$card" ] || continue
+        if ffmpeg -hide_banner -nostdin -loglevel warning -y \
+            -device "$card" -f kmsgrab -i - \
+            -vf 'hwdownload,format=bgra' \
+            -frames:v 1 -q:v 6 "$out" 2>"$WORK_DIR/ffmpeg-kmsgrab.err" \
+            && mpv_screenshot_ok "$out"; then
+            printf '%s' "$out"
+            return 0
+        fi
+        echo "kmsgrab ($card, vf=bgra) failed:" >&2
+        tail -n 15 "$WORK_DIR/ffmpeg-kmsgrab.err" >&2 || true
+        rm -f "$out"
+        if ffmpeg -hide_banner -nostdin -loglevel warning -y \
+            -device "$card" -f kmsgrab -i - \
+            -frames:v 1 -q:v 6 "$out" 2>"$WORK_DIR/ffmpeg-kmsgrab.err" \
+            && mpv_screenshot_ok "$out"; then
+            printf '%s' "$out"
+            return 0
+        fi
+        echo "kmsgrab ($card, raw) failed:" >&2
+        tail -n 15 "$WORK_DIR/ffmpeg-kmsgrab.err" >&2 || true
+        rm -f "$out"
+    done
+    return 1
+}
+
 mkdir -p "$OUTPUT_DIR"
 
 if screenshot_with_mpv && [ -n "${CAPTURE_MPV_OUT:-}" ]; then
     if commit_preview "$CAPTURE_MPV_OUT"; then
         rm -f "$MPV_WRITE_DIR"/preview-capture-*.jpg 2>/dev/null || true
         echo "Screenshot taken from MPV."
+        exit 0
+    fi
+fi
+
+if try_mpv_builtin_screenshot && [ -n "${CAPTURE_MPV_OUT:-}" ]; then
+    if commit_preview "$CAPTURE_MPV_OUT"; then
+        rm -f "$OUTPUT_DIR"/preview-ipc-*.* "$MPV_WRITE_DIR"/preview-capture-*.jpg 2>/dev/null || true
+        echo "Screenshot taken from MPV (builtin screenshot)."
         exit 0
     fi
 fi
@@ -194,13 +497,27 @@ if command -v raspi2png &> /dev/null; then
     fi
 fi
 
+media_out=""
+media_out=$(capture_via_playing_media || true)
+if [ -n "$media_out" ] && commit_preview "$media_out"; then
+    echo "Screenshot taken from playing media (ffmpeg thumb)."
+    exit 0
+fi
+
+kms_out=""
+kms_out=$(capture_via_kmsgrab || true)
+if [ -n "$kms_out" ] && commit_preview "$kms_out"; then
+    echo "Screenshot taken via ffmpeg kmsgrab (DRM)."
+    exit 0
+fi
+
 # With vo=drm, Linux fbcon (/dev/fb0) often does not contain the decoded video — captures look black.
 # Opt in with DSIGN_CAPTURE_USE_FB=1 if you really use a classic framebuffer console mirror.
 if [ "${DSIGN_CAPTURE_USE_FB:-0}" = "1" ] && [ -c "$FB_DEV" ]; then
     echo "Using framebuffer fallback (DSIGN_CAPTURE_USE_FB=1)..."
     TEMP_RAW=$(mktemp "$WORK_DIR/fb.raw.XXXXXX")
     if capture_fb_raw "$TEMP_RAW"; then
-        if ffmpeg_fb_to_jpeg "$TEMP_RAW" && commit_preview "$OUTPUT_TMP_PATH"; then
+        if ffmpeg_fb_to_jpeg "$TEMP_RAW" && commit_preview "$FFMPEG_TMP_JPG"; then
             echo "Screenshot taken from framebuffer."
             exit 0
         fi
