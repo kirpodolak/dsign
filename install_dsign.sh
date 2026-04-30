@@ -229,11 +229,13 @@ EOL
 # Network assistant helper (OSD on content screen via MPV IPC)
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/bin/dsign-network-assistant
 sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-post-start" /usr/local/bin/dsign-mpv-post-start
+sed -i 's/\r$//' /usr/local/bin/dsign-mpv-post-start
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-capture" /usr/local/bin/dsign-capture
 sed -i 's/\r$//' /usr/local/bin/dsign-capture
-chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-capture
+chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-mpv-post-start /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-capture
 
 # Screenshot service + timer (web UI "on air" preview)
 install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.service" /etc/systemd/system/screenshot.service
@@ -247,6 +249,10 @@ www-data ALL=(root) NOPASSWD: /bin/systemctl start screenshot.service
 www-data ALL=(root) NOPASSWD: /usr/bin/systemctl start screenshot.service
 dsign ALL=(root) NOPASSWD: /bin/systemctl start screenshot.service
 dsign ALL=(root) NOPASSWD: /usr/bin/systemctl start screenshot.service
+# Allow the app (user dsign) to recover MPV when IPC gets stuck.
+# Keep it narrow: only restart dsign-mpv.service.
+dsign ALL=(root) NOPASSWD: /bin/systemctl restart dsign-mpv.service
+dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart dsign-mpv.service
 EOL
 chmod 440 /etc/sudoers.d/dsign-screenshot
 
