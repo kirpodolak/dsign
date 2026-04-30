@@ -83,6 +83,8 @@ export class SettingsManager {
             initialized: false,
             /** Local audio state during drag (0–100, muted) */
             audioLocal: { volume: null, muted: null },
+            /** True while the user is actively dragging the knob. */
+            audioDragging: false,
             _overrideSaveTimers: new Map(),
             _globalSaveTimer: null,
         };
@@ -269,6 +271,7 @@ export class SettingsManager {
         donut.addEventListener('pointerdown', (e) => {
             if (e.target === btn || btn.contains(e.target)) return;
             e.preventDefault();
+            this.state.audioDragging = true;
             let base =
                 this.state.audioLocal.volume != null
                     ? this.state.audioLocal.volume
@@ -298,9 +301,14 @@ export class SettingsManager {
         const endDrag = (e) => {
             if (!drag) return;
             drag = null;
+            this.state.audioDragging = false;
             try {
                 donut.releasePointerCapture(e.pointerId);
             } catch (_) { /* noop */ }
+            // If the POST is slow/fails, don't keep the UI stuck in a local override.
+            // Let the next poll snap the knob to server truth.
+            this.state.audioLocal = { volume: null, muted: null };
+            this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
         };
         donut.addEventListener('pointerup', endDrag);
         donut.addEventListener('pointercancel', endDrag);
@@ -379,7 +387,9 @@ export class SettingsManager {
             this.state.systemStatus = data.status || null;
             this.applyNonAudioStatusToDashboard();
             const audioIdle =
-                this.state.audioLocal.volume == null && this.state.audioLocal.muted == null;
+                !this.state.audioDragging
+                && this.state.audioLocal.volume == null
+                && this.state.audioLocal.muted == null;
             if (audioIdle) {
                 this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
             }
