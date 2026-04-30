@@ -85,6 +85,8 @@ export class SettingsManager {
             audioLocal: { volume: null, muted: null },
             /** True while the user is actively dragging the knob. */
             audioDragging: false,
+            /** Monotonic id for in-flight audio POSTs to avoid out-of-order UI rewrites. */
+            audioPostSeq: 0,
             _overrideSaveTimers: new Map(),
             _globalSaveTimer: null,
         };
@@ -241,9 +243,18 @@ export class SettingsManager {
 
         let drag = null;
 
+        const getEffectiveAudio = () => {
+            const sv = this.state.systemStatus?.audio || {};
+            return {
+                volume: this.state.audioLocal.volume != null ? this.state.audioLocal.volume : (typeof sv.volume_percent === 'number' ? sv.volume_percent : null),
+                muted: this.state.audioLocal.muted != null ? this.state.audioLocal.muted : (sv.muted != null ? Boolean(sv.muted) : null),
+            };
+        };
+
         const applyLocalToUi = () => {
-            const v = this.state.audioLocal.volume;
-            const m = this.state.audioLocal.muted;
+            const eff = getEffectiveAudio();
+            const v = eff.volume;
+            const m = eff.muted;
             const lang = getUiLang();
             if (v != null) donut.style.setProperty('--p', String(Math.max(0, Math.min(100, v))));
             const valEl = this._qsDashboard('audioValue');
@@ -267,8 +278,8 @@ export class SettingsManager {
         btn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            const cur = this.state.audioLocal.muted;
-            this.state.audioLocal.muted = !cur;
+            const cur = getEffectiveAudio().muted;
+            this.state.audioLocal.muted = !(cur === true);
             applyLocalToUi();
             scheduleAudioPost();
         });
@@ -321,6 +332,7 @@ export class SettingsManager {
     async _flushAudioPost() {
         const vol = this.state.audioLocal.volume;
         const muted = this.state.audioLocal.muted;
+        const seq = ++this.state.audioPostSeq;
         let ok = false;
         try {
             const resp = await fetch('/api/system/audio', {
@@ -334,6 +346,10 @@ export class SettingsManager {
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+            // Ignore out-of-order responses (e.g. debounced request finishes after a newer flush).
+            if (seq !== this.state.audioPostSeq) {
+                return;
+            }
             if (data.audio) {
                 this.state.systemStatus = this.state.systemStatus || {};
                 this.state.systemStatus.audio = data.audio;
@@ -343,14 +359,17 @@ export class SettingsManager {
         } catch (err) {
             console.error('Audio save failed:', err);
         } finally {
-            // Always clear the local override so polling can resync the knob.
-            // If the POST failed (CSRF expired / network), revert the UI to the last known server state.
-            this.state.audioLocal = { volume: null, muted: null };
-            if (!ok) {
-                this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
+            // Only the latest request is allowed to clear the local override / refresh UI.
+            if (seq === this.state.audioPostSeq) {
+                // Always clear the local override so polling can resync the knob.
+                // If the POST failed (CSRF expired / network), revert the UI to the last known server state.
+                this.state.audioLocal = { volume: null, muted: null };
+                if (!ok) {
+                    this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
+                }
+                // Re-fetch status so the donut matches server truth (avoids stale cached /api/system/status audio).
+                await this.refreshSystemStatus().catch(() => {});
             }
-            // Re-fetch status so the donut matches server truth (avoids stale cached /api/system/status audio).
-            await this.refreshSystemStatus().catch(() => {});
         }
     }
 
