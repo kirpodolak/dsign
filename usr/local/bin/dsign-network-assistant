@@ -4,6 +4,7 @@ set -u
 TTY_DEVICE="/dev/tty1"
 STARTUP_IP_FILE="${DSIGN_STARTUP_IP_FILE:-/tmp/dsign-startup-ip.txt}"
 PROMPT_TIMEOUT_SEC="${DSIGN_NETWORK_PROMPT_TIMEOUT_SEC:-120}"
+INTERACTIVE="${DSIGN_NETWORK_ASSISTANT_INTERACTIVE:-0}"
 
 log() {
   logger -t dsign-network-assistant "$*"
@@ -60,6 +61,13 @@ run_nmtui_once() {
 
 main() {
   rm -f "$STARTUP_IP_FILE"
+
+  # Non-interactive default: just persist IP (if any) and exit.
+  # This helper must never block boot or the web UI.
+  if [ "${INTERACTIVE}" != "1" ] && [ "${INTERACTIVE}" != "true" ] && [ "${INTERACTIVE}" != "yes" ]; then
+    persist_startup_ip
+    return 0
+  fi
 
   if has_internet; then
     log "Internet already available at startup"

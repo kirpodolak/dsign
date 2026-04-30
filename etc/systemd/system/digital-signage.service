@@ -1,8 +1,7 @@
 [Unit]
 Description=Digital Signage Controller
-After=network.target dsign-mpv.service dsign-network-assistant.service
+After=network.target dsign-mpv.service
 Requires=dsign-mpv.service
-Wants=dsign-network-assistant.service
 StartLimitIntervalSec=60
 StartLimitBurst=3
 
@@ -25,7 +24,8 @@ Environment=DSIGN_TRANSCODE_TARGET_FPS=25
 # Environment=DSIGN_MPV_NETBUF_MAX_MB=96
 # Environment=DSIGN_MPV_NETBUF_BACK_MB=16
 # Environment=DSIGN_MPV_NETBUF_READAHEAD_SECS=20
-ExecStart=/usr/bin/python3 /home/dsign/run.py
+# Use module execution so imports work even if cwd changes.
+ExecStart=/home/dsign/venv/bin/python -m dsign.run
 # Настройки перезапуска
 Restart=on-failure
 RestartSec=30s

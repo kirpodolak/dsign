@@ -1,7 +1,6 @@
 [Unit]
 Description=Digital Signage Network Assistant (screen mode)
 After=network.target
-Before=dsign-mpv.service digital-signage.service
 Wants=network.target
 
 [Service]
@@ -11,6 +10,16 @@ Group=root
 ExecStart=/usr/local/bin/dsign-network-assistant
 Environment=DSIGN_NETWORK_PROMPT_TIMEOUT_SEC=120
 Environment=DSIGN_STARTUP_IP_FILE=/tmp/dsign-startup-ip.txt
+Environment=TERM=linux
+Environment=DSIGN_NETWORK_ASSISTANT_INTERACTIVE=0
+TimeoutStartSec=130
+
+# Keep all UI interaction on tty1 (nmtui needs TERM + a controlling TTY).
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=no
+TTYVTDisallocate=no
 
 [Install]
 WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 [Unit]
 Description=Digital Signage Startup IP OSD helper
-After=dsign-mpv.service dsign-network-assistant.service
+After=dsign-mpv.service
 
 [Service]
 Type=oneshot

@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MPV_SOCKET="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
+IDLE_LOGO_PATH="${DSIGN_IDLE_LOGO_PATH:-/var/lib/dsign/media/idle_logo.jpg}"
+SHOW_DURATION_MS="${DSIGN_STARTUP_IP_DURATION_MS:-60000}"
+WAIT_TIMEOUT_SEC="${DSIGN_MPV_POST_START_WAIT_SEC:-25}"
+
+log() {
+  logger -t dsign-mpv-post-start "$*"
+}
+
+primary_ip() {
+  ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}'
+}
+
+if [ ! -S "$MPV_SOCKET" ]; then
+  log "Skip: MPV socket missing: $MPV_SOCKET"
+  exit 0
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  log "Skip: python3 missing (cannot reliably wait for IPC replies)"
+  exit 0
+fi
+
+ip_addr="$(primary_ip || true)"
+if [ -z "${ip_addr:-}" ]; then
+  ip_addr="0.0.0.0"
+fi
+
+python3 - "$MPV_SOCKET" "$IDLE_LOGO_PATH" "$ip_addr" "$SHOW_DURATION_MS" "$WAIT_TIMEOUT_SEC" <<'PY'
+import json
+import os
+import socket
+import sys
+import time
+
+sock_path = sys.argv[1]
+idle_logo = sys.argv[2]
+ip_addr = sys.argv[3]
+duration_ms = int(sys.argv[4])
+wait_sec = float(sys.argv[5])
+
+def send_and_wait(s, cmd, timeout=2.0):
+    rid = int(time.time() * 1_000_000) & 0x7fffffff
+    payload = {"command": cmd, "request_id": rid}
+    s.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+    deadline = time.time() + timeout
+    buf = b""
+    while time.time() < deadline:
+        try:
+            s.settimeout(max(0.05, deadline - time.time()))
+            chunk = s.recv(4096)
+        except socket.timeout:
+            continue
+        if not chunk:
+            return None
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line.decode("utf-8", errors="replace"))
+            except Exception:
+                continue
+            if isinstance(obj, dict) and obj.get("request_id") == rid:
+                return obj
+    return None
+
+def connect():
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2.0)
+    s.connect(sock_path)
+    return s
+
+start = time.time()
+last_err = None
+while time.time() - start < wait_sec:
+    try:
+        s = connect()
+        # Wait until MPV actually replies to a basic get_property.
+        r = send_and_wait(s, ["get_property", "mpv-version"], timeout=1.5)
+        if r and r.get("error") == "success":
+            # Load idle logo (best-effort; OK if it fails)
+            if idle_logo and os.path.exists(idle_logo):
+                send_and_wait(s, ["loadfile", idle_logo, "replace"], timeout=2.0)
+                send_and_wait(s, ["set_property", "loop-file", "inf"], timeout=1.5)
+                send_and_wait(s, ["set_property", "pause", "no"], timeout=1.5)
+                send_and_wait(s, ["set_property", "panscan", 0.0], timeout=1.5)
+            # Show IP OSD (always best-effort)
+            send_and_wait(s, ["show-text", f"IP: {ip_addr}", duration_ms], timeout=1.5)
+            try:
+                s.close()
+            except Exception:
+                pass
+            sys.exit(0)
+        last_err = "no_reply"
+        try:
+            s.close()
+        except Exception:
+            pass
+    except Exception as e:
+        last_err = str(e)
+    time.sleep(0.25)
+
+print(f"dsign-mpv-post-start: timeout waiting for IPC replies (last_err={last_err})", file=sys.stderr)
+sys.exit(0)
+PY
+
+log "Post-start completed (idle logo + IP OSD attempted)"
+exit 0
+

@@ -10,11 +10,11 @@ log() {
   logger -t dsign-show-startup-ip "$*"
 }
 
-wait_for_inputs() {
+wait_for_socket() {
   local deadline now
   deadline=$(( $(date +%s) + WAIT_TIMEOUT_SEC ))
   while true; do
-    if [ -r "$STARTUP_IP_FILE" ] && [ -S "$MPV_SOCKET" ]; then
+    if [ -S "$MPV_SOCKET" ]; then
       return 0
     fi
     now="$(date +%s)"
@@ -25,42 +25,110 @@ wait_for_inputs() {
   done
 }
 
-if ! wait_for_inputs; then
-  log "Skip: startup IP file or MPV socket missing (timeout=${WAIT_TIMEOUT_SEC}s)"
+if ! wait_for_socket; then
+  log "Skip: MPV socket missing (timeout=${WAIT_TIMEOUT_SEC}s)"
   exit 0
 fi
 
-ip_addr="$(tr -d '\r\n' < "$STARTUP_IP_FILE" 2>/dev/null || true)"
+primary_ip() {
+  ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}'
+}
+
+read_ip_from_file() {
+  [ -r "$STARTUP_IP_FILE" ] || return 1
+  tr -d '\r\n' < "$STARTUP_IP_FILE" 2>/dev/null || true
+}
+
+ip_addr="$(read_ip_from_file || true)"
 if [ -z "$ip_addr" ]; then
-  rm -f "$STARTUP_IP_FILE"
-  log "Skip: startup IP is empty"
+  ip_addr="$(primary_ip || true)"
+fi
+
+if [ -z "$ip_addr" ]; then
+  # Nothing to show (don't delete startup file if it may be produced later).
+  log "Skip: startup IP is empty/unavailable"
   exit 0
 fi
 
-if command -v python3 >/dev/null 2>&1; then
-  payload="$(
-    python3 - "$ip_addr" "$SHOW_DURATION_MS" <<'PY'
-import json
-import sys
+attempt_send_ip() {
+  # Returns 0 if MPV accepted and replied with error=success, else non-zero.
+  python3 - "$ip_addr" "$SHOW_DURATION_MS" "$MPV_SOCKET" <<'PY'
+import json, socket, sys, time
 
 ip = sys.argv[1]
 duration_ms = int(sys.argv[2]) if len(sys.argv) > 2 else 60000
-print(json.dumps({"command": ["show-text", f"IP: {ip}", duration_ms]}, ensure_ascii=False))
+sock_path = sys.argv[3]
+
+rid = int(time.time() * 1_000_000) & 0x7fffffff
+payload = {
+    "command": ["show-text", f"IP: {ip}", duration_ms],
+    "request_id": rid,
+}
+
+def send_once():
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(1.5)
+    s.connect(sock_path)
+    s.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+    data = b""
+    # Read until newline (MPV replies line-delimited JSON)
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+        if b"\n" in data:
+            break
+    s.close()
+    line = data.split(b"\n", 1)[0].strip()
+    if not line:
+        return None
+    try:
+        obj = json.loads(line.decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    if obj.get("request_id") != rid:
+        return None
+    return obj
+
+obj = None
+try:
+    obj = send_once()
+except Exception:
+    obj = None
+
+if obj and obj.get("error") == "success":
+    sys.exit(0)
+sys.exit(1)
 PY
-  )"
-  if command -v socat >/dev/null 2>&1; then
-    printf '%s\n' "$payload" | socat - "$MPV_SOCKET" >/dev/null 2>&1 || true
-    log "OSD sent with python payload: IP=$ip_addr"
-  else
-    log "Skip: socat is not installed"
-  fi
+}
+
+deadline=$(( $(date +%s) + WAIT_TIMEOUT_SEC ))
+ok=1
+if command -v python3 >/dev/null 2>&1; then
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    attempt_send_ip && ok=0 && break || true
+    sleep 0.3
+  done
 else
+  # Fallback: no python => just best-effort fire-and-forget.
   if command -v socat >/dev/null 2>&1; then
-    printf '{"command":["show-text","IP: %s",%s]}\n' "$ip_addr" "$SHOW_DURATION_MS" | socat - "$MPV_SOCKET" >/dev/null 2>&1 || true
-    log "OSD sent with shell payload: IP=$ip_addr"
+    printf '%s\n' "$(printf '%s' "{\"command\":[\"show-text\",\"IP: ${ip_addr}\",${SHOW_DURATION_MS}]}")" | socat - "$MPV_SOCKET" >/dev/null 2>&1 || true
+    ok=0
   else
-    log "Skip: socat is not installed"
+    ok=1
   fi
 fi
 
-rm -f "$STARTUP_IP_FILE"
+if [ "$ok" -eq 0 ]; then
+  log "OSD shown: IP=$ip_addr"
+else
+  log "OSD not shown (MPV did not reply in time): IP=$ip_addr"
+fi
+
+# Remove it only if we consumed it from file; if it didn't exist or was empty, keep state.
+if [ -r "$STARTUP_IP_FILE" ]; then
+  rm -f "$STARTUP_IP_FILE" 2>/dev/null || true
+fi
