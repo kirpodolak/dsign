@@ -57,6 +57,13 @@ def init_api_routes(api_bp, services):
     _amixer_pick_cache_ttl_sec: float = 60.0
     # Bump when heuristics change so a stale (wrong) card/ctl is not served for 60s.
     _amixer_pick_cache_version: int = 7
+
+    # MPV volume/mute readback may intermittently fail if IPC is busy or MPV is restarting.
+    # Cache the last known MPV audio state so /api/system/status doesn't fall back to unrelated
+    # sinks (PipeWire/amixer) and "randomly" move the knob.
+    _mpv_audio_cache: dict = {"ts": 0.0, "volume_percent": None, "muted": None, "ao": None}
+    _mpv_audio_cache_lock = Lock()
+    _mpv_audio_cache_ttl_sec: float = 15.0
     def _read_cpu_temp_c() -> float | None:
         # Prefer x86 "coretemp" / package temperature when available.
         #
@@ -344,21 +351,49 @@ def init_api_routes(api_bp, services):
             mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
             if not mgr:
                 return None
-            vr = mgr._send_command({"command": ["get_property", "volume"]}, timeout=2.0)
-            mr = mgr._send_command({"command": ["get_property", "mute"]}, timeout=2.0)
-            if not vr or vr.get("error") != "success" or "data" not in vr:
-                return None
-            vraw = vr["data"]
-            try:
-                vnum = int(round(float(vraw)))
-            except (TypeError, ValueError):
-                vnum = None
-            mdata = bool(mr["data"]) if (mr and mr.get("error") == "success" and "data" in mr) else None
-            return {
-                "available": True,
-                "volume_percent": vnum,
-                "muted": mdata,
-            }
+            # Small retry helps when IPC is busy/restarting.
+            last_err = None
+            for _ in range(3):
+                ar = mgr._send_command({"command": ["get_property", "ao"]}, timeout=2.0)
+                vr = mgr._send_command({"command": ["get_property", "volume"]}, timeout=2.0)
+                mr = mgr._send_command({"command": ["get_property", "mute"]}, timeout=2.0)
+                if vr and vr.get("error") == "success" and "data" in vr:
+                    vraw = vr["data"]
+                    try:
+                        vnum = int(round(float(vraw)))
+                    except (TypeError, ValueError):
+                        vnum = None
+                    mdata = bool(mr["data"]) if (mr and mr.get("error") == "success" and "data" in mr) else None
+                    ao = str(ar.get("data")) if (ar and ar.get("error") == "success" and "data" in ar) else None
+                    state = {
+                        "available": True,
+                        "volume_percent": vnum,
+                        "muted": mdata,
+                        "ao": ao,
+                    }
+                    with _mpv_audio_cache_lock:
+                        _mpv_audio_cache["ts"] = time.time()
+                        _mpv_audio_cache["volume_percent"] = vnum
+                        _mpv_audio_cache["muted"] = mdata
+                        _mpv_audio_cache["ao"] = ao
+                    return state
+                last_err = (vr or {}).get("error") if isinstance(vr, dict) else "no-response"
+                time.sleep(0.05)
+
+            # Fall back to last known MPV audio state (prevents random dashboard jumps).
+            now = time.time()
+            with _mpv_audio_cache_lock:
+                ts = float(_mpv_audio_cache.get("ts") or 0.0)
+                if (now - ts) < _mpv_audio_cache_ttl_sec:
+                    return {
+                        "available": True,
+                        "volume_percent": _mpv_audio_cache.get("volume_percent"),
+                        "muted": _mpv_audio_cache.get("muted"),
+                        "ao": _mpv_audio_cache.get("ao"),
+                        "stale": True,
+                        "error": last_err,
+                    }
+            return None
         except Exception:
             return None
 
@@ -370,8 +405,19 @@ def init_api_routes(api_bp, services):
             if volume_percent is not None:
                 v = float(max(0, min(100, int(volume_percent))))
                 mgr._send_command({"command": ["set_property", "volume", v]}, timeout=2.0)
+            # If UI adjusts volume but doesn't explicitly toggle mute, prefer unmuting to recover
+            # from MPV being stuck muted (common after backend restarts / ao changes).
+            if muted is None and volume_percent is not None:
+                muted = False
             if muted is not None:
                 mgr._send_command({"command": ["set_property", "mute", bool(muted)]}, timeout=2.0)
+            # Update cached state even if immediate readback fails.
+            with _mpv_audio_cache_lock:
+                _mpv_audio_cache["ts"] = time.time()
+                if volume_percent is not None:
+                    _mpv_audio_cache["volume_percent"] = int(max(0, min(100, int(volume_percent))))
+                if muted is not None:
+                    _mpv_audio_cache["muted"] = bool(muted)
         except Exception:
             pass
 
@@ -542,32 +588,42 @@ def init_api_routes(api_bp, services):
             # Do not fall through to card0 Master / unrelated sinks — that caused stuck ~77% UI.
             return {"available": False, "volume_percent": None, "muted": None}
 
-        # 3) PipeWire (only when not in MPV-direct-HDMI mode, to avoid wrong default sink %)
+        # 3) When MPV is under our control, its software volume is the dashboard source of truth.
+        # Do not require `get_property ao` to succeed: that property can be missing/transient while
+        # `volume`/`mute` still work; falling through to PipeWire/amixer then makes the knob jump.
+        mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
+        prefer_mpv = os.getenv("DSIGN_PREFER_MPV_VOLUME", "1").strip().lower() in ("1", "true", "yes", "on")
+        mpv = _audio_get_mpv()
+        if prefer_mpv and mgr:
+            if mpv and mpv.get("available"):
+                return {
+                    "available": True,
+                    "volume_percent": mpv.get("volume_percent"),
+                    "muted": mpv.get("muted"),
+                }
+            return {"available": False, "volume_percent": None, "muted": None}
+
         wp = _wpctl_get_default_sink()
         if wp.get("available") and (wp.get("volume_percent") is not None or wp.get("muted") is not None):
             return {"available": True, "volume_percent": wp.get("volume_percent"), "muted": wp.get("muted")}
 
         if not _amixer_available():
-            mpv = _audio_get_mpv()
             return mpv if mpv else {"available": False, "volume_percent": None, "muted": None}
 
         picked = _amixer_pick_control()
         if not picked:
-            mpv = _audio_get_mpv()
             return mpv if mpv else {"available": False, "volume_percent": None, "muted": None}
         v, m = _amixer_sget_parsed(picked[0], picked[1])
         if v is not None or m is not None:
             return {"available": True, "volume_percent": v, "muted": m}
-        mpv = _audio_get_mpv()
         return mpv if mpv else {"available": True, "volume_percent": None, "muted": None}
 
     def _audio_set(volume_percent: int | None = None, muted: bool | None = None) -> dict:
         """
         Apply volume: (1) ALSA simple controls on all vc4hdmi* if they exist, else
-        (2) PipeWire @DEFAULT_AUDIO_SINK@ if enabled, else
-        (3) MPV volume/mute (when MPV uses direct HDMI and amixer scontrols is empty for vc4).
+        (2) MPV volume/mute (direct ALSA signage player). PipeWire wpctl is not applied here —
+        mixing MPV ALSA output with wpctl default sink caused silence on some setups.
         """
-        use_pw = (os.getenv("DSIGN_USE_PIPEWIRE_AUDIO", "1").strip().lower() in ("1", "true", "yes", "on")) and _wpctl_available()
         v_pct = int(max(0, min(100, int(volume_percent)))) if volume_percent is not None else None
 
         alsa_targs: list[tuple[int, str]] = []
@@ -589,10 +645,10 @@ def init_api_routes(api_bp, services):
             _invalidate_system_status_cache()
             return _audio_get()
 
-        if use_pw:
-            _wpctl_set_default_sink(vol_pct=v_pct, muted=muted)
-        else:
-            _audio_set_mpv(v_pct, muted)
+        # Always apply MPV software volume/mute: signage MPV uses `--ao=alsa` (direct ALSA device).
+        # Do **not** also drive PipeWire `@DEFAULT_AUDIO_SINK@`: that can mute/unmute or retarget an
+        # unrelated sink and silence ALSA playback while the dashboard still shows MPV volume.
+        _audio_set_mpv(v_pct, muted)
 
         _invalidate_system_status_cache()
         return _audio_get()
