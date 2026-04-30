@@ -446,12 +446,37 @@ class SettingsService:
             return False
 
     def expand_audio_route(self, route: str) -> Dict[str, str]:
-        """Map UI audio-route to mpv ao + audio-device (best-effort for Raspberry Pi OS)."""
+        """
+        Map UI audio-route to mpv ao + audio-device.
+
+        Notes:
+        - Keep defaults conservative: `dsign-mpv.service` forces `--ao=alsa` for headless reliability.
+        - On non-Pi (x86), users may set a working default via `/etc/asound.conf` or select a
+          specific ALSA device from the MPV Advanced dialog.
+        """
         r = (route or "auto").strip().lower()
+        # x86/Ubuntu common: Intel HDA "PCH" with multiple HDMI/DP endpoints
+        # (ALSA names show up as hdmi:CARD=PCH,DEV=0..3). We map these deterministically so
+        # the UI buttons work without requiring /etc/asound.conf.
+        try:
+            import subprocess
+            out = subprocess.run(["aplay", "-L"], capture_output=True, text=True, check=False).stdout or ""
+            has_pch_hdmi = "hdmi:CARD=PCH,DEV=0" in out
+        except Exception:
+            has_pch_hdmi = False
         if r == "hdmi":
+            if has_pch_hdmi:
+                return {"ao": "alsa", "audio-device": "alsa/hdmi:CARD=PCH,DEV=0"}
             # Pi 4 exposes vc4hdmi0 / vc4hdmi1 (not "vc4hdmi").
             return {"ao": "alsa", "audio-device": "alsa/hdmi:CARD=vc4hdmi0,DEV=0"}
+        if r in ("dp", "displayport"):
+            if has_pch_hdmi:
+                # Next digital endpoint; on many boards this is DP or a second HDMI/DP port.
+                return {"ao": "alsa", "audio-device": "alsa/hdmi:CARD=PCH,DEV=1"}
+            return {"ao": "alsa", "audio-device": "auto"}
         if r in ("headphones", "jack", "analog"):
+            if has_pch_hdmi:
+                return {"ao": "alsa", "audio-device": "alsa/hw:CARD=PCH,DEV=0"}
             return {"ao": "alsa", "audio-device": "alsa/plughw:CARD=Headphones,DEV=0"}
         return {"ao": "alsa", "audio-device": "auto"}
 

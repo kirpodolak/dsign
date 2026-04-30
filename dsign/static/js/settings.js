@@ -62,6 +62,7 @@ export class SettingsManager {
             transcodeResolution: document.getElementById('transcode-resolution'),
             transcodeFps: document.getElementById('transcode-fps'),
             idleLogoRotate: document.getElementById('idle-logo-rotate'),
+            audioRouteSelect: document.getElementById('audio-route-select'),
             mpvAdvancedBackdrop: document.getElementById('mpv-advanced-backdrop'),
             btnMpvAdvanced: document.getElementById('btn-mpv-advanced'),
             mpvAdvancedSave: document.getElementById('mpv-advanced-save'),
@@ -737,6 +738,9 @@ export class SettingsManager {
         const interval = String(this.state.currentSettings?.display?.preview_auto_interval_sec ?? 0);
         if (this.elements.previewAutoSelect) this.elements.previewAutoSelect.value = interval;
 
+        const audioRoute = String(this.state.currentSettings?.['audio-route'] || 'auto');
+        if (this.elements.audioRouteSelect) this.elements.audioRouteSelect.value = audioRoute;
+
         // Transcode settings (global)
         const display = this.state.currentSettings?.display || {};
         if (this.elements.transcodeEnabled) this.elements.transcodeEnabled.value = String(Boolean(display.auto_transcode_videos));
@@ -753,6 +757,7 @@ export class SettingsManager {
             if (key === 'transcode_target_fps') v = this.elements.transcodeFps?.value;
             if (key === 'hdmi_mode_preset') v = this.elements.displayModeSelect?.value;
             if (key === 'idle_logo_rotate') v = this.elements.idleLogoRotate?.value;
+            if (key === 'audio-route') v = this.elements.audioRouteSelect?.value;
             if (v != null) this._setSegmentedValue(seg, v);
         });
     }
@@ -938,12 +943,39 @@ export class SettingsManager {
         if (key === 'transcode_target_fps' && this.elements.transcodeFps) this.elements.transcodeFps.value = String(value);
         if (key === 'hdmi_mode_preset' && this.elements.displayModeSelect) this.elements.displayModeSelect.value = String(value);
         if (key === 'idle_logo_rotate' && this.elements.idleLogoRotate) this.elements.idleLogoRotate.value = String(value);
+        if (key === 'audio-route' && this.elements.audioRouteSelect) this.elements.audioRouteSelect.value = String(value);
 
         if (key === 'preview_auto_interval_sec') this._debounceAutosavePreview();
         if (key === 'auto_transcode_videos' || key === 'transcode_target_resolution' || key === 'transcode_target_fps') {
             this._debounceAutosaveTranscode();
         }
         if (key === 'idle_logo_rotate') this._debounceAutosaveIdle();
+        if (key === 'audio-route') this._debounceAutosaveAudioRoute();
+    }
+
+    _debounceAutosaveAudioRoute() {
+        clearTimeout(this._autosaveAudioRouteT);
+        this._autosaveAudioRouteT = setTimeout(() => this._saveAudioRouteSilent(), 650);
+    }
+
+    async _saveAudioRouteSilent() {
+        const route = String(this.elements.audioRouteSelect?.value || 'auto');
+        try {
+            const response = await fetch('/api/settings/mpv/global', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCSRFToken() },
+                credentials: 'include',
+                body: JSON.stringify({ 'audio-route': route }),
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) throw new Error(result.error || 'Failed');
+            await this.loadCurrentSettings();
+            this.applyGlobalSettingsToControls();
+            // don't show a noisy toast on every click; status ring updates implicitly
+        } catch (e) {
+            console.error(e);
+            showAlert(e.message || 'Audio route save failed', 'error');
+        }
     }
 
     _debounceAutosavePreview() {
