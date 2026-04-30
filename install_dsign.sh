@@ -154,7 +154,8 @@ Environment="FLASK_APP=dsign.server:create_app()"
 Environment="FLASK_ENV=production"
 Environment="PYTHONPATH=/home/dsign"
 Environment="DSIGN_CONFIG=$CONFIG_DIR/config.py"
-ExecStart=$VENV_DIR/bin/python /home/dsign/dsign/run.py
+# Use module execution so `dsign` package imports resolve consistently.
+ExecStart=$VENV_DIR/bin/python -m dsign.run
 Restart=on-failure
 RestartSec=30s
 StandardOutput=journal
