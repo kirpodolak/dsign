@@ -309,6 +309,7 @@ export class SettingsManager {
     async _flushAudioPost() {
         const vol = this.state.audioLocal.volume;
         const muted = this.state.audioLocal.muted;
+        let ok = false;
         try {
             const resp = await fetch('/api/system/audio', {
                 method: 'POST',
@@ -326,11 +327,18 @@ export class SettingsManager {
                 this.state.systemStatus.audio = data.audio;
                 this._applyAudioToDashboard(data.audio);
             }
-            this.state.audioLocal = { volume: null, muted: null };
-            // Re-fetch status so the donut matches server truth (avoids stale cached /api/system/status audio).
-            await this.refreshSystemStatus().catch(() => {});
+            ok = true;
         } catch (err) {
             console.error('Audio save failed:', err);
+        } finally {
+            // Always clear the local override so polling can resync the knob.
+            // If the POST failed (CSRF expired / network), revert the UI to the last known server state.
+            this.state.audioLocal = { volume: null, muted: null };
+            if (!ok) {
+                this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
+            }
+            // Re-fetch status so the donut matches server truth (avoids stale cached /api/system/status audio).
+            await this.refreshSystemStatus().catch(() => {});
         }
     }
 
