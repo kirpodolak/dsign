@@ -1,38 +1,43 @@
 [Unit]
-Description=Digital Signage Service (DRM)
-After=dsign-network-assistant.service dsign-mpv.service
-Wants=dsign-network-assistant.service
-Wants=dsign-mpv.service
-Requires=dev-dri-card0.device
+Description=Digital Signage Controller
+After=network.target dsign-mpv.service
+Requires=dsign-mpv.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
+Type=simple
 User=dsign
 Group=dsign
 WorkingDirectory=/home/dsign
-Environment="FLASK_APP=dsign.server:create_app()"
-Environment="FLASK_ENV=production"
-Environment="PYTHONPATH=/home/dsign"
-Environment="DSIGN_CONFIG=/home/dsign/config/config.py"
-ExecStart=/home/dsign/venv/bin/python /home/dsign/dsign/run.py
+ExecStartPre=/bin/mkdir -p /var/lib/dsign/media/tmp
+ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp
+ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp
+Environment="TMPDIR=/var/lib/dsign/media/tmp"
+Environment=DSIGN_LOG_LEVEL=WARNING
+Environment=DSIGN_AUTO_TRANSCODE_VIDEOS=true
+Environment=DSIGN_TRANSCODE_TARGET_RESOLUTION=1920x1080
+Environment=DSIGN_TRANSCODE_TARGET_FPS=25
+# Optional: HLS/micro-hitch tuning for VK/Rutube (increases RAM/latency; can worsen jank on some Pi setups).
+# Environment=DSIGN_MPV_NETBUF=1
+# Environment=DSIGN_MPV_NETBUF_SECS=12
+# Environment=DSIGN_MPV_NETBUF_MAX_MB=96
+# Environment=DSIGN_MPV_NETBUF_BACK_MB=16
+# Environment=DSIGN_MPV_NETBUF_READAHEAD_SECS=20
+# Use module execution so imports work even if cwd changes.
+ExecStart=/home/dsign/venv/bin/python -m dsign.run
+# Настройки перезапуска
 Restart=on-failure
 RestartSec=30s
-StandardOutput=journal
-StandardError=journal
+
+# Настройки завершения
+TimeoutStopSec=30
+KillMode=mixed
+
+# Ограничения ресурсов
+# Загрузка в галерею до 1 GiB буферизуется в процессе; 500M обрывала крупные файлы (~70% от ~650 MB).
+MemoryMax=2G
 CPUQuota=50%
-LimitNOFILE=65536
-
-# Особенно важные настройки:
-KillMode=process
-KillSignal=SIGTERM
-TimeoutStopSec=5
-SendSIGKILL=no
-
-# Права доступа
-DeviceAllow=/dev/dri rw
-DeviceAllow=/dev/vchiq rw
-
-# Директории для записи
-ReadWritePaths=/var/log/dsign /var/lib/dsign
 
 [Install]
 WantedBy=multi-user.target
