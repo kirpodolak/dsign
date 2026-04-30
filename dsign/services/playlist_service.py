@@ -15,6 +15,22 @@ class PlaylistService:
         self.db_session = db_session
         self.logger = logger or ServiceLogger(self.__class__.__name__)
 
+    def _get_m3u_export_dirs(self, primary_dir: str) -> List[str]:
+        """
+        Returns a list of candidate directories for M3U export.
+
+        Primary is taken from config, but on some systems `static/playlists` may be
+        root-owned or systemd-sandboxed which breaks writes. In that case we fall
+        back to a writable directory under /var/lib/dsign.
+        """
+        fallback_dir = os.getenv("DSIGN_M3U_EXPORT_FALLBACK_DIR", "/var/lib/dsign/m3u")
+        dirs: List[str] = []
+        if primary_dir:
+            dirs.append(primary_dir)
+        if fallback_dir and fallback_dir not in dirs:
+            dirs.append(fallback_dir)
+        return dirs
+
     def _log_error(self, message: str, exc_info: bool = True, extra: Optional[Dict[str, Any]] = None):
         """Унифицированный метод для логирования ошибок"""
         extra_data = {'module': 'PlaylistService'}
@@ -304,29 +320,63 @@ class PlaylistService:
         
             safe_name = re.sub(r'[\\/*?:"<>|]', "_", playlist.name)
             filename = f"{safe_name}.m3u"
-            filepath = os.path.join(export_dir, filename)
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(m3u_content)
+            export_dirs = self._get_m3u_export_dirs(export_dir)
 
-            # Удаляем старый файл если изменилось имя
-            if old_name and old_name != playlist.name:
-                old_safe_name = re.sub(r'[\\/*?:"<>|]', "_", old_name)
-                old_filepath = os.path.join(export_dir, f"{old_safe_name}.m3u")
-                if os.path.exists(old_filepath):
-                    try:
-                        os.remove(old_filepath)
-                    except Exception as e:
-                        self._log_warning('Failed to remove old M3U file', {
-                            'old_filepath': old_filepath,
-                            'error': str(e)
-                        })
+            last_error: Optional[str] = None
+            generated_filepath: Optional[str] = None
+
+            for candidate_dir in export_dirs:
+                try:
+                    os.makedirs(candidate_dir, exist_ok=True)
+                    filepath = os.path.join(candidate_dir, filename)
+
+                    # Atomic write to avoid partially-written files on reload.
+                    tmp_path = f"{filepath}.tmp-{os.getpid()}-{int(time.time() * 1000)}"
+                    with open(tmp_path, 'w', encoding='utf-8') as f:
+                        f.write(m3u_content)
+                    os.replace(tmp_path, filepath)
+
+                    generated_filepath = filepath
+
+                    # Удаляем старый файл если изменилось имя (best-effort).
+                    if old_name and old_name != playlist.name:
+                        old_safe_name = re.sub(r'[\\/*?:"<>|]', "_", old_name)
+                        old_filename = f"{old_safe_name}.m3u"
+                        for d in export_dirs:
+                            old_filepath = os.path.join(d, old_filename)
+                            if os.path.exists(old_filepath):
+                                try:
+                                    os.remove(old_filepath)
+                                except Exception as e:
+                                    self._log_warning('Failed to remove old M3U file', {
+                                        'old_filepath': old_filepath,
+                                        'error': str(e)
+                                    })
+
+                    break
+                except PermissionError as e:
+                    last_error = str(e)
+                    self._log_warning('M3U export dir not writable, falling back', {
+                        'primary_dir': export_dir,
+                        'candidate_dir': candidate_dir,
+                        'error': last_error
+                    })
+                    continue
+                except OSError as e:
+                    last_error = str(e)
+                    self._log_warning('M3U export failed in candidate dir, falling back', {
+                        'primary_dir': export_dir,
+                        'candidate_dir': candidate_dir,
+                        'error': last_error
+                    })
+                    continue
 
             self._log_info('M3U playlist generated', {
                 'playlist_id': playlist.id,
-                'filepath': filepath
+                'filepath': generated_filepath
             })
+            if not generated_filepath:
+                raise RuntimeError(f"M3U generation failed: no writable export dir (last_error={last_error})")
             return True
             
         except Exception as e:
@@ -399,34 +449,42 @@ class PlaylistService:
 
             safe_name = re.sub(r'[\\/*?:"<>|]', "_", playlist.name)
             filename = f"{safe_name}.m3u"
-            filepath = os.path.join(current_app.config['M3U_EXPORT_DIR'], filename)
+            primary_dir = current_app.config['M3U_EXPORT_DIR']
+            export_dirs = self._get_m3u_export_dirs(primary_dir)
 
-            result = {"success": False, "filepath": filepath}
-        
-            if os.path.exists(filepath):
+            deleted_any = False
+            last_error: Optional[str] = None
+            for d in export_dirs:
+                filepath = os.path.join(d, filename)
+                if not os.path.exists(filepath):
+                    continue
                 try:
                     os.remove(filepath)
+                    deleted_any = True
                     self._log_info('M3U file deleted', {
                         'playlist_id': playlist_id,
                         'filepath': filepath
                     })
-                    result.update({
-                        "success": True,
-                        "message": "M3U file deleted"
-                    })
                 except Exception as e:
+                    last_error = str(e)
                     self._log_error('Failed to delete M3U file', {
                         'filepath': filepath,
                         'error': str(e)
                     })
-                    result['error'] = str(e)
-            else:
-                result.update({
+
+            if deleted_any:
+                return {
                     "success": True,
-                    "message": "M3U file not found (no action needed)"
-                })
-            
-            return result
+                    "message": "M3U file deleted"
+                }
+
+            # If the file doesn't exist in any known dir, treat as success.
+            return {
+                "success": True,
+                "message": "M3U file not found (no action needed)"
+                if not last_error
+                else "M3U file deletion attempted but not fully confirmed"
+            }
             
         except Exception as e:
             self._log_error('M3U deletion process failed', {
