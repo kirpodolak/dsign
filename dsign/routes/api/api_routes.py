@@ -621,10 +621,9 @@ def init_api_routes(api_bp, services):
     def _audio_set(volume_percent: int | None = None, muted: bool | None = None) -> dict:
         """
         Apply volume: (1) ALSA simple controls on all vc4hdmi* if they exist, else
-        (2) PipeWire @DEFAULT_AUDIO_SINK@ if enabled, else
-        (3) MPV volume/mute (when MPV uses direct HDMI and amixer scontrols is empty for vc4).
+        (2) MPV volume/mute (direct ALSA signage player). PipeWire wpctl is not applied here —
+        mixing MPV ALSA output with wpctl default sink caused silence on some setups.
         """
-        use_pw = (os.getenv("DSIGN_USE_PIPEWIRE_AUDIO", "1").strip().lower() in ("1", "true", "yes", "on")) and _wpctl_available()
         v_pct = int(max(0, min(100, int(volume_percent)))) if volume_percent is not None else None
 
         alsa_targs: list[tuple[int, str]] = []
@@ -646,11 +645,10 @@ def init_api_routes(api_bp, services):
             _invalidate_system_status_cache()
             return _audio_get()
 
-        # Always apply MPV software volume/mute as well: on x86 we run MPV with `--ao=alsa`,
-        # and PipeWire / card mixers won't affect actual playback volume.
+        # Always apply MPV software volume/mute: signage MPV uses `--ao=alsa` (direct ALSA device).
+        # Do **not** also drive PipeWire `@DEFAULT_AUDIO_SINK@`: that can mute/unmute or retarget an
+        # unrelated sink and silence ALSA playback while the dashboard still shows MPV volume.
         _audio_set_mpv(v_pct, muted)
-        if use_pw:
-            _wpctl_set_default_sink(vol_pct=v_pct, muted=muted)
 
         _invalidate_system_status_cache()
         return _audio_get()
