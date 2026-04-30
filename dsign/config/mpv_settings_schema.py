@@ -6,10 +6,11 @@ MPV_SETTINGS_SCHEMA = {
     "audio-route": {
         "label": "Куда выводить звук",
         "type": "select",
-        "options": ["auto", "hdmi", "headphones"],
+        "options": ["auto", "hdmi", "dp", "headphones"],
         "option_labels": {
             "auto": "По умолчанию (система)",
             "hdmi": "HDMI",
+            "dp": "DisplayPort",
             "headphones": "Аналог 3.5 мм",
         },
     },
