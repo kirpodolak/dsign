@@ -11,6 +11,14 @@ Group=root
 ExecStart=/usr/local/bin/dsign-network-assistant
 Environment=DSIGN_NETWORK_PROMPT_TIMEOUT_SEC=120
 Environment=DSIGN_STARTUP_IP_FILE=/tmp/dsign-startup-ip.txt
+Environment=TERM=linux
+
+# Keep all UI interaction on tty1 (nmtui needs TERM + a controlling TTY).
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=no
+TTYVTDisallocate=no
 
 [Install]
 WantedBy=multi-user.target
