@@ -259,6 +259,11 @@ export class SettingsManager {
             this._audioPostTimer = setTimeout(() => this._flushAudioPost(), 450);
         };
 
+        const flushAudioPostNow = () => {
+            clearTimeout(this._audioPostTimer);
+            this._flushAudioPost().catch(() => {});
+        };
+
         btn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -305,10 +310,9 @@ export class SettingsManager {
             try {
                 donut.releasePointerCapture(e.pointerId);
             } catch (_) { /* noop */ }
-            // If the POST is slow/fails, don't keep the UI stuck in a local override.
-            // Let the next poll snap the knob to server truth.
-            this.state.audioLocal = { volume: null, muted: null };
-            this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
+            // Commit the last dragged value immediately.
+            // (If we clear audioLocal here, the debounced POST would send nulls and volume won't change.)
+            flushAudioPostNow();
         };
         donut.addEventListener('pointerup', endDrag);
         donut.addEventListener('pointercancel', endDrag);
