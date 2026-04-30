@@ -140,9 +140,8 @@ rm "$PROJECT_DIR/init_db.py"
 cat > /etc/systemd/system/digital-signage.service <<EOL
 [Unit]
 Description=Digital Signage Service (DRM)
-After=network.target dsign-network-assistant.service dsign-mpv.service
+After=network.target dsign-mpv.service
 Wants=network.target
-Wants=dsign-network-assistant.service
 Wants=dsign-mpv.service
 
 [Service]
@@ -154,7 +153,8 @@ Environment="FLASK_APP=dsign.server:create_app()"
 Environment="FLASK_ENV=production"
 Environment="PYTHONPATH=/home/dsign"
 Environment="DSIGN_CONFIG=$CONFIG_DIR/config.py"
-ExecStart=$VENV_DIR/bin/python /home/dsign/dsign/run.py
+# Use module execution so `dsign` package imports resolve consistently.
+ExecStart=$VENV_DIR/bin/python -m dsign.run
 Restart=on-failure
 RestartSec=30s
 StandardOutput=journal
@@ -260,7 +260,6 @@ cat > /etc/systemd/system/dsign-network-assistant.service <<EOL
 [Unit]
 Description=Digital Signage Network Assistant (OSD)
 After=network.target
-Before=digital-signage.service dsign-mpv.service
 Wants=network.target
 
 [Service]
@@ -269,6 +268,18 @@ User=root
 Group=root
 ExecStart=/usr/local/bin/dsign-network-assistant
 Environment=DSIGN_NETWORK_PROMPT_TIMEOUT_SEC=120
+Environment=DSIGN_STARTUP_IP_FILE=/tmp/dsign-startup-ip.txt
+Environment=TERM=linux
+# Non-interactive default: do not block boot/web UI. Set to 1 to enable nmtui prompt.
+Environment=DSIGN_NETWORK_ASSISTANT_INTERACTIVE=0
+TimeoutStartSec=130
+
+# Keep UI interaction (if enabled) on tty1
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=no
+TTYVTDisallocate=no
 
 [Install]
 WantedBy=multi-user.target
@@ -277,8 +288,7 @@ EOL
 cat > /etc/systemd/system/dsign-show-startup-ip.service <<EOL
 [Unit]
 Description=Digital Signage Startup IP OSD helper
-After=dsign-mpv.service dsign-network-assistant.service
-Wants=dsign-network-assistant.service
+After=dsign-mpv.service
 
 [Service]
 Type=oneshot
