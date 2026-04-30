@@ -87,6 +87,10 @@ export class SettingsManager {
             audioDragging: false,
             /** Monotonic id for in-flight audio POSTs to avoid out-of-order UI rewrites. */
             audioPostSeq: 0,
+            /** Hold off applying /api/system/status audio after a local change (ms timestamp). */
+            audioHoldUntilMs: 0,
+            /** Last locally requested audio values (rounded) for hold-off comparisons. */
+            audioLastSet: { volume: null, muted: null },
             _overrideSaveTimers: new Map(),
             _globalSaveTimer: null,
         };
@@ -355,6 +359,13 @@ export class SettingsManager {
                 this.state.systemStatus.audio = data.audio;
                 this._applyAudioToDashboard(data.audio);
             }
+            // Prevent immediate /api/system/status from overwriting the knob with stale cached audio.
+            // We'll accept status audio again after a short hold-off window or once it matches.
+            this.state.audioHoldUntilMs = Date.now() + 1800;
+            this.state.audioLastSet = {
+                volume: vol != null ? Math.round(vol) : null,
+                muted: muted != null ? Boolean(muted) : null,
+            };
             ok = true;
         } catch (err) {
             console.error('Audio save failed:', err);
@@ -414,7 +425,24 @@ export class SettingsManager {
                 && this.state.audioLocal.volume == null
                 && this.state.audioLocal.muted == null;
             if (audioIdle) {
-                this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
+                const now = Date.now();
+                const stAudio = this.state.systemStatus?.audio || {};
+                const hold = now < (this.state.audioHoldUntilMs || 0);
+                if (!hold) {
+                    this._applyAudioToDashboard(stAudio);
+                } else {
+                    // During hold-off, only accept status audio if it matches what we last set.
+                    const lv = this.state.audioLastSet?.volume;
+                    const lm = this.state.audioLastSet?.muted;
+                    const sv = typeof stAudio.volume_percent === 'number' ? Number(stAudio.volume_percent) : null;
+                    const sm = stAudio.muted != null ? Boolean(stAudio.muted) : null;
+                    const vMatch = lv == null || sv == null ? true : Math.abs(sv - lv) <= 2;
+                    const mMatch = lm == null || sm == null ? true : sm === lm;
+                    if (vMatch && mMatch) {
+                        this.state.audioHoldUntilMs = 0;
+                        this._applyAudioToDashboard(stAudio);
+                    }
+                }
             }
         } finally {
             this.state.systemStatusLoading = false;
