@@ -57,6 +57,13 @@ def init_api_routes(api_bp, services):
     _amixer_pick_cache_ttl_sec: float = 60.0
     # Bump when heuristics change so a stale (wrong) card/ctl is not served for 60s.
     _amixer_pick_cache_version: int = 7
+
+    # MPV volume/mute readback may intermittently fail if IPC is busy or MPV is restarting.
+    # Cache the last known MPV audio state so /api/system/status doesn't fall back to unrelated
+    # sinks (PipeWire/amixer) and "randomly" move the knob.
+    _mpv_audio_cache: dict = {"ts": 0.0, "volume_percent": None, "muted": None, "ao": None}
+    _mpv_audio_cache_lock = Lock()
+    _mpv_audio_cache_ttl_sec: float = 15.0
     def _read_cpu_temp_c() -> float | None:
         # Prefer x86 "coretemp" / package temperature when available.
         #
@@ -344,24 +351,49 @@ def init_api_routes(api_bp, services):
             mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
             if not mgr:
                 return None
-            ar = mgr._send_command({"command": ["get_property", "ao"]}, timeout=2.0)
-            vr = mgr._send_command({"command": ["get_property", "volume"]}, timeout=2.0)
-            mr = mgr._send_command({"command": ["get_property", "mute"]}, timeout=2.0)
-            if not vr or vr.get("error") != "success" or "data" not in vr:
-                return None
-            vraw = vr["data"]
-            try:
-                vnum = int(round(float(vraw)))
-            except (TypeError, ValueError):
-                vnum = None
-            mdata = bool(mr["data"]) if (mr and mr.get("error") == "success" and "data" in mr) else None
-            ao = str(ar.get("data")) if (ar and ar.get("error") == "success" and "data" in ar) else None
-            return {
-                "available": True,
-                "volume_percent": vnum,
-                "muted": mdata,
-                "ao": ao,
-            }
+            # Small retry helps when IPC is busy/restarting.
+            last_err = None
+            for _ in range(3):
+                ar = mgr._send_command({"command": ["get_property", "ao"]}, timeout=2.0)
+                vr = mgr._send_command({"command": ["get_property", "volume"]}, timeout=2.0)
+                mr = mgr._send_command({"command": ["get_property", "mute"]}, timeout=2.0)
+                if vr and vr.get("error") == "success" and "data" in vr:
+                    vraw = vr["data"]
+                    try:
+                        vnum = int(round(float(vraw)))
+                    except (TypeError, ValueError):
+                        vnum = None
+                    mdata = bool(mr["data"]) if (mr and mr.get("error") == "success" and "data" in mr) else None
+                    ao = str(ar.get("data")) if (ar and ar.get("error") == "success" and "data" in ar) else None
+                    state = {
+                        "available": True,
+                        "volume_percent": vnum,
+                        "muted": mdata,
+                        "ao": ao,
+                    }
+                    with _mpv_audio_cache_lock:
+                        _mpv_audio_cache["ts"] = time.time()
+                        _mpv_audio_cache["volume_percent"] = vnum
+                        _mpv_audio_cache["muted"] = mdata
+                        _mpv_audio_cache["ao"] = ao
+                    return state
+                last_err = (vr or {}).get("error") if isinstance(vr, dict) else "no-response"
+                time.sleep(0.05)
+
+            # Fall back to last known MPV audio state (prevents random dashboard jumps).
+            now = time.time()
+            with _mpv_audio_cache_lock:
+                ts = float(_mpv_audio_cache.get("ts") or 0.0)
+                if (now - ts) < _mpv_audio_cache_ttl_sec:
+                    return {
+                        "available": True,
+                        "volume_percent": _mpv_audio_cache.get("volume_percent"),
+                        "muted": _mpv_audio_cache.get("muted"),
+                        "ao": _mpv_audio_cache.get("ao"),
+                        "stale": True,
+                        "error": last_err,
+                    }
+            return None
         except Exception:
             return None
 
@@ -379,6 +411,13 @@ def init_api_routes(api_bp, services):
                 muted = False
             if muted is not None:
                 mgr._send_command({"command": ["set_property", "mute", bool(muted)]}, timeout=2.0)
+            # Update cached state even if immediate readback fails.
+            with _mpv_audio_cache_lock:
+                _mpv_audio_cache["ts"] = time.time()
+                if volume_percent is not None:
+                    _mpv_audio_cache["volume_percent"] = int(max(0, min(100, int(volume_percent))))
+                if muted is not None:
+                    _mpv_audio_cache["muted"] = bool(muted)
         except Exception:
             pass
 
@@ -556,6 +595,13 @@ def init_api_routes(api_bp, services):
         mpv_ao = (mpv or {}).get("ao")
         if prefer_mpv and mpv and mpv.get("available") and mpv_ao and str(mpv_ao).startswith("alsa"):
             return {"available": True, "volume_percent": mpv.get("volume_percent"), "muted": mpv.get("muted")}
+        if prefer_mpv:
+            # If we have an MPV manager but couldn't read MPV state right now, don't fall back to
+            # unrelated sinks (which causes the knob to jump). Either return cached MPV state (handled
+            # in _audio_get_mpv) or mark audio unavailable.
+            mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
+            if mgr and mpv is None:
+                return {"available": False, "volume_percent": None, "muted": None}
 
         wp = _wpctl_get_default_sink()
         if wp.get("available") and (wp.get("volume_percent") is not None or wp.get("muted") is not None):
