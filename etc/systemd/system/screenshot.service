@@ -23,7 +23,7 @@ SuccessExitStatus=0 1
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/dsign/dsign/static/images/
+ReadWritePaths=/home/dsign/dsign/static/images/ /var/lib/dsign/mpv/
 # playing-media fallback reads playlist files under UPLOAD_FOLDER (install default)
 BindReadOnlyPaths=/var/lib/dsign/media
 
