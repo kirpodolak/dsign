@@ -344,6 +344,7 @@ def init_api_routes(api_bp, services):
             mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
             if not mgr:
                 return None
+            ar = mgr._send_command({"command": ["get_property", "ao"]}, timeout=2.0)
             vr = mgr._send_command({"command": ["get_property", "volume"]}, timeout=2.0)
             mr = mgr._send_command({"command": ["get_property", "mute"]}, timeout=2.0)
             if not vr or vr.get("error") != "success" or "data" not in vr:
@@ -354,10 +355,12 @@ def init_api_routes(api_bp, services):
             except (TypeError, ValueError):
                 vnum = None
             mdata = bool(mr["data"]) if (mr and mr.get("error") == "success" and "data" in mr) else None
+            ao = str(ar.get("data")) if (ar and ar.get("error") == "success" and "data" in ar) else None
             return {
                 "available": True,
                 "volume_percent": vnum,
                 "muted": mdata,
+                "ao": ao,
             }
         except Exception:
             return None
@@ -370,6 +373,10 @@ def init_api_routes(api_bp, services):
             if volume_percent is not None:
                 v = float(max(0, min(100, int(volume_percent))))
                 mgr._send_command({"command": ["set_property", "volume", v]}, timeout=2.0)
+            # If UI adjusts volume but doesn't explicitly toggle mute, prefer unmuting to recover
+            # from MPV being stuck muted (common after backend restarts / ao changes).
+            if muted is None and volume_percent is not None:
+                muted = False
             if muted is not None:
                 mgr._send_command({"command": ["set_property", "mute", bool(muted)]}, timeout=2.0)
         except Exception:
@@ -543,22 +550,26 @@ def init_api_routes(api_bp, services):
             return {"available": False, "volume_percent": None, "muted": None}
 
         # 3) PipeWire (only when not in MPV-direct-HDMI mode, to avoid wrong default sink %)
+        # If MPV is active and uses ALSA directly, MPV volume is the authoritative knob.
+        mpv = _audio_get_mpv()
+        prefer_mpv = os.getenv("DSIGN_PREFER_MPV_VOLUME", "1").strip().lower() in ("1", "true", "yes", "on")
+        mpv_ao = (mpv or {}).get("ao")
+        if prefer_mpv and mpv and mpv.get("available") and mpv_ao and str(mpv_ao).startswith("alsa"):
+            return {"available": True, "volume_percent": mpv.get("volume_percent"), "muted": mpv.get("muted")}
+
         wp = _wpctl_get_default_sink()
         if wp.get("available") and (wp.get("volume_percent") is not None or wp.get("muted") is not None):
             return {"available": True, "volume_percent": wp.get("volume_percent"), "muted": wp.get("muted")}
 
         if not _amixer_available():
-            mpv = _audio_get_mpv()
             return mpv if mpv else {"available": False, "volume_percent": None, "muted": None}
 
         picked = _amixer_pick_control()
         if not picked:
-            mpv = _audio_get_mpv()
             return mpv if mpv else {"available": False, "volume_percent": None, "muted": None}
         v, m = _amixer_sget_parsed(picked[0], picked[1])
         if v is not None or m is not None:
             return {"available": True, "volume_percent": v, "muted": m}
-        mpv = _audio_get_mpv()
         return mpv if mpv else {"available": True, "volume_percent": None, "muted": None}
 
     def _audio_set(volume_percent: int | None = None, muted: bool | None = None) -> dict:
@@ -589,10 +600,11 @@ def init_api_routes(api_bp, services):
             _invalidate_system_status_cache()
             return _audio_get()
 
+        # Always apply MPV software volume/mute as well: on x86 we run MPV with `--ao=alsa`,
+        # and PipeWire / card mixers won't affect actual playback volume.
+        _audio_set_mpv(v_pct, muted)
         if use_pw:
             _wpctl_set_default_sink(vol_pct=v_pct, muted=muted)
-        else:
-            _audio_set_mpv(v_pct, muted)
 
         _invalidate_system_status_cache()
         return _audio_get()
