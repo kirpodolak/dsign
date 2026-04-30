@@ -20,6 +20,9 @@ DB_FILE="$DB_DIR/database.db"
 UPLOAD_DIR="/var/lib/dsign/media"
 SETTINGS_FILE="$DB_DIR/settings.json"
 X11_USER_DIR="/home/dsign/.X11"
+SYSTEMD_DIR="/etc/systemd/system"
+UDEV_RULES_DIR="/etc/udev/rules.d"
+BIN_DIR="/usr/local/bin"
 
 # Installer toggles (headless-friendly defaults)
 # - DSIGN_SETUP_X11=1 enables xauth setup (only useful if you run a real X session on :0)
@@ -51,6 +54,13 @@ apt-get install -y \
 mkdir -p "$PROJECT_DIR" "$VENV_DIR" "$CONFIG_DIR" "$LOG_DIR" "$UPLOAD_DIR" "$DB_DIR" "$X11_USER_DIR"
 chown -R "$DSIGN_USER:$DSIGN_USER" "/home/dsign" "$DB_DIR" "$LOG_DIR" "$X11_USER_DIR"
 chmod -R 775 "$UPLOAD_DIR" "$DB_DIR"
+
+# Directories required by services/scripts
+mkdir -p "$DB_DIR/mpv" "$DB_DIR/mpv-minimal" "$UPLOAD_DIR/tmp"
+chown -R "$DSIGN_USER:video" "$DB_DIR/mpv" "$DB_DIR/mpv-minimal" || true
+chmod 775 "$DB_DIR/mpv" "$DB_DIR/mpv-minimal" || true
+chown -R "$DSIGN_USER:$DSIGN_USER" "$UPLOAD_DIR/tmp" || true
+chmod 775 "$UPLOAD_DIR/tmp" || true
 
 # Настройка X11 авторизации (не требуется для DRM/KMS headless)
 if [ "$DSIGN_SETUP_X11" = "1" ]; then
@@ -134,112 +144,34 @@ EOL
 sudo -u "$DSIGN_USER" "$VENV_DIR/bin/python" "$PROJECT_DIR/init_db.py"
 rm "$PROJECT_DIR/init_db.py"
 
-# Создание systemd сервисов с точными настройками
+# ======================
+# Install scripts + systemd units from repo (single source of truth)
+# ======================
 
-# Digital Signage Service
-cat > /etc/systemd/system/digital-signage.service <<EOL
-[Unit]
-Description=Digital Signage Service (DRM)
-After=network.target dsign-mpv.service
-Wants=network.target
-Wants=dsign-mpv.service
+# Install all scripts shipped under usr/local/bin/
+mkdir -p "$BIN_DIR"
+for f in "$PROJECT_DIR/usr/local/bin/"*; do
+  [ -f "$f" ] || continue
+  bn="$(basename "$f")"
+  install -m 0755 "$f" "$BIN_DIR/$bn"
+  sed -i 's/\r$//' "$BIN_DIR/$bn" || true
+done
+chown root:root "$BIN_DIR"/dsign-* 2>/dev/null || true
 
-[Service]
-User=$DSIGN_USER
-Group=$DSIGN_USER
-SupplementaryGroups=video audio
-WorkingDirectory=/home/dsign
-Environment="FLASK_APP=dsign.server:create_app()"
-Environment="FLASK_ENV=production"
-Environment="PYTHONPATH=/home/dsign"
-Environment="DSIGN_CONFIG=$CONFIG_DIR/config.py"
-# Use module execution so `dsign` package imports resolve consistently.
-ExecStart=$VENV_DIR/bin/python -m dsign.run
-Restart=on-failure
-RestartSec=30s
-StandardOutput=journal
-StandardError=journal
-MemoryMax=500M
-CPUQuota=50%
-LimitNOFILE=65536
-
-# Особенно важные настройки:
-KillMode=process
-KillSignal=SIGTERM
-TimeoutStopSec=5
-SendSIGKILL=no
-
-# Права доступа
-DeviceAllow=/dev/dri rw
-# /dev/vchiq is Raspberry Pi specific; ignore on x86
-DeviceAllow=/dev/vchiq rw
-
-# Директории для записи
-ReadWritePaths=/var/log/dsign /var/lib/dsign
-
-[Install]
-WantedBy=multi-user.target
-EOL
+# Install systemd units/timers from etc/systemd/system/
+mkdir -p "$SYSTEMD_DIR"
+for u in "$PROJECT_DIR/etc/systemd/system/"*.service "$PROJECT_DIR/etc/systemd/system/"*.timer; do
+  [ -f "$u" ] || continue
+  install -m 0644 "$u" "$SYSTEMD_DIR/$(basename "$u")"
+done
 
 # MPV minimal config under /var/lib/dsign (owned by dsign — editable without root)
-mkdir -p "$DB_DIR/mpv-minimal"
-install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/mpv.conf" "$DB_DIR/mpv-minimal/mpv.conf"
-chown -R "$DSIGN_USER:video" "$DB_DIR/mpv-minimal"
-chmod 775 "$DB_DIR/mpv-minimal"
-chmod 664 "$DB_DIR/mpv-minimal/mpv.conf" 2>/dev/null || true
-
-# MPV Player Service
-cat > /etc/systemd/system/dsign-mpv.service <<EOL
-[Unit]
-Description=Digital Signage MPV Player
-After=network.target getty@tty1.service
-Conflicts=getty@tty1.service
-
-[Service]
-User=$DSIGN_USER
-Group=video
-Type=simple
-SupplementaryGroups=tty audio
-PermissionsStartOnly=true
-Environment="TERM=linux"
-WorkingDirectory=/home/dsign
-StandardInput=tty
-TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
-TTYVTDisallocate=yes
-UMask=0002
-ExecStartPre=/bin/chvt 1
-ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
-ExecStartPre=/bin/chown -R dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
-ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
-ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
-ExecStart=/usr/bin/mpv --idle=yes --no-terminal --config-dir=/var/lib/dsign/mpv-minimal --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --fullscreen --demuxer-lavf-o=safe=0 --hwdec=auto --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=auto --script-opts=ytdl_hook-ytdl_path=/usr/bin/yt-dlp --log-file=/var/log/dsign/mpv.log
-ExecStartPost=-/usr/local/bin/dsign-show-startup-ip
-Restart=always
-RestartSec=5s
-StartLimitInterval=60s
-StartLimitBurst=3
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-EOL
-
-# Network assistant helper (OSD on content screen via MPV IPC)
-install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/bin/dsign-network-assistant
-sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
-install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-post-start" /usr/local/bin/dsign-mpv-post-start
-sed -i 's/\r$//' /usr/local/bin/dsign-mpv-post-start
-install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
-sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
-install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-capture" /usr/local/bin/dsign-capture
-sed -i 's/\r$//' /usr/local/bin/dsign-capture
-chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-mpv-post-start /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-capture
-
-# Screenshot service + timer (web UI "on air" preview)
-install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.service" /etc/systemd/system/screenshot.service
-install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.timer" /etc/systemd/system/screenshot.timer
+if [ -f "$PROJECT_DIR/etc/dsign/mpv-minimal/mpv.conf" ]; then
+  install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/mpv.conf" "$DB_DIR/mpv-minimal/mpv.conf"
+  chown -R "$DSIGN_USER:video" "$DB_DIR/mpv-minimal" || true
+  chmod 775 "$DB_DIR/mpv-minimal" || true
+  chmod 664 "$DB_DIR/mpv-minimal/mpv.conf" 2>/dev/null || true
+fi
 
 # Allow the web UI to start the screenshot service without a password prompt.
 # Keep it narrow: only `systemctl start screenshot.service`.
@@ -256,52 +188,9 @@ dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart dsign-mpv.service
 EOL
 chmod 440 /etc/sudoers.d/dsign-screenshot
 
-cat > /etc/systemd/system/dsign-network-assistant.service <<EOL
-[Unit]
-Description=Digital Signage Network Assistant (OSD)
-After=network.target
-Wants=network.target
-
-[Service]
-Type=oneshot
-User=root
-Group=root
-ExecStart=/usr/local/bin/dsign-network-assistant
-Environment=DSIGN_NETWORK_PROMPT_TIMEOUT_SEC=120
-Environment=DSIGN_STARTUP_IP_FILE=/tmp/dsign-startup-ip.txt
-Environment=TERM=linux
-# Non-interactive default: do not block boot/web UI. Set to 1 to enable nmtui prompt.
-Environment=DSIGN_NETWORK_ASSISTANT_INTERACTIVE=0
-TimeoutStartSec=130
-
-# Keep UI interaction (if enabled) on tty1
-StandardInput=tty
-TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=no
-TTYVTDisallocate=no
-
-[Install]
-WantedBy=multi-user.target
-EOL
-
-cat > /etc/systemd/system/dsign-show-startup-ip.service <<EOL
-[Unit]
-Description=Digital Signage Startup IP OSD helper
-After=dsign-mpv.service
-
-[Service]
-Type=oneshot
-User=$DSIGN_USER
-Group=$DSIGN_USER
-ExecStart=/usr/local/bin/dsign-show-startup-ip
-
-[Install]
-WantedBy=multi-user.target
-EOL
-
 # Настройка прав на DRI устройства
-cat > /etc/udev/rules.d/99-dsign.rules <<EOL
+mkdir -p "$UDEV_RULES_DIR"
+cat > "$UDEV_RULES_DIR/99-dsign.rules" <<EOL
 KERNEL=="card0", GROUP="video", MODE="0660"
 KERNEL=="renderD128", GROUP="video", MODE="0660"
 EOL
@@ -310,9 +199,10 @@ udevadm control --reload-rules
 udevadm trigger
 
 systemctl daemon-reload
-systemctl enable digital-signage.service dsign-mpv.service dsign-network-assistant.service
+
+# Enable core services (best-effort: not all boxes have tty1/drm available during install)
+systemctl enable digital-signage.service dsign-mpv.service dsign-network-assistant.service || true
 systemctl enable screenshot.timer || true
-systemctl disable dsign-show-startup-ip.service || true
 systemctl start dsign-network-assistant.service dsign-mpv.service digital-signage.service || true
 
 # Настройка Nginx
