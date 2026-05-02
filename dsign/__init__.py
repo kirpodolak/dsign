@@ -207,15 +207,26 @@ def _start_idle_logo(app: Flask) -> None:
 
 def _resume_playback(app: Flask, playlist_id: int) -> None:
     """Возобновление воспроизведения плейлиста"""
-    try:
-        # playback_service controls mpv; playlist_service is CRUD only.
-        if not app.playback_service.play(playlist_id):
-            app.logger.error("Failed to resume playlist playback, falling back to idle logo")
-            _fallback_to_idle_logo(app)
-    except Exception as e:
-        app.logger.error(f"Error resuming playback: {str(e)}")
-        app.logger.info("Falling back to idle logo due to playback error")
-        _fallback_to_idle_logo(app)
+
+    def run_resume():
+        # Never block create_app / socketio.run on the main thread: play() starts IPC-heavy work and
+        # can stall HTTP until the playlist ends (looks like "frontend never loads").
+        try:
+            with app.app_context():
+                try:
+                    if not app.playback_service.play(playlist_id):
+                        app.logger.error(
+                            "Failed to resume playlist playback, falling back to idle logo"
+                        )
+                        _fallback_to_idle_logo(app)
+                except Exception as e:
+                    app.logger.error(f"Error resuming playback: {str(e)}")
+                    app.logger.info("Falling back to idle logo due to playback error")
+                    _fallback_to_idle_logo(app)
+        except Exception:
+            pass
+
+    Thread(target=run_resume, daemon=True).start()
 
 def _fallback_to_idle_logo(app: Flask) -> None:
     """Аварийный переход к отображению логотипа"""
