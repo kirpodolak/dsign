@@ -442,7 +442,8 @@ const ui = {
 
         const cpuTempRaw = Number(systemStatus?.cpu?.temp_c);
         const cpuTemp = Number.isFinite(cpuTempRaw) ? cpuTempRaw : null;
-        const cpuTempPercent = cpuTemp === null ? null : this._clampPercent(cpuTemp);
+        const cpuTempPercent =
+            cpuTemp === null ? null : Math.max(0, Math.min(100, (cpuTemp / 85) * 100));
         const cpuTempValue = cpuTemp === null ? t('value_na', lang) : `${cpuTemp.toFixed(1)}°C`;
 
         const cpuLoadRaw = Number(systemStatus?.cpu?.usage_percent ?? systemStatus?.cpu?.load_percent);
