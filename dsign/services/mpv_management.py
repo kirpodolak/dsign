@@ -372,7 +372,12 @@ class MPVManager:
                             # For get_property, "property unavailable" is expected on some mpv builds / media types.
                             # Treat it as a non-error and normalize to {"error":"success","data":None} so callers can
                             # handle it without generating noisy logs.
-                            if command_name == "get_property" and err == "property unavailable":
+                            # Older mpv builds say "property unavailable"; some say "property not found"
+                            # for optional OBS/cache-related properties we probe in polling loops.
+                            if command_name == "get_property" and err in (
+                                "property unavailable",
+                                "property not found",
+                            ):
                                 if log_ipc_debug:
                                     self.logger.debug(
                                         "MPVCommand property unavailable",
@@ -382,6 +387,7 @@ class MPVManager:
                                             "request_id": ipc_request_id,
                                             "duration_sec": duration_sec,
                                             "attempt": attempt + 1,
+                                            "mpv_error": err,
                                         },
                                     )
                                 return {
@@ -393,7 +399,11 @@ class MPVManager:
                             # Keep it at DEBUG to avoid log spam.
                             # `file-local-options/*` cannot be set while mpv is idle (no current file); callers should
                             # use per-file options on `loadfile` instead. Treat as DEBUG noise.
-                            quiet_errs = {"property unavailable", "error accessing property"}
+                            quiet_errs = {
+                                "property unavailable",
+                                "property not found",
+                                "error accessing property",
+                            }
                             quiet_props = False
                             try:
                                 if (

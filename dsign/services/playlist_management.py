@@ -890,9 +890,6 @@ class PlaylistManager:
                 dct = self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0)
                 if dct is not None and dct > 0.05:
                     return True
-                cu = self._mpv_get_prop_number("cache-used", timeout=2.0)
-                if cu is not None and cu >= 65536:
-                    return True
                 paused_cache = self._mpv_get_prop_bool("paused-for-cache", timeout=2.0)
                 if paused_cache is False:
                     eof = self._mpv_get_prop_bool("eof-reached", timeout=2.0)
