@@ -544,6 +544,15 @@ class MPVManager:
         results = {}
         
         for key, value in settings.items():
+            if key == "mute":
+                if isinstance(value, bool):
+                    value = "yes" if value else "no"
+                elif isinstance(value, str):
+                    lv = value.strip().lower()
+                    if lv in ("1", "true", "yes", "on"):
+                        value = "yes"
+                    elif lv in ("0", "false", "no", "off"):
+                        value = "no"
             response = self._send_command({
                 "command": ["set_property", key, value]
             })
