@@ -29,6 +29,7 @@ class PlaylistManager:
         self._active_playlist_id: Optional[int] = None
         # External media resolver is optional; attached lazily to avoid tight coupling.
         self._external_media_service = None
+        self._settings_service = None
         # Backoff per media key for unstable/blocked streams to avoid busy looping loadfile.
         # key -> {failures:int, next_try_monotonic:float}
         self._media_backoff: Dict[str, Dict[str, Any]] = {}
@@ -36,6 +37,56 @@ class PlaylistManager:
     def set_external_media_service(self, service) -> None:
         """Attach external media resolver service (optional)."""
         self._external_media_service = service
+
+    def set_settings_service(self, service) -> None:
+        """Attach settings service so playback can mirror volume/audio-route into MPV."""
+        self._settings_service = service
+
+    def _sync_settings_audio_to_mpv(self) -> None:
+        """
+        Apply audio-route + volume from settings.json to MPV.
+
+        On Pi/direct HDMI the dashboard often adjusts ALSA only while audible level is mpv's
+        ``volume`` property — leaving mpv at 0 after loadfile otherwise.
+        """
+        svc = self._settings_service
+        if not svc:
+            return
+        try:
+            st = svc.load_settings()
+        except Exception:
+            return
+        mpv_cfg = st.get("mpv") if isinstance(st.get("mpv"), dict) else {}
+        route = mpv_cfg.get("audio-route")
+        updates: Dict[str, Any] = {}
+        if route is not None and str(route).strip() != "":
+            try:
+                updates.update(svc.expand_audio_route(str(route)))
+            except Exception:
+                pass
+        if updates:
+            try:
+                self._mpv_manager.update_settings(updates)
+            except Exception:
+                pass
+        try:
+            vol_raw = st.get("volume")
+            if vol_raw is not None:
+                v = float(max(0, min(100, int(vol_raw))))
+                self._mpv_manager._send_command({"command": ["set_property", "volume", v]}, timeout=3.0)
+        except Exception:
+            pass
+
+    def _effective_playback_muted(self, *, item_muted: bool, profile_muted: bool) -> bool:
+        """Global UI mute OR playlist-profile mute OR per-file mute."""
+        g = False
+        try:
+            if self._settings_service:
+                st = self._settings_service.load_settings()
+                g = bool(st.get("mute", False))
+        except Exception:
+            pass
+        return g or bool(profile_muted) or bool(item_muted)
 
     def _resolve_playlist_item_path(self, file_name: str) -> Optional[Dict[str, Any]]:
         """
@@ -1161,7 +1212,10 @@ class PlaylistManager:
                 raw_duration = item.get("duration")
                 # Only images use duration. Treat 0/None as "missing" for images.
                 duration = raw_duration if (raw_duration is not None and int(raw_duration) >= 1) else default_duration
-                muted = bool(item.get("muted", False)) or profile_muted
+                muted = self._effective_playback_muted(
+                    item_muted=bool(item.get("muted", False)),
+                    profile_muted=profile_muted,
+                )
 
                 # Apply per-item settings (best-effort, longer timeout to avoid IPC churn on Pi 3B+).
                 # NOTE: if MPV is under load, short timeouts cause broken pipes and retry storms.
@@ -1225,8 +1279,8 @@ class PlaylistManager:
                     )
                     load_resp = self._mpv_manager._send_command({"command": load_cmd}, timeout=20.0)
                     self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
-                    # Apply after loadfile: mpv may reset mute on a new file; doing this before load
-                    # left repeat cycles stuck muted / out of sync with the playlist row.
+                    self._sync_settings_audio_to_mpv()
+                    # Apply after loadfile: mpv may reset mute/volume on a new file.
                     try:
                         self._mpv_manager._send_command(
                             {"command": ["set_property", "mute", "yes" if muted else "no"]},
@@ -1503,14 +1557,6 @@ class PlaylistManager:
                 )
             except Exception:
                 pass
-            try:
-                first_muted = bool(first.get("muted", False)) or profile_muted
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "mute", "yes" if first_muted else "no"]},
-                    timeout=2.0,
-                )
-            except Exception:
-                pass
             _, first_mpv_opts = self._apply_mpv_http_headers(first, stream_url=str(first.get("path") or ""))
             self._apply_mpv_ytdl_options(first, stream_url=str(first.get("path") or ""))
             first_load_cmd = self._mpv_loadfile_command(
@@ -1520,6 +1566,18 @@ class PlaylistManager:
             )
             self._mpv_manager._send_command({"command": first_load_cmd}, timeout=10.0)
             self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
+            self._sync_settings_audio_to_mpv()
+            try:
+                first_muted = self._effective_playback_muted(
+                    item_muted=bool(first.get("muted", False)),
+                    profile_muted=profile_muted,
+                )
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "mute", "yes" if first_muted else "no"]},
+                    timeout=3.0,
+                )
+            except Exception:
+                pass
 
             # Update playback status (single-row table; keep id=1 stable)
             playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)

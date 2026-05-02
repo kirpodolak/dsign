@@ -516,6 +516,17 @@ def init_services(
             # Best-effort only; local playback must keep working.
             pass
 
+        try:
+            ss = services.get("settings_service")
+            pb = services.get("playback_service")
+            if ss and pb:
+                pm = getattr(pb, "_playlist_manager", None)
+                if pm is not None and hasattr(pm, "set_settings_service"):
+                    pm.set_settings_service(ss)
+                    logger.info("SettingsService wired into PlaylistManager for MPV audio sync")
+        except Exception as e:
+            logger.warning("Failed wiring SettingsService into PlaylistManager", {"error": str(e)})
+
         logger.info("Все сервисы инициализированы", {
             'initialized': list(services.keys()),
             'failed': [name for name, _ in optional_services if name not in services]
