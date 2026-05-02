@@ -6,7 +6,7 @@ import socket
 import traceback
 import time
 from pathlib import Path 
-from flask import jsonify, request, send_from_directory, abort, current_app, send_file, make_response
+from flask import jsonify, request, send_from_directory, abort, current_app, send_file
 from flask_login import login_required, current_user, login_user, logout_user
 from flask_wtf.csrf import validate_csrf
 from werkzeug.utils import secure_filename
@@ -57,43 +57,7 @@ def init_api_routes(api_bp, services):
     _amixer_pick_cache_ttl_sec: float = 60.0
     # Bump when heuristics change so a stale (wrong) card/ctl is not served for 60s.
     _amixer_pick_cache_version: int = 7
-
-    # MPV volume/mute readback may intermittently fail if IPC is busy or MPV is restarting.
-    # Cache the last known MPV audio state so /api/system/status doesn't fall back to unrelated
-    # sinks (PipeWire/amixer) and "randomly" move the knob.
-    _mpv_audio_cache: dict = {"ts": 0.0, "volume_percent": None, "muted": None, "ao": None}
-    _mpv_audio_cache_lock = Lock()
-    _mpv_audio_cache_ttl_sec: float = 15.0
     def _read_cpu_temp_c() -> float | None:
-        # Prefer x86 "coretemp" / package temperature when available.
-        #
-        # On many x86 boxes, thermal_zone0 points to ACPI zones (often bogus, e.g. -269.9°C),
-        # while /sys/class/thermal/*/type may contain "x86_pkg_temp" with a correct value.
-        try:
-            base = Path("/sys/class/thermal")
-            for tp in sorted(base.glob("thermal_zone*/type")):
-                try:
-                    t = tp.read_text(encoding="utf-8", errors="ignore").strip().lower()
-                except Exception:
-                    continue
-                if t not in ("x86_pkg_temp", "coretemp"):
-                    continue
-                temp_p = tp.parent / "temp"
-                if not temp_p.exists():
-                    continue
-                try:
-                    raw = temp_p.read_text(encoding="utf-8", errors="ignore").strip()
-                    v = float(raw)
-                    # Filter obvious bogus values
-                    c = (v / 1000.0) if v > 1000 else v
-                    if c < -20 or c > 125:
-                        continue
-                    return round(c, 1)
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
         # Raspberry Pi / Linux common path
         for p in (
             "/sys/class/thermal/thermal_zone0/temp",
@@ -103,10 +67,7 @@ def init_api_routes(api_bp, services):
                 if os.path.exists(p):
                     raw = Path(p).read_text(encoding="utf-8").strip()
                     v = float(raw)
-                    c = (v / 1000.0) if v > 1000 else v
-                    if c < -20 or c > 125:
-                        continue
-                    return round(c, 1)
+                    return round(v / 1000.0, 1) if v > 1000 else round(v, 1)
             except Exception:
                 continue
         return None
@@ -351,49 +312,21 @@ def init_api_routes(api_bp, services):
             mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
             if not mgr:
                 return None
-            # Small retry helps when IPC is busy/restarting.
-            last_err = None
-            for _ in range(3):
-                ar = mgr._send_command({"command": ["get_property", "ao"]}, timeout=2.0)
-                vr = mgr._send_command({"command": ["get_property", "volume"]}, timeout=2.0)
-                mr = mgr._send_command({"command": ["get_property", "mute"]}, timeout=2.0)
-                if vr and vr.get("error") == "success" and "data" in vr:
-                    vraw = vr["data"]
-                    try:
-                        vnum = int(round(float(vraw)))
-                    except (TypeError, ValueError):
-                        vnum = None
-                    mdata = bool(mr["data"]) if (mr and mr.get("error") == "success" and "data" in mr) else None
-                    ao = str(ar.get("data")) if (ar and ar.get("error") == "success" and "data" in ar) else None
-                    state = {
-                        "available": True,
-                        "volume_percent": vnum,
-                        "muted": mdata,
-                        "ao": ao,
-                    }
-                    with _mpv_audio_cache_lock:
-                        _mpv_audio_cache["ts"] = time.time()
-                        _mpv_audio_cache["volume_percent"] = vnum
-                        _mpv_audio_cache["muted"] = mdata
-                        _mpv_audio_cache["ao"] = ao
-                    return state
-                last_err = (vr or {}).get("error") if isinstance(vr, dict) else "no-response"
-                time.sleep(0.05)
-
-            # Fall back to last known MPV audio state (prevents random dashboard jumps).
-            now = time.time()
-            with _mpv_audio_cache_lock:
-                ts = float(_mpv_audio_cache.get("ts") or 0.0)
-                if (now - ts) < _mpv_audio_cache_ttl_sec:
-                    return {
-                        "available": True,
-                        "volume_percent": _mpv_audio_cache.get("volume_percent"),
-                        "muted": _mpv_audio_cache.get("muted"),
-                        "ao": _mpv_audio_cache.get("ao"),
-                        "stale": True,
-                        "error": last_err,
-                    }
-            return None
+            vr = mgr._send_command({"command": ["get_property", "volume"]}, timeout=2.0)
+            mr = mgr._send_command({"command": ["get_property", "mute"]}, timeout=2.0)
+            if not vr or vr.get("error") != "success" or "data" not in vr:
+                return None
+            vraw = vr["data"]
+            try:
+                vnum = int(round(float(vraw)))
+            except (TypeError, ValueError):
+                vnum = None
+            mdata = bool(mr["data"]) if (mr and mr.get("error") == "success" and "data" in mr) else None
+            return {
+                "available": True,
+                "volume_percent": vnum,
+                "muted": mdata,
+            }
         except Exception:
             return None
 
@@ -405,21 +338,20 @@ def init_api_routes(api_bp, services):
             if volume_percent is not None:
                 v = float(max(0, min(100, int(volume_percent))))
                 mgr._send_command({"command": ["set_property", "volume", v]}, timeout=2.0)
-            # If UI adjusts volume but doesn't explicitly toggle mute, prefer unmuting to recover
-            # from MPV being stuck muted (common after backend restarts / ao changes).
-            if muted is None and volume_percent is not None:
-                muted = False
             if muted is not None:
                 mgr._send_command({"command": ["set_property", "mute", bool(muted)]}, timeout=2.0)
-            # Update cached state even if immediate readback fails.
-            with _mpv_audio_cache_lock:
-                _mpv_audio_cache["ts"] = time.time()
-                if volume_percent is not None:
-                    _mpv_audio_cache["volume_percent"] = int(max(0, min(100, int(volume_percent))))
-                if muted is not None:
-                    _mpv_audio_cache["muted"] = bool(muted)
         except Exception:
             pass
+
+    def _mpv_manager_available() -> bool:
+        try:
+            return getattr(playback_service, "_mpv_manager", None) is not None if playback_service else False
+        except Exception:
+            return False
+
+    def _prefer_mpv_volume() -> bool:
+        """When MPV drives ALSA directly, wpctl default sink is unrelated — prefer IPC volume/mute."""
+        return os.getenv("DSIGN_PREFER_MPV_VOLUME", "1").strip().lower() in ("1", "true", "yes", "on")
 
     def _amixer_pick_control() -> tuple[int, str] | None:
         """
@@ -580,6 +512,13 @@ def init_api_routes(api_bp, services):
                     "muted": m_any_off if m_any else None,
                 }
 
+        # After vc4hdmi hardware mixers: if signage MPV is running, its ao is often ALSA/PipeWire bypass.
+        # Prefer MPV readback before wpctl so the dashboard matches audible output (x86 + --ao=alsa).
+        if _prefer_mpv_volume() and _mpv_manager_available():
+            mpv = _audio_get_mpv()
+            if mpv:
+                return mpv
+
         # 2) MPV is the real volume knob for `alsa/hdmi:CARD=vc4hdmi0` when vc4 has no scontrols
         if _audio_path_is_mpv_direct_hdmi():
             mpv = _audio_get_mpv()
@@ -588,42 +527,33 @@ def init_api_routes(api_bp, services):
             # Do not fall through to card0 Master / unrelated sinks — that caused stuck ~77% UI.
             return {"available": False, "volume_percent": None, "muted": None}
 
-        # 3) When MPV is under our control, its software volume is the dashboard source of truth.
-        # Do not require `get_property ao` to succeed: that property can be missing/transient while
-        # `volume`/`mute` still work; falling through to PipeWire/amixer then makes the knob jump.
-        mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
-        prefer_mpv = os.getenv("DSIGN_PREFER_MPV_VOLUME", "1").strip().lower() in ("1", "true", "yes", "on")
-        mpv = _audio_get_mpv()
-        if prefer_mpv and mgr:
-            if mpv and mpv.get("available"):
-                return {
-                    "available": True,
-                    "volume_percent": mpv.get("volume_percent"),
-                    "muted": mpv.get("muted"),
-                }
-            return {"available": False, "volume_percent": None, "muted": None}
-
+        # 3) PipeWire (only when not in MPV-direct-HDMI mode, to avoid wrong default sink %)
         wp = _wpctl_get_default_sink()
         if wp.get("available") and (wp.get("volume_percent") is not None or wp.get("muted") is not None):
             return {"available": True, "volume_percent": wp.get("volume_percent"), "muted": wp.get("muted")}
 
         if not _amixer_available():
+            mpv = _audio_get_mpv()
             return mpv if mpv else {"available": False, "volume_percent": None, "muted": None}
 
         picked = _amixer_pick_control()
         if not picked:
+            mpv = _audio_get_mpv()
             return mpv if mpv else {"available": False, "volume_percent": None, "muted": None}
         v, m = _amixer_sget_parsed(picked[0], picked[1])
         if v is not None or m is not None:
             return {"available": True, "volume_percent": v, "muted": m}
+        mpv = _audio_get_mpv()
         return mpv if mpv else {"available": True, "volume_percent": None, "muted": None}
 
     def _audio_set(volume_percent: int | None = None, muted: bool | None = None) -> dict:
         """
         Apply volume: (1) ALSA simple controls on all vc4hdmi* if they exist, else
-        (2) MPV volume/mute (direct ALSA signage player). PipeWire wpctl is not applied here —
-        mixing MPV ALSA output with wpctl default sink caused silence on some setups.
+        (2) MPV IPC when DSIGN_PREFER_MPV_VOLUME (default on) and MPVManager exists — matches --ao=alsa,
+        (3) PipeWire @DEFAULT_AUDIO_SINK@ if DSIGN_USE_PIPEWIRE_AUDIO and wpctl, else
+        (4) MPV volume/mute as last resort.
         """
+        use_pw = (os.getenv("DSIGN_USE_PIPEWIRE_AUDIO", "1").strip().lower() in ("1", "true", "yes", "on")) and _wpctl_available()
         v_pct = int(max(0, min(100, int(volume_percent)))) if volume_percent is not None else None
 
         alsa_targs: list[tuple[int, str]] = []
@@ -645,10 +575,12 @@ def init_api_routes(api_bp, services):
             _invalidate_system_status_cache()
             return _audio_get()
 
-        # Always apply MPV software volume/mute: signage MPV uses `--ao=alsa` (direct ALSA device).
-        # Do **not** also drive PipeWire `@DEFAULT_AUDIO_SINK@`: that can mute/unmute or retarget an
-        # unrelated sink and silence ALSA playback while the dashboard still shows MPV volume.
-        _audio_set_mpv(v_pct, muted)
+        if _prefer_mpv_volume() and _mpv_manager_available():
+            _audio_set_mpv(v_pct, muted)
+        elif use_pw:
+            _wpctl_set_default_sink(vol_pct=v_pct, muted=muted)
+        else:
+            _audio_set_mpv(v_pct, muted)
 
         _invalidate_system_status_cache()
         return _audio_get()
@@ -2148,29 +2080,19 @@ def init_api_routes(api_bp, services):
             # Hot path: this endpoint is polled by the UI.
             # Avoid expensive PIL open/verify here; do validation in the capture endpoint instead.
             if os.path.exists(screenshot_path) and os.path.getsize(screenshot_path) > 1024:
-                resp = make_response(
-                    send_file(
-                        screenshot_path,
-                        mimetype="image/jpeg",
-                        conditional=True,
-                        max_age=0,
-                    )
-                )
-                resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-                resp.headers["Pragma"] = "no-cache"
-                return resp
-
-            resp = make_response(
-                send_file(
-                    default_path,
-                    mimetype="image/jpeg",
+                return send_file(
+                    screenshot_path,
+                    mimetype='image/jpeg',
                     conditional=True,
-                    max_age=0,
+                    max_age=0
                 )
+        
+            return send_file(
+                default_path,
+                mimetype='image/jpeg',
+                conditional=True,
+                max_age=0
             )
-            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-            resp.headers["Pragma"] = "no-cache"
-            return resp
         
         except Exception as e:
             current_app.logger.error(f"Screenshot error: {str(e)}")
@@ -2244,30 +2166,12 @@ def init_api_routes(api_bp, services):
 
             # Import subprocess here to avoid UnboundLocalError
             import subprocess
-            import shutil
         
             # Start service
-            systemctl = (
-                os.getenv("DSIGN_SYSTEMCTL_PATH", "").strip()
-                or shutil.which("systemctl")
-                or "/bin/systemctl"
-            )
-            # Use full paths to avoid sudo secure_path issues.
-            sudo = shutil.which("sudo") or "/usr/bin/sudo"
-            # `dsign-capture` may legitimately take >10s on 4K/DRM (wait for MPV IPC replies, file flush).
-            # Keep this reasonably bounded but not so small that normal capture fails.
-            try:
-                screenshot_systemctl_timeout = float(os.getenv("DSIGN_SCREENSHOT_SYSTEMCTL_TIMEOUT_SEC", "45") or 45)
-            except Exception:
-                screenshot_systemctl_timeout = 45.0
-            if screenshot_systemctl_timeout < 5:
-                screenshot_systemctl_timeout = 5.0
-            if screenshot_systemctl_timeout > 120:
-                screenshot_systemctl_timeout = 120.0
             result = subprocess.run(
-                [sudo, systemctl, 'start', 'screenshot.service'],
+                ['sudo', '/bin/systemctl', 'start', 'screenshot.service'],
                 check=True,
-                timeout=screenshot_systemctl_timeout,
+                timeout=10,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True
@@ -2293,25 +2197,15 @@ def init_api_routes(api_bp, services):
             if not msg:
                 msg = str(e) or "timeout"
             current_app.logger.error(f"Service timeout: {msg}")
-            return jsonify({"success": False, "error": "Service timeout", "details": msg}), 500
+            return jsonify({"success": False, "error": "Service timeout"}), 500
     
         except subprocess.CalledProcessError as e:
-            stderr = (e.stderr or "").strip()
-            stdout = (e.stdout or "").strip()
-            current_app.logger.error(
-                "Service failed",
-                extra={
-                    "exit_code": getattr(e, "returncode", None),
-                    "stdout": stdout[-2000:] if stdout else "",
-                    "stderr": stderr[-2000:] if stderr else "",
-                },
-            )
-            details = stderr or stdout or f"exit_code={getattr(e, 'returncode', None)}"
-            return jsonify({"success": False, "error": "Service failed", "details": details}), 500
+            current_app.logger.error(f"Service failed: {e.stderr}")
+            return jsonify({"success": False, "error": "Service failed"}), 500
     
         except Exception as e:
             current_app.logger.error(f"Unexpected error: {str(e)}", exc_info=True)
-            return jsonify({"success": False, "error": "Internal error", "details": str(e)}), 500
+            return jsonify({"success": False, "error": "Internal error"}), 500
             
     @api_bp.route('/media/thumbnail/<filename>', methods=['GET'])
     @login_required
