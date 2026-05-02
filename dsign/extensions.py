@@ -56,7 +56,7 @@ def init_extensions(app) -> Dict[str, Any]:
         socketio.init_app(
             app,
             cors_allowed_origins=app.config.get('SOCKETIO_CORS_ALLOWED_ORIGINS', "*"),
-            async_mode=app.config.get('SOCKETIO_ASYNC_MODE', 'eventlet'),
+            async_mode=app.config.get('SOCKETIO_ASYNC_MODE', 'threading'),
             ping_interval=app.config.get('SOCKETIO_PING_INTERVAL', 25),
             ping_timeout=app.config.get('SOCKETIO_PING_TIMEOUT', 60),
             # Only enable Socket.IO internal logs when explicitly debugging.
