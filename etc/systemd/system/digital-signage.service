@@ -2,7 +2,7 @@
 Description=Digital Signage Controller
 After=network.target dsign-mpv.service dsign-network-assistant.service
 Requires=dsign-mpv.service
-Wants=dsign-network-assistant.service
+# Do not Wants= network-assistant here: it is Type=oneshot (can block ~120s). MPV unit already Wants it before signage.
 StartLimitIntervalSec=60
 StartLimitBurst=5
 # After repeated failures systemd stops auto-restarts (inactive dead, no new journal lines until):

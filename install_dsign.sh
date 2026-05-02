@@ -192,6 +192,7 @@ Wants=network.target
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 User=root
 Group=root
 ExecStart=/usr/local/bin/dsign-network-assistant
@@ -209,6 +210,7 @@ Wants=dsign-network-assistant.service
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 User=$DSIGN_USER
 Group=$DSIGN_USER
 ExecStart=/usr/local/bin/dsign-show-startup-ip
