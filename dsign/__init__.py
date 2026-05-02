@@ -20,21 +20,28 @@ def should_display_logo(db_session) -> bool:
     return not (status and status.playlist_id)
 
 def check_mpv_service(logger: logging.Logger, timeout: int = 5, retries: int = 3) -> bool:
-    """Проверяет статус MPV сервиса"""
+    """
+    MPV must be reachable via IPC socket.
+
+    Do NOT rely on `systemctl is-active` here: under systemd's hardened service environment the
+    `dsign` user often cannot query systemd/dbus reliably, while MPV is already running — manual
+    `./venv/bin/python .../run.py` then works but digital-signage.service exits immediately.
+    """
+    try:
+        from dsign.services.playback_constants import PlaybackConstants as _PC
+
+        sock = Path(_PC.SOCKET_PATH)
+    except Exception:
+        sock = Path("/var/lib/dsign/mpv/socket")
+
     for attempt in range(retries):
         try:
-            result = subprocess.run(
-                ["systemctl", "is-active", "dsign-mpv.service"],
-                check=True,
-                timeout=timeout,
-                capture_output=True,
-                text=True
-            )
-            if result.stdout.strip() == "active":
+            if sock.exists():
+                # Exists while idle=yes mpv waits — sufficient for Flask bootstrap.
                 return True
-            logger.warning(f"MPV service not active (attempt {attempt + 1}/{retries})")
-        except subprocess.SubprocessError as e:
-            logger.warning(f"MPV service check failed: {str(e)} (attempt {attempt + 1}/{retries})")
+        except Exception as e:
+            logger.warning(f"MPV socket check failed (attempt {attempt + 1}/{retries}): {str(e)}")
+        logger.warning(f"MPV IPC socket not ready yet: {sock} (attempt {attempt + 1}/{retries})")
         time.sleep(1)
     return False
 
@@ -67,8 +74,8 @@ def create_app(config_class: Config = config) -> Flask:
         # 1. Проверка MPV сервиса
         app.logger.debug("Checking MPV service status...")
         if not check_mpv_service(app.logger):
-            app.logger.error("MPV service is not active")
-            raise RuntimeError("MPV service is not running")
+            app.logger.error("MPV IPC socket is not available (start dsign-mpv.service first)")
+            raise RuntimeError("MPV IPC socket is not available")
         app.logger.debug("MPV service is active and ready")
 
         # 2. Инициализация расширений
