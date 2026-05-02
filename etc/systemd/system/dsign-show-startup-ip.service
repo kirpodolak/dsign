@@ -1,9 +1,10 @@
 [Unit]
 Description=Digital Signage Startup IP OSD helper
-After=dsign-mpv.service
+After=dsign-mpv.service dsign-network-assistant.service
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 User=dsign
 Group=dsign
 ExecStart=/usr/local/bin/dsign-show-startup-ip
