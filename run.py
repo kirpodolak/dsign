@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
+"""
+Entry point for Digital Signage.
+
+Supports layouts:
+  - run.py next to package dir: <root>/run.py + <root>/dsign/__init__.py
+  - run.py inside package dir: <root>/dsign/run.py + <root>/dsign/__init__.py  → prepend <root>
+"""
 import sys
 import os
 from typing import Optional
 
 
-def _has_dsign_package(d: str) -> bool:
-    return os.path.isfile(os.path.join(os.path.abspath(d), "dsign", "__init__.py"))
+def _has_nested_package(root: str) -> bool:
+    return os.path.isfile(os.path.join(os.path.abspath(root), "dsign", "__init__.py"))
 
 
-def _project_root_containing_dsign_package(*candidate_dirs: str) -> Optional[str]:
-    """
-    Walk parents of each candidate until a directory containing `dsign/__init__.py` is found.
-    """
+def _walk_parents_for_nested_package(*starts: str) -> Optional[str]:
     seen: set[str] = set()
-    for start in candidate_dirs:
+    for start in starts:
         d = os.path.abspath(start)
-        for _ in range(10):
+        for _ in range(12):
             if d in seen:
                 break
             seen.add(d)
-            if _has_dsign_package(d):
+            if _has_nested_package(d):
                 return d
             parent = os.path.dirname(d)
             if parent == d:
@@ -28,22 +32,36 @@ def _project_root_containing_dsign_package(*candidate_dirs: str) -> Optional[str
     return None
 
 
-# Explicit layout override (run.py may live in scripts/, tools/, etc.)
-_env_root = (os.environ.get("DSIGN_PROJECT_ROOT") or "").strip()
 _here = os.path.dirname(os.path.abspath(__file__))
 _cwd = os.getcwd()
 
-_root = None
-if _env_root and _has_dsign_package(_env_root):
-    _root = os.path.abspath(_env_root)
-else:
-    _root = _project_root_containing_dsign_package(_here, _cwd)
+_roots_to_try: list[str] = []
 
-if _root:
-    if _root not in sys.path:
-        sys.path.insert(0, _root)
+# run.py sits inside .../dsign/ next to __init__.py → import root is parent directory
+if os.path.isfile(os.path.join(_here, "__init__.py")):
+    parent = os.path.dirname(_here)
+    if parent and parent != _here:
+        _roots_to_try.append(parent)
+
+_env = (os.environ.get("DSIGN_PROJECT_ROOT") or "").strip()
+if _env:
+    _roots_to_try.append(os.path.abspath(_env))
+
+_roots_to_try.extend([_here, _cwd])
+
+chosen = None
+for candidate in _roots_to_try:
+    if candidate and _has_nested_package(candidate):
+        chosen = os.path.abspath(candidate)
+        break
+
+if not chosen:
+    chosen = _walk_parents_for_nested_package(_here, _cwd)
+
+if chosen:
+    if chosen not in sys.path:
+        sys.path.insert(0, chosen)
 else:
-    # Last resort: directory of run.py only (may fail if run.py is isolated)
     if _here not in sys.path:
         sys.path.insert(0, _here)
 
