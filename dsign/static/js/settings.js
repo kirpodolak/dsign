@@ -132,7 +132,7 @@ export class SettingsManager {
             this.renderSettingsForm();
             this.performance.mark('settings-rendered');
             this.setupEventListeners();
-            this.startSystemPolling();
+            // startPolling above already arms slow polling; avoid duplicate timers.
             this.state.initialized = true;
             this.performance.flush('init-complete');
 
@@ -339,12 +339,13 @@ export class SettingsManager {
 
     startSystemPolling() {
         if (this.state.systemPollTimer) return;
+        // Slow safety net only: index dashboard polls /api/system/status more often when open.
         this.state.systemPollTimer = setInterval(() => {
             if (document.hidden || this.state.systemStatusLoading) {
                 return;
             }
             this.refreshSystemStatus().catch(() => {});
-        }, 10000);
+        }, 60000);
     }
 
     stopSystemPolling() {
