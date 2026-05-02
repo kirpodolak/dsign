@@ -1,7 +1,8 @@
 [Unit]
 Description=Digital Signage Controller
-After=network.target dsign-mpv.service
+After=network.target dsign-mpv.service dsign-network-assistant.service
 Requires=dsign-mpv.service
+Wants=dsign-network-assistant.service
 StartLimitIntervalSec=60
 StartLimitBurst=3
 
@@ -9,12 +10,15 @@ StartLimitBurst=3
 Type=simple
 User=dsign
 Group=dsign
-WorkingDirectory=/home/dsign
+# Default layout: git clone at /home/dsign/dsign → package /home/dsign/dsign/dsign/, run.py at /home/dsign/dsign/run.py
+WorkingDirectory=/home/dsign/dsign
+Environment=DSIGN_PROJECT_ROOT=/home/dsign/dsign
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/media/tmp
 ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp
 Environment="TMPDIR=/var/lib/dsign/media/tmp"
 Environment=DSIGN_LOG_LEVEL=WARNING
+Environment=SOCKETIO_ASYNC_MODE=threading
 Environment=DSIGN_AUTO_TRANSCODE_VIDEOS=true
 Environment=DSIGN_TRANSCODE_TARGET_RESOLUTION=1920x1080
 Environment=DSIGN_TRANSCODE_TARGET_FPS=25
@@ -24,8 +28,12 @@ Environment=DSIGN_TRANSCODE_TARGET_FPS=25
 # Environment=DSIGN_MPV_NETBUF_MAX_MB=96
 # Environment=DSIGN_MPV_NETBUF_BACK_MB=16
 # Environment=DSIGN_MPV_NETBUF_READAHEAD_SECS=20
-# Use module execution so imports work even if cwd changes.
-ExecStart=/home/dsign/venv/bin/python -m dsign.run
+# Rare: re-enable strict IPC readiness wait for plain https streams (default off; Rutube HLS uses resolved URLs).
+# Environment=DSIGN_MPV_STREAM_READY_HTTPS=1
+# Seconds before treating idle-active as EOF for network streams (HLS can flicker idle while buffering; default 25).
+# Environment=DSIGN_MPV_NETWORK_IDLE_GRACE_SEC=25
+# Use project venv — system python has no Flask/deps (ModuleNotFoundError: flask).
+ExecStart=/home/dsign/venv/bin/python /home/dsign/dsign/run.py
 # Настройки перезапуска
 Restart=on-failure
 RestartSec=30s
