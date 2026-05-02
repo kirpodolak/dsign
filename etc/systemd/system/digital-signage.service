@@ -2,20 +2,25 @@
 Description=Digital Signage Controller
 After=network.target dsign-mpv.service dsign-network-assistant.service
 Requires=dsign-mpv.service
-Wants=dsign-network-assistant.service
+# Do not Wants= network-assistant here: it is Type=oneshot (can block ~120s). MPV unit already Wants it before signage.
 StartLimitIntervalSec=60
-StartLimitBurst=3
+StartLimitBurst=5
+# After repeated failures systemd stops auto-restarts (inactive dead, no new journal lines until):
+#   sudo systemctl reset-failed digital-signage.service && sudo systemctl start digital-signage.service
+# Keep code + this unit in sync: git pull in /home/dsign/dsign, then daemon-reload.
 
 [Service]
 Type=simple
 User=dsign
 Group=dsign
-# Default layout: git clone at /home/dsign/dsign → package /home/dsign/dsign/dsign/, run.py at /home/dsign/dsign/run.py
+# Layout A (flat): clone root is the Python package → /home/dsign/dsign/{__init__.py,run.py,...}
 WorkingDirectory=/home/dsign/dsign
 Environment=DSIGN_PROJECT_ROOT=/home/dsign/dsign
-ExecStartPre=/bin/mkdir -p /var/lib/dsign/media/tmp
-ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp
-ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp
+ExecStartPre=/bin/mkdir -p /var/lib/dsign/media/tmp /var/log/dsign
+ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp /var/log/dsign
+ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp /var/log/dsign
+# MPV IPC socket often appears shortly after mpv's PID — Python wait is in create_app (DSIGN_MPV_SOCKET_WAIT_ATTEMPTS).
+# Avoid a long ExecStartPre loop here: it blocks `systemctl start` (looks hung; users Ctrl-C before ExecStart runs).
 Environment="TMPDIR=/var/lib/dsign/media/tmp"
 Environment=DSIGN_LOG_LEVEL=WARNING
 Environment=SOCKETIO_ASYNC_MODE=threading
@@ -40,6 +45,7 @@ RestartSec=30s
 
 # Настройки завершения
 TimeoutStopSec=30
+TimeoutStartSec=120
 KillMode=mixed
 
 # Ограничения ресурсов
