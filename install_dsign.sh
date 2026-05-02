@@ -125,6 +125,10 @@ sed -i \
     -e "s|^Environment=DSIGN_PROJECT_ROOT=.*|Environment=DSIGN_PROJECT_ROOT=$PROJECT_DIR|" \
     -e "s|^ExecStart=.*|ExecStart=$VENV_DIR/bin/python $PROJECT_DIR/run.py|" \
     /etc/systemd/system/digital-signage.service 2>/dev/null || true
+# Align ExecStartPre MPV socket wait path with PlaybackConstants.SOCKET_PATH (default /var/lib/dsign/mpv/socket).
+sed -i \
+    -e "s|/var/lib/dsign/mpv/socket|$DB_DIR/mpv/socket|g" \
+    /etc/systemd/system/digital-signage.service 2>/dev/null || true
 
 # MPV minimal config under /var/lib/dsign (owned by dsign — editable without root)
 mkdir -p "$DB_DIR/mpv-minimal"
@@ -188,6 +192,7 @@ Wants=network.target
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 User=root
 Group=root
 ExecStart=/usr/local/bin/dsign-network-assistant
@@ -205,6 +210,7 @@ Wants=dsign-network-assistant.service
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 User=$DSIGN_USER
 Group=$DSIGN_USER
 ExecStart=/usr/local/bin/dsign-show-startup-ip
