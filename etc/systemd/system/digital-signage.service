@@ -2,20 +2,30 @@
 Description=Digital Signage Controller
 After=network.target dsign-mpv.service dsign-network-assistant.service
 Requires=dsign-mpv.service
-Wants=dsign-network-assistant.service
+# Do not Wants= network-assistant here: it is Type=oneshot (can block ~120s). MPV unit already Wants it before signage.
 StartLimitIntervalSec=60
-StartLimitBurst=3
+StartLimitBurst=5
+# After repeated failures systemd stops auto-restarts (inactive dead, no new journal lines until):
+#   sudo systemctl reset-failed digital-signage.service && sudo systemctl start digital-signage.service
+# Keep code + this unit in sync: git pull in /home/dsign/dsign, then daemon-reload.
 
 [Service]
 Type=simple
 User=dsign
 Group=dsign
-WorkingDirectory=/home/dsign
-ExecStartPre=/bin/mkdir -p /var/lib/dsign/media/tmp
-ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp
-ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp
+# Layout A (flat): clone root is the Python package → /home/dsign/dsign/{__init__.py,run.py,...}
+WorkingDirectory=/home/dsign/dsign
+Environment=DSIGN_PROJECT_ROOT=/home/dsign/dsign
+# Default systemd PATH can omit /usr/bin — dependency checks and subprocess helpers need ffmpeg/mpv.
+Environment=PATH=/home/dsign/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStartPre=/bin/mkdir -p /var/lib/dsign/media/tmp /var/log/dsign
+ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp /var/log/dsign
+ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp /var/log/dsign
+# MPV IPC socket often appears shortly after mpv's PID — Python wait is in create_app (DSIGN_MPV_SOCKET_WAIT_ATTEMPTS).
+# Avoid a long ExecStartPre loop here: it blocks `systemctl start` (looks hung; users Ctrl-C before ExecStart runs).
 Environment="TMPDIR=/var/lib/dsign/media/tmp"
 Environment=DSIGN_LOG_LEVEL=WARNING
+Environment=SOCKETIO_ASYNC_MODE=threading
 Environment=DSIGN_AUTO_TRANSCODE_VIDEOS=true
 Environment=DSIGN_TRANSCODE_TARGET_RESOLUTION=1920x1080
 Environment=DSIGN_TRANSCODE_TARGET_FPS=25
@@ -25,13 +35,19 @@ Environment=DSIGN_TRANSCODE_TARGET_FPS=25
 # Environment=DSIGN_MPV_NETBUF_MAX_MB=96
 # Environment=DSIGN_MPV_NETBUF_BACK_MB=16
 # Environment=DSIGN_MPV_NETBUF_READAHEAD_SECS=20
-ExecStart=/usr/bin/python3 /home/dsign/run.py
+# Rare: re-enable strict IPC readiness wait for plain https streams (default off; Rutube HLS uses resolved URLs).
+# Environment=DSIGN_MPV_STREAM_READY_HTTPS=1
+# Seconds before treating idle-active as EOF for network streams (HLS can flicker idle while buffering; default 25).
+# Environment=DSIGN_MPV_NETWORK_IDLE_GRACE_SEC=25
+# Use project venv — system python has no Flask/deps (ModuleNotFoundError: flask).
+ExecStart=/home/dsign/venv/bin/python /home/dsign/dsign/run.py
 # Настройки перезапуска
 Restart=on-failure
 RestartSec=30s
 
 # Настройки завершения
 TimeoutStopSec=30
+TimeoutStartSec=120
 KillMode=mixed
 
 # Ограничения ресурсов

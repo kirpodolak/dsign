@@ -108,48 +108,28 @@ rm "$PROJECT_DIR/init_db.py"
 
 # Создание systemd сервисов с точными настройками
 
-# Digital Signage Service
-cat > /etc/systemd/system/digital-signage.service <<EOL
-[Unit]
-Description=Digital Signage Service (DRM)
-After=graphical.target dsign-network-assistant.service dsign-mpv.service
-Wants=dsign-network-assistant.service
-Wants=dsign-mpv.service
-Requires=dev-dri-card0.device
-ConditionPathExists=/dev/dri/card0
-
-[Service]
-User=$DSIGN_USER
-Group=$DSIGN_USER
-WorkingDirectory=/home/dsign
-Environment="FLASK_APP=dsign.server:create_app()"
-Environment="FLASK_ENV=production"
-Environment="PYTHONPATH=/home/dsign"
-Environment="DSIGN_CONFIG=$CONFIG_DIR/config.py"
-ExecStart=$VENV_DIR/bin/python /home/dsign/dsign/run.py
-Restart=on-failure
-RestartSec=30s
-StandardOutput=journal
-StandardError=journal
-MemoryLimit=500M
-CPUQuota=50%
-
-# Особенно важные настройки:
-KillMode=process
-KillSignal=SIGTERM
-TimeoutStopSec=5
-SendSIGKILL=no
-
-# Права доступа
-DeviceAllow=/dev/dri rw
-DeviceAllow=/dev/vchiq rw
-
-# Директории для записи
-ReadWritePaths=/var/log/dsign /var/lib/dsign
-
-[Install]
-WantedBy=multi-user.target
-EOL
+# Digital Signage Service — canonical unit from repo (no Requires=/dev/dri card0 — breaks x86/no-Pi installs).
+INSTALL_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+UNIT_SRC=""
+for cand in "$PROJECT_DIR/etc/systemd/system/digital-signage.service" "$INSTALL_SRC/etc/systemd/system/digital-signage.service"; do
+    [[ -f "$cand" ]] && UNIT_SRC="$cand" && break
+done
+if [[ -n "$UNIT_SRC" ]]; then
+    install -m 0644 "$UNIT_SRC" /etc/systemd/system/digital-signage.service
+else
+    echo "WARN: digital-signage.service template not found — skip install" >&2
+fi
+# Repo clone lives in PROJECT_DIR=/home/dsign/dsign → package is PROJECT_DIR/dsign/; PYTHONPATH root is PROJECT_DIR.
+sed -i \
+    -e "s|^WorkingDirectory=.*|WorkingDirectory=$PROJECT_DIR|" \
+    -e "s|^Environment=DSIGN_PROJECT_ROOT=.*|Environment=DSIGN_PROJECT_ROOT=$PROJECT_DIR|" \
+    -e "s|^Environment=PATH=.*|Environment=PATH=$VENV_DIR/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|" \
+    -e "s|^ExecStart=.*|ExecStart=$VENV_DIR/bin/python $PROJECT_DIR/run.py|" \
+    /etc/systemd/system/digital-signage.service 2>/dev/null || true
+# Align ExecStartPre MPV socket wait path with PlaybackConstants.SOCKET_PATH (default /var/lib/dsign/mpv/socket).
+sed -i \
+    -e "s|/var/lib/dsign/mpv/socket|$DB_DIR/mpv/socket|g" \
+    /etc/systemd/system/digital-signage.service 2>/dev/null || true
 
 # MPV minimal config under /var/lib/dsign (owned by dsign — editable without root)
 mkdir -p "$DB_DIR/mpv-minimal"
@@ -213,6 +193,7 @@ Wants=network.target
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 User=root
 Group=root
 ExecStart=/usr/local/bin/dsign-network-assistant
@@ -230,6 +211,7 @@ Wants=dsign-network-assistant.service
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 User=$DSIGN_USER
 Group=$DSIGN_USER
 ExecStart=/usr/local/bin/dsign-show-startup-ip
@@ -259,7 +241,7 @@ server {
     server_name _;
 
     location / {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://127.0.0.1:5000;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
     }

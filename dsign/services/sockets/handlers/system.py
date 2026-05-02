@@ -130,65 +130,60 @@ class SystemHandlers:
         self.connected_clients = {}
         self._app = getattr(socket_service, 'app', None)
 
-    def setup_connection_handler(self):
-        """Setup global connection handler"""
-        @self.socket_service.socketio.on('connect')
-        def handle_connect(auth=None):
+    def handle_connect(self, auth=None):
+        """Socket.IO connect handler (registered via SocketService._register_handlers)."""
+        try:
+            hdr = request.headers
+            ua = (hdr.get('User-Agent') or '')[:200]
+            origin = (hdr.get('Origin') or '')[:200]
+            transport = request.args.get('transport') or ''
+            token_preview = None
             try:
-                # Keep connect logs small/stable to avoid log storms on reconnect loops.
-                # Never log raw tokens or full headers (can be large / sensitive).
-                hdr = request.headers
-                ua = (hdr.get('User-Agent') or '')[:200]
-                origin = (hdr.get('Origin') or '')[:200]
-                transport = request.args.get('transport') or ''
+                tok = (auth.get('token') if auth and isinstance(auth, dict) else None)
+                if isinstance(tok, str) and tok:
+                    token_preview = tok[:12] + '…'
+            except Exception:
                 token_preview = None
-                try:
-                    tok = (auth.get('token') if auth and isinstance(auth, dict) else None)
-                    if isinstance(tok, str) and tok:
-                        token_preview = tok[:12] + '…'
-                except Exception:
-                    token_preview = None
-                self.logger.info('New connection attempt', {
-                    'sid': request.sid,
-                    'ip': request.remote_addr,
-                    'namespace': request.namespace,
-                    'transport': transport,
-                    'ua': ua,
-                    'origin': origin,
-                    'auth_keys': list(auth.keys()) if isinstance(auth, dict) else None,
-                    'token_preview': token_preview,
-                })
-                
-                token = self._extract_token(auth)
-                if not token:
-                    self.logger.warning('No token provided on connect')
-                    return self._handle_missing_token()
-                    
-                decoded = self.verify_socket_token(token)
-                
-                # Добавляем проверку активности пользователя
-                if not self._validate_user_access(decoded['user_id']):
-                    raise ValueError("User account is not active")
-                    
-                self._register_client(decoded)
-                
-                emit('connection_ack', {
-                    'status': 'authenticated',
-                    'user_id': decoded['user_id'],
-                    'timestamp': datetime.utcnow().isoformat()
-                })
-                return True
-                
-            except jwt.ExpiredSignatureError:
-                return self._handle_token_error('Token expired', 'token_expired')
-            except jwt.InvalidTokenError as e:
-                return self._handle_token_error(f'Invalid token: {str(e)}', 'auth_error')
-            except Exception as e:
-                self.logger.error('Connection failed', {
-                    'error': str(e),
-                    'stack_trace': traceback.format_exc()
-                })
-                return self._handle_connection_error(str(e))
+            self.logger.info('New connection attempt', {
+                'sid': request.sid,
+                'ip': request.remote_addr,
+                'namespace': request.namespace,
+                'transport': transport,
+                'ua': ua,
+                'origin': origin,
+                'auth_keys': list(auth.keys()) if isinstance(auth, dict) else None,
+                'token_preview': token_preview,
+            })
+
+            token = self._extract_token(auth)
+            if not token:
+                self.logger.warning('No token provided on connect')
+                return self._handle_missing_token()
+
+            decoded = self.verify_socket_token(token)
+
+            if not self._validate_user_access(decoded['user_id']):
+                raise ValueError("User account is not active")
+
+            self._register_client(decoded)
+
+            emit('connection_ack', {
+                'status': 'authenticated',
+                'user_id': decoded['user_id'],
+                'timestamp': datetime.utcnow().isoformat()
+            })
+            return True
+
+        except jwt.ExpiredSignatureError:
+            return self._handle_token_error('Token expired', 'token_expired')
+        except jwt.InvalidTokenError as e:
+            return self._handle_token_error(f'Invalid token: {str(e)}', 'auth_error')
+        except Exception as e:
+            self.logger.error('Connection failed', {
+                'error': str(e),
+                'stack_trace': traceback.format_exc()
+            })
+            return self._handle_connection_error(str(e))
 
     def _extract_token(self, auth) -> Optional[str]:
         """Extract token from various sources"""

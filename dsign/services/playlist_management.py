@@ -1,9 +1,10 @@
 import os
+import re
 import subprocess
 import traceback
 import time
 from threading import Event, Thread
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 from pathlib import Path
 
 from .playback_constants import PlaybackConstants
@@ -179,6 +180,16 @@ class PlaylistManager:
         data = resp.get("data")
         if isinstance(data, (int, float)) and not isinstance(data, bool):
             return float(data)
+        if isinstance(data, str):
+            s = data.strip()
+            if not s or s.lower() in ("nan", "inf", "n/a", "none"):
+                return None
+            m = re.match(r"^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$", s)
+            if m:
+                try:
+                    return float(s)
+                except ValueError:
+                    return None
         return None
 
     def _mpv_get_prop_string(self, name: str, timeout: float = 3.0) -> Optional[str]:
@@ -830,10 +841,44 @@ class PlaylistManager:
             self._stop_event.wait(timeout=0.15)
         return False
 
+    def _wait_mpv_network_demuxer_ready(self, *, timeout_sec: float = 45.0, poll_sec: float = 0.25) -> bool:
+        """
+        After leave-idle, mpv can briefly report idle-active=false while HLS demuxer has not opened yet.
+        Treat as failure if we return to idle before demuxer/path indicates an active open — avoids false
+        instant_eof when loadfile fails quickly (403, TLS, CDN).
+        """
+        deadline = time.monotonic() + max(2.0, float(timeout_sec))
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+            if idle is True:
+                return False
+            eof = self._mpv_get_prop_bool("eof-reached", timeout=2.0)
+            if eof is True:
+                return False
+
+            dem = self._mpv_get_prop_string("demuxer", timeout=2.0)
+            if dem and str(dem).strip():
+                return True
+            soc = self._mpv_get_prop_string("stream-open-filename", timeout=2.0)
+            if soc and len(str(soc).strip()) > 8:
+                return True
+            pth = self._mpv_get_prop_string("path", timeout=2.0)
+            if pth and len(str(pth).strip()) > 8:
+                return True
+
+            dct = self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0)
+            if dct is not None and dct > 0.02:
+                return True
+
+            self._stop_event.wait(timeout=max(0.1, float(poll_sec)))
+        return False
+
     def _wait_mpv_stream_ready(
         self,
         expected_url: str,
-        timeout_sec: float = 90.0,
+        timeout_sec: Optional[float] = None,
         poll_sec: float = 0.5,
     ) -> bool:
         """
@@ -845,7 +890,19 @@ class PlaylistManager:
         from the virtual `ytdl://...` URL to a real stream URL. In that case, treat `path` switching
         away from `ytdl://` as progress/readiness.
         """
+        def _float_env(name: str, default: float, *, lo: float, hi: float) -> float:
+            try:
+                v = float((os.getenv(name) or "").strip())
+            except ValueError:
+                return default
+            return max(lo, min(hi, v))
+
+        if timeout_sec is None:
+            timeout_sec = _float_env("DSIGN_MPV_STREAM_READY_SECS", 120.0, lo=15.0, hi=600.0)
+        grace_sec = _float_env("DSIGN_MPV_STREAM_READY_GRACE_SEC", 45.0, lo=5.0, hi=300.0)
+
         deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        grace_until = time.monotonic() + grace_sec
         exp = (expected_url or "").strip()
         is_ytdl = exp.startswith("ytdl://")
         # For ytdl:// resolution on low-power devices, be gentle with IPC:
@@ -874,6 +931,33 @@ class PlaylistManager:
                 if (cur_stream and len(str(cur_stream)) > 0) or (cur_path and len(str(cur_path)) > 0):
                     # do not early-return; keep probing time-pos/duration below
                     pass
+                # HLS (e.g. Rutube): demuxer can buffer for a long time before time-pos/duration
+                # appear; treat meaningful cache as "playback started".
+                dct = self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0)
+                if dct is not None and dct > 0.05:
+                    return True
+                dcdur = self._mpv_get_prop_number("demuxer-cache-duration", timeout=2.0)
+                if dcdur is not None and dcdur > 0.05:
+                    return True
+
+                idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+                eof = self._mpv_get_prop_bool("eof-reached", timeout=2.0)
+                paused_cache = self._mpv_get_prop_bool("paused-for-cache", timeout=2.0)
+                core_idle = self._mpv_get_prop_bool("core-idle", timeout=2.0)
+
+                # eof-reached / paused-for-cache are often "property unavailable" → None; never require
+                # strict False or we never signal ready on those mpv builds (Rutube HLS).
+                if idle is False and eof is not True:
+                    if paused_cache is True:
+                        pass
+                    elif paused_cache is False:
+                        return True
+                    else:
+                        # paused-for-cache unknown: trust core-idle or grace window
+                        if core_idle is False:
+                            return True
+                        if time.monotonic() >= grace_until:
+                            return True
             tick += 1
             if heavy_every > 1 and (tick % heavy_every) != 0:
                 self._stop_event.wait(timeout=max(0.15, float(poll_sec)))
@@ -892,16 +976,26 @@ class PlaylistManager:
         Detect a pathological case where MPV opens a file/stream and immediately returns to idle.
         This happens with some VK `edl://` selections (separate streams / blocked URL) and should
         be treated as a start failure (so we backoff instead of busy-looping).
+
+        Require evidence the demuxer actually opened — otherwise idle flicker before HLS attaches
+        looks like instant EOF on Rutube/CDN.
         """
         deadline = time.monotonic() + max(0.2, float(window_sec))
         saw_not_idle = False
+        saw_demuxer = False
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
             idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
             if idle is False:
                 saw_not_idle = True
-            if saw_not_idle and idle is True:
+            dem = self._mpv_get_prop_string("demuxer", timeout=2.0)
+            if dem and str(dem).strip():
+                saw_demuxer = True
+            elif self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0) not in (None, 0.0):
+                saw_demuxer = True
+
+            if saw_not_idle and idle is True and saw_demuxer:
                 return True
             self._stop_event.wait(timeout=0.1)
         return False
@@ -922,7 +1016,14 @@ class PlaylistManager:
         - Else for local files: same idle fallback after a short grace period.
         """
         start = time.time()
-        grace_until = time.monotonic() + (1.5 if is_network else 0.3)
+        # Short grace caused false EOF on HLS (idle flicker while buffering) → tight loadfile loops
+        # and IPC lock starvation (UI/API hang). Use a longer window for network playback.
+        try:
+            nw_grace = float((os.getenv("DSIGN_MPV_NETWORK_IDLE_GRACE_SEC") or "25").strip())
+        except ValueError:
+            nw_grace = 25.0
+        nw_grace = max(3.0, min(120.0, nw_grace))
+        grace_until = time.monotonic() + (nw_grace if is_network else 0.3)
         consecutive_idle = 0
 
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
@@ -1021,7 +1122,7 @@ class PlaylistManager:
     def _manual_slideshow_loop(
         self,
         playlist_id: int,
-        items: list[dict],
+        items: List[Dict[str, Any]],
         start_index: int = 0,
         *,
         first_item_preloaded: bool = False,
@@ -1166,13 +1267,44 @@ class PlaylistManager:
                             )
                             self._register_media_failure(media_key, reason="stayed_idle")
                             continue
-                        stream_ready = self._wait_mpv_stream_ready(str(path), timeout_sec=90.0)
-                        if not stream_ready:
+                        # Resolved http(s) URLs (e.g. Rutube HLS after resolver): once idle-active is false,
+                        # mpv has opened the stream — extra _wait_mpv_stream_ready often times out because
+                        # time-pos/duration/cache IPC differs per build. VK/edl and ytdl:// still use the waiter.
+                        path_s = str(path)
+                        strict_https = os.getenv("DSIGN_MPV_STREAM_READY_HTTPS", "").strip().lower() in (
+                            "1",
+                            "true",
+                            "yes",
+                            "on",
+                        )
+                        needs_ready_wait = path_s.startswith("ytdl://") or path_s.startswith("edl://")
+                        if needs_ready_wait or (
+                            strict_https
+                            and (path_s.startswith("http://") or path_s.startswith("https://"))
+                        ):
+                            stream_ready = self._wait_mpv_stream_ready(path_s)
+                            if not stream_ready:
+                                self.logger.warning(
+                                    "MPV stream did not become ready (no time-pos/duration/path match)",
+                                    extra={"media_key": media_key, "path_preview": path_s[:120]},
+                                )
+                                self._register_media_failure(media_key, reason="not_ready")
+                                continue
+                        else:
+                            stream_ready = True
+                        # HLS can leave idle before demuxer/path is populated; give time to open or fail clearly.
+                        try:
+                            dem_to = float((os.getenv("DSIGN_MPV_DEMUXER_WAIT_SEC") or "45").strip())
+                        except ValueError:
+                            dem_to = 45.0
+                        dem_to = max(5.0, min(120.0, dem_to))
+                        if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to):
                             self.logger.warning(
-                                "MPV stream did not become ready (no time-pos/duration/path match)",
-                                extra={"media_key": media_key, "path_preview": str(path)[:120]},
+                                "MPV network stream never opened demuxer (idle or EOF before HLS attach)",
+                                extra={"media_key": media_key, "path_preview": str(path)[:160]},
                             )
-                            self._register_media_failure(media_key, reason="not_ready")
+                            self._log_mpv_network_debug_snapshot(media_key=media_key, url=str(path))
+                            self._register_media_failure(media_key, reason="demuxer_timeout")
                             continue
                         # Detect "instant EOF" right after we considered it ready; avoid VK loops.
                         if self._detect_mpv_instant_eof(window_sec=2.5):

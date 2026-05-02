@@ -59,9 +59,11 @@ const CONFIG = {
     },
     defaultLogo: '/static/images/default-logo.jpg',
     defaultPreview: '/static/images/default-preview.jpg',
-    // Polling cadence. Even without sockets, keep idle/stopped light to avoid server/log spam.
-    refreshIntervalActiveMs: 2000,
+    // Polling cadence. Playing used 2s × 4 endpoints → noisy logs and IPC contention; 5s is enough for UI.
+    refreshIntervalActiveMs: 5000,
     refreshIntervalIdleMs: 30000,
+    // Refresh heavy /settings/current only occasionally during auto-poll (playback/system/network stay fresher).
+    settingsPollEveryNTicks: 6,
     // When we have socket push, polling becomes a slow safety net only.
     refreshIntervalSocketFallbackMs: 60000,
     previewRefreshInterval: 15000,
@@ -91,7 +93,8 @@ const state = {
     usingSocketPush: false,
     refreshTimerId: null,
     refreshInFlight: false,
-    refreshBackoffMs: 0
+    refreshBackoffMs: 0,
+    autoRefreshTickCount: 0,
 };
 
 // API functions
@@ -1166,8 +1169,16 @@ const handlers = {
             state.refreshInFlight = true;
 
             try {
+                state.autoRefreshTickCount = (state.autoRefreshTickCount || 0) + 1;
+                const tickN = state.autoRefreshTickCount;
+                const settingsEvery = Math.max(1, Number(CONFIG.settingsPollEveryNTicks) || 6);
+                const shouldFetchSettings =
+                    tickN === 1 || tickN % settingsEvery === 0;
+
                 const [settings, playbackStatusResp, systemStatusResp, networkStatusResp] = await Promise.all([
-                    api.getSettings().catch(() => state.currentSettings),
+                    shouldFetchSettings
+                        ? api.getSettings().catch(() => state.currentSettings)
+                        : Promise.resolve(state.currentSettings),
                     api.getPlaybackStatus().catch(() => null),
                     api.getSystemStatus().catch(() => null),
                     api.getNetworkStatus().catch(() => null),

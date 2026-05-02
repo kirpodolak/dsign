@@ -372,7 +372,12 @@ class MPVManager:
                             # For get_property, "property unavailable" is expected on some mpv builds / media types.
                             # Treat it as a non-error and normalize to {"error":"success","data":None} so callers can
                             # handle it without generating noisy logs.
-                            if command_name == "get_property" and err == "property unavailable":
+                            # Older mpv builds say "property unavailable"; some say "property not found"
+                            # for optional OBS/cache-related properties we probe in polling loops.
+                            if command_name == "get_property" and err in (
+                                "property unavailable",
+                                "property not found",
+                            ):
                                 if log_ipc_debug:
                                     self.logger.debug(
                                         "MPVCommand property unavailable",
@@ -382,6 +387,7 @@ class MPVManager:
                                             "request_id": ipc_request_id,
                                             "duration_sec": duration_sec,
                                             "attempt": attempt + 1,
+                                            "mpv_error": err,
                                         },
                                     )
                                 return {
@@ -393,7 +399,11 @@ class MPVManager:
                             # Keep it at DEBUG to avoid log spam.
                             # `file-local-options/*` cannot be set while mpv is idle (no current file); callers should
                             # use per-file options on `loadfile` instead. Treat as DEBUG noise.
-                            quiet_errs = {"property unavailable", "error accessing property"}
+                            quiet_errs = {
+                                "property unavailable",
+                                "property not found",
+                                "error accessing property",
+                            }
                             quiet_props = False
                             try:
                                 if (
@@ -463,8 +473,13 @@ class MPVManager:
             if not self._check_mpv_socket():
                 if not self._restart_systemd_service() or not self._wait_for_socket():
                     raise ConnectionError("MPV socket not available")
-            
-            resp = self._send_command({"command": ["get_property", "mpv-version"]})
+
+            resp = None
+            for ping_try in range(8):
+                resp = self._send_command({"command": ["get_property", "mpv-version"]})
+                if resp and resp.get("error") == "success":
+                    break
+                time.sleep(0.25)
             if not resp or resp.get("error") != "success":
                 raise RuntimeError("MPV not responding properly")
             
@@ -615,8 +630,14 @@ class MPVManager:
 
     def check_health(self) -> Dict[str, bool]:
         """Комплексная проверка состояния MPV"""
+        socket_ok = self._check_mpv_socket()
+        systemd_ok = self._check_systemd_service()
+        # digital-signage.service runs as user `dsign` — `systemctl is-active` often fails (dbus/policy)
+        # while mpv is running and the IPC socket exists. Do not treat that as unhealthy.
+        service_ok = systemd_ok or socket_ok
+        responsive = self._send_command({"command": ["get_property", "mpv-version"]}) is not None
         return {
-            "service_active": self._check_systemd_service(),
-            "socket_available": self._check_mpv_socket(),
-            "responsive": self._send_command({"command": ["get_property", "mpv-version"]}) is not None
+            "service_active": service_ok,
+            "socket_available": socket_ok,
+            "responsive": responsive,
         }
