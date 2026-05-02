@@ -4,7 +4,10 @@ After=network.target dsign-mpv.service dsign-network-assistant.service
 Requires=dsign-mpv.service
 Wants=dsign-network-assistant.service
 StartLimitIntervalSec=60
-StartLimitBurst=3
+StartLimitBurst=5
+# After repeated failures systemd stops auto-restarts (inactive dead, no new journal lines until):
+#   sudo systemctl reset-failed digital-signage.service && sudo systemctl start digital-signage.service
+# Keep code + this unit in sync: git pull in /home/dsign/dsign, then daemon-reload.
 
 [Service]
 Type=simple

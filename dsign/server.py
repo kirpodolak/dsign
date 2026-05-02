@@ -1,6 +1,27 @@
 from dsign import create_app
 import logging
+import os
+import sys
 from typing import NoReturn
+
+
+def _journal_startup_banner() -> None:
+    """One line to stderr → systemd journal; proves which interpreter/package tree ran."""
+    root = os.environ.get("DSIGN_PROJECT_ROOT", "")
+    pkg_file = ""
+    try:
+        import dsign as _dsign_pkg
+
+        pkg_file = getattr(_dsign_pkg, "__file__", "") or ""
+    except Exception as exc:
+        pkg_file = f"<import failed: {exc}>"
+    print(
+        f"[dsign] pid={os.getpid()} exe={sys.executable} cwd={os.getcwd()} "
+        f"DSIGN_PROJECT_ROOT={root!r} dsign_pkg={pkg_file}",
+        file=sys.stderr,
+        flush=True,
+    )
+
 
 def configure_logging() -> None:
     """
@@ -14,7 +35,8 @@ def run_server() -> NoReturn:
     """Запуск сервера приложения"""
     # Настройка логгирования
     configure_logging()
-    
+    _journal_startup_banner()
+
     try:
         # Создание приложения
         app = create_app()
