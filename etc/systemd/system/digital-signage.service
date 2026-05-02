@@ -11,6 +11,8 @@ Type=simple
 User=dsign
 Group=dsign
 WorkingDirectory=/home/dsign
+# If run.py is not next to the `dsign/` package directory, set absolute repo root here:
+# Environment=DSIGN_PROJECT_ROOT=/home/dsign
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/media/tmp
 ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp
