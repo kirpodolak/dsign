@@ -4,7 +4,7 @@ import subprocess
 import traceback
 import time
 from threading import Event, Thread
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 from pathlib import Path
 
 from .playback_constants import PlaybackConstants
@@ -844,7 +844,7 @@ class PlaylistManager:
     def _wait_mpv_stream_ready(
         self,
         expected_url: str,
-        timeout_sec: float | None = None,
+        timeout_sec: Optional[float] = None,
         poll_sec: float = 0.5,
     ) -> bool:
         """
@@ -972,7 +972,14 @@ class PlaylistManager:
         - Else for local files: same idle fallback after a short grace period.
         """
         start = time.time()
-        grace_until = time.monotonic() + (1.5 if is_network else 0.3)
+        # Short grace caused false EOF on HLS (idle flicker while buffering) → tight loadfile loops
+        # and IPC lock starvation (UI/API hang). Use a longer window for network playback.
+        try:
+            nw_grace = float((os.getenv("DSIGN_MPV_NETWORK_IDLE_GRACE_SEC") or "25").strip())
+        except ValueError:
+            nw_grace = 25.0
+        nw_grace = max(3.0, min(120.0, nw_grace))
+        grace_until = time.monotonic() + (nw_grace if is_network else 0.3)
         consecutive_idle = 0
 
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
@@ -1071,7 +1078,7 @@ class PlaylistManager:
     def _manual_slideshow_loop(
         self,
         playlist_id: int,
-        items: list[dict],
+        items: List[Dict[str, Any]],
         start_index: int = 0,
         *,
         first_item_preloaded: bool = False,
