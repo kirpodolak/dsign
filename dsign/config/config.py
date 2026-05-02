@@ -68,8 +68,9 @@ class Config:
     # Настройки CORS
     CORS_SUPPORTS_CREDENTIALS = True
     SOCKETIO_CORS_ALLOWED_ORIGINS = "*"
-    # Flask-SocketIO: threading | eventlet | gevent (как в manage.py / зависимостях)
-    SOCKETIO_ASYNC_MODE = os.getenv("SOCKETIO_ASYNC_MODE", "eventlet")
+    # Flask-SocketIO: threading | eventlet | gevent.
+    # Default threading: eventlet's single hub + blocking MPV IPC from playback threads starves HTTP (UI hangs).
+    SOCKETIO_ASYNC_MODE = os.getenv("SOCKETIO_ASYNC_MODE", "threading")
     # Keep ping/pong stable to avoid disconnect loops on low-power devices / Wi-Fi.
     # Values are in seconds (Flask-SocketIO passes them to python-socketio/engineio).
     SOCKETIO_PING_INTERVAL = int(os.getenv("DSIGN_SOCKETIO_PING_INTERVAL", "25"))

@@ -16,6 +16,7 @@ ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp
 Environment="TMPDIR=/var/lib/dsign/media/tmp"
 Environment=DSIGN_LOG_LEVEL=WARNING
+Environment=SOCKETIO_ASYNC_MODE=threading
 Environment=DSIGN_AUTO_TRANSCODE_VIDEOS=true
 Environment=DSIGN_TRANSCODE_TARGET_RESOLUTION=1920x1080
 Environment=DSIGN_TRANSCODE_TARGET_FPS=25

@@ -2,6 +2,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 from flask_socketio import SocketIO, disconnect
 from flask import request, current_app
+import os
 import jwt
 from .logger import ServiceLogger
 from threading import Lock
@@ -44,7 +45,10 @@ class SocketService:
         if socketio:
             self.socketio = socketio
         elif not self.socketio:
-            self.socketio = SocketIO(app, async_mode='eventlet')
+            self.socketio = SocketIO(
+                app,
+                async_mode=os.getenv("SOCKETIO_ASYNC_MODE", "threading"),
+            )
         
         self.register_handlers()
         self.start_activity_checker()
