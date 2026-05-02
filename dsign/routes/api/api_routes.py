@@ -59,17 +59,58 @@ def init_api_routes(api_bp, services):
     _amixer_pick_cache_ttl_sec: float = 60.0
     # Bump when heuristics change so a stale (wrong) card/ctl is not served for 60s.
     _amixer_pick_cache_version: int = 7
+    def _parse_sysfs_temp_to_celsius(raw: str) -> float | None:
+        """
+        sysfs thermal temp is usually millidegrees C (47234 -> 47.2°C).
+        Broken zones can emit huge signed garbage; dividing `if v > 1000` misses negatives (-269300000 -> -269300°C).
+        """
+        try:
+            v = float((raw or "").strip())
+        except (TypeError, ValueError):
+            return None
+        if abs(v) >= 500:
+            c = v / 1000.0
+        else:
+            c = v
+        if c < -40.0 or c > 125.0:
+            return None
+        return round(c, 1)
+
     def _read_cpu_temp_c() -> float | None:
-        # Raspberry Pi / Linux common path
-        for p in (
-            "/sys/class/thermal/thermal_zone0/temp",
-            "/sys/devices/virtual/thermal/thermal_zone0/temp",
+        thermal_root = Path("/sys/class/thermal")
+        paths: list[Path] = []
+        try:
+            if thermal_root.is_dir():
+                for z in sorted(thermal_root.glob("thermal_zone*")):
+                    tf = z / "temp"
+                    if tf.is_file():
+                        paths.append(tf)
+        except Exception:
+            pass
+        for legacy in (
+            Path("/sys/devices/virtual/thermal/thermal_zone0/temp"),
+            Path("/sys/class/hwmon/hwmon0/temp1_input"),
         ):
+            if legacy.is_file() and legacy not in paths:
+                paths.append(legacy)
+
+        preferred: list[Path] = []
+        rest: list[Path] = []
+        for tf in paths:
             try:
-                if os.path.exists(p):
-                    raw = Path(p).read_text(encoding="utf-8").strip()
-                    v = float(raw)
-                    return round(v / 1000.0, 1) if v > 1000 else round(v, 1)
+                typ = (tf.parent / "type").read_text(encoding="utf-8").strip().lower()
+            except Exception:
+                typ = ""
+            if any(x in typ for x in ("cpu", "core", "x86", "k10temp", "zen", "acpi", "soc")):
+                preferred.append(tf)
+            else:
+                rest.append(tf)
+
+        for tf in preferred + rest:
+            try:
+                parsed = _parse_sysfs_temp_to_celsius(tf.read_text(encoding="utf-8"))
+                if parsed is not None:
+                    return parsed
             except Exception:
                 continue
         return None
