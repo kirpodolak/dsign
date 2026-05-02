@@ -16,6 +16,8 @@ Environment=DSIGN_PROJECT_ROOT=/home/dsign/dsign
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/media/tmp /var/log/dsign
 ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp /var/log/dsign
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp /var/log/dsign
+# Boot race: Requires= starts us right after mpv's main PID is active; IPC socket may appear slightly later.
+ExecStartPre=/bin/bash -c 'for _ in $(seq 1 120); do [[ -e /var/lib/dsign/mpv/socket ]] && exit 0; sleep 0.5; done; echo "MPV IPC socket missing after wait" >&2; exit 1'
 Environment="TMPDIR=/var/lib/dsign/media/tmp"
 Environment=DSIGN_LOG_LEVEL=WARNING
 Environment=SOCKETIO_ASYNC_MODE=threading

@@ -7,7 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 from threading import Thread
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from dsign.config.config import Config, config
 from dsign.services.logger import ServiceLogger
@@ -18,14 +18,24 @@ def should_display_logo(db_session) -> bool:
     status = db_session.query(PlaybackStatus).first()
     return not (status and status.playlist_id)
 
-def check_mpv_service(logger: logging.Logger, timeout: int = 5, retries: int = 3) -> bool:
+def check_mpv_service(logger: logging.Logger, timeout: int = 5, retries: Optional[int] = None) -> bool:
     """
     MPV must be reachable via IPC socket.
 
     Do NOT rely on `systemctl is-active` here: under systemd's hardened service environment the
     `dsign` user often cannot query systemd/dbus reliably, while MPV is already running — manual
     `./venv/bin/python .../run.py` then works but digital-signage.service exits immediately.
+
+    Under systemd, `Requires=dsign-mpv` can schedule this unit immediately after mpv's PID is
+    active while the IPC socket path is still absent for a short window — allow more retries via
+    DSIGN_MPV_SOCKET_WAIT_ATTEMPTS (default 45, ~45s).
     """
+    if retries is None:
+        try:
+            retries = max(3, int(os.getenv("DSIGN_MPV_SOCKET_WAIT_ATTEMPTS", "45")))
+        except ValueError:
+            retries = 45
+
     try:
         from dsign.services.playback_constants import PlaybackConstants as _PC
 
