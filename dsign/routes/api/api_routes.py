@@ -32,6 +32,8 @@ def init_api_routes(api_bp, services):
     screenshot_capture_lock = Lock()
     last_screenshot_capture_ts: float = 0.0
     screenshot_min_interval_sec: float = 10.0
+    # screenshot.service is Type=oneshot with TimeoutStartSec=120; systemctl start blocks until done.
+    screenshot_systemctl_timeout_sec: float = 125.0
 
     # ======================
     # System status / audio (dashboard)
@@ -2171,7 +2173,7 @@ def init_api_routes(api_bp, services):
             result = subprocess.run(
                 ['sudo', '/bin/systemctl', 'start', 'screenshot.service'],
                 check=True,
-                timeout=10,
+                timeout=screenshot_systemctl_timeout_sec,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True
