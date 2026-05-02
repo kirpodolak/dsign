@@ -1126,6 +1126,7 @@ class PlaylistManager:
         start_index: int = 0,
         *,
         first_item_preloaded: bool = False,
+        profile_muted: bool = False,
     ):
         """
         Manual playback loop that enforces per-item durations for images and plays videos to EOF.
@@ -1158,7 +1159,7 @@ class PlaylistManager:
                 raw_duration = item.get("duration")
                 # Only images use duration. Treat 0/None as "missing" for images.
                 duration = raw_duration if (raw_duration is not None and int(raw_duration) >= 1) else default_duration
-                muted = bool(item.get("muted", False))
+                muted = bool(item.get("muted", False)) or profile_muted
 
                 # Apply per-item settings (best-effort, longer timeout to avoid IPC churn on Pi 3B+).
                 # NOTE: if MPV is under load, short timeouts cause broken pipes and retry storms.
@@ -1440,6 +1441,9 @@ class PlaylistManager:
                     # `settings` is stored as JSON in DB, so it is already a dict.
                     profile_settings = profile.settings or {}
 
+            # Playlist overrides store mute under JSON key "mute"; apply together with per-file mute flags.
+            profile_muted = bool(profile_settings.get("mute", False))
+
             # Apply profile settings first
             if profile_settings:
                 if not self._mpv_manager.update_settings(profile_settings):
@@ -1499,8 +1503,9 @@ class PlaylistManager:
             except Exception:
                 pass
             try:
+                first_muted = bool(first.get("muted", False)) or profile_muted
                 self._mpv_manager._send_command(
-                    {"command": ["set_property", "mute", "yes" if bool(first.get("muted")) else "no"]},
+                    {"command": ["set_property", "mute", "yes" if first_muted else "no"]},
                     timeout=2.0,
                 )
             except Exception:
@@ -1529,7 +1534,10 @@ class PlaylistManager:
             self._play_thread = Thread(
                 target=self._manual_slideshow_loop,
                 args=(playlist_id, items, loop_start),
-                kwargs={"first_item_preloaded": len(items) == 1},
+                kwargs={
+                    "first_item_preloaded": len(items) == 1,
+                    "profile_muted": profile_muted,
+                },
                 daemon=True,
             )
             self._play_thread.start()
