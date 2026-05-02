@@ -1,309 +1,155 @@
-# Головной init
-from flask import Flask
-from flask_wtf import CSRFProtect
-import logging
-import time
 import os
-import tempfile
+from socket import gethostbyname, gethostname
 from pathlib import Path
-from threading import Thread
-from typing import Dict, Any
 
-from dsign.config.config import Config, config
-from dsign.services.logger import ServiceLogger
-
-def should_display_logo(db_session) -> bool:
-    """Проверяет, нужно ли отображать логотип (нет активных плейлистов)"""
-    from .models import PlaybackStatus
-    status = db_session.query(PlaybackStatus).first()
-    return not (status and status.playlist_id)
-
-def check_mpv_service(logger: logging.Logger, timeout: int = 5, retries: int = 3) -> bool:
-    """
-    MPV must be reachable via IPC socket.
-
-    Do NOT rely on `systemctl is-active` here: under systemd's hardened service environment the
-    `dsign` user often cannot query systemd/dbus reliably, while MPV is already running — manual
-    `./venv/bin/python .../run.py` then works but digital-signage.service exits immediately.
-    """
+class Config:
+    # Получаем текущий IP
     try:
-        from dsign.services.playback_constants import PlaybackConstants as _PC
-
-        sock = Path(_PC.SOCKET_PATH)
-    except Exception:
-        sock = Path("/var/lib/dsign/mpv/socket")
-
-    for attempt in range(retries):
-        try:
-            if sock.exists():
-                # Exists while idle=yes mpv waits — sufficient for Flask bootstrap.
-                return True
-        except Exception as e:
-            logger.warning(f"MPV socket check failed (attempt {attempt + 1}/{retries}): {str(e)}")
-        logger.warning(f"MPV IPC socket not ready yet: {sock} (attempt {attempt + 1}/{retries})")
-        time.sleep(1)
-    return False
-
-def create_app(config_class: Config = config) -> Flask:
-    """Фабрика для создания экземпляра Flask приложения"""
-    # Инициализация приложения с ServiceLogger
-    app = Flask(__name__)
-    app.config.from_object(config_class)
-    app.static_folder = config_class.STATIC_FOLDER
-    app.static_url_path = '/static'
-
-    # Large multipart uploads may spool to the OS temp dir; on Raspberry Pi /tmp is often tmpfs (RAM).
-    # Force temp to a disk-backed directory to avoid OOM/connection drops on 500MB+ uploads.
-    try:
-        tmp_dir = Path(app.config.get("UPLOAD_FOLDER", "/var/lib/dsign/media")) / "tmp"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        os.environ["TMPDIR"] = str(tmp_dir)
-        tempfile.tempdir = str(tmp_dir)
-    except Exception:
-        # Best-effort; if this fails uploads may still work for smaller files.
-        pass
+        current_ip = gethostbyname(gethostname())
+    except:
+        current_ip = "127.0.0.1"  # Fallback IP
     
-    # Установка ServiceLogger как основного логгера
-    app.logger = ServiceLogger('FlaskApp')
+    # Обработка CORS origins
+    extra_origins = os.getenv("EXTRA_CORS_ORIGINS", "").split(",") if os.getenv("EXTRA_CORS_ORIGINS") else []
+
+    # Базовые пути
+    BASE_DIR = Path(__file__).parent.parent
     
-    try:
-        # Reduce startup chatter on low-power devices; set DSIGN_LOG_LEVEL=INFO/DEBUG when needed.
-        app.logger.debug("Starting application initialization")
+    # Пути к файлам
+    DB_PATH = "/var/lib/dsign/database.db"
+    SETTINGS_FILE = "/var/lib/dsign/settings.json"
+    UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "/var/lib/dsign/media")
+    BASE_DIR = Path(__file__).parent.parent
+    STATIC_FOLDER = str(BASE_DIR / 'static')
+    IDLE_LOGO = "idle_logo.jpg"
+    DEFAULT_LOGO = 'idle_logo.jpg'
+    DEFAULT_LOGO = IDLE_LOGO
+    SCREENSHOT_DIR = '/var/lib/dsign/media'
+    DEFAULT_LOGO_PATH = '/var/lib/dsign/media/idle_logo.jpg'
+    # App log files (systemd/install use /var/log/dsign; avoid cwd-relative 'logs' under WorkingDirectory).
+    LOG_DIR = os.getenv("DSIGN_LOG_DIR", "/var/log/dsign")
+    THUMBNAIL_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbnails')
+    THUMBNAIL_URL = '/media/thumbnails'  # URL-префикс для доступа к миниатюрам
+    M3U_EXPORT_DIR = os.path.join(BASE_DIR, 'static/playlists')
+    MEDIA_ROOT = '/var/lib/dsign/media'  # Физический путь к файлам
+    MEDIA_URL = '/media/'  # URL-префикс для доступа к файлам
+    
+    # Создаем директории, если они не существуют
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+    os.makedirs(STATIC_FOLDER, exist_ok=True)
+    os.makedirs(THUMBNAIL_FOLDER, exist_ok=True)
+    os.makedirs(M3U_EXPORT_DIR, exist_ok=True)
 
-        # 1. Проверка MPV сервиса
-        app.logger.debug("Checking MPV service status...")
-        if not check_mpv_service(app.logger):
-            app.logger.error("MPV IPC socket is not available (start dsign-mpv.service first)")
-            raise RuntimeError("MPV IPC socket is not available")
-        app.logger.debug("MPV service is active and ready")
+    # Настройки приложения
+    SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey123")
+    # Единый потолок для галереи / видео (Flask отсекает тело запроса по MAX_CONTENT_LENGTH)
+    MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # 1 GiB
+    MAX_CONTENT_LENGTH = MAX_UPLOAD_BYTES
+    # Разрешенные расширения файлов
+    ALLOWED_LOGO_EXTENSIONS = {'jpg', 'png', 'jpeg'}
+    ALLOWED_LOGO_TYPES = ['image/jpeg', 'image/png']  # MIME-типы
+    ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif', 'mp4', 'avi'}
+    
+    # Настройки загрузки файлов
+    MAX_LOGO_SIZE = 2 * 1024 * 1024  # 2MB
+    MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB для других изображений
+    MAX_VIDEO_SIZE = MAX_UPLOAD_BYTES
+    
+    # Настройки сессии
+    SESSION_COOKIE_NAME = 'dsign_session'
+    SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "False").lower() == "true"
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Lax'
+    PERMANENT_SESSION_LIFETIME = 86400  # 1 day in seconds
+    REMEMBER_COOKIE_HTTPONLY = True
+    REMEMBER_COOKIE_SECURE = SESSION_COOKIE_SECURE
+    REMEMBER_COOKIE_SAMESITE = 'Lax'
+    
+    # Настройки CORS
+    CORS_SUPPORTS_CREDENTIALS = True
+    SOCKETIO_CORS_ALLOWED_ORIGINS = "*"
+    # Flask-SocketIO: threading | eventlet | gevent.
+    # Default threading: eventlet's single hub + blocking MPV IPC from playback threads starves HTTP (UI hangs).
+    SOCKETIO_ASYNC_MODE = os.getenv("SOCKETIO_ASYNC_MODE", "threading")
+    # Keep ping/pong stable to avoid disconnect loops on low-power devices / Wi-Fi.
+    # Values are in seconds (Flask-SocketIO passes them to python-socketio/engineio).
+    SOCKETIO_PING_INTERVAL = int(os.getenv("DSIGN_SOCKETIO_PING_INTERVAL", "25"))
+    SOCKETIO_PING_TIMEOUT = int(os.getenv("DSIGN_SOCKETIO_PING_TIMEOUT", "60"))
+    # Debugging: enable Engine.IO logger (very verbose) only when explicitly asked.
+    SOCKETIO_ENGINEIO_DEBUG = os.getenv("DSIGN_SOCKETIO_ENGINEIO_DEBUG", "false").lower() == "true"
 
-        # 2. Инициализация расширений
-        app.logger.debug("Initializing extensions...")
-        from .extensions import init_extensions, db, socketio
-        init_extensions(app)
-        csrf = CSRFProtect(app)
-        app.logger.debug("Extensions initialized successfully")
+    # Режим отладки
+    DEBUG = os.getenv("FLASK_ENV", "production").lower() == "development"
 
-        # 3. Инициализация сервисов
-        app.logger.debug("Initializing services...")
-        with app.app_context():
-            # Ensure DB schema is up to date for new models (SQLite deployments typically rely on create_all).
-            # This is best-effort: if DB is read-only or corrupted we still want to surface the real error later.
-            try:
-                from . import models  # noqa: F401
-                db.create_all()
-            except Exception as e:
-                app.logger.warning(f"DB schema init (create_all) skipped/failed: {str(e)}")
+    # Настройки базы данных
+    SQLALCHEMY_DATABASE_URI = f'sqlite:///{DB_PATH}'
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
 
-            # Import here to avoid heavy side effects during module import
-            # and to prevent circular imports when tooling/scripts import dsign.* modules.
-            from dsign.services import init_services
-            services = init_services(
-                config={
-                    'UPLOAD_FOLDER': config_class.UPLOAD_FOLDER,
-                    'SECRET_KEY': config_class.SECRET_KEY,
-                    'SETTINGS_FILE': config_class.SETTINGS_FILE,
-                    'THUMBNAIL_FOLDER': config_class.THUMBNAIL_FOLDER,
-                    'THUMBNAIL_URL': config_class.THUMBNAIL_URL,
-                    'DEFAULT_LOGO': config_class.DEFAULT_LOGO
-                },
-                db=db,
-                socketio=socketio,
-                logger=app.logger
-            )
-            
-            # Прикрепляем сервисы к app
-            for name, service in services.items():
-                setattr(app, name, service)
-                app.logger.debug(f"Service attached: {name}")
+    # Настройки процессов
+    PROCESS_TIMEOUT = 5  # сек
+    MPV_GRACE_PERIOD = 0.5  # сек
 
-            # Wire optional services into mandatory ones (avoid relying on current_app during constructors).
-            # This ensures external media keys (ext-<id>) can be resolved during playback.
-            try:
-                playback_service = getattr(app, "playback_service", None)
-                external_media_service = getattr(app, "external_media_service", None)
-                if playback_service and external_media_service and hasattr(playback_service, "set_external_media_service"):
-                    playback_service.set_external_media_service(external_media_service)
-                    app.logger.info("External media service wired into playback service")
-            except Exception as e:
-                app.logger.warning(f"Failed to wire external media into playback service: {str(e)}")
+    # Video transcoding (to keep playback smooth on low-power devices like Pi 3B+)
+    # If enabled, uploaded videos are transcoded in background to a Pi-friendly H.264 MP4.
+    AUTO_TRANSCODE_VIDEOS = os.getenv("DSIGN_AUTO_TRANSCODE_VIDEOS", "true").lower() == "true"
+    # Target resolution for video files in playlists. Keep consistent to avoid VO reconfig.
+    TRANSCODE_TARGET_RESOLUTION = os.getenv("DSIGN_TRANSCODE_TARGET_RESOLUTION", "1920x1080")
+    # Target FPS (CFR). 25 is a safe default for many signage loops; adjust if needed.
+    TRANSCODE_TARGET_FPS = int(os.getenv("DSIGN_TRANSCODE_TARGET_FPS", "25"))
 
-        # Проверка обязательных сервисов
-        required_services = [
-            'playback_service',
-            'settings_service', 
-            'file_service',
-            'playlist_service',
-            'socket_service'
-        ]
-        
-        missing_services = [svc for svc in required_services if not hasattr(app, svc)]
-        if missing_services:
-            app.logger.error(f"Missing required services: {', '.join(missing_services)}")
-            raise RuntimeError(f"Missing required services: {', '.join(missing_services)}")
-        
-        app.logger.debug("All required services verified and initialized")
+    # Конфигурация CORS
+    CORS_ORIGINS = [
+        "http://localhost:5000",
+        "http://127.0.0.1:5000",
+        f"http://{current_ip}:5000",
+        *[x.strip() for x in extra_origins if x.strip()]
+    ]
 
-        # Настройка сервиса воспроизведения
-        app.logger.debug("Configuring playback service...")
-        _configure_playback_service(app)
-        
-        # Инициализация маршрутов
-        app.logger.debug("Initializing routes...")
-        from .routes import init_routes
-        init_routes(app, services)
-        app.logger.debug("Routes initialized successfully")
+# Создаем экземпляр конфигурации
+config = Config()
 
-        # Регистрация обработчиков ошибок
-        register_error_handlers(app)
-        app.logger.debug("Error handlers registered")
+# Экспортируем часто используемые переменные для прямого импорта
+UPLOAD_FOLDER = config.UPLOAD_FOLDER
+STATIC_FOLDER = config.STATIC_FOLDER
+IDLE_LOGO = config.IDLE_LOGO
+SECRET_KEY = config.SECRET_KEY
+DEBUG = config.DEBUG
+SQLALCHEMY_DATABASE_URI = config.SQLALCHEMY_DATABASE_URI
+ALLOWED_EXTENSIONS = config.ALLOWED_EXTENSIONS
+ALLOWED_LOGO_EXTENSIONS = config.ALLOWED_LOGO_EXTENSIONS
+MAX_CONTENT_LENGTH = config.MAX_CONTENT_LENGTH
+MAX_UPLOAD_BYTES = config.MAX_UPLOAD_BYTES
+CORS_SUPPORTS_CREDENTIALS = config.CORS_SUPPORTS_CREDENTIALS
+THUMBNAIL_FOLDER = config.THUMBNAIL_FOLDER
+THUMBNAIL_URL = config.THUMBNAIL_URL
+M3U_EXPORT_DIR = config.M3U_EXPORT_DIR
+MEDIA_ROOT = config.MEDIA_ROOT
+MEDIA_URL = config.MEDIA_URL
 
-        app.logger.info("Application initialization completed successfully")
-        return app
-
-    except Exception as e:
-        app.logger.critical(f"Application initialization failed: {str(e)}")
-        app.logger.exception(e)  # This will log the full traceback
-        raise RuntimeError(f"Application startup failed: {str(e)}") from e
-
-def _configure_playback_service(app: Flask) -> None:
-    """Конфигурация сервиса воспроизведения"""
-
-    def run_configure():
-        # Never block create_app: idle logo / resume touch MPV over IPC with multi-second timeouts and
-        # retries — that delayed socketio.run so nothing listened on :5000.
-        from .models import PlaybackStatus
-        from .extensions import db
-
-        try:
-            with app.app_context():
-                try:
-                    playback_status = db.session.query(PlaybackStatus).first()
-                    app.logger.info("Database connection verified")
-
-                    if not playback_status or not playback_status.playlist_id:
-                        app.logger.info("No active playlist found, starting idle logo...")
-                        _run_idle_logo_attempts(app)
-                    elif getattr(playback_status, "status", None) == "playing":
-                        app.logger.info(
-                            f"Active playlist found (ID: {playback_status.playlist_id}), resuming playback..."
-                        )
-                        _resume_playback_now(app, playback_status.playlist_id)
-                    else:
-                        app.logger.info(
-                            f"Playback status is {getattr(playback_status, 'status', None)!r} "
-                            "(not playing); idle logo only."
-                        )
-                        _run_idle_logo_attempts(app)
-
-                except Exception as db_error:
-                    app.logger.error(f"Database/playback initialization failed: {str(db_error)}")
-                    try:
-                        _fallback_to_idle_logo(app)
-                    except Exception:
-                        pass
-
-        except Exception as outer:
-            app.logger.error(f"Playback configure thread failed: {str(outer)}")
-
-    Thread(target=run_configure, daemon=True).start()
-
-
-def _run_idle_logo_attempts(app: Flask) -> None:
-    """Show idle logo (blocking IPC); call only from background threads."""
-    max_attempts = 3
-    for attempt in range(max_attempts):
-        try:
-            if app.playback_service.display_idle_logo():
-                return
-            app.logger.warning(f"Idle logo display failed (attempt {attempt + 1}/{max_attempts})")
-            time.sleep(2)
-        except Exception as e:
-            app.logger.error(f"Failed to display idle logo (attempt {attempt + 1}): {str(e)}")
-            time.sleep(2)
-    app.logger.error("All attempts to display idle logo failed")
-
-
-def _resume_playback_now(app: Flask, playlist_id: int) -> None:
-    """Resume playlist inside caller context (background thread)."""
-    try:
-        if not app.playback_service.play(playlist_id):
-            app.logger.error("Failed to resume playlist playback, falling back to idle logo")
-            _fallback_to_idle_logo(app)
-    except Exception as e:
-        app.logger.error(f"Error resuming playback: {str(e)}")
-        app.logger.info("Falling back to idle logo due to playback error")
-        try:
-            _fallback_to_idle_logo(app)
-        except Exception:
-            pass
-
-def _fallback_to_idle_logo(app: Flask) -> None:
-    """Аварийный переход к отображению логотипа"""
-    try:
-        app.playback_service.display_idle_logo()
-    except Exception as e:
-        app.logger.critical(f"Application initialization failed: {str(e)}")
-        app.logger.exception(e)  # This will log the full traceback
-
-def register_error_handlers(app: Flask) -> None:
-    """Регистрация обработчиков ошибок"""
-    from flask import jsonify, render_template, request
-
-    def is_api_request() -> bool:
-        return request.path.startswith(('/api/', '/auth/'))
-
-    @app.errorhandler(400)
-    def bad_request_error(error):
-        app.logger.warning(f"Bad request: {str(error)}")
-        if is_api_request():
-            return jsonify({
-                "success": False,
-                "error": "Bad Request",
-                "message": str(error.description) if hasattr(error, 'description') else "Invalid request"
-            }), 400
-        return render_template('errors/400.html'), 400
-
-    @app.errorhandler(401)
-    def unauthorized_error(error):
-        app.logger.warning(f"Unauthorized: {str(error)}")
-        if is_api_request():
-            return jsonify({
-                "success": False,
-                "error": "Unauthorized",
-                "message": "Authentication required"
-            }), 401
-        return render_template('errors/401.html'), 401
-
-    @app.errorhandler(403)
-    def forbidden_error(error):
-        app.logger.warning(f"Forbidden: {str(error)}")
-        if is_api_request():
-            return jsonify({
-                "success": False,
-                "error": "Forbidden",
-                "message": "Insufficient permissions"
-            }), 403
-        return render_template('errors/403.html'), 403
-
-    @app.errorhandler(404)
-    def not_found_error(error):
-        app.logger.warning(f"Not Found: {str(error)}")
-        if is_api_request():
-            return jsonify({
-                "success": False,
-                "error": "Not Found",
-                "message": str(error.description) if hasattr(error, 'description') else "Resource not found"
-            }), 404
-        return render_template('errors/404.html'), 404
-
-    @app.errorhandler(500)
-    def internal_error(error):
-        app.logger.error(f"Server Error: {str(error)}")
-        if is_api_request():
-            return jsonify({
-                "success": False,
-                "error": "Internal Server Error", 
-                "message": "An unexpected error occurred"
-            }), 500
-        return render_template('errors/500.html'), 500
+__all__ = [
+    'config',
+    'Config',
+    'UPLOAD_FOLDER',
+    'STATIC_FOLDER',
+    'IDLE_LOGO',
+    'SECRET_KEY',
+    'DEBUG',
+    'SQLALCHEMY_DATABASE_URI',
+    'ALLOWED_EXTENSIONS',
+    'ALLOWED_LOGO_EXTENSIONS',
+    'MAX_CONTENT_LENGTH',
+    'MAX_UPLOAD_BYTES',
+    'CORS_SUPPORTS_CREDENTIALS',
+    'BASE_DIR',
+    'THUMBNAIL_FOLDER',
+    'THUMBNAIL_URL',
+    'M3U_EXPORT_DIR',
+    'MEDIA_ROOT',
+    'MEDIA_URL',
+    'MAX_LOGO_SIZE',
+    'MAX_IMAGE_SIZE',
+    'MAX_VIDEO_SIZE',
+    'ALLOWED_LOGO_TYPES',
+]
