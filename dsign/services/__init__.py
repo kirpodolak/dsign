@@ -238,7 +238,9 @@ class ServiceFactory:
         logger = logger or setup_logger('SocketService')
         try:
             logger.info('Initializing SocketService')
-            from .sockets import SocketService
+            # Package `dsign.services.sockets.*` (handlers/service.py). Do not use a top-level
+            # `sockets.py` file — it shadows this package on import.
+            from .sockets.service import SocketService
             return SocketService(socketio, db_session=db, logger=logger)
         except Exception as e:
             logger.error('SocketService initialization failed', {
