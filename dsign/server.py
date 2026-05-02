@@ -52,8 +52,10 @@ def run_server() -> NoReturn:
             debug=app.config.get('DEBUG', False),
             use_reloader=False,
             # Avoid EngineIO "emitting event ..." spam in production.
-            log_output=bool(app.config.get('DEBUG', False))
-            # Убрано: allow_unsafe_werkzeug=True
+            log_output=bool(app.config.get('DEBUG', False)),
+            # Flask-SocketIO refuses Werkzeug when debug=False unless this is set.
+            # systemd runs this embedded server; use eventlet/gevent + gunicorn for hardening.
+            allow_unsafe_werkzeug=True,
         )
         
     except Exception as e:
