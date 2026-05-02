@@ -473,8 +473,13 @@ class MPVManager:
             if not self._check_mpv_socket():
                 if not self._restart_systemd_service() or not self._wait_for_socket():
                     raise ConnectionError("MPV socket not available")
-            
-            resp = self._send_command({"command": ["get_property", "mpv-version"]})
+
+            resp = None
+            for ping_try in range(8):
+                resp = self._send_command({"command": ["get_property", "mpv-version"]})
+                if resp and resp.get("error") == "success":
+                    break
+                time.sleep(0.25)
             if not resp or resp.get("error") != "success":
                 raise RuntimeError("MPV not responding properly")
             
