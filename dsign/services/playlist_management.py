@@ -841,6 +841,40 @@ class PlaylistManager:
             self._stop_event.wait(timeout=0.15)
         return False
 
+    def _wait_mpv_network_demuxer_ready(self, *, timeout_sec: float = 45.0, poll_sec: float = 0.25) -> bool:
+        """
+        After leave-idle, mpv can briefly report idle-active=false while HLS demuxer has not opened yet.
+        Treat as failure if we return to idle before demuxer/path indicates an active open — avoids false
+        instant_eof when loadfile fails quickly (403, TLS, CDN).
+        """
+        deadline = time.monotonic() + max(2.0, float(timeout_sec))
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+            if idle is True:
+                return False
+            eof = self._mpv_get_prop_bool("eof-reached", timeout=2.0)
+            if eof is True:
+                return False
+
+            dem = self._mpv_get_prop_string("demuxer", timeout=2.0)
+            if dem and str(dem).strip():
+                return True
+            soc = self._mpv_get_prop_string("stream-open-filename", timeout=2.0)
+            if soc and len(str(soc).strip()) > 8:
+                return True
+            pth = self._mpv_get_prop_string("path", timeout=2.0)
+            if pth and len(str(pth).strip()) > 8:
+                return True
+
+            dct = self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0)
+            if dct is not None and dct > 0.02:
+                return True
+
+            self._stop_event.wait(timeout=max(0.1, float(poll_sec)))
+        return False
+
     def _wait_mpv_stream_ready(
         self,
         expected_url: str,
@@ -942,16 +976,26 @@ class PlaylistManager:
         Detect a pathological case where MPV opens a file/stream and immediately returns to idle.
         This happens with some VK `edl://` selections (separate streams / blocked URL) and should
         be treated as a start failure (so we backoff instead of busy-looping).
+
+        Require evidence the demuxer actually opened — otherwise idle flicker before HLS attaches
+        looks like instant EOF on Rutube/CDN.
         """
         deadline = time.monotonic() + max(0.2, float(window_sec))
         saw_not_idle = False
+        saw_demuxer = False
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
             idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
             if idle is False:
                 saw_not_idle = True
-            if saw_not_idle and idle is True:
+            dem = self._mpv_get_prop_string("demuxer", timeout=2.0)
+            if dem and str(dem).strip():
+                saw_demuxer = True
+            elif self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0) not in (None, 0.0):
+                saw_demuxer = True
+
+            if saw_not_idle and idle is True and saw_demuxer:
                 return True
             self._stop_event.wait(timeout=0.1)
         return False
@@ -1248,6 +1292,20 @@ class PlaylistManager:
                                 continue
                         else:
                             stream_ready = True
+                        # HLS can leave idle before demuxer/path is populated; give time to open or fail clearly.
+                        try:
+                            dem_to = float((os.getenv("DSIGN_MPV_DEMUXER_WAIT_SEC") or "45").strip())
+                        except ValueError:
+                            dem_to = 45.0
+                        dem_to = max(5.0, min(120.0, dem_to))
+                        if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to):
+                            self.logger.warning(
+                                "MPV network stream never opened demuxer (idle or EOF before HLS attach)",
+                                extra={"media_key": media_key, "path_preview": str(path)[:160]},
+                            )
+                            self._log_mpv_network_debug_snapshot(media_key=media_key, url=str(path))
+                            self._register_media_failure(media_key, reason="demuxer_timeout")
+                            continue
                         # Detect "instant EOF" right after we considered it ready; avoid VK loops.
                         if self._detect_mpv_instant_eof(window_sec=2.5):
                             self.logger.warning(
