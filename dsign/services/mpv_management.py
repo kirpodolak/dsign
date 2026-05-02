@@ -3,45 +3,39 @@ import json
 import socket
 import time
 import subprocess
-import fcntl
 from threading import Lock
-from typing import Dict, Optional, Any, Tuple
+from typing import Dict, Optional, Any
 from pathlib import Path
 
 from .playback_constants import PlaybackConstants
 from .logger import ServiceLogger
 
 
-def _take_one_mpv_ipc_reply_from_buffer(
-    buf: bytes, expect_request_id: int
-) -> Tuple[Optional[Dict[str, Any]], bytes]:
+def _pick_mpv_ipc_command_reply(data: bytes, expect_request_id: Optional[int]) -> Optional[Dict[str, Any]]:
     """
-    Split `buf` on newlines; return (reply_for_expect_request_id, remainder_bytes).
-    Incomplete trailing line stays in remainder.
+    MPV IPC: в одном recv() часто приходит несколько JSON-строк (события + ответ команды).
+    Ответ команды всегда содержит ключ "error"; события — нет (только "event", ...).
     """
-    if not buf:
-        return None, buf
-    lines = buf.split(b"\n")
-    remainder = lines[-1]
-    for raw in lines[:-1]:
-        line = raw.strip()
+    if not data:
+        return None
+    text = data.decode("utf-8", errors="replace")
+    exact: Optional[Dict[str, Any]] = None
+    any_reply: Optional[Dict[str, Any]] = None
+    for line in text.split("\n"):
+        line = line.strip()
         if not line:
             continue
         try:
-            obj = json.loads(line.decode("utf-8", errors="replace"))
+            obj = json.loads(line)
         except json.JSONDecodeError:
             continue
         if not isinstance(obj, dict) or "error" not in obj:
             continue
-        if obj.get("request_id") == expect_request_id:
-            return obj, remainder
-    return None, buf
-
-
-def _mpv_ipc_cross_process_lock_path(socket_path: str) -> str:
-    """Lock file for coordinating JSON-IPC with external tools (e.g. usr/local/bin/dsign-capture)."""
-    d = os.path.dirname(socket_path or "") or "/var/lib/dsign/mpv"
-    return os.path.join(d, ".json-ipc.lock")
+        any_reply = obj
+        if expect_request_id is None or obj.get("request_id") == expect_request_id:
+            exact = obj
+            break
+    return exact if exact is not None else any_reply
 
 
 class MPVManager:
@@ -64,20 +58,9 @@ class MPVManager:
         self.mpv_socket = mpv_socket or PlaybackConstants.SOCKET_PATH
         self.upload_folder = upload_folder
         self._ipc_lock = Lock()
-        # One long-lived Unix socket for all IPC. Opening a new socket per command makes mpv
-        # spawn a client thread each time; overnight polling can exhaust resources and stall IPC.
-        self._ipc_sock: Optional[socket.socket] = None
-        # Leftover bytes after the last parsed IPC line (persistent socket can recv multiple lines).
-        self._ipc_recv_buf: bytes = b""
         self._current_settings = {}
         self._mpv_ready = False
         self._managed_by_systemd = True
-
-        # IPC watchdog: if MPV stops answering JSON-IPC (timeouts / empty buffer),
-        # the playback thread can get stuck polling. After repeated timeouts we
-        # restart MPV service to recover.
-        self._ipc_timeout_streak = 0
-        self._last_ipc_restart_monotonic = 0.0
 
         # Логирование инициализации
         self.logger.info(
@@ -177,33 +160,13 @@ class MPVManager:
         """Перезапуск systemd сервиса"""
         try:
             start_time = time.time()
-            # In typical deployments `digital-signage.service` runs as user `dsign` and can't
-            # restart system units directly (polkit). Prefer plain systemctl, but fall back to
-            # `sudo -n systemctl ...` when needed (paired with a narrow NOPASSWD sudoers rule).
-            systemctl = "/bin/systemctl" if os.path.exists("/bin/systemctl") else "systemctl"
-            cmd = [systemctl, "restart", "dsign-mpv.service"]
-            try:
-                result = subprocess.run(
-                    cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=10.0,
-                )
-            except subprocess.CalledProcessError as e:
-                stderr = (e.stderr or "").strip()
-                if "interactive authentication" in stderr.lower() or "access denied" in stderr.lower():
-                    # Non-interactive sudo: must be allowed by sudoers, otherwise this will fail too.
-                    sudo_cmd = ["sudo", "-n", systemctl, "restart", "dsign-mpv.service"]
-                    result = subprocess.run(
-                        sudo_cmd,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=15.0,
-                    )
-                else:
-                    raise
+            result = subprocess.run(
+                ["systemctl", "restart", "dsign-mpv.service"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10.0
+            )
             duration = time.time() - start_time
             
             self._log_operation(
@@ -244,125 +207,6 @@ class MPVManager:
                 }
             )
             return False
-
-    def _drop_ipc_socket(self) -> None:
-        """Close persistent IPC socket (call with _ipc_lock held)."""
-        if self._ipc_sock is not None:
-            try:
-                self._ipc_sock.close()
-            except Exception:
-                pass
-            self._ipc_sock = None
-            self._ipc_recv_buf = b""
-
-    def _ensure_ipc_connected(self, *, connect_timeout: float = 5.0) -> bool:
-        """Ensure self._ipc_sock is connected (call with _ipc_lock held)."""
-        if self._ipc_sock is not None:
-            return True
-        if not os.path.exists(self.mpv_socket):
-            return False
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(connect_timeout)
-        try:
-            s.connect(self.mpv_socket)
-            self._ipc_sock = s
-            return True
-        except (ConnectionRefusedError, FileNotFoundError, OSError):
-            try:
-                s.close()
-            except Exception:
-                pass
-            return False
-
-    def _best_effort_ipc_command(self, command_arr: list[Any], *, timeout: float = 2.0) -> bool:
-        """
-        Best-effort IPC call that does NOT raise.
-
-        Used after watchdog MPV restarts to avoid leaving the screen blank when Flask
-        doesn't immediately trigger an idle-logo transition.
-        """
-        with self._ipc_lock:
-            lock_path = _mpv_ipc_cross_process_lock_path(self.mpv_socket)
-            try:
-                os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-            except Exception:
-                pass
-            try:
-                lf = open(lock_path, "a+b")
-            except OSError:
-                lf = None
-            try:
-                if lf is not None:
-                    fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
-                s = self._ipc_sock
-                if s is None:
-                    return False
-
-                ipc_request_id = int(time.time() * 1_000_000) & 0x7FFFFFFF
-                payload = {"command": command_arr, "request_id": ipc_request_id}
-                cmd_str = json.dumps(payload, ensure_ascii=False) + "\n"
-                try:
-                    s.sendall(cmd_str.encode())
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    self._drop_ipc_socket()
-                    return False
-
-                deadline = time.time() + float(timeout)
-                while time.time() < deadline:
-                    result, self._ipc_recv_buf = _take_one_mpv_ipc_reply_from_buffer(
-                        self._ipc_recv_buf, ipc_request_id
-                    )
-                    if result is not None:
-                        return result.get("error") == "success"
-
-                    s.settimeout(max(0.05, deadline - time.time()))
-                    try:
-                        chunk = s.recv(16384)
-                    except socket.timeout:
-                        continue
-                    except (BrokenPipeError, ConnectionResetError, OSError):
-                        self._drop_ipc_socket()
-                        return False
-                    if chunk == b"":
-                        self._drop_ipc_socket()
-                        return False
-                    self._ipc_recv_buf += chunk
-
-                return False
-            finally:
-                if lf is not None:
-                    try:
-                        fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
-                    except Exception:
-                        pass
-                    try:
-                        lf.close()
-                    except Exception:
-                        pass
-
-    def _best_effort_restore_idle_logo(self) -> None:
-        """
-        Ensure `idle_logo.jpg` is loaded into MPV after an MPV restart.
-
-        This is intentionally best-effort: it should never break playback.
-        """
-        try:
-            logo_path = Path(self.upload_folder) / "idle_logo.jpg"
-            if not logo_path.exists() or not os.access(logo_path, os.R_OK):
-                return
-
-            # Keep this minimal and deterministic.
-            cmds = [
-                ["loadfile", str(logo_path), "replace"],
-                ["set_property", "loop-file", "inf"],
-                ["set_property", "pause", "no"],
-                ["set_property", "panscan", 0.0],
-            ]
-            for cmd in cmds:
-                self._best_effort_ipc_command(cmd, timeout=2.0)
-        except Exception:
-            # never let diagnostics break playback
-            return
 
     def _check_mpv_socket(self, timeout=5) -> bool:
         """Проверка доступности сокета MPV"""
@@ -462,150 +306,137 @@ class MPVManager:
 
         for attempt in range(PlaybackConstants.MAX_RETRIES):
             try:
-                with self._ipc_lock:
-                    lock_path = _mpv_ipc_cross_process_lock_path(self.mpv_socket)
+                with self._ipc_lock, \
+                     socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    
+                    s.settimeout(timeout)
+                    
                     try:
-                        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-                    except Exception:
-                        pass
-                    try:
-                        lf = open(lock_path, "a+b")
-                    except OSError:
-                        lf = None
-                    try:
-                        if lf is not None:
-                            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
-                        s = self._ipc_sock
-                        if s is None:
-                            if os.path.exists(self.mpv_socket):
-                                self._ensure_ipc_connected(
-                                    connect_timeout=min(5.0, float(timeout))
-                                )
-                            s = self._ipc_sock
-                        if s is None:
-                            self.logger.warning(
-                                "MPV socket not available, restarting service...",
-                                extra={
-                                    "operation": "MPVCommand",
-                                    "command": command_name,
-                                    "attempt": attempt + 1,
-                                    "request_id": ipc_request_id,
-                                },
-                            )
-                            self._drop_ipc_socket()
-                            if not self._restart_systemd_service() or not self._wait_for_socket():
-                                time.sleep(PlaybackConstants.RETRY_DELAY)
-                                continue
-                            if not self._ensure_ipc_connected(
-                                connect_timeout=min(5.0, float(timeout))
-                            ):
-                                time.sleep(PlaybackConstants.RETRY_DELAY)
-                                continue
-                            s = self._ipc_sock
+                        s.connect(self.mpv_socket)
+                    except (ConnectionRefusedError, FileNotFoundError):
+                        self.logger.warning(
+                            "MPV socket not available, restarting service...",
+                            extra={
+                                "operation": "MPVCommand",
+                                "command": command_name,
+                                "attempt": attempt + 1,
+                                "request_id": ipc_request_id
+                            }
+                        )
+                        if not self._restart_systemd_service() or not self._wait_for_socket():
+                            time.sleep(PlaybackConstants.RETRY_DELAY)
+                            continue
+                        s.connect(self.mpv_socket)
 
-                        assert s is not None
+                    payload = dict(command)
+                    payload["request_id"] = ipc_request_id
+                    cmd_str = json.dumps(payload, ensure_ascii=False) + "\n"
+                    s.sendall(cmd_str.encode())
 
-                        payload = dict(command)
-                        payload["request_id"] = ipc_request_id
-                        cmd_str = json.dumps(payload, ensure_ascii=False) + "\n"
+                    deadline = time.time() + timeout
+                    buffer = b""
+                    result: Optional[Dict[str, Any]] = None
+                    while time.time() < deadline:
+                        s.settimeout(max(0.05, deadline - time.time()))
                         try:
-                            s.sendall(cmd_str.encode())
-                        except (BrokenPipeError, ConnectionResetError, OSError):
-                            self._drop_ipc_socket()
-                            raise
-
-                        deadline = time.time() + float(timeout)
-                        result: Optional[Dict[str, Any]] = None
-                        while time.time() < deadline:
-                            result, self._ipc_recv_buf = _take_one_mpv_ipc_reply_from_buffer(
-                                self._ipc_recv_buf, ipc_request_id
-                            )
-                            if result is not None:
-                                break
-                            s.settimeout(max(0.05, deadline - time.time()))
-                            try:
-                                chunk = s.recv(16384)
-                            except socket.timeout:
-                                continue
-                            except (BrokenPipeError, ConnectionResetError, OSError):
-                                self._drop_ipc_socket()
-                                raise
-                            if chunk == b"":
-                                self._drop_ipc_socket()
-                                raise ConnectionError("MPV closed IPC connection")
-                            self._ipc_recv_buf += chunk
-
+                            chunk = s.recv(16384)
+                        except socket.timeout:
+                            # No data yet; keep waiting until deadline.
+                            continue
+                        buffer += chunk
+                        result = _pick_mpv_ipc_command_reply(buffer, ipc_request_id)
                         if result is not None:
-                            duration_sec = round(time.time() - start_time, 3)
-                            err = result.get("error")
-                            if err == "success":
-                                duration_ms = int(duration_sec * 1000)
-                                if log_ipc_debug or (slow_ms and duration_ms >= slow_ms):
-                                    self.logger.debug(
-                                        "MPVCommand completed" if log_ipc_debug else "MPVCommand slow",
-                                        extra={
-                                            "command": command_name,
-                                            **({"property": prop_name} if prop_name else {}),
-                                            "request_id": ipc_request_id,
-                                            "duration_sec": duration_sec,
-                                            "attempt": attempt + 1,
-                                            **({"slow_ms_threshold": slow_ms} if not log_ipc_debug else {}),
-                                        },
-                                    )
-                            else:
-                                if command_name == "get_property" and err == "property unavailable":
-                                    if log_ipc_debug:
-                                        self.logger.debug(
-                                            "MPVCommand property unavailable",
-                                            extra={
-                                                "command": command_name,
-                                                **({"property": prop_name} if prop_name else {}),
-                                                "request_id": ipc_request_id,
-                                                "duration_sec": duration_sec,
-                                                "attempt": attempt + 1,
-                                            },
-                                        )
-                                    return {
-                                        "request_id": result.get("request_id", ipc_request_id),
-                                        "error": "success",
-                                        "data": None,
-                                    }
-                                log_fn = self.logger.debug if err == "property unavailable" else self.logger.warning
-                                log_fn(
-                                    "MPVCommand error response",
+                            break
+                        # recv() returns b"" only when the peer closed the connection.
+                        if chunk == b"":
+                            break
+
+                    if result is not None:
+                        duration_sec = round(time.time() - start_time, 3)
+                        err = result.get("error")
+                        if err == "success":
+                            duration_ms = int(duration_sec * 1000)
+                            if log_ipc_debug or (slow_ms and duration_ms >= slow_ms):
+                                self.logger.debug(
+                                    "MPVCommand completed" if log_ipc_debug else "MPVCommand slow",
                                     extra={
                                         "command": command_name,
                                         **({"property": prop_name} if prop_name else {}),
                                         "request_id": ipc_request_id,
                                         "duration_sec": duration_sec,
                                         "attempt": attempt + 1,
-                                        "mpv_error": err,
-                                        **({} if err != "property unavailable" else {"response": result}),
+                                        **({"slow_ms_threshold": slow_ms} if not log_ipc_debug else {}),
                                     },
                                 )
-                            return result
-
-                        self._drop_ipc_socket()
-                        raise TimeoutError("No command reply from MPV (events only or empty buffer)")
-                    finally:
-                        if lf is not None:
+                        else:
+                            # For get_property, "property unavailable" is expected on some mpv builds / media types.
+                            # Treat it as a non-error and normalize to {"error":"success","data":None} so callers can
+                            # handle it without generating noisy logs.
+                            # Older mpv builds say "property unavailable"; some say "property not found"
+                            # for optional OBS/cache-related properties we probe in polling loops.
+                            if command_name == "get_property" and err in (
+                                "property unavailable",
+                                "property not found",
+                            ):
+                                if log_ipc_debug:
+                                    self.logger.debug(
+                                        "MPVCommand property unavailable",
+                                        extra={
+                                            "command": command_name,
+                                            **({"property": prop_name} if prop_name else {}),
+                                            "request_id": ipc_request_id,
+                                            "duration_sec": duration_sec,
+                                            "attempt": attempt + 1,
+                                            "mpv_error": err,
+                                        },
+                                    )
+                                return {
+                                    "request_id": result.get("request_id", ipc_request_id),
+                                    "error": "success",
+                                    "data": None,
+                                }
+                            # "property unavailable" is common on some mpv builds and is not actionable in production.
+                            # Keep it at DEBUG to avoid log spam.
+                            # `file-local-options/*` cannot be set while mpv is idle (no current file); callers should
+                            # use per-file options on `loadfile` instead. Treat as DEBUG noise.
+                            quiet_errs = {
+                                "property unavailable",
+                                "property not found",
+                                "error accessing property",
+                            }
+                            quiet_props = False
                             try:
-                                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+                                if (
+                                    command_name == "set_property"
+                                    and isinstance(prop_name, str)
+                                    and prop_name.startswith("file-local-options/")
+                                ):
+                                    quiet_props = True
                             except Exception:
-                                pass
-                            try:
-                                lf.close()
-                            except Exception:
-                                pass
+                                quiet_props = False
+                            log_fn = (
+                                self.logger.debug
+                                if err in quiet_errs or quiet_props
+                                else self.logger.warning
+                            )
+                            log_fn(
+                                "MPVCommand error response",
+                                extra={
+                                    "command": command_name,
+                                    **({"property": prop_name} if prop_name else {}),
+                                    "request_id": ipc_request_id,
+                                    "duration_sec": duration_sec,
+                                    "attempt": attempt + 1,
+                                    "mpv_error": err,
+                                    # Drop full response from warning logs (too noisy); keep essentials.
+                                    **({} if err != "property unavailable" else {"response": result}),
+                                },
+                            )
+                        return result
 
+                    raise TimeoutError("No command reply from MPV (events only or empty buffer)")
+                    
             except Exception as e:
-                is_ipc_timeout = isinstance(e, TimeoutError)
-                if is_ipc_timeout:
-                    self._ipc_timeout_streak += 1
-                else:
-                    # Reset streak on non-timeout IPC errors (broken pipe, property unavailable, etc.).
-                    self._ipc_timeout_streak = 0
-
                 self.logger.warning(
                     f"Attempt {attempt+1} failed",
                     extra={
@@ -620,41 +451,6 @@ class MPVManager:
                 )
                 if attempt < PlaybackConstants.MAX_RETRIES - 1:
                     time.sleep(PlaybackConstants.RETRY_DELAY)
-
-                # Restart MPV after a short streak of IPC timeouts, but throttle restarts.
-                # This targets the "MPV is alive but never replies to get_property" situation.
-                if is_ipc_timeout:
-                    streak = int(os.getenv("DSIGN_MPV_IPC_TIMEOUT_RESTART_STREAK", "3") or 3)
-                    cooldown = float(os.getenv("DSIGN_MPV_IPC_TIMEOUT_RESTART_COOLDOWN_SEC", "30") or 30)
-                    now_mono = time.monotonic()
-                    if (
-                        self._ipc_timeout_streak >= max(1, streak)
-                        and (now_mono - self._last_ipc_restart_monotonic) >= max(5.0, cooldown)
-                    ):
-                        self._last_ipc_restart_monotonic = now_mono
-                        self._ipc_timeout_streak = 0
-                        self.logger.error(
-                            "MPV IPC watchdog restarting MPV after repeated get_property timeouts",
-                            extra={
-                                "operation": "MPVCommand",
-                                "command": command_name,
-                                "timeout_sec": timeout,
-                                "streak": streak,
-                                "cooldown_sec": cooldown,
-                                "request_id": ipc_request_id,
-                            },
-                        )
-                        # Best-effort restart; ignore errors so playback loop can proceed/fallback.
-                        try:
-                            self._restart_systemd_service()
-                            self._wait_for_socket(timeout=20.0)
-                            self._ensure_ipc_connected(connect_timeout=min(5.0, float(timeout)))
-                            # After an MPV restart, Flask may not re-trigger idle-logo transition
-                            # (it only happens at digital-signage start / playlist stop).
-                            # Restore idle logo best-effort so the screen doesn't stay blank.
-                            self._best_effort_restore_idle_logo()
-                        except Exception:
-                            pass
                 continue
         
         self.logger.error(
@@ -729,8 +525,6 @@ class MPVManager:
             )
         finally:
             self._mpv_ready = False
-            with self._ipc_lock:
-                self._drop_ipc_socket()
 
     def update_settings(self, settings: Dict[str, Any]) -> bool:
         """Обновление настроек"""
