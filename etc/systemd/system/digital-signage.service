@@ -11,8 +11,8 @@ Type=simple
 User=dsign
 Group=dsign
 WorkingDirectory=/home/dsign
-# If run.py is not next to the `dsign/` package directory, set absolute repo root here:
-# Environment=DSIGN_PROJECT_ROOT=/home/dsign
+# Python package lives under project root (e.g. /home/dsign/dsign/). run.py may sit in that subfolder.
+Environment=DSIGN_PROJECT_ROOT=/home/dsign
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/media/tmp
 ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp
@@ -32,7 +32,7 @@ Environment=DSIGN_TRANSCODE_TARGET_FPS=25
 # Environment=DSIGN_MPV_STREAM_READY_HTTPS=1
 # Seconds before treating idle-active as EOF for network streams (HLS can flicker idle while buffering; default 25).
 # Environment=DSIGN_MPV_NETWORK_IDLE_GRACE_SEC=25
-ExecStart=/usr/bin/python3 /home/dsign/run.py
+ExecStart=/usr/bin/python3 /home/dsign/dsign/run.py
 # Настройки перезапуска
 Restart=on-failure
 RestartSec=30s
