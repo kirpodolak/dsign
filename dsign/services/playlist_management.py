@@ -1126,6 +1126,7 @@ class PlaylistManager:
         start_index: int = 0,
         *,
         first_item_preloaded: bool = False,
+        profile_muted: bool = False,
     ):
         """
         Manual playback loop that enforces per-item durations for images and plays videos to EOF.
@@ -1533,7 +1534,10 @@ class PlaylistManager:
             self._play_thread = Thread(
                 target=self._manual_slideshow_loop,
                 args=(playlist_id, items, loop_start),
-                kwargs={"first_item_preloaded": len(items) == 1},
+                kwargs={
+                    "first_item_preloaded": len(items) == 1,
+                    "profile_muted": profile_muted,
+                },
                 daemon=True,
             )
             self._play_thread.start()
