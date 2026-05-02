@@ -54,8 +54,9 @@ class SocketService:
 
     def _register_handlers(self):
         """Register all event handlers and namespaces"""
-        # System events
-        self.socketio.on_event('connect', self.system.setup_connection_handler)
+        # System events (register real handlers — never pass factory functions here:
+        # `setup_connection_handler` registers nested handlers and returns None)
+        self.socketio.on_event('connect', self.system.handle_connect)
         self.socketio.on_event('disconnect', self.system.handle_disconnect)
         self.socketio.on_event('ping', self.system.handle_ping)
         self.socketio.on_event('heartbeat', self.system.handle_heartbeat)

@@ -23,7 +23,7 @@ class PlaylistHandler:
         Returns:
             bool: True if successful, False otherwise
         """
-        from dsign.models import Playlist, PlaylistItem, PlaylistProfileAssignment, PlaybackProfile
+        from dsign.models import Playlist, PlaylistProfileAssignment, PlaybackProfile
         
         if not self.socket_service.is_authenticated(sid):
             self._emit_error(sid, 'playlist_error', 'Unauthorized access')
@@ -39,13 +39,20 @@ class PlaylistHandler:
                 if not playlist:
                     raise ValueError(f"Playlist {playlist_id} not found")
 
-                items = [{
-                    'id': item.id,
-                    'media_id': item.media_id,
-                    'position': item.position,
-                    'duration': item.duration,
-                    'metadata': item.metadata
-                } for item in playlist.items.order_by(PlaylistItem.position).all()]
+                rows = sorted(
+                    playlist.files or [],
+                    key=lambda f: int(getattr(f, "order", 0) or 0),
+                )
+                items = [
+                    {
+                        'id': pf.id,
+                        'file_name': pf.file_name,
+                        'order': pf.order,
+                        'duration': pf.duration,
+                        'muted': bool(getattr(pf, 'muted', False)),
+                    }
+                    for pf in rows
+                ]
 
                 response = {
                     'id': playlist.id,
@@ -227,11 +234,19 @@ class PlaylistHandler:
 
                 items = []
                 if update_type == 'full':
-                    items = [{
-                        'id': item.id,
-                        'media_id': item.media_id,
-                        'position': item.position
-                    } for item in playlist.items.order_by(PlaylistItem.position).all()]
+                    rows = sorted(
+                        playlist.files or [],
+                        key=lambda f: int(getattr(f, "order", 0) or 0),
+                    )
+                    items = [
+                        {
+                            'id': pf.id,
+                            'file_name': pf.file_name,
+                            'order': pf.order,
+                            'duration': pf.duration,
+                        }
+                        for pf in rows
+                    ]
 
                 update_data = {
                     'playlist_id': playlist.id,

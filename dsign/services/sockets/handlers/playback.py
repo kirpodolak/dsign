@@ -1,7 +1,6 @@
 # services/sockets/handlers/playback.py
 from typing import Dict, Optional
 from datetime import datetime
-from flask import current_app
 from flask_socketio import emit
 from ...logger import ServiceLogger
 from threading import Lock
@@ -22,22 +21,25 @@ class PlaybackHandler:
         :param data: Request data
         :param sid: Session ID of the requesting client
         """
-        from dsign.models import PlaybackState
-        
+        from dsign.models import PlaybackStatus
+
         if not self._check_authentication(sid):
             self.logger.warning('Unauthorized playback state request', {'sid': sid})
             return False
 
         try:
             with self.playback_lock:
-                state = self.db.session.query(PlaybackState).first()
-                if state:
-                    emit('playback_update', {
-                        'state': state.state,
-                        'current_time': state.current_time,
-                        'playlist_item_id': state.playlist_item_id,
-                        'timestamp': datetime.utcnow().isoformat()
-                    }, room=sid)
+                row = self.db.session.query(PlaybackStatus).first()
+                if row:
+                    emit(
+                        'playback_update',
+                        {
+                            'status': row.status,
+                            'playlist_id': row.playlist_id,
+                            'timestamp': datetime.utcnow().isoformat(),
+                        },
+                        room=sid,
+                    )
                     self.logger.debug('Playback state sent', {'sid': sid})
                     return True
                 return False
@@ -60,24 +62,23 @@ class PlaybackHandler:
         :param state_data: Playback state data to broadcast
         """
         try:
+            from dsign.models import PlaybackStatus
+
             with self.playback_lock:
-                # Update database state
-                state = self.db.session.query(PlaybackState).first()
-                if state:
-                    state.state = state_data.get('state', state.state)
-                    state.current_time = state_data.get('current_time', state.current_time)
-                    state.playlist_item_id = state_data.get('playlist_item_id', state.playlist_item_id)
+                row = self.db.session.query(PlaybackStatus).first()
+                if row:
+                    if 'status' in state_data:
+                        row.status = str(state_data.get('status'))
+                    if 'playlist_id' in state_data:
+                        row.playlist_id = state_data.get('playlist_id')
                     self.db.session.commit()
 
-                # Prepare broadcast data
                 broadcast_data = {
-                    'state': state.state if state else None,
-                    'current_time': state.current_time if state else 0,
-                    'playlist_item_id': state.playlist_item_id if state else None,
-                    'timestamp': datetime.utcnow().isoformat()
+                    'status': row.status if row else None,
+                    'playlist_id': row.playlist_id if row else None,
+                    'timestamp': datetime.utcnow().isoformat(),
                 }
 
-                # Broadcast to all authenticated clients
                 emit('playback_update', broadcast_data, broadcast=True)
                 self.logger.debug('Playback state broadcasted', {
                     'state': broadcast_data['state'],
@@ -130,11 +131,7 @@ class PlaybackHandler:
                     raise ValueError(f"Unknown playback action: {action}")
 
                 # After processing command, emit updated state
-                self.emit_playback_update({
-                    'state': 'playing',  # Update with actual state
-                    'current_time': 0,   # Update with actual time
-                    'playlist_item_id': None  # Update if needed
-                })
+                self.emit_playback_update({'status': 'playing'})
             
                 return True
 
