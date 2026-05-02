@@ -32,7 +32,8 @@ Environment=DSIGN_TRANSCODE_TARGET_FPS=25
 # Environment=DSIGN_MPV_STREAM_READY_HTTPS=1
 # Seconds before treating idle-active as EOF for network streams (HLS can flicker idle while buffering; default 25).
 # Environment=DSIGN_MPV_NETWORK_IDLE_GRACE_SEC=25
-ExecStart=/usr/bin/python3 /home/dsign/dsign/run.py
+# Use project venv — system python has no Flask/deps (ModuleNotFoundError: flask).
+ExecStart=/home/dsign/venv/bin/python /home/dsign/dsign/run.py
 # Настройки перезапуска
 Restart=on-failure
 RestartSec=30s
