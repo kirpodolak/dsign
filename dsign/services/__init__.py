@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import os
 import sys
+import shutil
 import platform
 import traceback
 import subprocess
@@ -326,26 +327,48 @@ def init_services(
             from PIL import Image
             Image.new('RGB', (1, 1)).save(io.BytesIO(), 'JPEG')
             
-            # Проверка ffmpeg (для видео)
-            ffmpeg_available = subprocess.run(
-                ["ffmpeg", "-version"], 
-                capture_output=True
-            ).returncode == 0
-            
-            # Проверка MPV (для воспроизведения)
-            mpv_available = subprocess.run(
-                ["which", "mpv"],
-                capture_output=True
-            ).returncode == 0
-            
+            # systemd sets a minimal PATH — avoid relying on `which` (often missing from PATH entirely).
+            ffmpeg_exe = shutil.which("ffmpeg") or (
+                "/usr/bin/ffmpeg" if os.path.isfile("/usr/bin/ffmpeg") else None
+            )
+            ffmpeg_available = False
+            if ffmpeg_exe:
+                ffmpeg_available = (
+                    subprocess.run(
+                        [ffmpeg_exe, "-version"],
+                        capture_output=True,
+                        timeout=10,
+                    ).returncode
+                    == 0
+                )
+
+            mpv_exe = shutil.which("mpv") or (
+                "/usr/bin/mpv" if os.path.isfile("/usr/bin/mpv") else None
+            )
+            mpv_available = False
+            if mpv_exe:
+                mpv_available = (
+                    subprocess.run(
+                        [mpv_exe, "--version"],
+                        capture_output=True,
+                        timeout=10,
+                    ).returncode
+                    == 0
+                )
+
             logger.info("Проверка зависимостей выполнена", {
                 'Pillow': True,
                 'ffmpeg': ffmpeg_available,
-                'mpv': mpv_available
+                'ffmpeg_exe': ffmpeg_exe,
+                'mpv': mpv_available,
+                'mpv_exe': mpv_exe,
             })
-            
+
             if not mpv_available:
-                raise RuntimeError("MPV player not found in PATH")
+                raise RuntimeError(
+                    "MPV player not found or not executable "
+                    "(systemd PATH may be minimal; ensure mpv at /usr/bin/mpv or set PATH)"
+                )
                 
         except Exception as e:
             logger.critical("Ошибка проверки зависимостей", {

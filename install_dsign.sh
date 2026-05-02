@@ -123,6 +123,7 @@ fi
 sed -i \
     -e "s|^WorkingDirectory=.*|WorkingDirectory=$PROJECT_DIR|" \
     -e "s|^Environment=DSIGN_PROJECT_ROOT=.*|Environment=DSIGN_PROJECT_ROOT=$PROJECT_DIR|" \
+    -e "s|^Environment=PATH=.*|Environment=PATH=$VENV_DIR/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|" \
     -e "s|^ExecStart=.*|ExecStart=$VENV_DIR/bin/python $PROJECT_DIR/run.py|" \
     /etc/systemd/system/digital-signage.service 2>/dev/null || true
 # Align ExecStartPre MPV socket wait path with PlaybackConstants.SOCKET_PATH (default /var/lib/dsign/mpv/socket).

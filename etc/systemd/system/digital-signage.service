@@ -16,6 +16,8 @@ Group=dsign
 # Layout A (flat): clone root is the Python package → /home/dsign/dsign/{__init__.py,run.py,...}
 WorkingDirectory=/home/dsign/dsign
 Environment=DSIGN_PROJECT_ROOT=/home/dsign/dsign
+# Default systemd PATH can omit /usr/bin — dependency checks and subprocess helpers need ffmpeg/mpv.
+Environment=PATH=/home/dsign/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/media/tmp /var/log/dsign
 ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp /var/log/dsign
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp /var/log/dsign
