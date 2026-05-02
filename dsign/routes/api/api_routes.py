@@ -343,6 +343,16 @@ def init_api_routes(api_bp, services):
         except Exception:
             pass
 
+    def _mpv_manager_available() -> bool:
+        try:
+            return getattr(playback_service, "_mpv_manager", None) is not None if playback_service else False
+        except Exception:
+            return False
+
+    def _prefer_mpv_volume() -> bool:
+        """When MPV drives ALSA directly, wpctl default sink is unrelated — prefer IPC volume/mute."""
+        return os.getenv("DSIGN_PREFER_MPV_VOLUME", "1").strip().lower() in ("1", "true", "yes", "on")
+
     def _amixer_pick_control() -> tuple[int, str] | None:
         """
         Pick ALSA simple mixer control for global volume. On Pi HDMI the effective control is
@@ -502,6 +512,13 @@ def init_api_routes(api_bp, services):
                     "muted": m_any_off if m_any else None,
                 }
 
+        # After vc4hdmi hardware mixers: if signage MPV is running, its ao is often ALSA/PipeWire bypass.
+        # Prefer MPV readback before wpctl so the dashboard matches audible output (x86 + --ao=alsa).
+        if _prefer_mpv_volume() and _mpv_manager_available():
+            mpv = _audio_get_mpv()
+            if mpv:
+                return mpv
+
         # 2) MPV is the real volume knob for `alsa/hdmi:CARD=vc4hdmi0` when vc4 has no scontrols
         if _audio_path_is_mpv_direct_hdmi():
             mpv = _audio_get_mpv()
@@ -532,8 +549,9 @@ def init_api_routes(api_bp, services):
     def _audio_set(volume_percent: int | None = None, muted: bool | None = None) -> dict:
         """
         Apply volume: (1) ALSA simple controls on all vc4hdmi* if they exist, else
-        (2) PipeWire @DEFAULT_AUDIO_SINK@ if enabled, else
-        (3) MPV volume/mute (when MPV uses direct HDMI and amixer scontrols is empty for vc4).
+        (2) MPV IPC when DSIGN_PREFER_MPV_VOLUME (default on) and MPVManager exists — matches --ao=alsa,
+        (3) PipeWire @DEFAULT_AUDIO_SINK@ if DSIGN_USE_PIPEWIRE_AUDIO and wpctl, else
+        (4) MPV volume/mute as last resort.
         """
         use_pw = (os.getenv("DSIGN_USE_PIPEWIRE_AUDIO", "1").strip().lower() in ("1", "true", "yes", "on")) and _wpctl_available()
         v_pct = int(max(0, min(100, int(volume_percent)))) if volume_percent is not None else None
@@ -557,7 +575,9 @@ def init_api_routes(api_bp, services):
             _invalidate_system_status_cache()
             return _audio_get()
 
-        if use_pw:
+        if _prefer_mpv_volume() and _mpv_manager_available():
+            _audio_set_mpv(v_pct, muted)
+        elif use_pw:
             _wpctl_set_default_sink(vol_pct=v_pct, muted=muted)
         else:
             _audio_set_mpv(v_pct, muted)
