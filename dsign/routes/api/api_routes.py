@@ -323,7 +323,16 @@ def init_api_routes(api_bp, services):
                 vnum = int(round(float(vraw)))
             except (TypeError, ValueError):
                 vnum = None
-            mdata = bool(mr["data"]) if (mr and mr.get("error") == "success" and "data" in mr) else None
+            mraw = mr.get("data") if (mr and mr.get("error") == "success" and "data" in mr) else None
+            if mraw is None:
+                mdata = None
+            elif isinstance(mraw, bool):
+                mdata = mraw
+            elif isinstance(mraw, (int, float)):
+                mdata = bool(mraw)
+            else:
+                ms = str(mraw).strip().lower()
+                mdata = ms in ("yes", "true", "1", "on")
             return {
                 "available": True,
                 "volume_percent": vnum,
@@ -341,7 +350,10 @@ def init_api_routes(api_bp, services):
                 v = float(max(0, min(100, int(volume_percent))))
                 mgr._send_command({"command": ["set_property", "volume", v]}, timeout=2.0)
             if muted is not None:
-                mgr._send_command({"command": ["set_property", "mute", bool(muted)]}, timeout=2.0)
+                mgr._send_command(
+                    {"command": ["set_property", "mute", "yes" if bool(muted) else "no"]},
+                    timeout=2.0,
+                )
         except Exception:
             pass
 
