@@ -62,7 +62,6 @@ export class SettingsManager {
             transcodeResolution: document.getElementById('transcode-resolution'),
             transcodeFps: document.getElementById('transcode-fps'),
             idleLogoRotate: document.getElementById('idle-logo-rotate'),
-            audioRouteSelect: document.getElementById('audio-route-select'),
             mpvAdvancedBackdrop: document.getElementById('mpv-advanced-backdrop'),
             btnMpvAdvanced: document.getElementById('btn-mpv-advanced'),
             mpvAdvancedSave: document.getElementById('mpv-advanced-save'),
@@ -83,14 +82,6 @@ export class SettingsManager {
             initialized: false,
             /** Local audio state during drag (0–100, muted) */
             audioLocal: { volume: null, muted: null },
-            /** True while the user is actively dragging the knob. */
-            audioDragging: false,
-            /** Monotonic id for in-flight audio POSTs to avoid out-of-order UI rewrites. */
-            audioPostSeq: 0,
-            /** Hold off applying /api/system/status audio after a local change (ms timestamp). */
-            audioHoldUntilMs: 0,
-            /** Last locally requested audio values (rounded) for hold-off comparisons. */
-            audioLastSet: { volume: null, muted: null },
             _overrideSaveTimers: new Map(),
             _globalSaveTimer: null,
         };
@@ -141,7 +132,7 @@ export class SettingsManager {
             this.renderSettingsForm();
             this.performance.mark('settings-rendered');
             this.setupEventListeners();
-            this.startSystemPolling();
+            // startPolling above already arms slow polling; avoid duplicate timers.
             this.state.initialized = true;
             this.performance.flush('init-complete');
 
@@ -247,18 +238,9 @@ export class SettingsManager {
 
         let drag = null;
 
-        const getEffectiveAudio = () => {
-            const sv = this.state.systemStatus?.audio || {};
-            return {
-                volume: this.state.audioLocal.volume != null ? this.state.audioLocal.volume : (typeof sv.volume_percent === 'number' ? sv.volume_percent : null),
-                muted: this.state.audioLocal.muted != null ? this.state.audioLocal.muted : (sv.muted != null ? Boolean(sv.muted) : null),
-            };
-        };
-
         const applyLocalToUi = () => {
-            const eff = getEffectiveAudio();
-            const v = eff.volume;
-            const m = eff.muted;
+            const v = this.state.audioLocal.volume;
+            const m = this.state.audioLocal.muted;
             const lang = getUiLang();
             if (v != null) donut.style.setProperty('--p', String(Math.max(0, Math.min(100, v))));
             const valEl = this._qsDashboard('audioValue');
@@ -274,16 +256,11 @@ export class SettingsManager {
             this._audioPostTimer = setTimeout(() => this._flushAudioPost(), 450);
         };
 
-        const flushAudioPostNow = () => {
-            clearTimeout(this._audioPostTimer);
-            this._flushAudioPost().catch(() => {});
-        };
-
         btn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            const cur = getEffectiveAudio().muted;
-            this.state.audioLocal.muted = !(cur === true);
+            const cur = this.state.audioLocal.muted;
+            this.state.audioLocal.muted = !cur;
             applyLocalToUi();
             scheduleAudioPost();
         });
@@ -291,7 +268,6 @@ export class SettingsManager {
         donut.addEventListener('pointerdown', (e) => {
             if (e.target === btn || btn.contains(e.target)) return;
             e.preventDefault();
-            this.state.audioDragging = true;
             let base =
                 this.state.audioLocal.volume != null
                     ? this.state.audioLocal.volume
@@ -321,13 +297,9 @@ export class SettingsManager {
         const endDrag = (e) => {
             if (!drag) return;
             drag = null;
-            this.state.audioDragging = false;
             try {
                 donut.releasePointerCapture(e.pointerId);
             } catch (_) { /* noop */ }
-            // Commit the last dragged value immediately.
-            // (If we clear audioLocal here, the debounced POST would send nulls and volume won't change.)
-            flushAudioPostNow();
         };
         donut.addEventListener('pointerup', endDrag);
         donut.addEventListener('pointercancel', endDrag);
@@ -336,8 +308,6 @@ export class SettingsManager {
     async _flushAudioPost() {
         const vol = this.state.audioLocal.volume;
         const muted = this.state.audioLocal.muted;
-        const seq = ++this.state.audioPostSeq;
-        let ok = false;
         try {
             const resp = await fetch('/api/system/audio', {
                 method: 'POST',
@@ -350,37 +320,16 @@ export class SettingsManager {
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
-            // Ignore out-of-order responses (e.g. debounced request finishes after a newer flush).
-            if (seq !== this.state.audioPostSeq) {
-                return;
-            }
             if (data.audio) {
                 this.state.systemStatus = this.state.systemStatus || {};
                 this.state.systemStatus.audio = data.audio;
                 this._applyAudioToDashboard(data.audio);
             }
-            // Prevent immediate /api/system/status from overwriting the knob with stale cached audio.
-            // We'll accept status audio again after a short hold-off window or once it matches.
-            this.state.audioHoldUntilMs = Date.now() + 1800;
-            this.state.audioLastSet = {
-                volume: vol != null ? Math.round(vol) : null,
-                muted: muted != null ? Boolean(muted) : null,
-            };
-            ok = true;
+            this.state.audioLocal = { volume: null, muted: null };
+            // Re-fetch status so the donut matches server truth (avoids stale cached /api/system/status audio).
+            await this.refreshSystemStatus().catch(() => {});
         } catch (err) {
             console.error('Audio save failed:', err);
-        } finally {
-            // Only the latest request is allowed to clear the local override / refresh UI.
-            if (seq === this.state.audioPostSeq) {
-                // Always clear the local override so polling can resync the knob.
-                // If the POST failed (CSRF expired / network), revert the UI to the last known server state.
-                this.state.audioLocal = { volume: null, muted: null };
-                if (!ok) {
-                    this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
-                }
-                // Re-fetch status so the donut matches server truth (avoids stale cached /api/system/status audio).
-                await this.refreshSystemStatus().catch(() => {});
-            }
         }
     }
 
@@ -390,12 +339,13 @@ export class SettingsManager {
 
     startSystemPolling() {
         if (this.state.systemPollTimer) return;
+        // Slow safety net only: index dashboard polls /api/system/status more often when open.
         this.state.systemPollTimer = setInterval(() => {
             if (document.hidden || this.state.systemStatusLoading) {
                 return;
             }
             this.refreshSystemStatus().catch(() => {});
-        }, 10000);
+        }, 60000);
     }
 
     stopSystemPolling() {
@@ -421,28 +371,9 @@ export class SettingsManager {
             this.state.systemStatus = data.status || null;
             this.applyNonAudioStatusToDashboard();
             const audioIdle =
-                !this.state.audioDragging
-                && this.state.audioLocal.volume == null
-                && this.state.audioLocal.muted == null;
+                this.state.audioLocal.volume == null && this.state.audioLocal.muted == null;
             if (audioIdle) {
-                const now = Date.now();
-                const stAudio = this.state.systemStatus?.audio || {};
-                const hold = now < (this.state.audioHoldUntilMs || 0);
-                if (!hold) {
-                    this._applyAudioToDashboard(stAudio);
-                } else {
-                    // During hold-off, only accept status audio if it matches what we last set.
-                    const lv = this.state.audioLastSet?.volume;
-                    const lm = this.state.audioLastSet?.muted;
-                    const sv = typeof stAudio.volume_percent === 'number' ? Number(stAudio.volume_percent) : null;
-                    const sm = stAudio.muted != null ? Boolean(stAudio.muted) : null;
-                    const vMatch = lv == null || sv == null ? true : Math.abs(sv - lv) <= 2;
-                    const mMatch = lm == null || sm == null ? true : sm === lm;
-                    if (vMatch && mMatch) {
-                        this.state.audioHoldUntilMs = 0;
-                        this._applyAudioToDashboard(stAudio);
-                    }
-                }
+                this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
             }
         } finally {
             this.state.systemStatusLoading = false;
@@ -807,9 +738,6 @@ export class SettingsManager {
         const interval = String(this.state.currentSettings?.display?.preview_auto_interval_sec ?? 0);
         if (this.elements.previewAutoSelect) this.elements.previewAutoSelect.value = interval;
 
-        const audioRoute = String(this.state.currentSettings?.['audio-route'] || 'auto');
-        if (this.elements.audioRouteSelect) this.elements.audioRouteSelect.value = audioRoute;
-
         // Transcode settings (global)
         const display = this.state.currentSettings?.display || {};
         if (this.elements.transcodeEnabled) this.elements.transcodeEnabled.value = String(Boolean(display.auto_transcode_videos));
@@ -826,7 +754,6 @@ export class SettingsManager {
             if (key === 'transcode_target_fps') v = this.elements.transcodeFps?.value;
             if (key === 'hdmi_mode_preset') v = this.elements.displayModeSelect?.value;
             if (key === 'idle_logo_rotate') v = this.elements.idleLogoRotate?.value;
-            if (key === 'audio-route') v = this.elements.audioRouteSelect?.value;
             if (v != null) this._setSegmentedValue(seg, v);
         });
     }
@@ -1012,39 +939,12 @@ export class SettingsManager {
         if (key === 'transcode_target_fps' && this.elements.transcodeFps) this.elements.transcodeFps.value = String(value);
         if (key === 'hdmi_mode_preset' && this.elements.displayModeSelect) this.elements.displayModeSelect.value = String(value);
         if (key === 'idle_logo_rotate' && this.elements.idleLogoRotate) this.elements.idleLogoRotate.value = String(value);
-        if (key === 'audio-route' && this.elements.audioRouteSelect) this.elements.audioRouteSelect.value = String(value);
 
         if (key === 'preview_auto_interval_sec') this._debounceAutosavePreview();
         if (key === 'auto_transcode_videos' || key === 'transcode_target_resolution' || key === 'transcode_target_fps') {
             this._debounceAutosaveTranscode();
         }
         if (key === 'idle_logo_rotate') this._debounceAutosaveIdle();
-        if (key === 'audio-route') this._debounceAutosaveAudioRoute();
-    }
-
-    _debounceAutosaveAudioRoute() {
-        clearTimeout(this._autosaveAudioRouteT);
-        this._autosaveAudioRouteT = setTimeout(() => this._saveAudioRouteSilent(), 650);
-    }
-
-    async _saveAudioRouteSilent() {
-        const route = String(this.elements.audioRouteSelect?.value || 'auto');
-        try {
-            const response = await fetch('/api/settings/mpv/global', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCSRFToken() },
-                credentials: 'include',
-                body: JSON.stringify({ 'audio-route': route }),
-            });
-            const result = await response.json().catch(() => ({}));
-            if (!response.ok || !result.success) throw new Error(result.error || 'Failed');
-            await this.loadCurrentSettings();
-            this.applyGlobalSettingsToControls();
-            // don't show a noisy toast on every click; status ring updates implicitly
-        } catch (e) {
-            console.error(e);
-            showAlert(e.message || 'Audio route save failed', 'error');
-        }
     }
 
     _debounceAutosavePreview() {
