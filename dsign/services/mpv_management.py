@@ -391,7 +391,24 @@ class MPVManager:
                                 }
                             # "property unavailable" is common on some mpv builds and is not actionable in production.
                             # Keep it at DEBUG to avoid log spam.
-                            log_fn = self.logger.debug if err == "property unavailable" else self.logger.warning
+                            # `file-local-options/*` cannot be set while mpv is idle (no current file); callers should
+                            # use per-file options on `loadfile` instead. Treat as DEBUG noise.
+                            quiet_errs = {"property unavailable", "error accessing property"}
+                            quiet_props = False
+                            try:
+                                if (
+                                    command_name == "set_property"
+                                    and isinstance(prop_name, str)
+                                    and prop_name.startswith("file-local-options/")
+                                ):
+                                    quiet_props = True
+                            except Exception:
+                                quiet_props = False
+                            log_fn = (
+                                self.logger.debug
+                                if err in quiet_errs or quiet_props
+                                else self.logger.warning
+                            )
                             log_fn(
                                 "MPVCommand error response",
                                 extra={
