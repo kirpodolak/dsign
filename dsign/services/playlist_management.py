@@ -1,9 +1,10 @@
 import os
+import re
 import subprocess
 import traceback
 import time
 from threading import Event, Thread
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 from pathlib import Path
 
 from .playback_constants import PlaybackConstants
@@ -179,6 +180,16 @@ class PlaylistManager:
         data = resp.get("data")
         if isinstance(data, (int, float)) and not isinstance(data, bool):
             return float(data)
+        if isinstance(data, str):
+            s = data.strip()
+            if not s or s.lower() in ("nan", "inf", "n/a", "none"):
+                return None
+            m = re.match(r"^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$", s)
+            if m:
+                try:
+                    return float(s)
+                except ValueError:
+                    return None
         return None
 
     def _mpv_get_prop_string(self, name: str, timeout: float = 3.0) -> Optional[str]:
@@ -317,6 +328,30 @@ class PlaylistManager:
             provider=provider,
         )
 
+    @staticmethod
+    def _escape_mpv_key_value_list_token(s: str) -> str:
+        """Escape a token for mpv's comma-separated key=value list options (e.g. --stream-lavf-o)."""
+        return (
+            str(s)
+            .replace("\\", "\\\\")
+            .replace(",", "\\,")
+            .replace("=", "\\=")
+        )
+
+    def _format_mpv_key_value_list(self, d: Dict[str, str]) -> str:
+        parts: list[str] = []
+        for k, v in (d or {}).items():
+            if k is None or v is None:
+                continue
+            ks = str(k).strip()
+            vs = str(v)
+            if not ks or not vs:
+                continue
+            parts.append(
+                f"{self._escape_mpv_key_value_list_token(ks)}={self._escape_mpv_key_value_list_token(vs)}"
+            )
+        return ",".join(parts)
+
     def _clear_mpv_http_options(self) -> None:
         """Reset per-stream HTTP options so a previous item cannot poison the next load."""
         try:
@@ -326,30 +361,9 @@ class PlaylistManager:
             )
         except Exception:
             pass
-        # Some network fetches (notably EDL sources opened by lavf/ffmpeg) do not always honor
-        # `http-header-fields`. Clear/override the more specific stream options too.
-        try:
-            self._mpv_manager._send_command(
-                {"command": ["set_property", "file-local-options/stream-lavf-o", {}]},
-                timeout=3.0,
-            )
-        except Exception:
-            pass
-        # Clear any file-local buffering options we may set for network streams.
-        for key, value in (
-            ("file-local-options/cache", "no"),
-            ("file-local-options/cache-secs", 0),
-            ("file-local-options/demuxer-max-bytes", 0),
-            ("file-local-options/demuxer-max-back-bytes", 0),
-            ("file-local-options/demuxer-readahead-secs", 0),
-        ):
-            try:
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", key, value]},
-                    timeout=2.0,
-                )
-            except Exception:
-                pass
+        # NOTE: Do not `set_property` `file-local-options/*` while mpv is idle (no current file):
+        # mpv returns "error accessing property" and spams logs. Per-file options are applied on
+        # `loadfile` via the options list instead.
         try:
             self._mpv_manager._send_command(
                 {"command": ["set_property", "user-agent", ""]},
@@ -373,29 +387,29 @@ class PlaylistManager:
         except Exception:
             pass
 
-    def _apply_mpv_stream_lavf_options(
+    def _build_mpv_stream_lavf_o_opts(
         self,
         headers: Dict[str, str],
         *,
         stream_url: Optional[str] = None,
         provider: Optional[str] = None,
-    ) -> None:
+    ) -> Dict[str, str]:
         """
-        Apply headers for lavf/ffmpeg-based network opens.
+        Build libavformat options for network opens (used as per-file `stream-lavf-o` on loadfile).
 
         When mpv plays `edl://` sources from ytdl_hook, the underlying open can go through
-        lavf/ffmpeg. Those opens may ignore `http-header-fields`, so we also set
-        `file-local-options/stream-lavf-o` (plus `user-agent`/`referrer`) for best compatibility.
+        lavf/ffmpeg. Those opens may ignore `http-header-fields`, so we pass `stream-lavf-o`
+        as a per-file option (mpv `loadfile` option list), plus `user-agent`/`referrer` fallbacks.
 
         IMPORTANT: Avoid duplicating UA/Referer between multiple mechanisms when possible.
         """
         if not headers:
-            return
+            return {}
         ua = str(headers.get("User-Agent") or "").strip()
         ref = str(headers.get("Referer") or "").strip()
         cookie = str(headers.get("Cookie") or "").strip()
         if not ua and not ref and not cookie:
-            return
+            return {}
 
         # ffmpeg expects CRLF-separated header lines in `headers`.
         #
@@ -456,14 +470,7 @@ class PlaylistManager:
         if hdr_blob:
             opts["headers"] = hdr_blob + "\r\n"
 
-        try:
-            self._mpv_manager._send_command(
-                {"command": ["set_property", "file-local-options/stream-lavf-o", opts]},
-                timeout=5.0,
-            )
-        except Exception:
-            pass
-        # These are mpv-level fallbacks; they can help non-lavf opens too.
+        # mpv-level fallbacks; they can help non-lavf opens too.
         if ua:
             try:
                 self._mpv_manager._send_command(
@@ -480,6 +487,7 @@ class PlaylistManager:
                 )
             except Exception:
                 pass
+        return opts
 
     def _merge_mpv_lavf_options(self, base: Any, extra: Dict[str, str]) -> Dict[str, str]:
         """Merge dict-like lavf options, normalizing keys/values as strings."""
@@ -561,6 +569,11 @@ class PlaylistManager:
             pass
         if hdr_blob:
             extra["headers"] = hdr_blob + "\r\n"
+
+        # `file-local-options/*` is only meaningful while a file is being opened/played.
+        # If mpv is still idle here, skip (avoid noisy IPC errors).
+        if not self._wait_mpv_leave_idle(timeout_sec=min(8.0, float(timeout_sec))):
+            return
 
         # Wait briefly for ytdl_hook to populate cookies, then merge+set.
         deadline = time.monotonic() + max(0.2, float(timeout_sec))
@@ -644,10 +657,13 @@ class PlaylistManager:
             except Exception:
                 pass
 
-    def _apply_mpv_http_headers(self, item: dict, *, stream_url: str) -> Dict[str, str]:
+    def _apply_mpv_http_headers(self, item: dict, *, stream_url: str) -> tuple[Dict[str, str], Dict[str, Any]]:
         """
         Set MPV HTTP options for one playlist item. Always clears stale options first.
-        Returns the normalized header dict (may be empty).
+
+        Returns:
+        - normalized headers dict (may be empty)
+        - per-file mpv options for the next `loadfile` command (mpv 0.38+: use index -1 when passing options)
         """
         http_headers = item.get("http_headers") or {}
 
@@ -668,7 +684,7 @@ class PlaylistManager:
             http_headers = {}
         if not http_headers and not is_network_url:
             self._clear_mpv_http_options()
-            return {}
+            return {}, {}
 
         normalized = self._sanitize_headers_for_mpv(
             http_headers,
@@ -678,24 +694,26 @@ class PlaylistManager:
         )
         self._clear_mpv_http_options()
 
-        # Optional: reduce micro-stutters on HLS/network streams by enabling a small demux cache.
-        # Kept behind an env flag and applied via file-local-options so local playback isn't affected.
-        self._apply_mpv_network_buffering(item, stream_url=stream_url)
+        per_file_opts: Dict[str, Any] = {}
+        per_file_opts.update(self._collect_mpv_network_buffering_per_file(item, stream_url=stream_url))
 
         # For network streams opened via lavf/ffmpeg (incl. direct Rutube river/rtbcdn URLs),
-        # also apply `stream-lavf-o` so ffmpeg uses the same request context as mpv.
+        # pass `stream-lavf-o` as a per-file option on `loadfile` (do not use `set_property` while idle).
         is_network = isinstance(stream_url, str) and stream_url.startswith(("http://", "https://", "ytdl://"))
         if is_network and normalized:
-            self._apply_mpv_stream_lavf_options(
+            lavf = self._build_mpv_stream_lavf_o_opts(
                 normalized,
                 stream_url=stream_url,
                 provider=provider,
             )
+            lavf_blob = self._format_mpv_key_value_list(lavf)
+            if lavf_blob:
+                per_file_opts["stream-lavf-o"] = lavf_blob
 
         # Rutube direct CDN (river-*/rtbcdn): the actual open goes through lavf/ffmpeg.
         # Setting global `http-header-fields` in parallel (Cookie/Referer/Origin/UA) can
-        # duplicate or fight `file-local-options/stream-lavf-o` and some CDNs return 400.
-        # Leave `http-header-fields` empty after _clear_mpv_http_options; rely on stream-lavf-o + mpv user-agent/referrer.
+        # duplicate or fight lavf request context and some CDNs return 400.
+        # Leave `http-header-fields` empty after _clear_mpv_http_options; rely on per-file `stream-lavf-o` + mpv user-agent/referrer.
         skip_global_http_header_fields = False
         try:
             prov_h = (str(provider or "").strip().lower()) if provider is not None else ""
@@ -730,20 +748,20 @@ class PlaylistManager:
                 # lavf options later (cookies-only), but it won't clobber http-header-fields.
             except Exception:
                 pass
-        return normalized
+        return normalized, per_file_opts
 
-    def _apply_mpv_network_buffering(self, item: dict, *, stream_url: str) -> None:
+    def _collect_mpv_network_buffering_per_file(self, item: dict, *, stream_url: str) -> Dict[str, str]:
         """
-        Apply per-file buffering options for external network streams to reduce microfreezes.
+        Collect per-file buffering options for external network streams to reduce microfreezes.
 
         This is best-effort and intentionally OFF by default.
         Enable with DSIGN_MPV_NETBUF=1 (or true/yes/on).
         """
         enabled = (os.getenv("DSIGN_MPV_NETBUF", "").strip().lower() in ("1", "true", "yes", "on"))
         if not enabled:
-            return
+            return {}
         if not isinstance(stream_url, str) or not stream_url.startswith(("http://", "https://", "ytdl://")):
-            return
+            return {}
         try:
             provider = str(item.get("provider") or "").strip().lower()
         except Exception:
@@ -757,7 +775,7 @@ class PlaylistManager:
             or su.startswith("ytdl://")
         )
         if not is_external:
-            return
+            return {}
 
         def _int_env(name: str, default: int, *, lo: int, hi: int) -> int:
             raw = os.getenv(name, "").strip()
@@ -776,22 +794,37 @@ class PlaylistManager:
         back_bytes_mb = _int_env("DSIGN_MPV_NETBUF_BACK_MB", 16, lo=0, hi=128)
         readahead_secs = _int_env("DSIGN_MPV_NETBUF_READAHEAD_SECS", 20, lo=0, hi=120)
 
-        # Apply as file-local options so they only affect the next loaded file.
-        opts = (
-            ("file-local-options/cache", "yes"),
-            ("file-local-options/cache-secs", cache_secs),
-            ("file-local-options/demuxer-max-bytes", int(max_bytes_mb) * 1024 * 1024),
-            ("file-local-options/demuxer-max-back-bytes", int(back_bytes_mb) * 1024 * 1024),
-            ("file-local-options/demuxer-readahead-secs", readahead_secs),
-        )
-        for key, value in opts:
-            try:
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", key, value]},
-                    timeout=2.0,
-                )
-            except Exception:
-                pass
+        return {
+            "cache": "yes",
+            "cache-secs": str(int(cache_secs)),
+            "demuxer-max-bytes": str(int(max_bytes_mb) * 1024 * 1024),
+            "demuxer-max-back-bytes": str(int(back_bytes_mb) * 1024 * 1024),
+            "demuxer-readahead-secs": str(int(readahead_secs)),
+        }
+
+    def _mpv_loadfile_command(self, url: str, mode: str = "replace", *, per_file_opts: Optional[Dict[str, Any]] = None) -> list[Any]:
+        """
+        Build a `loadfile` IPC command compatible with mpv >= 0.38 (insert index arg).
+
+        When `per_file_opts` is empty, use the legacy 3-arg form for maximum compatibility.
+        When non-empty, pass `-1` as the insertion index placeholder and supply options as the 4th arg
+        (mpv expects `MPV_FORMAT_NODE_MAP` with string values).
+        """
+        if not per_file_opts:
+            return ["loadfile", url, mode]
+
+        opts: Dict[str, str] = {}
+        for k, v in (per_file_opts or {}).items():
+            if k is None or v is None:
+                continue
+            ks = str(k).strip()
+            if not ks:
+                continue
+            opts[ks] = str(v)
+
+        if not opts:
+            return ["loadfile", url, mode]
+        return ["loadfile", url, mode, -1, opts]
 
     def _wait_mpv_leave_idle(self, timeout_sec: float = 45.0) -> bool:
         """
@@ -808,10 +841,44 @@ class PlaylistManager:
             self._stop_event.wait(timeout=0.15)
         return False
 
+    def _wait_mpv_network_demuxer_ready(self, *, timeout_sec: float = 45.0, poll_sec: float = 0.25) -> bool:
+        """
+        After leave-idle, mpv can briefly report idle-active=false while HLS demuxer has not opened yet.
+        Treat as failure if we return to idle before demuxer/path indicates an active open — avoids false
+        instant_eof when loadfile fails quickly (403, TLS, CDN).
+        """
+        deadline = time.monotonic() + max(2.0, float(timeout_sec))
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+            if idle is True:
+                return False
+            eof = self._mpv_get_prop_bool("eof-reached", timeout=2.0)
+            if eof is True:
+                return False
+
+            dem = self._mpv_get_prop_string("demuxer", timeout=2.0)
+            if dem and str(dem).strip():
+                return True
+            soc = self._mpv_get_prop_string("stream-open-filename", timeout=2.0)
+            if soc and len(str(soc).strip()) > 8:
+                return True
+            pth = self._mpv_get_prop_string("path", timeout=2.0)
+            if pth and len(str(pth).strip()) > 8:
+                return True
+
+            dct = self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0)
+            if dct is not None and dct > 0.02:
+                return True
+
+            self._stop_event.wait(timeout=max(0.1, float(poll_sec)))
+        return False
+
     def _wait_mpv_stream_ready(
         self,
         expected_url: str,
-        timeout_sec: float = 90.0,
+        timeout_sec: Optional[float] = None,
         poll_sec: float = 0.5,
     ) -> bool:
         """
@@ -823,7 +890,19 @@ class PlaylistManager:
         from the virtual `ytdl://...` URL to a real stream URL. In that case, treat `path` switching
         away from `ytdl://` as progress/readiness.
         """
+        def _float_env(name: str, default: float, *, lo: float, hi: float) -> float:
+            try:
+                v = float((os.getenv(name) or "").strip())
+            except ValueError:
+                return default
+            return max(lo, min(hi, v))
+
+        if timeout_sec is None:
+            timeout_sec = _float_env("DSIGN_MPV_STREAM_READY_SECS", 120.0, lo=15.0, hi=600.0)
+        grace_sec = _float_env("DSIGN_MPV_STREAM_READY_GRACE_SEC", 45.0, lo=5.0, hi=300.0)
+
         deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        grace_until = time.monotonic() + grace_sec
         exp = (expected_url or "").strip()
         is_ytdl = exp.startswith("ytdl://")
         # For ytdl:// resolution on low-power devices, be gentle with IPC:
@@ -852,16 +931,33 @@ class PlaylistManager:
                 if (cur_stream and len(str(cur_stream)) > 0) or (cur_path and len(str(cur_path)) > 0):
                     # do not early-return; keep probing time-pos/duration below
                     pass
-                # HLS/DASH: demuxer can expose a manifest URL while time-pos/duration stay unset for a long time
-                # (especially under IPC load). Treat an opened .m3u8/.mpd as "ready enough" to avoid false not_ready.
-                def _looks_like_manifest(p: Optional[str]) -> bool:
-                    if not p:
-                        return False
-                    s = str(p).lower()
-                    return ".m3u8" in s or ".mpd" in s
-
-                if _looks_like_manifest(cur_stream) or _looks_like_manifest(cur_path):
+                # HLS (e.g. Rutube): demuxer can buffer for a long time before time-pos/duration
+                # appear; treat meaningful cache as "playback started".
+                dct = self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0)
+                if dct is not None and dct > 0.05:
                     return True
+                dcdur = self._mpv_get_prop_number("demuxer-cache-duration", timeout=2.0)
+                if dcdur is not None and dcdur > 0.05:
+                    return True
+
+                idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+                eof = self._mpv_get_prop_bool("eof-reached", timeout=2.0)
+                paused_cache = self._mpv_get_prop_bool("paused-for-cache", timeout=2.0)
+                core_idle = self._mpv_get_prop_bool("core-idle", timeout=2.0)
+
+                # eof-reached / paused-for-cache are often "property unavailable" → None; never require
+                # strict False or we never signal ready on those mpv builds (Rutube HLS).
+                if idle is False and eof is not True:
+                    if paused_cache is True:
+                        pass
+                    elif paused_cache is False:
+                        return True
+                    else:
+                        # paused-for-cache unknown: trust core-idle or grace window
+                        if core_idle is False:
+                            return True
+                        if time.monotonic() >= grace_until:
+                            return True
             tick += 1
             if heavy_every > 1 and (tick % heavy_every) != 0:
                 self._stop_event.wait(timeout=max(0.15, float(poll_sec)))
@@ -880,16 +976,26 @@ class PlaylistManager:
         Detect a pathological case where MPV opens a file/stream and immediately returns to idle.
         This happens with some VK `edl://` selections (separate streams / blocked URL) and should
         be treated as a start failure (so we backoff instead of busy-looping).
+
+        Require evidence the demuxer actually opened — otherwise idle flicker before HLS attaches
+        looks like instant EOF on Rutube/CDN.
         """
         deadline = time.monotonic() + max(0.2, float(window_sec))
         saw_not_idle = False
+        saw_demuxer = False
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
             idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
             if idle is False:
                 saw_not_idle = True
-            if saw_not_idle and idle is True:
+            dem = self._mpv_get_prop_string("demuxer", timeout=2.0)
+            if dem and str(dem).strip():
+                saw_demuxer = True
+            elif self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0) not in (None, 0.0):
+                saw_demuxer = True
+
+            if saw_not_idle and idle is True and saw_demuxer:
                 return True
             self._stop_event.wait(timeout=0.1)
         return False
@@ -910,7 +1016,14 @@ class PlaylistManager:
         - Else for local files: same idle fallback after a short grace period.
         """
         start = time.time()
-        grace_until = time.monotonic() + (1.5 if is_network else 0.3)
+        # Short grace caused false EOF on HLS (idle flicker while buffering) → tight loadfile loops
+        # and IPC lock starvation (UI/API hang). Use a longer window for network playback.
+        try:
+            nw_grace = float((os.getenv("DSIGN_MPV_NETWORK_IDLE_GRACE_SEC") or "25").strip())
+        except ValueError:
+            nw_grace = 25.0
+        nw_grace = max(3.0, min(120.0, nw_grace))
+        grace_until = time.monotonic() + (nw_grace if is_network else 0.3)
         consecutive_idle = 0
 
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
@@ -1009,7 +1122,7 @@ class PlaylistManager:
     def _manual_slideshow_loop(
         self,
         playlist_id: int,
-        items: list[dict],
+        items: List[Dict[str, Any]],
         start_index: int = 0,
         *,
         first_item_preloaded: bool = False,
@@ -1096,14 +1209,18 @@ class PlaylistManager:
                 )
                 if skip_load:
                     did_skip_first_preload = True
-                normalized_headers: Dict[str, Any] = {}
+                normalized_headers: Dict[str, str] = {}
+                mpv_per_file_opts: Dict[str, Any] = {}
                 if not skip_load:
                     # External streams: Referer/UA must be set before loadfile (and cleared between items).
-                    normalized_headers = self._apply_mpv_http_headers(item, stream_url=str(path))
+                    normalized_headers, mpv_per_file_opts = self._apply_mpv_http_headers(item, stream_url=str(path))
                     self._apply_mpv_ytdl_options(item, stream_url=str(path))
-                    load_resp = self._mpv_manager._send_command(
-                        {"command": ["loadfile", path, "replace"]}, timeout=20.0
+                    load_cmd = self._mpv_loadfile_command(
+                        str(path),
+                        "replace",
+                        per_file_opts=mpv_per_file_opts,
                     )
+                    load_resp = self._mpv_manager._send_command({"command": load_cmd}, timeout=20.0)
                     self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
                     # Apply after loadfile: mpv may reset mute on a new file; doing this before load
                     # left repeat cycles stuck muted / out of sync with the playlist row.
@@ -1150,13 +1267,44 @@ class PlaylistManager:
                             )
                             self._register_media_failure(media_key, reason="stayed_idle")
                             continue
-                        stream_ready = self._wait_mpv_stream_ready(str(path), timeout_sec=90.0)
-                        if not stream_ready:
+                        # Resolved http(s) URLs (e.g. Rutube HLS after resolver): once idle-active is false,
+                        # mpv has opened the stream — extra _wait_mpv_stream_ready often times out because
+                        # time-pos/duration/cache IPC differs per build. VK/edl and ytdl:// still use the waiter.
+                        path_s = str(path)
+                        strict_https = os.getenv("DSIGN_MPV_STREAM_READY_HTTPS", "").strip().lower() in (
+                            "1",
+                            "true",
+                            "yes",
+                            "on",
+                        )
+                        needs_ready_wait = path_s.startswith("ytdl://") or path_s.startswith("edl://")
+                        if needs_ready_wait or (
+                            strict_https
+                            and (path_s.startswith("http://") or path_s.startswith("https://"))
+                        ):
+                            stream_ready = self._wait_mpv_stream_ready(path_s)
+                            if not stream_ready:
+                                self.logger.warning(
+                                    "MPV stream did not become ready (no time-pos/duration/path match)",
+                                    extra={"media_key": media_key, "path_preview": path_s[:120]},
+                                )
+                                self._register_media_failure(media_key, reason="not_ready")
+                                continue
+                        else:
+                            stream_ready = True
+                        # HLS can leave idle before demuxer/path is populated; give time to open or fail clearly.
+                        try:
+                            dem_to = float((os.getenv("DSIGN_MPV_DEMUXER_WAIT_SEC") or "45").strip())
+                        except ValueError:
+                            dem_to = 45.0
+                        dem_to = max(5.0, min(120.0, dem_to))
+                        if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to):
                             self.logger.warning(
-                                "MPV stream did not become ready (no time-pos/duration/path match)",
-                                extra={"media_key": media_key, "path_preview": str(path)[:120]},
+                                "MPV network stream never opened demuxer (idle or EOF before HLS attach)",
+                                extra={"media_key": media_key, "path_preview": str(path)[:160]},
                             )
-                            self._register_media_failure(media_key, reason="not_ready")
+                            self._log_mpv_network_debug_snapshot(media_key=media_key, url=str(path))
+                            self._register_media_failure(media_key, reason="demuxer_timeout")
                             continue
                         # Detect "instant EOF" right after we considered it ready; avoid VK loops.
                         if self._detect_mpv_instant_eof(window_sec=2.5):
@@ -1357,8 +1505,14 @@ class PlaylistManager:
                 )
             except Exception:
                 pass
-            self._apply_mpv_http_headers(first, stream_url=str(first.get("path") or ""))
-            self._mpv_manager._send_command({"command": ["loadfile", first["path"], "replace"]}, timeout=10.0)
+            _, first_mpv_opts = self._apply_mpv_http_headers(first, stream_url=str(first.get("path") or ""))
+            self._apply_mpv_ytdl_options(first, stream_url=str(first.get("path") or ""))
+            first_load_cmd = self._mpv_loadfile_command(
+                str(first.get("path") or ""),
+                "replace",
+                per_file_opts=first_mpv_opts,
+            )
+            self._mpv_manager._send_command({"command": first_load_cmd}, timeout=10.0)
             self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
 
             # Update playback status (single-row table; keep id=1 stable)
