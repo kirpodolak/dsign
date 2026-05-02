@@ -10,9 +10,9 @@ StartLimitBurst=3
 Type=simple
 User=dsign
 Group=dsign
-WorkingDirectory=/home/dsign
-# Python package lives under project root (e.g. /home/dsign/dsign/). run.py may sit in that subfolder.
-Environment=DSIGN_PROJECT_ROOT=/home/dsign
+# Default layout: git clone at /home/dsign/dsign → package /home/dsign/dsign/dsign/, run.py at /home/dsign/dsign/run.py
+WorkingDirectory=/home/dsign/dsign
+Environment=DSIGN_PROJECT_ROOT=/home/dsign/dsign
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/media/tmp
 ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp
