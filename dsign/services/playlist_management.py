@@ -844,7 +844,7 @@ class PlaylistManager:
     def _wait_mpv_stream_ready(
         self,
         expected_url: str,
-        timeout_sec: float = 90.0,
+        timeout_sec: float | None = None,
         poll_sec: float = 0.5,
     ) -> bool:
         """
@@ -856,7 +856,19 @@ class PlaylistManager:
         from the virtual `ytdl://...` URL to a real stream URL. In that case, treat `path` switching
         away from `ytdl://` as progress/readiness.
         """
+        def _float_env(name: str, default: float, *, lo: float, hi: float) -> float:
+            try:
+                v = float((os.getenv(name) or "").strip())
+            except ValueError:
+                return default
+            return max(lo, min(hi, v))
+
+        if timeout_sec is None:
+            timeout_sec = _float_env("DSIGN_MPV_STREAM_READY_SECS", 120.0, lo=15.0, hi=600.0)
+        grace_sec = _float_env("DSIGN_MPV_STREAM_READY_GRACE_SEC", 45.0, lo=5.0, hi=300.0)
+
         deadline = time.monotonic() + max(1.0, float(timeout_sec))
+        grace_until = time.monotonic() + grace_sec
         exp = (expected_url or "").strip()
         is_ytdl = exp.startswith("ytdl://")
         # For ytdl:// resolution on low-power devices, be gentle with IPC:
@@ -890,12 +902,28 @@ class PlaylistManager:
                 dct = self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0)
                 if dct is not None and dct > 0.05:
                     return True
+                dcdur = self._mpv_get_prop_number("demuxer-cache-duration", timeout=2.0)
+                if dcdur is not None and dcdur > 0.05:
+                    return True
+
+                idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+                eof = self._mpv_get_prop_bool("eof-reached", timeout=2.0)
                 paused_cache = self._mpv_get_prop_bool("paused-for-cache", timeout=2.0)
-                if paused_cache is False:
-                    eof = self._mpv_get_prop_bool("eof-reached", timeout=2.0)
-                    idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
-                    if eof is False and idle is False:
+                core_idle = self._mpv_get_prop_bool("core-idle", timeout=2.0)
+
+                # eof-reached / paused-for-cache are often "property unavailable" → None; never require
+                # strict False or we never signal ready on those mpv builds (Rutube HLS).
+                if idle is False and eof is not True:
+                    if paused_cache is True:
+                        pass
+                    elif paused_cache is False:
                         return True
+                    else:
+                        # paused-for-cache unknown: trust core-idle or grace window
+                        if core_idle is False:
+                            return True
+                        if time.monotonic() >= grace_until:
+                            return True
             tick += 1
             if heavy_every > 1 and (tick % heavy_every) != 0:
                 self._stop_event.wait(timeout=max(0.15, float(poll_sec)))
@@ -1188,7 +1216,7 @@ class PlaylistManager:
                             )
                             self._register_media_failure(media_key, reason="stayed_idle")
                             continue
-                        stream_ready = self._wait_mpv_stream_ready(str(path), timeout_sec=90.0)
+                        stream_ready = self._wait_mpv_stream_ready(str(path))
                         if not stream_ready:
                             self.logger.warning(
                                 "MPV stream did not become ready (no time-pos/duration/path match)",
