@@ -162,71 +162,75 @@ def create_app(config_class: Config = config) -> Flask:
 
 def _configure_playback_service(app: Flask) -> None:
     """Конфигурация сервиса воспроизведения"""
-    from .models import PlaybackStatus
-    from .extensions import db
-    
-    with app.app_context():
-        try:
-            playback_status = db.session.query(PlaybackStatus).first()
-            app.logger.info("Database connection verified")
-            
-            if not playback_status or not playback_status.playlist_id:
-                app.logger.info("No active playlist found, starting idle logo...")
-                _start_idle_logo(app)
-            elif getattr(playback_status, "status", None) == "playing":
-                app.logger.info(f"Active playlist found (ID: {playback_status.playlist_id}), resuming playback...")
-                _resume_playback(app, playback_status.playlist_id)
-            else:
-                app.logger.info(
-                    f"Playback status is {getattr(playback_status, 'status', None)!r} (not playing); idle logo only."
-                )
-                _start_idle_logo(app)
-                
-        except Exception as db_error:
-            # ServiceLogger.error does not support exc_info kwarg.
-            app.logger.error(f"Database/playback initialization failed: {str(db_error)}")
-            _fallback_to_idle_logo(app)
-            raise RuntimeError("Initialization failed") from db_error
 
-def _start_idle_logo(app: Flask) -> None:
-    """Запуск логотипа в режиме ожидания"""
-    def run():
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            try:
-                if app.playback_service.display_idle_logo():
-                    return
-                app.logger.warning(f"Idle logo display failed (attempt {attempt + 1}/{max_attempts})")
-                time.sleep(2)
-            except Exception as e:
-                app.logger.error(f"Failed to display idle logo (attempt {attempt + 1}): {str(e)}")
-                time.sleep(2)
-        app.logger.error("All attempts to display idle logo failed")
-    
-    Thread(target=run, daemon=True).start()
+    def run_configure():
+        # Never block create_app: idle logo / resume touch MPV over IPC with multi-second timeouts and
+        # retries — that delayed socketio.run so nothing listened on :5000.
+        from .models import PlaybackStatus
+        from .extensions import db
 
-def _resume_playback(app: Flask, playlist_id: int) -> None:
-    """Возобновление воспроизведения плейлиста"""
-
-    def run_resume():
-        # Never block create_app / socketio.run on the main thread: play() starts IPC-heavy work and
-        # can stall HTTP until the playlist ends (looks like "frontend never loads").
         try:
             with app.app_context():
                 try:
-                    if not app.playback_service.play(playlist_id):
-                        app.logger.error(
-                            "Failed to resume playlist playback, falling back to idle logo"
+                    playback_status = db.session.query(PlaybackStatus).first()
+                    app.logger.info("Database connection verified")
+
+                    if not playback_status or not playback_status.playlist_id:
+                        app.logger.info("No active playlist found, starting idle logo...")
+                        _run_idle_logo_attempts(app)
+                    elif getattr(playback_status, "status", None) == "playing":
+                        app.logger.info(
+                            f"Active playlist found (ID: {playback_status.playlist_id}), resuming playback..."
                         )
+                        _resume_playback_now(app, playback_status.playlist_id)
+                    else:
+                        app.logger.info(
+                            f"Playback status is {getattr(playback_status, 'status', None)!r} "
+                            "(not playing); idle logo only."
+                        )
+                        _run_idle_logo_attempts(app)
+
+                except Exception as db_error:
+                    app.logger.error(f"Database/playback initialization failed: {str(db_error)}")
+                    try:
                         _fallback_to_idle_logo(app)
-                except Exception as e:
-                    app.logger.error(f"Error resuming playback: {str(e)}")
-                    app.logger.info("Falling back to idle logo due to playback error")
-                    _fallback_to_idle_logo(app)
+                    except Exception:
+                        pass
+
+        except Exception as outer:
+            app.logger.error(f"Playback configure thread failed: {str(outer)}")
+
+    Thread(target=run_configure, daemon=True).start()
+
+
+def _run_idle_logo_attempts(app: Flask) -> None:
+    """Show idle logo (blocking IPC); call only from background threads."""
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            if app.playback_service.display_idle_logo():
+                return
+            app.logger.warning(f"Idle logo display failed (attempt {attempt + 1}/{max_attempts})")
+            time.sleep(2)
+        except Exception as e:
+            app.logger.error(f"Failed to display idle logo (attempt {attempt + 1}): {str(e)}")
+            time.sleep(2)
+    app.logger.error("All attempts to display idle logo failed")
+
+
+def _resume_playback_now(app: Flask, playlist_id: int) -> None:
+    """Resume playlist inside caller context (background thread)."""
+    try:
+        if not app.playback_service.play(playlist_id):
+            app.logger.error("Failed to resume playlist playback, falling back to idle logo")
+            _fallback_to_idle_logo(app)
+    except Exception as e:
+        app.logger.error(f"Error resuming playback: {str(e)}")
+        app.logger.info("Falling back to idle logo due to playback error")
+        try:
+            _fallback_to_idle_logo(app)
         except Exception:
             pass
-
-    Thread(target=run_resume, daemon=True).start()
 
 def _fallback_to_idle_logo(app: Flask) -> None:
     """Аварийный переход к отображению логотипа"""
