@@ -15,12 +15,12 @@ import os
 import traceback
 
 class ServiceLogger:
-    def __init__(self, name: str, log_level: str = 'INFO', log_dir: Union[str, Path] = 'logs'):
+    def __init__(self, name: str, log_level: str = 'INFO', log_dir: Union[str, Path, None] = None):
         """
         Инициализация логгера сервиса
         :param name: Имя сервиса/модуля
         :param log_level: Уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        :param log_dir: Директория для хранения логов
+        :param log_dir: Директория для хранения логов (None → DSIGN_LOG_DIR or /var/log/dsign)
         """
         # Allow environment override. Recommended on Pi: WARNING in production.
         env_level = os.getenv("DSIGN_LOG_LEVEL")
@@ -45,18 +45,33 @@ class ServiceLogger:
             console_handler.setFormatter(self.formatter)
             self.logger.addHandler(console_handler)
 
-            # Файловый вывод с ротацией
-            log_dir = Path(log_dir)
-            log_dir.mkdir(exist_ok=True)
+            # Файловый вывод с ротацией (avoid cwd-relative dirs: systemd WorkingDirectory may not be writable)
+            resolved = log_dir if log_dir is not None else os.getenv("DSIGN_LOG_DIR") or "/var/log/dsign"
+            candidates = [Path(resolved).expanduser()]
+            try:
+                home = Path.home()
+                candidates.append(home / ".cache" / "dsign" / "logs")
+            except Exception:
+                pass
 
-            file_handler = RotatingFileHandler(
-                log_dir / f'{name}.log',
-                maxBytes=10*1024*1024,  # 10 MB
-                backupCount=5,
-                encoding='utf-8'
-            )
-            file_handler.setFormatter(self.formatter)
-            self.logger.addHandler(file_handler)
+            file_handler = None
+            for cand in candidates:
+                try:
+                    cand.mkdir(parents=True, exist_ok=True)
+                    fh = RotatingFileHandler(
+                        cand / f'{name}.log',
+                        maxBytes=10 * 1024 * 1024,  # 10 MB
+                        backupCount=5,
+                        encoding='utf-8',
+                    )
+                    fh.setFormatter(self.formatter)
+                    file_handler = fh
+                    break
+                except OSError:
+                    continue
+
+            if file_handler is not None:
+                self.logger.addHandler(file_handler)
         else:
             for h in self.logger.handlers:
                 try:

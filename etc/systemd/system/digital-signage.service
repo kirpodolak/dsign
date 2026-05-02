@@ -13,9 +13,9 @@ Group=dsign
 # Default layout: git clone at /home/dsign/dsign → package /home/dsign/dsign/dsign/, run.py at /home/dsign/dsign/run.py
 WorkingDirectory=/home/dsign/dsign
 Environment=DSIGN_PROJECT_ROOT=/home/dsign/dsign
-ExecStartPre=/bin/mkdir -p /var/lib/dsign/media/tmp
-ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp
-ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp
+ExecStartPre=/bin/mkdir -p /var/lib/dsign/media/tmp /var/log/dsign
+ExecStartPre=/bin/chown dsign:dsign /var/lib/dsign/media/tmp /var/log/dsign
+ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp /var/log/dsign
 Environment="TMPDIR=/var/lib/dsign/media/tmp"
 Environment=DSIGN_LOG_LEVEL=WARNING
 Environment=SOCKETIO_ASYNC_MODE=threading

@@ -26,6 +26,8 @@ class Config:
     DEFAULT_LOGO = IDLE_LOGO
     SCREENSHOT_DIR = '/var/lib/dsign/media'
     DEFAULT_LOGO_PATH = '/var/lib/dsign/media/idle_logo.jpg'
+    # App log files (systemd/install use /var/log/dsign; avoid cwd-relative 'logs' under WorkingDirectory).
+    LOG_DIR = os.getenv("DSIGN_LOG_DIR", "/var/log/dsign")
     THUMBNAIL_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbnails')
     THUMBNAIL_URL = '/media/thumbnails'  # URL-префикс для доступа к миниатюрам
     M3U_EXPORT_DIR = os.path.join(BASE_DIR, 'static/playlists')

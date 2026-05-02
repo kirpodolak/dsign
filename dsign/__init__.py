@@ -3,7 +3,6 @@ from flask import Flask
 from flask_wtf import CSRFProtect
 import logging
 import time
-import subprocess
 import os
 import tempfile
 from pathlib import Path
@@ -65,7 +64,7 @@ def create_app(config_class: Config = config) -> Flask:
         pass
     
     # Установка ServiceLogger как основного логгера
-    app.logger = ServiceLogger('FlaskApp')
+    app.logger = ServiceLogger('FlaskApp', log_dir=app.config.get('LOG_DIR'))
     
     try:
         # Reduce startup chatter on low-power devices; set DSIGN_LOG_LEVEL=INFO/DEBUG when needed.
