@@ -625,8 +625,14 @@ class MPVManager:
 
     def check_health(self) -> Dict[str, bool]:
         """Комплексная проверка состояния MPV"""
+        socket_ok = self._check_mpv_socket()
+        systemd_ok = self._check_systemd_service()
+        # digital-signage.service runs as user `dsign` — `systemctl is-active` often fails (dbus/policy)
+        # while mpv is running and the IPC socket exists. Do not treat that as unhealthy.
+        service_ok = systemd_ok or socket_ok
+        responsive = self._send_command({"command": ["get_property", "mpv-version"]}) is not None
         return {
-            "service_active": self._check_systemd_service(),
-            "socket_available": self._check_mpv_socket(),
-            "responsive": self._send_command({"command": ["get_property", "mpv-version"]}) is not None
+            "service_active": service_ok,
+            "socket_available": socket_ok,
+            "responsive": responsive,
         }
