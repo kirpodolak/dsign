@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import traceback
 import time
@@ -179,6 +180,16 @@ class PlaylistManager:
         data = resp.get("data")
         if isinstance(data, (int, float)) and not isinstance(data, bool):
             return float(data)
+        if isinstance(data, str):
+            s = data.strip()
+            if not s or s.lower() in ("nan", "inf", "n/a", "none"):
+                return None
+            m = re.match(r"^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$", s)
+            if m:
+                try:
+                    return float(s)
+                except ValueError:
+                    return None
         return None
 
     def _mpv_get_prop_string(self, name: str, timeout: float = 3.0) -> Optional[str]:
@@ -874,6 +885,20 @@ class PlaylistManager:
                 if (cur_stream and len(str(cur_stream)) > 0) or (cur_path and len(str(cur_path)) > 0):
                     # do not early-return; keep probing time-pos/duration below
                     pass
+                # HLS (e.g. Rutube): demuxer can buffer for a long time before time-pos/duration
+                # appear; treat meaningful cache as "playback started".
+                dct = self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0)
+                if dct is not None and dct > 0.05:
+                    return True
+                cu = self._mpv_get_prop_number("cache-used", timeout=2.0)
+                if cu is not None and cu >= 65536:
+                    return True
+                paused_cache = self._mpv_get_prop_bool("paused-for-cache", timeout=2.0)
+                if paused_cache is False:
+                    eof = self._mpv_get_prop_bool("eof-reached", timeout=2.0)
+                    idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+                    if eof is False and idle is False:
+                        return True
             tick += 1
             if heavy_every > 1 and (tick % heavy_every) != 0:
                 self._stop_event.wait(timeout=max(0.15, float(poll_sec)))
