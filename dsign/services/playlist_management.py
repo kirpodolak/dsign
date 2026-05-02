@@ -1216,14 +1216,31 @@ class PlaylistManager:
                             )
                             self._register_media_failure(media_key, reason="stayed_idle")
                             continue
-                        stream_ready = self._wait_mpv_stream_ready(str(path))
-                        if not stream_ready:
-                            self.logger.warning(
-                                "MPV stream did not become ready (no time-pos/duration/path match)",
-                                extra={"media_key": media_key, "path_preview": str(path)[:120]},
-                            )
-                            self._register_media_failure(media_key, reason="not_ready")
-                            continue
+                        # Resolved http(s) URLs (e.g. Rutube HLS after resolver): once idle-active is false,
+                        # mpv has opened the stream — extra _wait_mpv_stream_ready often times out because
+                        # time-pos/duration/cache IPC differs per build. VK/edl and ytdl:// still use the waiter.
+                        path_s = str(path)
+                        strict_https = os.getenv("DSIGN_MPV_STREAM_READY_HTTPS", "").strip().lower() in (
+                            "1",
+                            "true",
+                            "yes",
+                            "on",
+                        )
+                        needs_ready_wait = path_s.startswith("ytdl://") or path_s.startswith("edl://")
+                        if needs_ready_wait or (
+                            strict_https
+                            and (path_s.startswith("http://") or path_s.startswith("https://"))
+                        ):
+                            stream_ready = self._wait_mpv_stream_ready(path_s)
+                            if not stream_ready:
+                                self.logger.warning(
+                                    "MPV stream did not become ready (no time-pos/duration/path match)",
+                                    extra={"media_key": media_key, "path_preview": path_s[:120]},
+                                )
+                                self._register_media_failure(media_key, reason="not_ready")
+                                continue
+                        else:
+                            stream_ready = True
                         # Detect "instant EOF" right after we considered it ready; avoid VK loops.
                         if self._detect_mpv_instant_eof(window_sec=2.5):
                             self.logger.warning(

@@ -25,6 +25,8 @@ Environment=DSIGN_TRANSCODE_TARGET_FPS=25
 # Environment=DSIGN_MPV_NETBUF_MAX_MB=96
 # Environment=DSIGN_MPV_NETBUF_BACK_MB=16
 # Environment=DSIGN_MPV_NETBUF_READAHEAD_SECS=20
+# Rare: re-enable strict IPC readiness wait for plain https streams (default off; Rutube HLS uses resolved URLs).
+# Environment=DSIGN_MPV_STREAM_READY_HTTPS=1
 ExecStart=/usr/bin/python3 /home/dsign/run.py
 # Настройки перезапуска
 Restart=on-failure
