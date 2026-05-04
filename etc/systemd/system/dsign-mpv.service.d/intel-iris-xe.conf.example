@@ -1,0 +1,12 @@
+# Intel Iris Xe / x86 — выбор профиля через переменную (mpv.conf не трогаем):
+#
+#   sudo mkdir -p /etc/systemd/system/dsign-mpv.service.d
+#   sudo cp intel-iris-xe.conf.example /etc/systemd/system/dsign-mpv.service.d/intel-iris-xe.conf
+#   sudo systemctl daemon-reload && sudo systemctl restart dsign-mpv.service
+#
+# intel-balanced = vo=drm + VA-API (стабильная картинка на консоли).
+# Эксперимент Vulkan VO (может быть только звук): intel-balanced-vulkan
+# Максимум качества: intel-high-quality
+
+[Service]
+Environment=DSIGN_MPV_PROFILE=intel-balanced
