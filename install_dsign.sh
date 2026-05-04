@@ -131,9 +131,13 @@ sed -i \
     /etc/systemd/system/digital-signage.service 2>/dev/null || true
 
 # MPV minimal config under /var/lib/dsign (owned by dsign — editable without root)
-mkdir -p "$DB_DIR/mpv-minimal"
+mkdir -p "$DB_DIR/mpv-minimal/profiles"
 if [ ! -f "$DB_DIR/mpv-minimal/mpv.conf" ]; then
     install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/mpv.conf" "$DB_DIR/mpv-minimal/mpv.conf"
+fi
+if [ -f "$PROJECT_DIR/etc/dsign/mpv-minimal/profiles/intel-iris-xe-high-quality.conf" ]; then
+    install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/profiles/intel-iris-xe-high-quality.conf" \
+        "$DB_DIR/mpv-minimal/profiles/intel-iris-xe-high-quality.conf"
 fi
 chown -R "$DSIGN_USER:video" "$DB_DIR/mpv-minimal"
 chmod 775 "$DB_DIR/mpv-minimal"

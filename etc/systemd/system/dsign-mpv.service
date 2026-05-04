@@ -33,6 +33,8 @@ ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 
 # Основная команда запуска
+# On x86/Intel Iris Xe (Vulkan): optional drop-in overrides CLI — see
+# etc/systemd/system/dsign-mpv.service.d/intel-iris-xe.conf.example
 # On x86/Intel, avoid Pi-specific DRM plane/connector settings and ARM-only hwdec.
 # Keep a minimal config under /var/lib/dsign/mpv-minimal so screenshots/IPC options can be tuned without root.
 ExecStart=/usr/bin/mpv --idle=yes --no-terminal --config-dir=/var/lib/dsign/mpv-minimal --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --fullscreen --demuxer-lavf-o=safe=0 --hwdec=auto --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=auto --script-opts=ytdl_hook-ytdl_path=/usr/bin/yt-dlp --log-file=/var/lib/dsign/mpv/mpv.log
