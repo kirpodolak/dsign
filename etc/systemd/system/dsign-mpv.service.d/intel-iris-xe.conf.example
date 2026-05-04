@@ -1,11 +1,11 @@
-# Example drop-in for Intel Iris Xe / x86 signage boxes:
+# Intel Iris Xe / x86 — выбор профиля через переменную (mpv.conf не трогаем):
+#
 #   sudo mkdir -p /etc/systemd/system/dsign-mpv.service.d
 #   sudo cp intel-iris-xe.conf.example /etc/systemd/system/dsign-mpv.service.d/intel-iris-xe.conf
 #   sudo systemctl daemon-reload && sudo systemctl restart dsign-mpv.service
 #
-# Removes CLI flags that override mpv.conf quality settings (--vo=drm, bilinear, etc.).
-# Pair with /var/lib/dsign/mpv-minimal/mpv.conf including profiles/intel-iris-xe-high-quality.conf
+# По умолчанию в примере — баланс качество/нагрузка. Для максимума качества замените на:
+#   Environment=DSIGN_MPV_PROFILE=intel-high-quality
 
 [Service]
-ExecStart=
-ExecStart=/usr/bin/mpv --idle=yes --no-terminal --config-dir=/var/lib/dsign/mpv-minimal --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --fullscreen --demuxer-lavf-o=safe=0 --ao=alsa --audio-device=auto --script-opts=ytdl_hook-ytdl_path=/usr/bin/yt-dlp --log-file=/var/lib/dsign/mpv/mpv.log
+Environment=DSIGN_MPV_PROFILE=intel-balanced

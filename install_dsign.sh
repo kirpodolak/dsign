@@ -135,13 +135,19 @@ mkdir -p "$DB_DIR/mpv-minimal/profiles"
 if [ ! -f "$DB_DIR/mpv-minimal/mpv.conf" ]; then
     install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/mpv.conf" "$DB_DIR/mpv-minimal/mpv.conf"
 fi
-if [ -f "$PROJECT_DIR/etc/dsign/mpv-minimal/profiles/intel-iris-xe-high-quality.conf" ]; then
-    install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/profiles/intel-iris-xe-high-quality.conf" \
-        "$DB_DIR/mpv-minimal/profiles/intel-iris-xe-high-quality.conf"
-fi
+for _prof in intel-iris-xe-high-quality.conf intel-iris-xe-balanced.conf; do
+    if [ -f "$PROJECT_DIR/etc/dsign/mpv-minimal/profiles/$_prof" ]; then
+        install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/profiles/$_prof" \
+            "$DB_DIR/mpv-minimal/profiles/$_prof"
+    fi
+done
 chown -R "$DSIGN_USER:video" "$DB_DIR/mpv-minimal"
 chmod 775 "$DB_DIR/mpv-minimal"
 chmod 664 "$DB_DIR/mpv-minimal/mpv.conf" 2>/dev/null || true
+
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-launch" /usr/local/bin/dsign-mpv-launch
+sed -i 's/\r$//' /usr/local/bin/dsign-mpv-launch
+chown root:root /usr/local/bin/dsign-mpv-launch
 
 # MPV Player Service
 cat > /etc/systemd/system/dsign-mpv.service <<EOL
@@ -154,9 +160,11 @@ Conflicts=getty@tty1.service
 User=$DSIGN_USER
 Group=video
 Type=simple
-SupplementaryGroups=tty
+SupplementaryGroups=tty audio
 PermissionsStartOnly=true
 Environment="TERM=linux"
+Environment="DSIGN_MPV_PROFILE=signboard"
+Environment="DSIGN_MPV_SIGNBOARD_VARIANT=pi"
 WorkingDirectory=/home/dsign
 StandardInput=tty
 TTYPath=/dev/tty1
@@ -169,7 +177,7 @@ ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/chown -R dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
-ExecStart=/usr/bin/mpv --idle=yes --no-terminal --config-dir=/var/lib/dsign/mpv-minimal --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --drm-connector=HDMI-A-1 --drm-mode=1920x1080@60 --drm-draw-plane=primary --drm-drmprime-video-plane=primary --fullscreen --demuxer-lavf-o=safe=0 --hwdec=v4l2m2m-copy --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 --log-file=/var/log/dsign/mpv.log
+ExecStart=/usr/local/bin/dsign-mpv-launch
 ExecStartPost=-/usr/local/bin/dsign-show-startup-ip
 Restart=always
 RestartSec=5s
@@ -185,7 +193,7 @@ install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/
 sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
-chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip
+chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-mpv-launch
 
 cat > /etc/systemd/system/dsign-network-assistant.service <<EOL
 [Unit]
