@@ -12,7 +12,7 @@ Group=video
 SupplementaryGroups=tty audio
 PermissionsStartOnly=true
 Environment="TERM=linux"
-# Профиль воспроизведения без правки mpv.conf: signboard | intel-balanced | intel-high-quality
+# Профиль: signboard | intel-balanced | intel-balanced-vulkan | intel-high-quality (см. dsign-mpv-launch)
 Environment="DSIGN_MPV_PROFILE=signboard"
 WorkingDirectory=/home/dsign
 

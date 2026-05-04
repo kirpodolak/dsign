@@ -135,7 +135,7 @@ mkdir -p "$DB_DIR/mpv-minimal/profiles"
 if [ ! -f "$DB_DIR/mpv-minimal/mpv.conf" ]; then
     install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/mpv.conf" "$DB_DIR/mpv-minimal/mpv.conf"
 fi
-for _prof in intel-iris-xe-high-quality.conf intel-iris-xe-balanced.conf; do
+for _prof in intel-iris-xe-high-quality.conf intel-iris-xe-balanced.conf intel-iris-xe-balanced-vulkan.conf; do
     if [ -f "$PROJECT_DIR/etc/dsign/mpv-minimal/profiles/$_prof" ]; then
         install -m 0644 "$PROJECT_DIR/etc/dsign/mpv-minimal/profiles/$_prof" \
             "$DB_DIR/mpv-minimal/profiles/$_prof"

@@ -4,8 +4,9 @@
 #   sudo cp intel-iris-xe.conf.example /etc/systemd/system/dsign-mpv.service.d/intel-iris-xe.conf
 #   sudo systemctl daemon-reload && sudo systemctl restart dsign-mpv.service
 #
-# По умолчанию в примере — баланс качество/нагрузка. Для максимума качества замените на:
-#   Environment=DSIGN_MPV_PROFILE=intel-high-quality
+# intel-balanced = vo=drm + VA-API (стабильная картинка на консоли).
+# Эксперимент Vulkan VO (может быть только звук): intel-balanced-vulkan
+# Максимум качества: intel-high-quality
 
 [Service]
 Environment=DSIGN_MPV_PROFILE=intel-balanced

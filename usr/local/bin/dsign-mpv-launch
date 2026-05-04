@@ -3,9 +3,10 @@
 # Choose playback preset via DSIGN_MPV_PROFILE (no manual mpv.conf edits for profiles).
 #
 # Profiles:
-#   signboard          — default signage (vo=drm, light scaling, Pi-safe defaults variant)
-#   intel-balanced     — Intel Iris Xe: Vulkan + VA-API, moderate scalers, no interpolation
-#   intel-high-quality — Intel Iris Xe: maximum quality (heavy GPU/CPU)
+#   signboard               — default signage (vo=drm, light scaling, Pi-safe defaults variant)
+#   intel-balanced          — Intel x86: vo=drm + hwdec=vaapi (stable picture on tty; Quick Sync)
+#   intel-balanced-vulkan   — vo=gpu + Vulkan (may be black screen + audio only on plain DRM tty)
+#   intel-high-quality      — Intel: maximum quality profile file (heavy GPU/CPU)
 #
 # Optional:
 #   DSIGN_MPV_CONFIG_DIR     default /var/lib/dsign/mpv-minimal
@@ -96,11 +97,14 @@ case "$PROFILE" in
   intel-balanced)
     intel_with_include "intel-iris-xe-balanced" "$@"
     ;;
+  intel-balanced-vulkan)
+    intel_with_include "intel-iris-xe-balanced-vulkan" "$@"
+    ;;
   intel-high-quality)
     intel_with_include "intel-iris-xe-high-quality" "$@"
     ;;
   *)
-    echo "dsign-mpv-launch: unknown DSIGN_MPV_PROFILE='$PROFILE' (signboard|intel-balanced|intel-high-quality)" >&2
+    echo "dsign-mpv-launch: unknown DSIGN_MPV_PROFILE='$PROFILE' (signboard|intel-balanced|intel-balanced-vulkan|intel-high-quality)" >&2
     exit 1
     ;;
 esac
