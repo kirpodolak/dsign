@@ -1,0 +1,110 @@
+#!/bin/bash
+# MPV launcher for dsign-mpv.service.
+# Choose playback preset via DSIGN_MPV_PROFILE (no manual mpv.conf edits for profiles).
+#
+# Profiles:
+#   signboard               — default signage (vo=drm, light scaling, Pi-safe defaults variant)
+#   intel-balanced          — Intel x86: vo=drm + hwdec=vaapi (stable picture on tty; Quick Sync)
+#   intel-balanced-vulkan   — vo=gpu + Vulkan (may be black screen + audio only on plain DRM tty)
+#   intel-high-quality      — Intel: maximum quality profile file (heavy GPU/CPU)
+#
+# Optional:
+#   DSIGN_MPV_CONFIG_DIR     default /var/lib/dsign/mpv-minimal
+#   DSIGN_MPV_SOCKET         default /var/lib/dsign/mpv/socket
+#   DSIGN_MPV_LOG_FILE       default /var/lib/dsign/mpv/mpv.log
+#   DSIGN_MPV_SIGNBOARD_VARIANT  generic | pi  (only for profile=signboard)
+
+set -euo pipefail
+
+PROFILE="${DSIGN_MPV_PROFILE:-signboard}"
+CFG="${DSIGN_MPV_CONFIG_DIR:-/var/lib/dsign/mpv-minimal}"
+SOCK="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
+LOG="${DSIGN_MPV_LOG_FILE:-/var/lib/dsign/mpv/mpv.log}"
+VARIANT="${DSIGN_MPV_SIGNBOARD_VARIANT:-generic}"
+
+BASE=(
+  --idle=yes
+  --no-terminal
+  --config-dir="$CFG"
+  --no-osc
+  --no-input-default-bindings
+  --input-ipc-server="$SOCK"
+  --fullscreen
+  --demuxer-lavf-o=safe=0
+  --script-opts=ytdl_hook-ytdl_path=/usr/bin/yt-dlp
+  --log-file="$LOG"
+)
+
+signboard_generic() {
+  exec /usr/bin/mpv "${BASE[@]}" \
+    --vo=drm \
+    --hwdec=auto \
+    --vd-lavc-dr=no \
+    --interpolation=no \
+    --deband=no \
+    --scale=bilinear \
+    --dscale=bilinear \
+    --cscale=bilinear \
+    --video-sync=display-vdrop \
+    --ao=alsa \
+    --audio-device=auto \
+    "$@"
+}
+
+signboard_pi() {
+  exec /usr/bin/mpv "${BASE[@]}" \
+    --vo=drm \
+    --drm-connector=HDMI-A-1 \
+    --drm-mode=1920x1080@60 \
+    --drm-draw-plane=primary \
+    --drm-drmprime-video-plane=primary \
+    --hwdec=v4l2m2m-copy \
+    --vd-lavc-dr=no \
+    --interpolation=no \
+    --deband=no \
+    --scale=bilinear \
+    --dscale=bilinear \
+    --cscale=bilinear \
+    --video-sync=display-vdrop \
+    --ao=alsa \
+    --audio-device=alsa/plughw:CARD=vc4hdmi,DEV=0 \
+    "$@"
+}
+
+intel_with_include() {
+  local name="$1"
+  local inc="$CFG/profiles/${name}.conf"
+  if [[ ! -f "$inc" ]]; then
+    echo "dsign-mpv-launch: missing profile file $inc" >&2
+    exit 1
+  fi
+  # Profile sets vo/gpu/scalers/hwdec; keep only non-conflicting global flags here.
+  exec /usr/bin/mpv "${BASE[@]}" \
+    --vd-lavc-dr=no \
+    --ao=alsa \
+    --audio-device=auto \
+    --include="$inc" \
+    "$@"
+}
+
+case "$PROFILE" in
+  signboard)
+    case "$VARIANT" in
+      pi) signboard_pi "$@" ;;
+      generic|*) signboard_generic "$@" ;;
+    esac
+    ;;
+  intel-balanced)
+    intel_with_include "intel-iris-xe-balanced" "$@"
+    ;;
+  intel-balanced-vulkan)
+    intel_with_include "intel-iris-xe-balanced-vulkan" "$@"
+    ;;
+  intel-high-quality)
+    intel_with_include "intel-iris-xe-high-quality" "$@"
+    ;;
+  *)
+    echo "dsign-mpv-launch: unknown DSIGN_MPV_PROFILE='$PROFILE' (signboard|intel-balanced|intel-balanced-vulkan|intel-high-quality)" >&2
+    exit 1
+    ;;
+esac
