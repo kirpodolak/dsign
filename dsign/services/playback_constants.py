@@ -8,7 +8,10 @@ class PlaybackConstants:
     DEFAULT_RESOLUTION = '1920x1080'
     DEFAULT_ASPECT_RATIO = '16:9'
     MAX_RETRIES = 3  # Увеличено с 3
+    # Used between retries for errors where MPV likely needs systemd recovery (socket missing, etc.).
     RETRY_DELAY = 5.0  # Увеличено с 1.0
+    # Fast backoff when MPV resets/closes the IPC socket mid-command (avoid starving HTTP workers).
+    RETRY_DELAY_TRANSPORT_SEC = (0.15, 0.35, 0.75)
     SOCKET_TIMEOUT = 10.0  # Увеличено с 5.0
     
     MPV_ENV = {
