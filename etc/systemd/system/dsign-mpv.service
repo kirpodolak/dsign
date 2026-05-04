@@ -12,6 +12,8 @@ Group=video
 SupplementaryGroups=tty audio
 PermissionsStartOnly=true
 Environment="TERM=linux"
+# Профиль: signboard | intel-balanced | intel-balanced-vulkan | intel-high-quality (см. dsign-mpv-launch)
+Environment="DSIGN_MPV_PROFILE=signboard"
 WorkingDirectory=/home/dsign
 
 # Attach to tty1 so DRM can switch to graphics mode
@@ -32,10 +34,10 @@ ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 
-# Основная команда запуска
-# On x86/Intel, avoid Pi-specific DRM plane/connector settings and ARM-only hwdec.
-# Keep a minimal config under /var/lib/dsign/mpv-minimal so screenshots/IPC options can be tuned without root.
-ExecStart=/usr/bin/mpv --idle=yes --no-terminal --config-dir=/var/lib/dsign/mpv-minimal --no-osc --no-input-default-bindings --input-ipc-server=/var/lib/dsign/mpv/socket --vo=drm --fullscreen --demuxer-lavf-o=safe=0 --hwdec=auto --vd-lavc-dr=no --interpolation=no --deband=no --scale=bilinear --dscale=bilinear --cscale=bilinear --video-sync=display-vdrop --ao=alsa --audio-device=auto --script-opts=ytdl_hook-ytdl_path=/usr/bin/yt-dlp --log-file=/var/lib/dsign/mpv/mpv.log
+# Основная команда запуска (dsign-mpv-launch читает DSIGN_MPV_PROFILE и общие пути).
+# Для Raspberry Pi в install_dsign.sh задаётся DSIGN_MPV_SIGNBOARD_VARIANT=pi.
+# Intel: например Environment=DSIGN_MPV_PROFILE=intel-balanced в drop-in.
+ExecStart=/usr/local/bin/dsign-mpv-launch
 # Startup IP OSD is best-effort; never fail MPV startup if helper is unavailable.
 ExecStartPost=-/bin/systemctl --no-block start dsign-show-startup-ip.service
 # Run via bash to avoid execute-bit / noexec issues.
