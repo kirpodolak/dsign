@@ -210,6 +210,8 @@ RemainAfterExit=yes
 User=root
 Group=root
 ExecStart=/usr/local/bin/dsign-network-assistant
+# Optional per-device config (written by Settings UI). Must be safe to ignore.
+EnvironmentFile=-/var/lib/dsign/config/network-assistant.env
 Environment=DSIGN_NETWORK_PROMPT_TIMEOUT_SEC=120
 
 [Install]
