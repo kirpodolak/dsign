@@ -78,10 +78,11 @@ export class SettingsManager {
             settingsSchema: {},
             systemStatus: null,
             systemServicesStatus: null,
-            networkAssistant: null,
             systemPollTimer: null,
             systemStatusLoading: false,
             servicesStatusLoading: false,
+            networkAssistBootMode: 'auto',
+            networkAssistSaving: false,
             initStarted: false,
             initialized: false,
             /** Local audio state during drag (0–100, muted) */
@@ -135,10 +136,7 @@ export class SettingsManager {
             this.renderStatusDashboardSkeleton();
             await this.refreshSystemStatus({ startPolling: true }).catch(() => {});
             this.performance.mark('system-status-loaded');
-            await Promise.all([
-                this.refreshSystemServicesStatus().catch(() => {}),
-                this._loadNetworkAssistantSettings().catch(() => {}),
-            ]);
+            await this.refreshSystemServicesStatus().catch(() => {});
             this._bindVolumeKnob();
             this.renderSettingsForm();
             this.performance.mark('settings-rendered');
@@ -403,10 +401,17 @@ export class SettingsManager {
                 this._renderSystemServices(this.state.systemServicesStatus);
                 return;
             }
-            const resp = await fetch('/api/system/services/status', { credentials: 'include' });
-            if (!resp.ok) throw new Error('Failed to load services status');
-            const data = await resp.json();
+            const [svcResp, naResp] = await Promise.all([
+                fetch('/api/system/services/status', { credentials: 'include' }),
+                fetch('/api/system/network/assistant', { credentials: 'include' }),
+            ]);
+            if (!svcResp.ok) throw new Error('Failed to load services status');
+            const data = await svcResp.json();
             if (!data.success) throw new Error(data.error || 'Invalid services status data');
+            const naData = naResp.ok ? await naResp.json().catch(() => ({})) : {};
+            if (naData.success && typeof naData.boot_mode === 'string') {
+                this.state.networkAssistBootMode = naData.boot_mode;
+            }
             this._svcStatusCache = { ts: now, payload: data };
             this.state.systemServicesStatus = data;
             this._renderSystemServices(data);
@@ -415,20 +420,46 @@ export class SettingsManager {
         }
     }
 
-    async _loadNetworkAssistantSettings() {
-        const resp = await fetch('/api/system/network/assistant', { credentials: 'include' });
-        if (!resp.ok) throw new Error('Failed to load network assistant settings');
-        const data = await resp.json().catch(() => ({}));
-        if (!data.success) throw new Error(data.error || `HTTP ${resp.status}`);
-        this.state.networkAssistant = data;
-        if (this.state.systemServicesStatus) this._renderSystemServices(this.state.systemServicesStatus);
-        return data;
+    _svcAccentClass(activeState, subState) {
+        const act = String(activeState || '').toLowerCase();
+        const sub = String(subState || '').toLowerCase();
+        if (act === 'failed' || act === 'dead' || (act === 'active' && sub === 'dead')) {
+            return 'svc-tile--accent-bad';
+        }
+        if (act === 'active' && (sub === 'running' || sub === 'exited')) {
+            return 'svc-tile--accent-good';
+        }
+        if (
+            ['activating', 'deactivating', 'reloading'].includes(act)
+            || act === 'inactive'
+            || (act === 'active'
+                && ['waiting', 'reloading', 'auto-restart', 'start-pre', 'start', 'stop'].includes(sub))
+        ) {
+            return 'svc-tile--accent-warn';
+        }
+        return act === 'active' ? 'svc-tile--accent-good' : 'svc-tile--accent-bad';
     }
 
-    async _setNetworkAssistantBootMode(mode, btnEl) {
+    _networkAssistCycle(mode) {
+        const order = ['off', 'auto', 'force'];
+        const i = Math.max(0, order.indexOf(String(mode || 'auto')));
+        return order[(i + 1) % order.length];
+    }
+
+    _networkAssistToggleLabel(mode, lang) {
+        const m = String(mode || 'auto');
+        if (m === 'off') return t('network_assist_toggle_off', lang);
+        if (m === 'force') return t('network_assist_toggle_force', lang);
+        return t('network_assist_toggle_auto', lang);
+    }
+
+    async _setNetworkAssistBootMode(nextMode, btnEl) {
         const lang = getUiLang();
+        const mode = String(nextMode || 'auto');
+        if (this.state.networkAssistSaving) return;
+        this.state.networkAssistSaving = true;
+        if (btnEl) btnEl.disabled = true;
         try {
-            if (btnEl) btnEl.disabled = true;
             const resp = await fetch('/api/system/network/assistant', {
                 method: 'POST',
                 headers: {
@@ -436,27 +467,20 @@ export class SettingsManager {
                     'X-CSRFToken': getCSRFToken(),
                 },
                 credentials: 'include',
-                body: JSON.stringify({ boot_mode: String(mode || '') }),
+                body: JSON.stringify({ boot_mode: mode }),
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
-            this.state.networkAssistant = data;
-            // Silent autosave: avoid stacking alerts every toggle/poll.
-            // Refresh services tile to reflect current toggle state.
-            if (this.state.systemServicesStatus) this._renderSystemServices(this.state.systemServicesStatus);
+            this.state.networkAssistBootMode = data.boot_mode || mode;
+            this._svcStatusCache = { ts: 0, payload: null };
+            await this.refreshSystemServicesStatus().catch(() => {});
         } catch (e) {
             console.error(e);
             showAlert(e.message || 'Failed', 'error');
         } finally {
+            this.state.networkAssistSaving = false;
             if (btnEl) btnEl.disabled = false;
         }
-    }
-
-    _svcStatusLabel(activeState) {
-        const lang = getUiLang();
-        const a = String(activeState || '').toLowerCase();
-        if (a === 'active') return t('svc_status_active', lang);
-        return t('svc_status_dead', lang);
     }
 
     _renderSystemServices(payload) {
@@ -465,98 +489,84 @@ export class SettingsManager {
         const lang = getUiLang();
         const services = payload?.services || {};
         const os = payload?.os || {};
-        const na = this.state.networkAssistant || {};
-        const naMode =
-            String(na.boot_mode || '').trim() ||
-            (na.force_prompt_on_boot ? 'force' : na.interactive_on_boot ? 'auto' : 'off');
-        const naLabel =
-            naMode === 'force'
-                ? t('network_assistant_boot_mode_on', lang)
-                : naMode === 'auto'
-                  ? t('network_assistant_boot_mode_auto', lang)
-                  : t('network_assistant_boot_mode_off', lang);
-        const naToggleOn = naMode !== 'off';
+        const bootMode = this.state.networkAssistBootMode || 'auto';
 
         const entries = [
             {
                 key: 'digital-signage',
-                name: t('service_digital_signage', lang),
+                label: t('service_digital_signage_short', lang),
+                nameFull: t('service_digital_signage_full', lang),
                 st: services['digital-signage'],
             },
             {
                 key: 'mpv',
-                name: t('service_mpv', lang),
+                label: t('service_mpv_short', lang),
+                nameFull: t('service_mpv_full', lang),
+                nameClass: 'svc-name svc-name--mpv',
                 st: services['mpv'],
             },
             {
                 key: 'network-assistant',
-                name: t('service_network_assistant', lang),
+                label: t('service_network_assistant_short', lang),
+                nameFull: t('service_network_assistant_full', lang),
                 st: services['network-assistant'],
+                extraToggle: true,
             },
             {
                 key: 'screenshot',
-                name: t('service_screenshot', lang),
+                label: t('service_screenshot_short', lang),
+                nameFull: t('service_screenshot_full', lang),
                 st: services['screenshot'],
             },
         ];
 
-        const osActive = Boolean(os?.available && os?.active);
+        const restartSvg = `<svg class="svc-action-btn__svg" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M1 4v6h6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>`;
+
+        const osAccent = os?.available && os?.active ? 'svc-tile--accent-good' : 'svc-tile--accent-bad';
         const osTile = `
-            <div class="svc-tile" data-svc="os">
-                <div class="svc-row">
-                    <div class="svc-name" title="${t('os_linux', lang)}">${t('os_linux', lang)}</div>
+            <div class="svc-tile ${osAccent}" data-svc="os">
+                <div class="svc-row svc-row--top">
+                    <div class="svc-name" data-i18n="os_linux_short" data-i18n-title="os_linux_full"></div>
                     <button type="button"
                             class="svc-action-btn svc-action-btn--danger"
                             data-action="reboot"
                             data-i18n-title="reboot_system"
-                            title="${t('reboot_system', lang)}">↻</button>
-                </div>
-                <div class="svc-row">
-                    <div class="svc-status ${osActive ? 'svc-status--active' : 'svc-status--dead'}">
-                        ${osActive ? t('svc_status_active', lang) : t('svc_status_dead', lang)}
-                    </div>
-                    <div class="svc-sub">${os?.uptime_sec != null ? `${Math.floor(Number(os.uptime_sec))}s` : ''}</div>
+                            data-i18n-aria="reboot_system">${restartSvg}</button>
                 </div>
             </div>
         `;
 
         const html = entries.map((e) => {
             const st = e.st || {};
-            const activeState = st.active_state;
-            const isActive = String(activeState || '').toLowerCase() === 'active';
-            const sub = st.sub_state ? String(st.sub_state) : '';
-            const isNetworkAssistant = e.key === 'network-assistant';
+            const accent = this._svcAccentClass(st.active_state, st.sub_state);
+            const nmCls = e.nameClass || 'svc-name';
+            const nextNa = this._networkAssistCycle(bootMode);
+            const toggleBlock = e.extraToggle
+                ? `<button type="button"
+                        class="svc-mini-toggle"
+                        data-action="netassist-cycle"
+                        data-next-mode="${nextNa}"
+                        data-i18n-title="network_assistant_boot_tooltip"
+                        title="${t('network_assistant_boot_tooltip', lang)}"
+                        aria-label="${t('network_assistant_boot_tooltip', lang)}"><span class="svc-mini-toggle__text">${this._networkAssistToggleLabel(bootMode, lang)}</span></button>`
+                : '';
             return `
-                <div class="svc-tile" data-svc="${e.key}">
-                    <div class="svc-row">
-                        <div class="svc-name" title="${e.name}">${e.name}</div>
-                        <button type="button"
-                                class="svc-action-btn"
-                                data-action="restart"
-                                data-service-key="${e.key}"
-                                data-i18n-title="restart_service"
-                                title="${t('restart_service', lang)}">↻</button>
-                    </div>
-                    <div class="svc-row">
-                        <div class="svc-status ${isActive ? 'svc-status--active' : 'svc-status--dead'}">
-                            ${this._svcStatusLabel(activeState)}
-                        </div>
-                        <div class="svc-sub" title="${sub}">${sub}</div>
-                    </div>
-                    ${isNetworkAssistant ? `
-                        <div class="svc-row svc-row--toggle">
-                            <div class="svc-sub">${t('network_assistant_boot_mode', lang)}</div>
+                <div class="svc-tile ${accent}" data-svc="${e.key}">
+                    <div class="svc-row svc-row--top">
+                        <div class="${nmCls}" title="${e.nameFull}">${e.label}</div>
+                        <div class="svc-actions">
+                            ${toggleBlock}
                             <button type="button"
-                                    class="svc-toggle ${naToggleOn ? 'is-on' : ''}"
-                                    data-action="netassist-toggle"
-                                    data-mode="${naMode}"
-                                    aria-pressed="${naToggleOn ? 'true' : 'false'}"
-                                    title="${t('network_assistant_boot_mode', lang)}">
-                                <span class="svc-toggle__dot"></span>
-                                <span class="svc-toggle__label">${naLabel}</span>
-                            </button>
+                                    class="svc-action-btn"
+                                    data-action="restart"
+                                    data-service-key="${e.key}"
+                                    data-i18n-title="restart_service"
+                                    data-i18n-aria="restart_service">${restartSvg}</button>
                         </div>
-                    ` : ''}
+                    </div>
                 </div>
             `;
         }).join('') + osTile;
@@ -565,10 +575,22 @@ export class SettingsManager {
         applyI18n();
     }
 
+    _svcActionRipple(btn, pointerEv) {
+        if (!btn || !pointerEv || typeof pointerEv.clientX !== 'number') return;
+        const rect = btn.getBoundingClientRect();
+        const ripple = document.createElement('span');
+        ripple.className = 'svc-action-btn__ripple';
+        const size = Math.max(rect.width, rect.height);
+        ripple.style.width = `${size}px`;
+        ripple.style.height = `${size}px`;
+        ripple.style.left = `${pointerEv.clientX - rect.left - size / 2}px`;
+        ripple.style.top = `${pointerEv.clientY - rect.top - size / 2}px`;
+        btn.appendChild(ripple);
+        ripple.addEventListener('animationend', () => ripple.remove());
+    }
+
     async _restartService(serviceKey, btnEl) {
-        const lang = getUiLang();
         try {
-            if (!confirm(`${t('restart_service', lang)}: ${serviceKey}?`)) return;
             if (btnEl) btnEl.disabled = true;
             let resp;
             try {
@@ -604,7 +626,6 @@ export class SettingsManager {
     async _rebootOs(btnEl) {
         const lang = getUiLang();
         try {
-            if (!confirm(`${t('reboot_system', lang)}?`)) return;
             if (btnEl) btnEl.disabled = true;
             let resp;
             try {
@@ -1173,23 +1194,22 @@ export class SettingsManager {
                 this.handleDeleteProfile(e);
             }
 
+            const naBtn = e.target?.closest?.('[data-action="netassist-cycle"]');
+            if (naBtn?.dataset?.nextMode) {
+                this._setNetworkAssistBootMode(naBtn.dataset.nextMode, naBtn).catch(() => {});
+                return;
+            }
+
             const svcBtn = e.target?.closest?.('.svc-action-btn');
             if (svcBtn?.dataset?.action === 'restart') {
+                this._svcActionRipple(svcBtn, e);
                 const key = svcBtn.dataset.serviceKey;
                 if (key) this._restartService(key, svcBtn).catch(() => {});
                 return;
             }
             if (svcBtn?.dataset?.action === 'reboot') {
+                this._svcActionRipple(svcBtn, e);
                 this._rebootOs(svcBtn).catch(() => {});
-                return;
-            }
-            const naToggle = e.target?.closest?.('.svc-toggle');
-            if (naToggle?.dataset?.action === 'netassist-toggle') {
-                const cur = String(naToggle.dataset.mode || 'auto');
-                const order = ['off', 'auto', 'force'];
-                const idx = Math.max(0, order.indexOf(cur));
-                const nextMode = order[(idx + 1) % order.length];
-                this._setNetworkAssistantBootMode(nextMode, naToggle).catch(() => {});
                 return;
             }
         });
