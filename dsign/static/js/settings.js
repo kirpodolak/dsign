@@ -55,7 +55,6 @@ export class SettingsManager {
             playlistOverrides: document.getElementById('playlist-overrides'),
             systemDashboard: document.getElementById('system-dashboard'),
             systemServicesGrid: document.getElementById('system-services-grid'),
-            osRebootBtn: document.getElementById('btn-os-reboot'),
             currentProfileIndicator: document.getElementById('current-profile-indicator'),
             displayModeSelect: document.getElementById('display-mode-select'),
             applyDisplayModeBtn: document.getElementById('apply-display-mode'),
@@ -454,11 +453,18 @@ export class SettingsManager {
             <div class="svc-tile" data-svc="os">
                 <div class="svc-row">
                     <div class="svc-name" title="${t('os_linux', lang)}">${t('os_linux', lang)}</div>
+                    <button type="button"
+                            class="svc-action-btn svc-action-btn--danger"
+                            data-action="reboot"
+                            data-i18n-title="reboot_system"
+                            title="${t('reboot_system', lang)}">↻</button>
+                </div>
+                <div class="svc-row">
                     <div class="svc-status ${osActive ? 'svc-status--active' : 'svc-status--dead'}">
                         ${osActive ? t('svc_status_active', lang) : t('svc_status_dead', lang)}
                     </div>
+                    <div class="svc-sub">${os?.uptime_sec != null ? `${Math.floor(Number(os.uptime_sec))}s` : ''}</div>
                 </div>
-                <p class="svc-sub">${os?.uptime_sec != null ? `${Math.floor(Number(os.uptime_sec))}s` : ''}</p>
             </div>
         `;
 
@@ -1104,11 +1110,12 @@ export class SettingsManager {
             if (svcBtn?.dataset?.action === 'restart') {
                 const key = svcBtn.dataset.serviceKey;
                 if (key) this._restartService(key, svcBtn).catch(() => {});
+                return;
             }
-        });
-
-        this.elements.osRebootBtn?.addEventListener('click', () => {
-            this._rebootOs(this.elements.osRebootBtn).catch(() => {});
+            if (svcBtn?.dataset?.action === 'reboot') {
+                this._rebootOs(svcBtn).catch(() => {});
+                return;
+            }
         });
     }
 
