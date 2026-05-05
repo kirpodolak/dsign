@@ -974,6 +974,22 @@ class PlaylistManager:
                 cur_path = self._mpv_get_prop_string("path", timeout=2.0)
                 if cur_path and not str(cur_path).startswith("ytdl://"):
                     return True
+                # Some mpv builds keep a synthetic `ytdl://...` path until playback starts.
+                # Same signals as HLS: cache/time-pos/duration mean demuxer is alive.
+                dct = self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0)
+                if dct is not None and dct > 0.05:
+                    return True
+                dcdur = self._mpv_get_prop_number("demuxer-cache-duration", timeout=2.0)
+                if dcdur is not None and dcdur > 0.05:
+                    return True
+                dem = self._mpv_get_prop_string("demuxer", timeout=2.0)
+                if dem and str(dem).strip():
+                    tp_y = self._mpv_get_prop_number("time-pos", timeout=2.0)
+                    if tp_y is not None:
+                        return True
+                    dur_y = self._mpv_get_prop_number("duration", timeout=2.0)
+                    if dur_y is not None and dur_y > 0:
+                        return True
             else:
                 # For already-resolved `edl://` items we still want to see that MPV has opened
                 # something non-empty. Without this, VK can look "ready" and then instantly EOF.
