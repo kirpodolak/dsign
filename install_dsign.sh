@@ -197,6 +197,9 @@ install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bi
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
 chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-mpv-launch
 
+mkdir -p /var/lib/dsign/config
+chown "$DSIGN_USER:$DSIGN_USER" /var/lib/dsign/config
+
 cat > /etc/systemd/system/dsign-network-assistant.service <<EOL
 [Unit]
 Description=Digital Signage Network Assistant (OSD)
@@ -210,7 +213,6 @@ RemainAfterExit=yes
 User=root
 Group=root
 ExecStart=/usr/local/bin/dsign-network-assistant
-# Optional per-device config (written by Settings UI). Must be safe to ignore.
 EnvironmentFile=-/var/lib/dsign/config/network-assistant.env
 Environment=DSIGN_NETWORK_PROMPT_TIMEOUT_SEC=120
 
