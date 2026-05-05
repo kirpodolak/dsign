@@ -88,6 +88,49 @@ def init_api_routes(api_bp, services):
         "screenshot": "screenshot.service",
     }
 
+    _netassist_env_path = Path("/var/lib/dsign/config/network-assistant.env")
+
+    def _read_network_assistant_flags() -> tuple[bool, bool]:
+        interactive = False
+        force_prompt = False
+        try:
+            if not _netassist_env_path.is_file():
+                return interactive, force_prompt
+            for raw in _netassist_env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key == "DSIGN_NETWORK_ASSISTANT_INTERACTIVE":
+                    interactive = val in ("1", "true", "yes", "on")
+                elif key == "DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT":
+                    force_prompt = val in ("1", "true", "yes", "on")
+        except Exception:
+            pass
+        return interactive, force_prompt
+
+    def _network_assistant_boot_mode(interactive: bool, force_prompt: bool) -> str:
+        if not interactive:
+            return "off"
+        if force_prompt:
+            return "force"
+        return "auto"
+
+    def _write_network_assistant_env(interactive: bool, force_prompt: bool) -> None:
+        _netassist_env_path.parent.mkdir(parents=True, exist_ok=True)
+        body = (
+            "# Written by Digital Signage Settings\n"
+            f"DSIGN_NETWORK_ASSISTANT_INTERACTIVE={'1' if interactive else '0'}\n"
+            f"DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT={'1' if force_prompt else '0'}\n"
+        )
+        _netassist_env_path.write_text(body, encoding="utf-8")
+        try:
+            os.chmod(_netassist_env_path, 0o664)
+        except Exception:
+            pass
+
     def _is_admin_user() -> bool:
         try:
             return bool(getattr(current_user, "is_admin", False) or current_user.username == "admin")
@@ -985,6 +1028,73 @@ def init_api_routes(api_bp, services):
             return jsonify(payload)
         except Exception as e:
             current_app.logger.error(f"Error getting services status: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/system/network/assistant', methods=['GET'])
+    @login_required
+    def get_network_assistant_settings():
+        try:
+            interactive, force_prompt = _read_network_assistant_flags()
+            boot_mode = _network_assistant_boot_mode(interactive, force_prompt)
+            return jsonify({
+                "success": True,
+                "boot_mode": boot_mode,
+                "interactive_on_boot": interactive,
+                "force_prompt_on_boot": force_prompt,
+                "env_file": str(_netassist_env_path),
+            })
+        except Exception as e:
+            current_app.logger.error(f"Error reading network assistant settings: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/system/network/assistant', methods=['POST'])
+    @login_required
+    def set_network_assistant_settings():
+        try:
+            if not _is_admin_user():
+                return jsonify({"success": False, "error": "Unauthorized"}), 403
+            data = request.get_json(silent=True) or {}
+            boot_mode = str(data.get("boot_mode", "")).strip().lower()
+            if boot_mode not in ("off", "auto", "force"):
+                return jsonify({"success": False, "error": "boot_mode must be off, auto, or force"}), 400
+            interactive = boot_mode in ("auto", "force")
+            force_prompt = boot_mode == "force"
+            _write_network_assistant_env(interactive, force_prompt)
+
+            systemctl = shutil.which("systemctl") or "/bin/systemctl"
+            for cmd in (
+                ["sudo", "-n", systemctl, "daemon-reload"],
+                ["sudo", "-n", systemctl, "restart", "dsign-network-assistant.service"],
+            ):
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=25.0)
+                except FileNotFoundError:
+                    return jsonify({"success": False, "error": "systemctl not found"}), 500
+                except subprocess.TimeoutExpired:
+                    return jsonify({"success": False, "error": "Timed out"}), 504
+                except subprocess.CalledProcessError as e:
+                    msg = (e.stderr or e.stdout or "").strip() or f"Command failed: {e.returncode}"
+                    msg_l = msg.lower()
+                    if (
+                        "a terminal is required" in msg_l
+                        or "password is required" in msg_l
+                        or "interactive authentication is required" in msg_l
+                    ):
+                        msg = "sudoers not configured (NOPASSWD) for this action"
+                    return jsonify({"success": False, "error": msg}), 403
+
+            with _svc_status_cache_lock:
+                _svc_status_cache["payload"] = None
+                _svc_status_cache["ts"] = 0.0
+
+            return jsonify({
+                "success": True,
+                "boot_mode": boot_mode,
+                "interactive_on_boot": interactive,
+                "force_prompt_on_boot": force_prompt,
+            })
+        except Exception as e:
+            current_app.logger.error(f"Error saving network assistant settings: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/system/services/<string:service_key>/restart', methods=['POST'])
