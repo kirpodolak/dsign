@@ -1081,6 +1081,13 @@ def init_api_routes(api_bp, services):
         except Exception:
             return {}
 
+    def _netassist_boot_mode(interactive: bool, force_prompt: bool) -> str:
+        if not interactive:
+            return "off"
+        if force_prompt:
+            return "force"
+        return "auto"
+
     def _netassist_write_env(interactive: bool | None, force_prompt: bool | None) -> None:
         _netassist_env_path.parent.mkdir(parents=True, exist_ok=True)
         lines: list[str] = [
@@ -1105,7 +1112,15 @@ def init_api_routes(api_bp, services):
             interactive = raw in ("1", "true", "yes", "y", "on")
             raw_force = str(env.get("DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT", "0")).strip().lower()
             force_prompt = raw_force in ("1", "true", "yes", "y", "on")
-            return jsonify({"success": True, "interactive_on_boot": interactive, "force_prompt_on_boot": force_prompt})
+            boot_mode = _netassist_boot_mode(interactive, force_prompt)
+            return jsonify(
+                {
+                    "success": True,
+                    "interactive_on_boot": interactive,
+                    "force_prompt_on_boot": force_prompt,
+                    "boot_mode": boot_mode,
+                }
+            )
         except Exception as e:
             current_app.logger.error(f"Error getting network assistant settings: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500
@@ -1117,23 +1132,39 @@ def init_api_routes(api_bp, services):
             if not _is_admin_user():
                 return jsonify({"success": False, "error": "Unauthorized"}), 403
             data = request.get_json(silent=True) or {}
+            boot_mode_raw = data.get("boot_mode")
             interactive_raw = data.get("interactive_on_boot")
             force_raw = data.get("force_prompt_on_boot")
-            if interactive_raw is None and force_raw is None:
-                return jsonify({"success": False, "error": "interactive_on_boot or force_prompt_on_boot is required"}), 400
 
             env_prev = _netassist_read_env()
-            if interactive_raw is None:
-                raw_prev = str(env_prev.get("DSIGN_NETWORK_ASSISTANT_INTERACTIVE", "0")).strip().lower()
-                interactive = raw_prev in ("1", "true", "yes", "y", "on")
-            else:
-                interactive = bool(interactive_raw)
 
-            if force_raw is None:
-                raw_force_prev = str(env_prev.get("DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT", "0")).strip().lower()
-                force_prompt = raw_force_prev in ("1", "true", "yes", "y", "on")
+            if boot_mode_raw is not None:
+                bm = str(boot_mode_raw).strip().lower()
+                if bm == "force":
+                    interactive, force_prompt = True, True
+                elif bm == "auto":
+                    interactive, force_prompt = True, False
+                elif bm in ("off", "disabled", "none"):
+                    interactive, force_prompt = False, False
+                else:
+                    return jsonify({"success": False, "error": "Invalid boot_mode"}), 400
             else:
-                force_prompt = bool(force_raw)
+                if interactive_raw is None and force_raw is None:
+                    return jsonify(
+                        {"success": False, "error": "boot_mode or interactive_on_boot/force_prompt_on_boot required"}
+                    ), 400
+
+                if interactive_raw is None:
+                    raw_prev = str(env_prev.get("DSIGN_NETWORK_ASSISTANT_INTERACTIVE", "0")).strip().lower()
+                    interactive = raw_prev in ("1", "true", "yes", "y", "on")
+                else:
+                    interactive = bool(interactive_raw)
+
+                if force_raw is None:
+                    raw_force_prev = str(env_prev.get("DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT", "0")).strip().lower()
+                    force_prompt = raw_force_prev in ("1", "true", "yes", "y", "on")
+                else:
+                    force_prompt = bool(force_raw)
 
             # Write env file used by systemd EnvironmentFile=.
             _netassist_write_env(interactive, force_prompt)
@@ -1148,7 +1179,15 @@ def init_api_routes(api_bp, services):
                 _svc_status_cache["payload"] = None
                 _svc_status_cache["ts"] = 0.0
 
-            return jsonify({"success": True, "interactive_on_boot": interactive, "force_prompt_on_boot": force_prompt})
+            boot_mode = _netassist_boot_mode(interactive, force_prompt)
+            return jsonify(
+                {
+                    "success": True,
+                    "interactive_on_boot": interactive,
+                    "force_prompt_on_boot": force_prompt,
+                    "boot_mode": boot_mode,
+                }
+            )
         except Exception as e:
             current_app.logger.error(f"Error setting network assistant settings: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500

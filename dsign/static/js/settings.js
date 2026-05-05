@@ -441,7 +441,7 @@ export class SettingsManager {
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
             this.state.networkAssistant = data;
-            showAlert(t('network_assistant_boot_mode', lang), 'success');
+            // Silent autosave: avoid stacking alerts every toggle/poll.
             // Refresh services tile to reflect current toggle state.
             if (this.state.systemServicesStatus) this._renderSystemServices(this.state.systemServicesStatus);
         } catch (e) {
@@ -465,8 +465,17 @@ export class SettingsManager {
         const lang = getUiLang();
         const services = payload?.services || {};
         const os = payload?.os || {};
-        const naMode = String(this.state.networkAssistant?.boot_mode || 'auto');
-        const naForce = naMode === 'force';
+        const na = this.state.networkAssistant || {};
+        const naMode =
+            String(na.boot_mode || '').trim() ||
+            (na.force_prompt_on_boot ? 'force' : na.interactive_on_boot ? 'auto' : 'off');
+        const naLabel =
+            naMode === 'force'
+                ? t('network_assistant_boot_mode_on', lang)
+                : naMode === 'auto'
+                  ? t('network_assistant_boot_mode_auto', lang)
+                  : t('network_assistant_boot_mode_off', lang);
+        const naToggleOn = naMode !== 'off';
 
         const entries = [
             {
@@ -538,13 +547,13 @@ export class SettingsManager {
                         <div class="svc-row svc-row--toggle">
                             <div class="svc-sub">${t('network_assistant_boot_mode', lang)}</div>
                             <button type="button"
-                                    class="svc-toggle ${naForce ? 'is-on' : ''}"
+                                    class="svc-toggle ${naToggleOn ? 'is-on' : ''}"
                                     data-action="netassist-toggle"
-                                    data-mode="${naForce ? 'force' : 'auto'}"
-                                    aria-pressed="${naForce ? 'true' : 'false'}"
+                                    data-mode="${naMode}"
+                                    aria-pressed="${naToggleOn ? 'true' : 'false'}"
                                     title="${t('network_assistant_boot_mode', lang)}">
                                 <span class="svc-toggle__dot"></span>
-                                <span class="svc-toggle__label">${naForce ? t('network_assistant_boot_mode_on', lang) : t('network_assistant_boot_mode_off', lang)}</span>
+                                <span class="svc-toggle__label">${naLabel}</span>
                             </button>
                         </div>
                     ` : ''}
@@ -1176,8 +1185,10 @@ export class SettingsManager {
             }
             const naToggle = e.target?.closest?.('.svc-toggle');
             if (naToggle?.dataset?.action === 'netassist-toggle') {
-                const curMode = String(naToggle.dataset.mode || 'auto');
-                const nextMode = curMode === 'force' ? 'auto' : 'force';
+                const cur = String(naToggle.dataset.mode || 'auto');
+                const order = ['off', 'auto', 'force'];
+                const idx = Math.max(0, order.indexOf(cur));
+                const nextMode = order[(idx + 1) % order.length];
                 this._setNetworkAssistantBootMode(nextMode, naToggle).catch(() => {});
                 return;
             }
