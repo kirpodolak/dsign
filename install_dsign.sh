@@ -178,7 +178,9 @@ ExecStartPre=/bin/chown -R dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv-min
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 ExecStart=/usr/local/bin/dsign-mpv-launch
-ExecStartPost=-/usr/local/bin/dsign-show-startup-ip
+# Startup IP OSD helper should run on every MPV (re)start.
+# Use systemd oneshot unit so it doesn't get stuck active(exited).
+ExecStartPost=-/bin/systemctl --no-block restart dsign-show-startup-ip.service
 Restart=always
 RestartSec=5s
 StartLimitInterval=60s
@@ -222,7 +224,7 @@ Wants=dsign-network-assistant.service
 
 [Service]
 Type=oneshot
-RemainAfterExit=yes
+RemainAfterExit=no
 User=$DSIGN_USER
 Group=$DSIGN_USER
 ExecStart=/usr/local/bin/dsign-show-startup-ip
