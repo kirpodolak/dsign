@@ -514,23 +514,58 @@
 .system-services-grid {
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 14px;
+    gap: 10px;
 }
 .svc-tile {
-    background: rgba(255, 255, 255, 0.85);
-    border: 1px solid rgba(0, 0, 0, 0.08);
-    border-radius: 14px;
-    padding: 12px 12px 12px;
+    --svc-accent-edge: rgba(108, 117, 125, 0.35);
+    background: linear-gradient(
+        105deg,
+        rgba(255, 255, 255, 0.97) 0%,
+        rgba(248, 249, 250, 0.94) 100%
+    );
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-left: 4px solid var(--svc-accent-edge);
+    border-radius: 12px;
+    padding: 10px 10px;
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 0;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.svc-tile--accent-good {
+    --svc-accent-edge: rgba(72, 180, 97, 0.65);
+    background: linear-gradient(
+        105deg,
+        rgba(237, 252, 241, 0.92) 0%,
+        rgba(255, 255, 255, 0.96) 72%
+    );
+}
+.svc-tile--accent-warn {
+    --svc-accent-edge: rgba(224, 168, 0, 0.62);
+    background: linear-gradient(
+        105deg,
+        rgba(255, 251, 235, 0.95) 0%,
+        rgba(255, 255, 255, 0.96) 72%
+    );
+}
+.svc-tile--accent-bad {
+    --svc-accent-edge: rgba(220, 53, 69, 0.58);
+    background: linear-gradient(
+        105deg,
+        rgba(255, 241, 242, 0.94) 0%,
+        rgba(255, 255, 255, 0.96) 72%
+    );
 }
 .svc-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 10px;
+    gap: 8px;
+}
+.svc-row--top {
+    min-height: 36px;
 }
 .svc-name {
     font-size: 13px;
@@ -539,112 +574,177 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    letter-spacing: 0.02em;
 }
-.svc-status {
-    font-size: 12px;
+.svc-name--mpv {
+    font-size: 14px;
     font-weight: 800;
-    letter-spacing: 0.2px;
+    letter-spacing: 0.06em;
 }
-.svc-status--active {
-    color: #1e7e34;
-}
-.svc-status--dead {
-    color: #c82333;
-}
-.svc-sub {
-    font-size: 12px;
-    color: #6c757d;
-    margin: 0;
-    min-height: 16px;
-}
-.svc-action-btn {
-    width: 34px;
-    height: 34px;
-    border-radius: 50%;
-    border: 1px solid rgba(0, 0, 0, 0.12);
-    background: rgba(255, 255, 255, 0.9);
-    cursor: pointer;
-    display: grid;
-    place-items: center;
-    font-weight: 900;
-    color: #2c3e50;
-    transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease;
-    flex: 0 0 auto;
-}
-.svc-action-btn--danger {
-    color: #c82333;
-    background: rgba(220, 53, 69, 0.06);
-    border-color: rgba(220, 53, 69, 0.20);
-}
-.svc-action-btn--toggle {
-    color: #1d2fff;
-    background: rgba(74, 107, 255, 0.08);
-    border-color: rgba(74, 107, 255, 0.22);
-}
-.svc-action-btn--toggle.is-off {
-    color: #6c757d;
-    background: rgba(0, 0, 0, 0.03);
-    border-color: rgba(0, 0, 0, 0.12);
-    opacity: 0.75;
-}
-.svc-action-btn--toggle.is-on {
-    box-shadow: 0 0 0 3px rgba(74, 107, 255, 0.12);
-}
-.svc-action-btn:hover {
-    transform: translateY(-1px);
-    border-color: rgba(74, 107, 255, 0.45);
-}
-.svc-action-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-    transform: none;
-}
-.svc-action-btn--danger:hover {
-    border-color: rgba(220, 53, 69, 0.45);
-}
-
-.svc-toggle {
+.svc-actions {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
-    border-radius: 999px;
-    border: 1px solid rgba(0, 0, 0, 0.12);
-    background: rgba(0, 0, 0, 0.03);
-    color: #6c757d;
-    cursor: pointer;
-    user-select: none;
-    font-weight: 800;
-    font-size: 12px;
-    transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+    gap: 6px;
+    flex: 0 0 auto;
 }
-.svc-toggle:hover {
-    transform: translateY(-1px);
+.svc-mini-toggle {
+    min-width: 36px;
+    height: 30px;
+    padding: 0 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    background: rgba(255, 255, 255, 0.65);
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    color: #374151;
+    transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+}
+.svc-mini-toggle:hover {
+    background: rgba(255, 255, 255, 0.95);
     border-color: rgba(74, 107, 255, 0.35);
 }
-.svc-toggle:disabled {
-    opacity: 0.55;
+.svc-mini-toggle:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+.svc-mini-toggle__text {
+    display: block;
+    line-height: 1;
+}
+.svc-action-btn {
+    --svc-btn-a: #6b8cff;
+    --svc-btn-b: #4a6bff;
+    --svc-btn-c: #91aeff;
+    --svc-btn-shadow: rgba(74, 107, 255, 0.42);
+    --svc-btn-shadow-soft: rgba(74, 107, 255, 0.22);
+    position: relative;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    overflow: visible;
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    isolation: isolate;
+    background: transparent;
+    transition: transform 0.35s ease, box-shadow 0.35s ease;
+}
+.svc-action-btn::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--svc-btn-a) 0%, var(--svc-btn-b) 100%);
+    z-index: 0;
+    box-shadow: 0 2px 8px var(--svc-btn-shadow-soft);
+    transition: transform 0.45s ease;
+}
+.svc-action-btn::after {
+    content: '';
+    position: absolute;
+    top: -3px;
+    left: -3px;
+    right: -3px;
+    bottom: -3px;
+    border-radius: 50%;
+    background: linear-gradient(
+        135deg,
+        var(--svc-btn-a),
+        var(--svc-btn-b),
+        var(--svc-btn-c),
+        var(--svc-btn-a)
+    );
+    background-size: 300% 300%;
+    z-index: -1;
+    opacity: 0;
+    transition: opacity 0.35s ease;
+    animation: svc-action-glow-shift 3s ease infinite;
+    pointer-events: none;
+}
+@keyframes svc-action-glow-shift {
+    0%,
+    100% {
+        background-position: 0% 50%;
+    }
+    50% {
+        background-position: 100% 50%;
+    }
+}
+.svc-action-btn__svg {
+    position: relative;
+    z-index: 1;
+    width: 17px;
+    height: 17px;
+    color: #fff;
+    display: block;
+    pointer-events: none;
+    transition: transform 0.55s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.svc-action-btn:not(:disabled):hover {
+    transform: translateY(-2px) scale(1.05);
+    box-shadow:
+        0 8px 26px var(--svc-btn-shadow),
+        0 0 36px var(--svc-btn-shadow-soft);
+}
+.svc-action-btn:not(:disabled):hover::after {
+    opacity: 1;
+}
+.svc-action-btn:not(:disabled):hover .svc-action-btn__svg {
+    transform: rotate(360deg);
+}
+.svc-action-btn:active:not(:disabled) {
+    transform: translateY(0) scale(0.96);
+    transition: transform 0.1s ease;
+}
+.svc-action-btn__ripple {
+    position: absolute;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.38);
+    transform: scale(0);
+    animation: svc-action-ripple 0.55s ease-out forwards;
+    pointer-events: none;
+    z-index: 2;
+}
+@keyframes svc-action-ripple {
+    to {
+        transform: scale(4);
+        opacity: 0;
+    }
+}
+.svc-action-btn--danger {
+    --svc-btn-a: #ff8da1;
+    --svc-btn-b: #e84855;
+    --svc-btn-c: #ffb4bc;
+    --svc-btn-shadow: rgba(232, 72, 85, 0.48);
+    --svc-btn-shadow-soft: rgba(232, 72, 85, 0.26);
+}
+.svc-action-btn:focus-visible {
+    outline: 2px solid rgba(255, 255, 255, 0.95);
+    outline-offset: 3px;
+}
+.svc-action-btn:focus-visible::before {
+    box-shadow:
+        0 0 0 2px rgba(74, 107, 255, 0.35),
+        0 2px 10px var(--svc-btn-shadow-soft);
+}
+.svc-action-btn--danger:focus-visible::before {
+    box-shadow:
+        0 0 0 2px rgba(232, 72, 85, 0.35),
+        0 2px 10px var(--svc-btn-shadow-soft);
+}
+.svc-action-btn:disabled {
+    opacity: 0.48;
     cursor: not-allowed;
     transform: none;
+    box-shadow: none;
 }
-.svc-toggle__dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: rgba(0, 0, 0, 0.25);
-}
-.svc-toggle.is-on {
-    background: rgba(74, 107, 255, 0.10);
-    border-color: rgba(74, 107, 255, 0.35);
-    color: #1d2fff;
-    box-shadow: 0 0 0 3px rgba(74, 107, 255, 0.10);
-}
-.svc-toggle.is-on .svc-toggle__dot {
-    background: rgba(74, 107, 255, 0.85);
-}
-.svc-row--toggle {
-    justify-content: space-between;
-    align-items: center;
+.svc-action-btn:disabled::after {
+    opacity: 0;
 }
 
 @media (max-width: 980px) {
