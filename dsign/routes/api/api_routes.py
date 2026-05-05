@@ -1081,14 +1081,17 @@ def init_api_routes(api_bp, services):
         except Exception:
             return {}
 
-    def _netassist_write_env(interactive: bool | None) -> None:
+    def _netassist_write_env(interactive: bool | None, force_prompt: bool | None) -> None:
         _netassist_env_path.parent.mkdir(parents=True, exist_ok=True)
         lines: list[str] = [
             "# Managed by Digital Signage Settings UI",
             "# DSIGN_NETWORK_ASSISTANT_INTERACTIVE: 1 enables nmtui on tty1 when no IP link at boot.",
+            "# DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT: 1 forces nmtui prompt even if IP is already up.",
         ]
         if interactive is not None:
             lines.append(f'DSIGN_NETWORK_ASSISTANT_INTERACTIVE={"1" if interactive else "0"}')
+        if force_prompt is not None:
+            lines.append(f'DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT={"1" if force_prompt else "0"}')
         tmp = _netassist_env_path.with_suffix(".env.tmp")
         tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
         tmp.replace(_netassist_env_path)
@@ -1100,7 +1103,9 @@ def init_api_routes(api_bp, services):
             env = _netassist_read_env()
             raw = str(env.get("DSIGN_NETWORK_ASSISTANT_INTERACTIVE", "0")).strip().lower()
             interactive = raw in ("1", "true", "yes", "y", "on")
-            return jsonify({"success": True, "interactive_on_boot": interactive})
+            raw_force = str(env.get("DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT", "0")).strip().lower()
+            force_prompt = raw_force in ("1", "true", "yes", "y", "on")
+            return jsonify({"success": True, "interactive_on_boot": interactive, "force_prompt_on_boot": force_prompt})
         except Exception as e:
             current_app.logger.error(f"Error getting network assistant settings: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500
@@ -1113,12 +1118,25 @@ def init_api_routes(api_bp, services):
                 return jsonify({"success": False, "error": "Unauthorized"}), 403
             data = request.get_json(silent=True) or {}
             interactive_raw = data.get("interactive_on_boot")
+            force_raw = data.get("force_prompt_on_boot")
+            if interactive_raw is None and force_raw is None:
+                return jsonify({"success": False, "error": "interactive_on_boot or force_prompt_on_boot is required"}), 400
+
+            env_prev = _netassist_read_env()
             if interactive_raw is None:
-                return jsonify({"success": False, "error": "interactive_on_boot is required"}), 400
-            interactive = bool(interactive_raw)
+                raw_prev = str(env_prev.get("DSIGN_NETWORK_ASSISTANT_INTERACTIVE", "0")).strip().lower()
+                interactive = raw_prev in ("1", "true", "yes", "y", "on")
+            else:
+                interactive = bool(interactive_raw)
+
+            if force_raw is None:
+                raw_force_prev = str(env_prev.get("DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT", "0")).strip().lower()
+                force_prompt = raw_force_prev in ("1", "true", "yes", "y", "on")
+            else:
+                force_prompt = bool(force_raw)
 
             # Write env file used by systemd EnvironmentFile=.
-            _netassist_write_env(interactive)
+            _netassist_write_env(interactive, force_prompt)
 
             # Best-effort reload unit files and restart assistant once so user can test immediately.
             systemctl = shutil.which("systemctl") or "/bin/systemctl"
@@ -1130,7 +1148,7 @@ def init_api_routes(api_bp, services):
                 _svc_status_cache["payload"] = None
                 _svc_status_cache["ts"] = 0.0
 
-            return jsonify({"success": True, "interactive_on_boot": interactive})
+            return jsonify({"success": True, "interactive_on_boot": interactive, "force_prompt_on_boot": force_prompt})
         except Exception as e:
             current_app.logger.error(f"Error setting network assistant settings: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500

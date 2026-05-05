@@ -425,7 +425,7 @@ export class SettingsManager {
         return data;
     }
 
-    async _setNetworkAssistantInteractiveOnBoot(on, btnEl) {
+    async _setNetworkAssistantBootMode(mode, btnEl) {
         const lang = getUiLang();
         try {
             if (btnEl) btnEl.disabled = true;
@@ -436,7 +436,7 @@ export class SettingsManager {
                     'X-CSRFToken': getCSRFToken(),
                 },
                 credentials: 'include',
-                body: JSON.stringify({ interactive_on_boot: Boolean(on) }),
+                body: JSON.stringify({ boot_mode: String(mode || '') }),
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
@@ -465,7 +465,8 @@ export class SettingsManager {
         const lang = getUiLang();
         const services = payload?.services || {};
         const os = payload?.os || {};
-        const naInteractive = Boolean(this.state.networkAssistant?.interactive_on_boot);
+        const naMode = String(this.state.networkAssistant?.boot_mode || 'auto');
+        const naForce = naMode === 'force';
 
         const entries = [
             {
@@ -537,13 +538,13 @@ export class SettingsManager {
                         <div class="svc-row svc-row--toggle">
                             <div class="svc-sub">${t('network_assistant_boot_mode', lang)}</div>
                             <button type="button"
-                                    class="svc-toggle ${naInteractive ? 'is-on' : ''}"
+                                    class="svc-toggle ${naForce ? 'is-on' : ''}"
                                     data-action="netassist-toggle"
-                                    data-on="${naInteractive ? '1' : '0'}"
-                                    aria-pressed="${naInteractive ? 'true' : 'false'}"
+                                    data-mode="${naForce ? 'force' : 'auto'}"
+                                    aria-pressed="${naForce ? 'true' : 'false'}"
                                     title="${t('network_assistant_boot_mode', lang)}">
                                 <span class="svc-toggle__dot"></span>
-                                <span class="svc-toggle__label">${naInteractive ? t('network_assistant_boot_mode_on', lang) : t('network_assistant_boot_mode_off', lang)}</span>
+                                <span class="svc-toggle__label">${naForce ? t('network_assistant_boot_mode_on', lang) : t('network_assistant_boot_mode_off', lang)}</span>
                             </button>
                         </div>
                     ` : ''}
@@ -1175,8 +1176,9 @@ export class SettingsManager {
             }
             const naToggle = e.target?.closest?.('.svc-toggle');
             if (naToggle?.dataset?.action === 'netassist-toggle') {
-                const cur = naToggle.dataset.on === '1';
-                this._setNetworkAssistantInteractiveOnBoot(!cur, naToggle).catch(() => {});
+                const curMode = String(naToggle.dataset.mode || 'auto');
+                const nextMode = curMode === 'force' ? 'auto' : 'force';
+                this._setNetworkAssistantBootMode(nextMode, naToggle).catch(() => {});
                 return;
             }
         });
