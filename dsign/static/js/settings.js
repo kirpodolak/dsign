@@ -520,6 +520,11 @@ export class SettingsManager {
             },
         ];
 
+        const restartSvg = `<svg class="svc-action-btn__svg" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M1 4v6h6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>`;
+
         const osAccent = os?.available && os?.active ? 'svc-tile--accent-good' : 'svc-tile--accent-bad';
         const osTile = `
             <div class="svc-tile ${osAccent}" data-svc="os">
@@ -529,7 +534,7 @@ export class SettingsManager {
                             class="svc-action-btn svc-action-btn--danger"
                             data-action="reboot"
                             data-i18n-title="reboot_system"
-                            data-i18n-aria="reboot_system"><span class="svc-action-btn__icon" aria-hidden="true"></span></button>
+                            data-i18n-aria="reboot_system">${restartSvg}</button>
                 </div>
             </div>
         `;
@@ -559,7 +564,7 @@ export class SettingsManager {
                                     data-action="restart"
                                     data-service-key="${e.key}"
                                     data-i18n-title="restart_service"
-                                    data-i18n-aria="restart_service"><span class="svc-action-btn__icon" aria-hidden="true"></span></button>
+                                    data-i18n-aria="restart_service">${restartSvg}</button>
                         </div>
                     </div>
                 </div>
@@ -568,6 +573,20 @@ export class SettingsManager {
 
         grid.innerHTML = html;
         applyI18n();
+    }
+
+    _svcActionRipple(btn, pointerEv) {
+        if (!btn || !pointerEv || typeof pointerEv.clientX !== 'number') return;
+        const rect = btn.getBoundingClientRect();
+        const ripple = document.createElement('span');
+        ripple.className = 'svc-action-btn__ripple';
+        const size = Math.max(rect.width, rect.height);
+        ripple.style.width = `${size}px`;
+        ripple.style.height = `${size}px`;
+        ripple.style.left = `${pointerEv.clientX - rect.left - size / 2}px`;
+        ripple.style.top = `${pointerEv.clientY - rect.top - size / 2}px`;
+        btn.appendChild(ripple);
+        ripple.addEventListener('animationend', () => ripple.remove());
     }
 
     async _restartService(serviceKey, btnEl) {
@@ -1186,11 +1205,13 @@ export class SettingsManager {
 
             const svcBtn = e.target?.closest?.('.svc-action-btn');
             if (svcBtn?.dataset?.action === 'restart') {
+                this._svcActionRipple(svcBtn, e);
                 const key = svcBtn.dataset.serviceKey;
                 if (key) this._restartService(key, svcBtn).catch(() => {});
                 return;
             }
             if (svcBtn?.dataset?.action === 'reboot') {
+                this._svcActionRipple(svcBtn, e);
                 this._rebootOs(svcBtn).catch(() => {});
                 return;
             }
