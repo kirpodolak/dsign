@@ -1342,7 +1342,9 @@ class PlaylistManager:
                             continue
                         # Resolved http(s) URLs (e.g. Rutube HLS after resolver): once idle-active is false,
                         # mpv has opened the stream — extra _wait_mpv_stream_ready often times out because
-                        # time-pos/duration/cache IPC differs per build. VK/edl and ytdl:// still use the waiter.
+                        # time-pos/duration/cache IPC differs per build.
+                        # ytdl://: treat like plain network — leave-idle + demuxer wait is enough; stream-ready
+                        # IPC is inconsistent across mpv builds and caused false not_ready for Rutube/VK.
                         path_s = str(path)
                         strict_https = os.getenv("DSIGN_MPV_STREAM_READY_HTTPS", "").strip().lower() in (
                             "1",
@@ -1350,7 +1352,7 @@ class PlaylistManager:
                             "yes",
                             "on",
                         )
-                        needs_ready_wait = path_s.startswith("ytdl://") or path_s.startswith("edl://")
+                        needs_ready_wait = path_s.startswith("edl://")
                         if needs_ready_wait or (
                             strict_https
                             and (path_s.startswith("http://") or path_s.startswith("https://"))
