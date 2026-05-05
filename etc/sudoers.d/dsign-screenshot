@@ -1,0 +1,4 @@
+dsign ALL=(root) NOPASSWD: /bin/systemctl start screenshot.service
+dsign ALL=(root) NOPASSWD: /usr/bin/systemctl start screenshot.service
+www-data ALL=(root) NOPASSWD: /bin/systemctl start screenshot.service
+www-data ALL=(root) NOPASSWD: /usr/bin/systemctl start screenshot.service
