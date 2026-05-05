@@ -5,6 +5,7 @@ TTY_DEVICE="/dev/tty1"
 STARTUP_IP_FILE="${DSIGN_STARTUP_IP_FILE:-/tmp/dsign-startup-ip.txt}"
 PROMPT_TIMEOUT_SEC="${DSIGN_NETWORK_PROMPT_TIMEOUT_SEC:-120}"
 INTERACTIVE="${DSIGN_NETWORK_ASSISTANT_INTERACTIVE:-0}"
+FORCE_PROMPT="${DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT:-0}"
 
 log() {
   logger -t dsign-network-assistant "$*"
@@ -65,6 +66,36 @@ main() {
   # Non-interactive default: just persist IP (if any) and exit.
   # This helper must never block boot or the web UI.
   if [ "${INTERACTIVE}" != "1" ] && [ "${INTERACTIVE}" != "true" ] && [ "${INTERACTIVE}" != "yes" ]; then
+    persist_startup_ip
+    return 0
+  fi
+
+  # Force mode: always open nmtui on tty1 (for relocation/testing), regardless of current IP/internet.
+  # Still exits quickly if required tools/tty are unavailable.
+  if [ "${FORCE_PROMPT}" = "1" ] || [ "${FORCE_PROMPT}" = "true" ] || [ "${FORCE_PROMPT}" = "yes" ]; then
+    if ! command -v nmcli >/dev/null 2>&1; then
+      log "nmcli is unavailable, cannot run network assistant"
+      persist_startup_ip
+      return 0
+    fi
+    if ! command -v nmtui-connect >/dev/null 2>&1; then
+      log "nmtui-connect is unavailable, cannot run interactive setup"
+      persist_startup_ip
+      return 0
+    fi
+    if ! tty_ready; then
+      log "tty1 is unavailable, skipping interactive setup"
+      persist_startup_ip
+      return 0
+    fi
+    log "Force prompt enabled, opening interactive Wi-Fi setup on tty1"
+    chvt 1 >/dev/null 2>&1 || true
+    clear_tty
+    tty_write "Digital Signage: Wi-Fi setup (forced)."
+    tty_write "Select Wi-Fi and enter password."
+    tty_write "Assistant timeout: ${PROMPT_TIMEOUT_SEC}s"
+    tty_write ""
+    run_nmtui_once "$PROMPT_TIMEOUT_SEC"
     persist_startup_ip
     return 0
   fi
