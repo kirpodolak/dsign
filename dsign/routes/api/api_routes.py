@@ -1056,6 +1056,85 @@ def init_api_routes(api_bp, services):
             current_app.logger.error(f"Error rebooting system: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500
 
+    # ======================
+    # Network assistant settings (Settings page)
+    # ======================
+    # Network assistant unit runs as root, but Settings UI writes this file.
+    # Keep it under /var/lib/dsign so the app can create/write it on first run.
+    _netassist_env_path = Path("/var/lib/dsign/config/network-assistant.env")
+
+    def _netassist_read_env() -> dict:
+        try:
+            if not _netassist_env_path.exists():
+                return {}
+            raw = _netassist_env_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            out: dict[str, str] = {}
+            for line in raw:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                if "=" not in s:
+                    continue
+                k, v = s.split("=", 1)
+                out[k.strip()] = v.strip().strip('"').strip("'")
+            return out
+        except Exception:
+            return {}
+
+    def _netassist_write_env(interactive: bool | None) -> None:
+        _netassist_env_path.parent.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = [
+            "# Managed by Digital Signage Settings UI",
+            "# DSIGN_NETWORK_ASSISTANT_INTERACTIVE: 1 enables nmtui on tty1 when no IP link at boot.",
+        ]
+        if interactive is not None:
+            lines.append(f'DSIGN_NETWORK_ASSISTANT_INTERACTIVE={"1" if interactive else "0"}')
+        tmp = _netassist_env_path.with_suffix(".env.tmp")
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp.replace(_netassist_env_path)
+
+    @api_bp.route('/system/network/assistant', methods=['GET'])
+    @login_required
+    def get_network_assistant_settings():
+        try:
+            env = _netassist_read_env()
+            raw = str(env.get("DSIGN_NETWORK_ASSISTANT_INTERACTIVE", "0")).strip().lower()
+            interactive = raw in ("1", "true", "yes", "y", "on")
+            return jsonify({"success": True, "interactive_on_boot": interactive})
+        except Exception as e:
+            current_app.logger.error(f"Error getting network assistant settings: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/system/network/assistant', methods=['POST'])
+    @login_required
+    def set_network_assistant_settings():
+        try:
+            if not _is_admin_user():
+                return jsonify({"success": False, "error": "Unauthorized"}), 403
+            data = request.get_json(silent=True) or {}
+            interactive_raw = data.get("interactive_on_boot")
+            if interactive_raw is None:
+                return jsonify({"success": False, "error": "interactive_on_boot is required"}), 400
+            interactive = bool(interactive_raw)
+
+            # Write env file used by systemd EnvironmentFile=.
+            _netassist_write_env(interactive)
+
+            # Best-effort reload unit files and restart assistant once so user can test immediately.
+            systemctl = shutil.which("systemctl") or "/bin/systemctl"
+            subprocess.run(["sudo", "-n", systemctl, "daemon-reload"], check=False, capture_output=True, text=True, timeout=5.0)
+            subprocess.run(["sudo", "-n", systemctl, "restart", "dsign-network-assistant.service"], check=False, capture_output=True, text=True, timeout=15.0)
+
+            # Invalidate services cache so UI updates quickly.
+            with _svc_status_cache_lock:
+                _svc_status_cache["payload"] = None
+                _svc_status_cache["ts"] = 0.0
+
+            return jsonify({"success": True, "interactive_on_boot": interactive})
+        except Exception as e:
+            current_app.logger.error(f"Error setting network assistant settings: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
     @api_bp.route('/system/network/wifi/scan', methods=['GET'])
     @login_required
     def scan_wifi_networks():

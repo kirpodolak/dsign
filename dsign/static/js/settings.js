@@ -78,6 +78,7 @@ export class SettingsManager {
             settingsSchema: {},
             systemStatus: null,
             systemServicesStatus: null,
+            networkAssistant: null,
             systemPollTimer: null,
             systemStatusLoading: false,
             servicesStatusLoading: false,
@@ -134,7 +135,10 @@ export class SettingsManager {
             this.renderStatusDashboardSkeleton();
             await this.refreshSystemStatus({ startPolling: true }).catch(() => {});
             this.performance.mark('system-status-loaded');
-            await this.refreshSystemServicesStatus().catch(() => {});
+            await Promise.all([
+                this.refreshSystemServicesStatus().catch(() => {}),
+                this._loadNetworkAssistantSettings().catch(() => {}),
+            ]);
             this._bindVolumeKnob();
             this.renderSettingsForm();
             this.performance.mark('settings-rendered');
@@ -411,6 +415,43 @@ export class SettingsManager {
         }
     }
 
+    async _loadNetworkAssistantSettings() {
+        const resp = await fetch('/api/system/network/assistant', { credentials: 'include' });
+        if (!resp.ok) throw new Error('Failed to load network assistant settings');
+        const data = await resp.json().catch(() => ({}));
+        if (!data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+        this.state.networkAssistant = data;
+        if (this.state.systemServicesStatus) this._renderSystemServices(this.state.systemServicesStatus);
+        return data;
+    }
+
+    async _setNetworkAssistantInteractiveOnBoot(on, btnEl) {
+        const lang = getUiLang();
+        try {
+            if (btnEl) btnEl.disabled = true;
+            const resp = await fetch('/api/system/network/assistant', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCSRFToken(),
+                },
+                credentials: 'include',
+                body: JSON.stringify({ interactive_on_boot: Boolean(on) }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+            this.state.networkAssistant = data;
+            showAlert(t('network_assistant_boot_mode', lang), 'success');
+            // Refresh services tile to reflect current toggle state.
+            if (this.state.systemServicesStatus) this._renderSystemServices(this.state.systemServicesStatus);
+        } catch (e) {
+            console.error(e);
+            showAlert(e.message || 'Failed', 'error');
+        } finally {
+            if (btnEl) btnEl.disabled = false;
+        }
+    }
+
     _svcStatusLabel(activeState) {
         const lang = getUiLang();
         const a = String(activeState || '').toLowerCase();
@@ -424,6 +465,7 @@ export class SettingsManager {
         const lang = getUiLang();
         const services = payload?.services || {};
         const os = payload?.os || {};
+        const naInteractive = Boolean(this.state.networkAssistant?.interactive_on_boot);
 
         const entries = [
             {
@@ -473,6 +515,7 @@ export class SettingsManager {
             const activeState = st.active_state;
             const isActive = String(activeState || '').toLowerCase() === 'active';
             const sub = st.sub_state ? String(st.sub_state) : '';
+            const isNetworkAssistant = e.key === 'network-assistant';
             return `
                 <div class="svc-tile" data-svc="${e.key}">
                     <div class="svc-row">
@@ -490,6 +533,20 @@ export class SettingsManager {
                         </div>
                         <div class="svc-sub" title="${sub}">${sub}</div>
                     </div>
+                    ${isNetworkAssistant ? `
+                        <div class="svc-row svc-row--toggle">
+                            <div class="svc-sub">${t('network_assistant_boot_mode', lang)}</div>
+                            <button type="button"
+                                    class="svc-toggle ${naInteractive ? 'is-on' : ''}"
+                                    data-action="netassist-toggle"
+                                    data-on="${naInteractive ? '1' : '0'}"
+                                    aria-pressed="${naInteractive ? 'true' : 'false'}"
+                                    title="${t('network_assistant_boot_mode', lang)}">
+                                <span class="svc-toggle__dot"></span>
+                                <span class="svc-toggle__label">${naInteractive ? t('network_assistant_boot_mode_on', lang) : t('network_assistant_boot_mode_off', lang)}</span>
+                            </button>
+                        </div>
+                    ` : ''}
                 </div>
             `;
         }).join('') + osTile;
@@ -1114,6 +1171,12 @@ export class SettingsManager {
             }
             if (svcBtn?.dataset?.action === 'reboot') {
                 this._rebootOs(svcBtn).catch(() => {});
+                return;
+            }
+            const naToggle = e.target?.closest?.('.svc-toggle');
+            if (naToggle?.dataset?.action === 'netassist-toggle') {
+                const cur = naToggle.dataset.on === '1';
+                this._setNetworkAssistantInteractiveOnBoot(!cur, naToggle).catch(() => {});
                 return;
             }
         });
