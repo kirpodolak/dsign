@@ -590,9 +590,7 @@ export class SettingsManager {
     }
 
     async _restartService(serviceKey, btnEl) {
-        const lang = getUiLang();
         try {
-            if (!confirm(`${t('restart_service', lang)}: ${serviceKey}?`)) return;
             if (btnEl) btnEl.disabled = true;
             let resp;
             try {
@@ -628,7 +626,6 @@ export class SettingsManager {
     async _rebootOs(btnEl) {
         const lang = getUiLang();
         try {
-            if (!confirm(`${t('reboot_system', lang)}?`)) return;
             if (btnEl) btnEl.disabled = true;
             let resp;
             try {
