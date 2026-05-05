@@ -70,48 +70,25 @@ main() {
     return 0
   fi
 
-  # Force mode: always open nmtui on tty1 (for relocation/testing), regardless of current IP/internet.
-  # Still exits quickly if required tools/tty are unavailable.
+  force_on="0"
   if [ "${FORCE_PROMPT}" = "1" ] || [ "${FORCE_PROMPT}" = "true" ] || [ "${FORCE_PROMPT}" = "yes" ]; then
-    if ! command -v nmcli >/dev/null 2>&1; then
-      log "nmcli is unavailable, cannot run network assistant"
-      persist_startup_ip
-      return 0
-    fi
-    if ! command -v nmtui-connect >/dev/null 2>&1; then
-      log "nmtui-connect is unavailable, cannot run interactive setup"
-      persist_startup_ip
-      return 0
-    fi
-    if ! tty_ready; then
-      log "tty1 is unavailable, skipping interactive setup"
-      persist_startup_ip
-      return 0
-    fi
-    log "Force prompt enabled, opening interactive Wi-Fi setup on tty1"
-    chvt 1 >/dev/null 2>&1 || true
-    clear_tty
-    tty_write "Digital Signage: Wi-Fi setup (forced)."
-    tty_write "Select Wi-Fi and enter password."
-    tty_write "Assistant timeout: ${PROMPT_TIMEOUT_SEC}s"
-    tty_write ""
-    run_nmtui_once "$PROMPT_TIMEOUT_SEC"
-    persist_startup_ip
-    return 0
+    force_on="1"
   fi
 
-  if has_internet; then
-    log "Internet already available at startup"
-    persist_startup_ip
-    return 0
-  fi
+  if [ "${force_on}" != "1" ]; then
+    if has_internet; then
+      log "Internet already available at startup"
+      persist_startup_ip
+      return 0
+    fi
 
-  # Some networks block outbound DNS probes (1.1.1.1/8.8.8.8) but still provide
-  # local connectivity and valid IP. In that case skip interactive Wi-Fi prompt.
-  if has_ip_link; then
-    log "IP link is already up (external internet probe failed), skipping Wi-Fi setup"
-    persist_startup_ip
-    return 0
+    # Some networks block outbound DNS probes (1.1.1.1/8.8.8.8) but still provide
+    # local connectivity and valid IP. In that case skip interactive Wi-Fi prompt.
+    if has_ip_link; then
+      log "IP link is already up (external internet probe failed), skipping Wi-Fi setup"
+      persist_startup_ip
+      return 0
+    fi
   fi
 
   if ! command -v nmcli >/dev/null 2>&1; then
@@ -132,7 +109,11 @@ main() {
     return 0
   fi
 
-  log "Internet is offline, opening interactive Wi-Fi setup on tty1"
+  if [ "${force_on}" = "1" ]; then
+    log "FORCE_PROMPT: opening interactive Wi-Fi setup on tty1"
+  else
+    log "Internet is offline, opening interactive Wi-Fi setup on tty1"
+  fi
   chvt 1 >/dev/null 2>&1 || true
   clear_tty
   tty_write "Digital Signage: network connection required."
