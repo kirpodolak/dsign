@@ -4,7 +4,6 @@ After=dsign-mpv.service dsign-network-assistant.service
 
 [Service]
 Type=oneshot
-RemainAfterExit=yes
 User=dsign
 Group=dsign
 ExecStart=/usr/local/bin/dsign-show-startup-ip
