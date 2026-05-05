@@ -996,9 +996,10 @@ def init_api_routes(api_bp, services):
             unit = _svc_allowlist.get(str(service_key))
             if not unit:
                 return jsonify({"success": False, "error": "Unknown service"}), 404
-            # Requires sudoers: allow dsign to run /bin/systemctl restart <unit>
+            # Requires sudoers: allow dsign to run `systemctl restart <unit>` without a password.
             # Use -n to avoid hanging / requiring a tty in web context.
-            cmd = ["sudo", "-n", "/bin/systemctl", "restart", unit]
+            systemctl = shutil.which("systemctl") or "/bin/systemctl"
+            cmd = ["sudo", "-n", systemctl, "restart", unit]
             try:
                 subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=20.0)
             except FileNotFoundError:
@@ -1007,7 +1008,12 @@ def init_api_routes(api_bp, services):
                 return jsonify({"success": False, "error": "Timed out"}), 504
             except subprocess.CalledProcessError as e:
                 msg = (e.stderr or e.stdout or "").strip() or f"Command failed: {e.returncode}"
-                if "a terminal is required" in msg.lower() or "password is required" in msg.lower():
+                msg_l = msg.lower()
+                if (
+                    "a terminal is required" in msg_l
+                    or "password is required" in msg_l
+                    or "interactive authentication is required" in msg_l
+                ):
                     msg = "sudoers not configured (NOPASSWD) for this action"
                 return jsonify({"success": False, "error": msg}), 403
             with _svc_status_cache_lock:
@@ -1024,19 +1030,25 @@ def init_api_routes(api_bp, services):
         try:
             if not _is_admin_user():
                 return jsonify({"success": False, "error": "Unauthorized"}), 403
-            # Requires sudoers: allow dsign to run /sbin/reboot (or /bin/systemctl reboot).
+            # Requires sudoers: allow dsign to reboot without a password.
             cmd = ["sudo", "-n", "/sbin/reboot"]
             try:
                 subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=5.0)
             except FileNotFoundError:
                 # Fallback
                 try:
-                    subprocess.run(["sudo", "-n", "/bin/systemctl", "reboot"], check=True, capture_output=True, text=True, timeout=5.0)
+                    systemctl = shutil.which("systemctl") or "/bin/systemctl"
+                    subprocess.run(["sudo", "-n", systemctl, "reboot"], check=True, capture_output=True, text=True, timeout=5.0)
                 except Exception as e:
                     return jsonify({"success": False, "error": str(e)}), 500
             except subprocess.CalledProcessError as e:
                 msg = (e.stderr or e.stdout or "").strip() or f"Command failed: {e.returncode}"
-                if "a terminal is required" in msg.lower() or "password is required" in msg.lower():
+                msg_l = msg.lower()
+                if (
+                    "a terminal is required" in msg_l
+                    or "password is required" in msg_l
+                    or "interactive authentication is required" in msg_l
+                ):
                     msg = "sudoers not configured (NOPASSWD) for this action"
                 return jsonify({"success": False, "error": msg}), 403
             return jsonify({"success": True})
