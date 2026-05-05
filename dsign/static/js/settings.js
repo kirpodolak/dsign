@@ -54,6 +54,7 @@ export class SettingsManager {
             playlistAssignments: document.getElementById('playlist-assignments'),
             playlistOverrides: document.getElementById('playlist-overrides'),
             systemDashboard: document.getElementById('system-dashboard'),
+            systemServicesGrid: document.getElementById('system-services-grid'),
             currentProfileIndicator: document.getElementById('current-profile-indicator'),
             displayModeSelect: document.getElementById('display-mode-select'),
             applyDisplayModeBtn: document.getElementById('apply-display-mode'),
@@ -76,8 +77,10 @@ export class SettingsManager {
             playlistOverrides: [],
             settingsSchema: {},
             systemStatus: null,
+            systemServicesStatus: null,
             systemPollTimer: null,
             systemStatusLoading: false,
+            servicesStatusLoading: false,
             initStarted: false,
             initialized: false,
             /** Local audio state during drag (0–100, muted) */
@@ -85,6 +88,9 @@ export class SettingsManager {
             _overrideSaveTimers: new Map(),
             _globalSaveTimer: null,
         };
+
+        this._svcStatusCache = { ts: 0, payload: null };
+        this._svcStatusCacheTtlMs = 1000;
 
         this.init();
     }
@@ -128,6 +134,7 @@ export class SettingsManager {
             this.renderStatusDashboardSkeleton();
             await this.refreshSystemStatus({ startPolling: true }).catch(() => {});
             this.performance.mark('system-status-loaded');
+            await this.refreshSystemServicesStatus().catch(() => {});
             this._bindVolumeKnob();
             this.renderSettingsForm();
             this.performance.mark('settings-rendered');
@@ -345,6 +352,7 @@ export class SettingsManager {
                 return;
             }
             this.refreshSystemStatus().catch(() => {});
+            this.refreshSystemServicesStatus().catch(() => {});
         }, 60000);
     }
 
@@ -377,6 +385,184 @@ export class SettingsManager {
             }
         } finally {
             this.state.systemStatusLoading = false;
+        }
+    }
+
+    async refreshSystemServicesStatus() {
+        if (!this.elements.systemServicesGrid) return;
+        if (this.state.servicesStatusLoading) return;
+        this.state.servicesStatusLoading = true;
+        try {
+            const now = Date.now();
+            if (this._svcStatusCache.payload && (now - this._svcStatusCache.ts) < this._svcStatusCacheTtlMs) {
+                this.state.systemServicesStatus = this._svcStatusCache.payload;
+                this._renderSystemServices(this.state.systemServicesStatus);
+                return;
+            }
+            const resp = await fetch('/api/system/services/status', { credentials: 'include' });
+            if (!resp.ok) throw new Error('Failed to load services status');
+            const data = await resp.json();
+            if (!data.success) throw new Error(data.error || 'Invalid services status data');
+            this._svcStatusCache = { ts: now, payload: data };
+            this.state.systemServicesStatus = data;
+            this._renderSystemServices(data);
+        } finally {
+            this.state.servicesStatusLoading = false;
+        }
+    }
+
+    _svcStatusLabel(activeState) {
+        const lang = getUiLang();
+        const a = String(activeState || '').toLowerCase();
+        if (a === 'active') return t('svc_status_active', lang);
+        return t('svc_status_dead', lang);
+    }
+
+    _renderSystemServices(payload) {
+        const grid = this.elements.systemServicesGrid;
+        if (!grid) return;
+        const lang = getUiLang();
+        const services = payload?.services || {};
+        const os = payload?.os || {};
+
+        const entries = [
+            {
+                key: 'digital-signage',
+                name: t('service_digital_signage', lang),
+                st: services['digital-signage'],
+            },
+            {
+                key: 'mpv',
+                name: t('service_mpv', lang),
+                st: services['mpv'],
+            },
+            {
+                key: 'network-assistant',
+                name: t('service_network_assistant', lang),
+                st: services['network-assistant'],
+            },
+            {
+                key: 'screenshot',
+                name: t('service_screenshot', lang),
+                st: services['screenshot'],
+            },
+        ];
+
+        const osActive = Boolean(os?.available && os?.active);
+        const osTile = `
+            <div class="svc-tile" data-svc="os">
+                <div class="svc-row">
+                    <div class="svc-name" title="${t('os_linux', lang)}">${t('os_linux', lang)}</div>
+                    <button type="button"
+                            class="svc-action-btn svc-action-btn--danger"
+                            data-action="reboot"
+                            data-i18n-title="reboot_system"
+                            title="${t('reboot_system', lang)}">↻</button>
+                </div>
+                <div class="svc-row">
+                    <div class="svc-status ${osActive ? 'svc-status--active' : 'svc-status--dead'}">
+                        ${osActive ? t('svc_status_active', lang) : t('svc_status_dead', lang)}
+                    </div>
+                    <div class="svc-sub">${os?.uptime_sec != null ? `${Math.floor(Number(os.uptime_sec))}s` : ''}</div>
+                </div>
+            </div>
+        `;
+
+        const html = entries.map((e) => {
+            const st = e.st || {};
+            const activeState = st.active_state;
+            const isActive = String(activeState || '').toLowerCase() === 'active';
+            const sub = st.sub_state ? String(st.sub_state) : '';
+            return `
+                <div class="svc-tile" data-svc="${e.key}">
+                    <div class="svc-row">
+                        <div class="svc-name" title="${e.name}">${e.name}</div>
+                        <button type="button"
+                                class="svc-action-btn"
+                                data-action="restart"
+                                data-service-key="${e.key}"
+                                data-i18n-title="restart_service"
+                                title="${t('restart_service', lang)}">↻</button>
+                    </div>
+                    <div class="svc-row">
+                        <div class="svc-status ${isActive ? 'svc-status--active' : 'svc-status--dead'}">
+                            ${this._svcStatusLabel(activeState)}
+                        </div>
+                        <div class="svc-sub" title="${sub}">${sub}</div>
+                    </div>
+                </div>
+            `;
+        }).join('') + osTile;
+
+        grid.innerHTML = html;
+        applyI18n();
+    }
+
+    async _restartService(serviceKey, btnEl) {
+        const lang = getUiLang();
+        try {
+            if (!confirm(`${t('restart_service', lang)}: ${serviceKey}?`)) return;
+            if (btnEl) btnEl.disabled = true;
+            let resp;
+            try {
+                resp = await fetch(`/api/system/services/${encodeURIComponent(serviceKey)}/restart`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': getCSRFToken(),
+                    },
+                    credentials: 'include',
+                    body: JSON.stringify({}),
+                });
+            } catch (e) {
+                // Common when restarting mpv/digital-signage from within the same process:
+                // the server may drop the connection while it is being restarted.
+                showAlert('Service restart requested. Connection dropped (expected). Refresh in a few seconds.', 'info');
+                return;
+            }
+
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+            showAlert(`${serviceKey}: OK`, 'success');
+            this._svcStatusCache = { ts: 0, payload: null };
+            await this.refreshSystemServicesStatus().catch(() => {});
+        } catch (e) {
+            console.error(e);
+            showAlert(e.message || 'Failed', 'error');
+        } finally {
+            if (btnEl) btnEl.disabled = false;
+        }
+    }
+
+    async _rebootOs(btnEl) {
+        const lang = getUiLang();
+        try {
+            if (!confirm(`${t('reboot_system', lang)}?`)) return;
+            if (btnEl) btnEl.disabled = true;
+            let resp;
+            try {
+                resp = await fetch('/api/system/reboot', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': getCSRFToken(),
+                    },
+                    credentials: 'include',
+                    body: JSON.stringify({}),
+                });
+            } catch (e) {
+                showAlert('Reboot requested. Connection dropped (expected).', 'info');
+                return;
+            }
+
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+            showAlert(t('reboot_system', lang), 'success');
+        } catch (e) {
+            console.error(e);
+            showAlert(e.message || 'Failed', 'error');
+        } finally {
+            if (btnEl) btnEl.disabled = false;
         }
     }
 
@@ -877,6 +1063,7 @@ export class SettingsManager {
             applyI18n();
             try {
                 this.refreshDashboardAfterLangChange();
+                if (this.state.systemServicesStatus) this._renderSystemServices(this.state.systemServicesStatus);
             } catch (e) {
                 console.warn(e);
             }
@@ -917,6 +1104,17 @@ export class SettingsManager {
 
             if (e.target.classList.contains('btn-delete')) {
                 this.handleDeleteProfile(e);
+            }
+
+            const svcBtn = e.target?.closest?.('.svc-action-btn');
+            if (svcBtn?.dataset?.action === 'restart') {
+                const key = svcBtn.dataset.serviceKey;
+                if (key) this._restartService(key, svcBtn).catch(() => {});
+                return;
+            }
+            if (svcBtn?.dataset?.action === 'reboot') {
+                this._rebootOs(svcBtn).catch(() => {});
+                return;
             }
         });
     }
