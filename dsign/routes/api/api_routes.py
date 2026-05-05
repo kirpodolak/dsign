@@ -74,6 +74,70 @@ def init_api_routes(api_bp, services):
     _network_status_cache_lock = Lock()
     _network_status_cache_ttl_sec: float = 5.0
 
+    # ======================
+    # System services status / restart (Settings page)
+    # ======================
+    _svc_status_cache: dict = {"ts": 0.0, "payload": None}
+    _svc_status_cache_lock = Lock()
+    _svc_status_cache_ttl_sec: float = 1.0
+
+    _svc_allowlist: dict[str, str] = {
+        "digital-signage": "digital-signage.service",
+        "mpv": "dsign-mpv.service",
+        "network-assistant": "dsign-network-assistant.service",
+        "screenshot": "screenshot.service",
+    }
+
+    def _is_admin_user() -> bool:
+        try:
+            return bool(getattr(current_user, "is_admin", False) or current_user.username == "admin")
+        except Exception:
+            return False
+
+    def _systemctl_unit_state(unit: str) -> dict:
+        """
+        Return structured systemd unit state.
+        Uses `systemctl show` (works without polkit prompts) and is fast enough for a small allowlist.
+        """
+        try:
+            res = subprocess.run(
+                ["systemctl", "show", "--no-page", "--property=ActiveState,SubState", unit],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2.5,
+            )
+            active_state = None
+            sub_state = None
+            for line in (res.stdout or "").splitlines():
+                if line.startswith("ActiveState="):
+                    active_state = line.split("=", 1)[1].strip() or None
+                elif line.startswith("SubState="):
+                    sub_state = line.split("=", 1)[1].strip() or None
+            ok = bool(active_state)
+            return {
+                "available": ok,
+                "active_state": active_state,
+                "sub_state": sub_state,
+            }
+        except Exception:
+            return {"available": False, "active_state": None, "sub_state": None}
+
+    def _os_linux_status() -> dict:
+        try:
+            if os.path.exists("/proc/uptime"):
+                # If procfs is readable we consider OS alive; use uptime seconds for a tiny signal.
+                uptime = None
+                try:
+                    up = Path("/proc/uptime").read_text(encoding="utf-8").strip().split()
+                    uptime = float(up[0]) if up else None
+                except Exception:
+                    uptime = None
+                return {"available": True, "active": True, "uptime_sec": uptime}
+        except Exception:
+            pass
+        return {"available": False, "active": False, "uptime_sec": None}
+
     _amixer_pick_cache: dict = {"ts": 0.0, "value": None, "v": 0}
     _amixer_pick_cache_lock = Lock()
     _amixer_pick_cache_ttl_sec: float = 60.0
@@ -889,6 +953,95 @@ def init_api_routes(api_bp, services):
             return jsonify(payload)
         except Exception as e:
             current_app.logger.error(f"Error getting network status: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/system/services/status', methods=['GET'])
+    @login_required
+    def get_system_services_status():
+        """
+        Small allowlist of systemd services shown on Settings page.
+        """
+        try:
+            now = time.time()
+            with _svc_status_cache_lock:
+                cached = _svc_status_cache.get("payload")
+                ts = float(_svc_status_cache.get("ts") or 0.0)
+                if cached is not None and (now - ts) < _svc_status_cache_ttl_sec:
+                    return jsonify(cached)
+
+            services_payload: dict[str, dict] = {}
+            for short, unit in _svc_allowlist.items():
+                st = _systemctl_unit_state(unit)
+                services_payload[short] = {**st, "unit": unit}
+
+            payload = {
+                "success": True,
+                "os": _os_linux_status(),
+                "services": services_payload,
+            }
+            with _svc_status_cache_lock:
+                _svc_status_cache["payload"] = payload
+                _svc_status_cache["ts"] = now
+            return jsonify(payload)
+        except Exception as e:
+            current_app.logger.error(f"Error getting services status: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/system/services/<string:service_key>/restart', methods=['POST'])
+    @login_required
+    def restart_system_service(service_key: str):
+        try:
+            if not _is_admin_user():
+                return jsonify({"success": False, "error": "Unauthorized"}), 403
+            unit = _svc_allowlist.get(str(service_key))
+            if not unit:
+                return jsonify({"success": False, "error": "Unknown service"}), 404
+            # Requires sudoers: allow dsign to run /bin/systemctl restart <unit>
+            # Use -n to avoid hanging / requiring a tty in web context.
+            cmd = ["sudo", "-n", "/bin/systemctl", "restart", unit]
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=20.0)
+            except FileNotFoundError:
+                return jsonify({"success": False, "error": "systemctl not found"}), 500
+            except subprocess.TimeoutExpired:
+                return jsonify({"success": False, "error": "Timed out"}), 504
+            except subprocess.CalledProcessError as e:
+                msg = (e.stderr or e.stdout or "").strip() or f"Command failed: {e.returncode}"
+                if "a terminal is required" in msg.lower() or "password is required" in msg.lower():
+                    msg = "sudoers not configured (NOPASSWD) for this action"
+                return jsonify({"success": False, "error": msg}), 403
+            with _svc_status_cache_lock:
+                _svc_status_cache["payload"] = None
+                _svc_status_cache["ts"] = 0.0
+            return jsonify({"success": True, "service": service_key, "unit": unit})
+        except Exception as e:
+            current_app.logger.error(f"Error restarting service {service_key}: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/system/reboot', methods=['POST'])
+    @login_required
+    def system_reboot():
+        try:
+            if not _is_admin_user():
+                return jsonify({"success": False, "error": "Unauthorized"}), 403
+            # Requires sudoers: allow dsign to run /sbin/reboot (or /bin/systemctl reboot).
+            cmd = ["sudo", "-n", "/sbin/reboot"]
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=5.0)
+            except FileNotFoundError:
+                # Fallback
+                try:
+                    subprocess.run(["sudo", "-n", "/bin/systemctl", "reboot"], check=True, capture_output=True, text=True, timeout=5.0)
+                except Exception as e:
+                    return jsonify({"success": False, "error": str(e)}), 500
+            except subprocess.CalledProcessError as e:
+                msg = (e.stderr or e.stdout or "").strip() or f"Command failed: {e.returncode}"
+                if "a terminal is required" in msg.lower() or "password is required" in msg.lower():
+                    msg = "sudoers not configured (NOPASSWD) for this action"
+                return jsonify({"success": False, "error": msg}), 403
+            return jsonify({"success": True})
+        except Exception as e:
+            current_app.logger.error(f"Error rebooting system: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/system/network/wifi/scan', methods=['GET'])
