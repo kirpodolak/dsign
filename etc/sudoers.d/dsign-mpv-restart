@@ -1,0 +1,2 @@
+dsign ALL=(root) NOPASSWD: /bin/systemctl restart dsign-mpv.service
+dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart dsign-mpv.service
