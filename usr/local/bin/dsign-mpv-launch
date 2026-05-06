@@ -73,6 +73,7 @@ signboard_pi() {
 
 intel_with_include() {
   local name="$1"
+  shift
   local inc="$CFG/profiles/${name}.conf"
   if [[ ! -f "$inc" ]]; then
     echo "dsign-mpv-launch: missing profile file $inc" >&2
