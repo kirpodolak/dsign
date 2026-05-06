@@ -1,5 +1,6 @@
 import os
 import json
+import shutil
 import socket
 import time
 import subprocess
@@ -175,15 +176,21 @@ class MPVManager:
             return False
 
     def _restart_systemd_service(self) -> bool:
-        """Перезапуск systemd сервиса"""
+        """
+        Перезапуск systemd-сервиса MPV.
+
+        Процесс digital-signage работает от пользователя dsign; прямой вызов systemctl
+        требует интерактивной политики/polkit. Используем sudo -n при наличии sudoers NOPASSWD.
+        """
         try:
             start_time = time.time()
+            systemctl = shutil.which("systemctl") or "/bin/systemctl"
             result = subprocess.run(
-                ["systemctl", "restart", "dsign-mpv.service"],
+                ["sudo", "-n", systemctl, "restart", "dsign-mpv.service"],
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=10.0
+                timeout=25.0,
             )
             duration = time.time() - start_time
             
@@ -205,12 +212,22 @@ class MPVManager:
             return False
             
         except subprocess.CalledProcessError as e:
+            msg = (e.stderr or e.stdout or "").strip() or str(e)
+            msg_l = msg.lower()
+            if (
+                "a terminal is required" in msg_l
+                or "password is required" in msg_l
+                or "interactive authentication is required" in msg_l
+            ):
+                msg = (
+                    "sudoers not configured (NOPASSWD) for: sudo systemctl restart dsign-mpv.service"
+                )
             self.logger.error(
                 "Systemd restart failed",
                 extra={
                     "operation": "SystemdServiceRestart",
                     "error": str(e),
-                    "stderr": e.stderr.strip()
+                    "stderr": msg,
                 }
             )
             return False
