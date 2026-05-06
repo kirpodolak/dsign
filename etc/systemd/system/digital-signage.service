@@ -1,7 +1,10 @@
 [Unit]
 Description=Digital Signage Controller
 After=network.target dsign-mpv.service dsign-network-assistant.service
-Requires=dsign-mpv.service
+# Wants= keeps ordering (After= above) but does NOT stop signage when mpv is restarted.
+# Requires= would tear down digital-signage during `systemctl restart dsign-mpv` (e.g. Settings UI or IPC recovery),
+# killing the Flask process and any in-flight sudo systemctl child with SIGKILL — see journal around those restarts.
+Wants=dsign-mpv.service
 # Do not Wants= network-assistant here: it is Type=oneshot (can block ~120s). MPV unit already Wants it before signage.
 StartLimitIntervalSec=60
 StartLimitBurst=5
