@@ -16,6 +16,10 @@ class MPVIPCClosedError(ConnectionError):
     """mpv closed the unix socket before returning a JSON reply for our request_id."""
 
 
+class MPVIPCTimeoutError(TimeoutError):
+    """mpv accepted IPC but sent no JSON command reply (often wedged main thread; events may still arrive)."""
+
+
 def _is_ipc_transport_error(exc: BaseException) -> bool:
     """True when the IPC session died (mpv restart/crash) rather than a logical mpv error."""
     if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, MPVIPCClosedError)):
@@ -26,6 +30,11 @@ def _is_ipc_transport_error(exc: BaseException) -> bool:
         if errno in (104, 32):
             return True
     return False
+
+
+def _ipc_error_should_restart_mpv(exc: BaseException) -> bool:
+    """Transport drop or hung IPC (no reply) — systemd restart is the practical recovery."""
+    return _is_ipc_transport_error(exc) or isinstance(exc, MPVIPCTimeoutError)
 
 
 def _pick_mpv_ipc_command_reply(data: bytes, expect_request_id: Optional[int]) -> Optional[Dict[str, Any]]:
@@ -350,7 +359,7 @@ class MPVManager:
         def _retry_sleep_after_failure(exc: BaseException, attempt_idx: int) -> None:
             if attempt_idx >= PlaybackConstants.MAX_RETRIES - 1:
                 return
-            if _is_ipc_transport_error(exc):
+            if _ipc_error_should_restart_mpv(exc):
                 i = min(attempt_idx, len(delays_transport) - 1)
                 try:
                     d = float(delays_transport[i])
@@ -362,7 +371,7 @@ class MPVManager:
 
         def _maybe_restart_mpv_for_transport(*, reason: str, attempt_num: int) -> None:
             """
-            One bounded systemd restart per burst of IPC transport failures (many callers poll in parallel).
+            One bounded systemd restart per burst of IPC failures (transport drop or hung/no-reply).
             """
             window = float(os.getenv("DSIGN_MPV_RESTART_COALESCE_SEC", "8") or 8)
             if window < 0:
@@ -373,7 +382,7 @@ class MPVManager:
                     return
                 self._last_mpv_restart_attempt_ts = now
             self.logger.warning(
-                "MPV IPC transport failure; attempting systemd restart",
+                "MPV IPC failure; attempting systemd restart",
                 extra={
                     "operation": "MPVCommand",
                     "command": command_name,
@@ -515,7 +524,7 @@ class MPVManager:
 
                         if peer_closed_early:
                             raise MPVIPCClosedError("mpv closed IPC before command reply")
-                        raise TimeoutError(
+                        raise MPVIPCTimeoutError(
                             "No command reply from MPV (events only or empty buffer)"
                         )
 
@@ -557,7 +566,7 @@ class MPVManager:
                         "duration_sec": round(time.time() - start_time, 3),
                     },
                 )
-                if _is_ipc_transport_error(e):
+                if _ipc_error_should_restart_mpv(e):
                     _maybe_restart_mpv_for_transport(
                         reason=str(e), attempt_num=attempt + 1
                     )
