@@ -1,5 +1,4 @@
 import os
-import json
 import shutil
 import socket
 import time
@@ -10,14 +9,7 @@ from pathlib import Path
 
 from .playback_constants import PlaybackConstants
 from .logger import ServiceLogger
-
-
-class MPVIPCClosedError(ConnectionError):
-    """mpv closed the unix socket before returning a JSON reply for our request_id."""
-
-
-class MPVIPCTimeoutError(TimeoutError):
-    """mpv accepted IPC but sent no JSON command reply (often wedged main thread; events may still arrive)."""
+from .mpv_ipc_session import MPVIPCClosedError, MPVIPCTimeoutError, MpvJsonIpcSession
 
 
 def _is_ipc_transport_error(exc: BaseException) -> bool:
@@ -35,33 +27,6 @@ def _is_ipc_transport_error(exc: BaseException) -> bool:
 def _ipc_error_should_restart_mpv(exc: BaseException) -> bool:
     """Transport drop or hung IPC (no reply) — systemd restart is the practical recovery."""
     return _is_ipc_transport_error(exc) or isinstance(exc, MPVIPCTimeoutError)
-
-
-def _pick_mpv_ipc_command_reply(data: bytes, expect_request_id: Optional[int]) -> Optional[Dict[str, Any]]:
-    """
-    MPV IPC: в одном recv() часто приходит несколько JSON-строк (события + ответ команды).
-    Ответ команды всегда содержит ключ "error"; события — нет (только "event", ...).
-    """
-    if not data:
-        return None
-    text = data.decode("utf-8", errors="replace")
-    exact: Optional[Dict[str, Any]] = None
-    any_reply: Optional[Dict[str, Any]] = None
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(obj, dict) or "error" not in obj:
-            continue
-        any_reply = obj
-        if expect_request_id is None or obj.get("request_id") == expect_request_id:
-            exact = obj
-            break
-    return exact if exact is not None else any_reply
 
 
 class MPVManager:
@@ -84,6 +49,7 @@ class MPVManager:
         self.mpv_socket = mpv_socket or PlaybackConstants.SOCKET_PATH
         self.upload_folder = upload_folder
         self._ipc_lock = Lock()
+        self._ipc_session: Optional[MpvJsonIpcSession] = None
         self._mpv_restart_coalesce_lock = Lock()
         self._last_mpv_restart_attempt_ts = 0.0
         self._current_settings = {}
@@ -111,7 +77,7 @@ class MPVManager:
         """Кеширует важные параметры MPV"""
         props = ["pause", "volume", "mute"]
         for prop in props:
-            resp = self._mpv_manager._send_command({
+            resp = self._send_command({
                 "command": ["get_property", prop]
             })
             if resp and "data" in resp:
@@ -316,6 +282,19 @@ class MPVManager:
         )
         return False
 
+    def _get_ipc_session(self) -> MpvJsonIpcSession:
+        if self._ipc_session is None:
+            self._ipc_session = MpvJsonIpcSession(self.mpv_socket, logger=self.logger)
+        return self._ipc_session
+
+    def _reset_ipc_session(self) -> None:
+        """Drop IPC socket state after mpv restart or transport failure (next command reconnects)."""
+        if self._ipc_session is not None:
+            try:
+                self._ipc_session.reset()
+            except Exception:
+                pass
+
     def _send_command(self, command: Dict[str, Any], timeout: float = 5.0) -> Optional[Dict[str, Any]]:
         """Отправка команды в MPV. Успехи — только DEBUG (слайдшоу иначе забивает journal)."""
         command_arr = command.get("command", ["unknown"])
@@ -328,7 +307,6 @@ class MPVManager:
                 prop_name = str(command_arr[1])
             except Exception:
                 prop_name = None
-        ipc_request_id = int(time.time() * 1_000_000) & 0x7FFFFFFF
         start_time = time.time()
 
         # IPC command logs can be extremely chatty (polling loops call this frequently).
@@ -337,16 +315,6 @@ class MPVManager:
         slow_ms = int(os.getenv("DSIGN_MPV_IPC_SLOW_MS", "250") or 250)
         if slow_ms < 0:
             slow_ms = 0
-        if log_ipc_debug:
-            self.logger.debug(
-                "MPVCommand started",
-                extra={
-                    "command": command_name,
-                    **({"property": prop_name} if prop_name else {}),
-                    "request_id": ipc_request_id,
-                    "timeout": timeout,
-                },
-            )
 
         delays_transport = getattr(
             PlaybackConstants,
@@ -392,6 +360,8 @@ class MPVManager:
                 },
             )
             ok = self._restart_systemd_service() and self._wait_for_socket(timeout=12.0)
+            if ok:
+                self._reset_ipc_session()
             if not ok:
                 self.logger.error(
                     "MPV systemd restart after IPC failure did not restore socket",
@@ -403,130 +373,99 @@ class MPVManager:
                     },
                 )
 
+        ipc_request_id = 0
         for attempt in range(PlaybackConstants.MAX_RETRIES):
+            ipc_request_id = int(time.time() * 1_000_000) & 0x7FFFFFFF
+            if log_ipc_debug:
+                self.logger.debug(
+                    "MPVCommand started",
+                    extra={
+                        "command": command_name,
+                        **({"property": prop_name} if prop_name else {}),
+                        "request_id": ipc_request_id,
+                        "timeout": timeout,
+                    },
+                )
             try:
                 with self._ipc_lock:
-                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                        s.settimeout(timeout)
-                        try:
-                            s.connect(self.mpv_socket)
-                        except (ConnectionRefusedError, FileNotFoundError):
-                            raise
+                    sess = self._get_ipc_session()
+                    result = sess.command(
+                        dict(command),
+                        timeout=timeout,
+                        request_id=ipc_request_id,
+                    )
 
-                        payload = dict(command)
-                        payload["request_id"] = ipc_request_id
-                        cmd_str = json.dumps(payload, ensure_ascii=False) + "\n"
-                        try:
-                            s.sendall(cmd_str.encode())
-                        except OSError as se:
-                            if _is_ipc_transport_error(se):
-                                raise MPVIPCClosedError(
-                                    "mpv IPC reset during send"
-                                ) from se
-                            raise
-
-                        deadline = time.time() + timeout
-                        buffer = b""
-                        result: Optional[Dict[str, Any]] = None
-                        peer_closed_early = False
-                        while time.time() < deadline:
-                            s.settimeout(max(0.05, deadline - time.time()))
-                            try:
-                                chunk = s.recv(16384)
-                            except socket.timeout:
-                                continue
-                            except OSError as re:
-                                if _is_ipc_transport_error(re):
-                                    raise MPVIPCClosedError(
-                                        "mpv IPC reset during recv"
-                                    ) from re
-                                raise
-                            buffer += chunk
-                            result = _pick_mpv_ipc_command_reply(buffer, ipc_request_id)
-                            if result is not None:
-                                break
-                            if chunk == b"":
-                                peer_closed_early = True
-                                break
-
-                        if result is not None:
-                            duration_sec = round(time.time() - start_time, 3)
-                            err = result.get("error")
-                            if err == "success":
-                                duration_ms = int(duration_sec * 1000)
-                                if log_ipc_debug or (slow_ms and duration_ms >= slow_ms):
-                                    self.logger.debug(
-                                        "MPVCommand completed" if log_ipc_debug else "MPVCommand slow",
-                                        extra={
-                                            "command": command_name,
-                                            **({"property": prop_name} if prop_name else {}),
-                                            "request_id": ipc_request_id,
-                                            "duration_sec": duration_sec,
-                                            "attempt": attempt + 1,
-                                            **({"slow_ms_threshold": slow_ms} if not log_ipc_debug else {}),
-                                        },
-                                    )
-                            else:
-                                if command_name == "get_property" and err in (
-                                    "property unavailable",
-                                    "property not found",
-                                ):
-                                    if log_ipc_debug:
-                                        self.logger.debug(
-                                            "MPVCommand property unavailable",
-                                            extra={
-                                                "command": command_name,
-                                                **({"property": prop_name} if prop_name else {}),
-                                                "request_id": ipc_request_id,
-                                                "duration_sec": duration_sec,
-                                                "attempt": attempt + 1,
-                                                "mpv_error": err,
-                                            },
-                                        )
-                                    return {
-                                        "request_id": result.get("request_id", ipc_request_id),
-                                        "error": "success",
-                                        "data": None,
-                                    }
-                                quiet_errs = {
-                                    "property unavailable",
-                                    "property not found",
-                                    "error accessing property",
-                                }
-                                quiet_props = False
-                                try:
-                                    if (
-                                        command_name == "set_property"
-                                        and isinstance(prop_name, str)
-                                        and prop_name.startswith("file-local-options/")
-                                    ):
-                                        quiet_props = True
-                                except Exception:
-                                    quiet_props = False
-                                log_fn = (
-                                    self.logger.debug
-                                    if err in quiet_errs or quiet_props
-                                    else self.logger.warning
-                                )
-                                log_fn(
-                                    "MPVCommand error response",
-                                    extra={
-                                        "command": command_name,
-                                        **({"property": prop_name} if prop_name else {}),
-                                        "request_id": ipc_request_id,
-                                        "duration_sec": duration_sec,
-                                        "attempt": attempt + 1,
-                                        "mpv_error": err,
-                                        **({} if err != "property unavailable" else {"response": result}),
-                                    },
-                                )
-                            return result
-
-                        if peer_closed_early:
-                            raise MPVIPCClosedError("mpv closed IPC before command reply")
-                        raise MPVIPCTimeoutError(
-                            "No command reply from MPV (events only or empty buffer)"
+                duration_sec = round(time.time() - start_time, 3)
+                err = result.get("error")
+                if err == "success":
+                    duration_ms = int(duration_sec * 1000)
+                    if log_ipc_debug or (slow_ms and duration_ms >= slow_ms):
+                        self.logger.debug(
+                            "MPVCommand completed" if log_ipc_debug else "MPVCommand slow",
+                            extra={
+                                "command": command_name,
+                                **({"property": prop_name} if prop_name else {}),
+                                "request_id": ipc_request_id,
+                                "duration_sec": duration_sec,
+                                "attempt": attempt + 1,
+                                **({"slow_ms_threshold": slow_ms} if not log_ipc_debug else {}),
+                            },
                         )
+                else:
+                    if command_name == "get_property" and err in (
+                        "property unavailable",
+                        "property not found",
+                    ):
+                        if log_ipc_debug:
+                            self.logger.debug(
+                                "MPVCommand property unavailable",
+                                extra={
+                                    "command": command_name,
+                                    **({"property": prop_name} if prop_name else {}),
+                                    "request_id": ipc_request_id,
+                                    "duration_sec": duration_sec,
+                                    "attempt": attempt + 1,
+                                    "mpv_error": err,
+                                },
+                            )
+                        return {
+                            "request_id": result.get("request_id", ipc_request_id),
+                            "error": "success",
+                            "data": None,
+                        }
+                    quiet_errs = {
+                        "property unavailable",
+                        "property not found",
+                        "error accessing property",
+                    }
+                    quiet_props = False
+                    try:
+                        if (
+                            command_name == "set_property"
+                            and isinstance(prop_name, str)
+                            and prop_name.startswith("file-local-options/")
+                        ):
+                            quiet_props = True
+                    except Exception:
+                        quiet_props = False
+                    log_fn = (
+                        self.logger.debug
+                        if err in quiet_errs or quiet_props
+                        else self.logger.warning
+                    )
+                    log_fn(
+                        "MPVCommand error response",
+                        extra={
+                            "command": command_name,
+                            **({"property": prop_name} if prop_name else {}),
+                            "request_id": ipc_request_id,
+                            "duration_sec": duration_sec,
+                            "attempt": attempt + 1,
+                            "mpv_error": err,
+                            **({} if err != "property unavailable" else {"response": result}),
+                        },
+                    )
+                return result
 
             except (ConnectionRefusedError, FileNotFoundError):
                 self.logger.warning(
@@ -543,6 +482,7 @@ class MPVManager:
                     if not self._restart_systemd_service() or not self._wait_for_socket():
                         _retry_sleep_after_failure(ConnectionRefusedError("socket"), attempt)
                         continue
+                    self._reset_ipc_session()
                 except Exception:
                     _retry_sleep_after_failure(ConnectionRefusedError("socket"), attempt)
                     continue
@@ -566,6 +506,7 @@ class MPVManager:
                         "duration_sec": round(time.time() - start_time, 3),
                     },
                 )
+                self._reset_ipc_session()
                 if _ipc_error_should_restart_mpv(e):
                     _maybe_restart_mpv_for_transport(
                         reason=str(e), attempt_num=attempt + 1
@@ -650,6 +591,12 @@ class MPVManager:
             )
         finally:
             self._mpv_ready = False
+            if self._ipc_session is not None:
+                try:
+                    self._ipc_session.close()
+                except Exception:
+                    pass
+                self._ipc_session = None
 
     def update_settings(self, settings: Dict[str, Any]) -> bool:
         """Обновление настроек"""
