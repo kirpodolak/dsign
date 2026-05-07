@@ -4,7 +4,7 @@ import socket
 import time
 import subprocess
 from threading import Lock
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 from pathlib import Path
 
 from .playback_constants import PlaybackConstants
@@ -294,6 +294,172 @@ class MPVManager:
                 self._ipc_session.reset()
             except Exception:
                 pass
+
+    @staticmethod
+    def _normalize_get_property_batch_reply(
+        result: Dict[str, Any], ipc_request_id: int
+    ) -> Dict[str, Any]:
+        """Match single-command normalization for get_property (unavailable → success, data None)."""
+        err = result.get("error")
+        if err == "success":
+            return result
+        if err in ("property unavailable", "property not found"):
+            return {
+                "request_id": result.get("request_id", ipc_request_id),
+                "error": "success",
+                "data": None,
+            }
+        return result
+
+    def get_properties_snapshot(
+        self,
+        names: List[str],
+        *,
+        timeout: float = 3.0,
+    ) -> Dict[str, Optional[Any]]:
+        """
+        Multiple get_property in one IPC round-trip (ordered, de-duplicated keys).
+
+        Returns map property_name -> data (or None if unavailable / error). No per-property logging.
+        """
+        ordered: List[str] = []
+        seen: set[str] = set()
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                ordered.append(n)
+        if not ordered:
+            return {}
+
+        delays_transport = getattr(
+            PlaybackConstants,
+            "RETRY_DELAY_TRANSPORT_SEC",
+            (0.15, 0.35, 0.75),
+        )
+        if not isinstance(delays_transport, (list, tuple)):
+            delays_transport = (0.15, 0.35, 0.75)
+
+        def _retry_sleep_after_failure(exc: BaseException, attempt_idx: int) -> None:
+            if attempt_idx >= PlaybackConstants.MAX_RETRIES - 1:
+                return
+            if _ipc_error_should_restart_mpv(exc):
+                i = min(attempt_idx, len(delays_transport) - 1)
+                try:
+                    d = float(delays_transport[i])
+                except (TypeError, ValueError, IndexError):
+                    d = 0.25
+                time.sleep(max(0.0, d))
+            else:
+                time.sleep(PlaybackConstants.RETRY_DELAY)
+
+        def _maybe_restart_mpv_batch(
+            *, reason: str, attempt_num: int, ipc_request_id: int
+        ) -> None:
+            window = float(os.getenv("DSIGN_MPV_RESTART_COALESCE_SEC", "8") or 8)
+            if window < 0:
+                window = 0.0
+            now = time.time()
+            with self._mpv_restart_coalesce_lock:
+                if window > 0 and (now - self._last_mpv_restart_attempt_ts) < window:
+                    return
+                self._last_mpv_restart_attempt_ts = now
+            self.logger.warning(
+                "MPV IPC failure; attempting systemd restart",
+                extra={
+                    "operation": "MPVCommandBatch",
+                    "attempt": attempt_num,
+                    "request_id": ipc_request_id,
+                    "reason": reason,
+                    "properties": ",".join(ordered[:12])
+                    + ("..." if len(ordered) > 12 else ""),
+                },
+            )
+            ok = self._restart_systemd_service() and self._wait_for_socket(timeout=12.0)
+            if ok:
+                self._reset_ipc_session()
+            if not ok:
+                self.logger.error(
+                    "MPV systemd restart after IPC batch failure did not restore socket",
+                    extra={
+                        "operation": "MPVCommandBatch",
+                        "attempt": attempt_num,
+                    },
+                )
+
+        first_rid = 0
+        for attempt in range(PlaybackConstants.MAX_RETRIES):
+            base_rid = int(time.time() * 1_000_000) & 0x7FFFFFFF
+            ids: List[int] = []
+            items: List[tuple[int, Dict[str, Any]]] = []
+            for idx, pname in enumerate(ordered):
+                ipc_request_id = (base_rid + idx * 7919 + ((idx & 31) << 20)) & 0x7FFFFFFF
+                ipc_request_id = max(1, ipc_request_id)
+                ids.append(ipc_request_id)
+                items.append((ipc_request_id, {"command": ["get_property", pname]}))
+            first_rid = ids[0] if ids else 0
+            try:
+                with self._ipc_lock:
+                    sess = self._get_ipc_session()
+                    raw_results = sess.commands_batch(items, timeout=float(timeout))
+
+                out: Dict[str, Optional[Any]] = {}
+                for pname, ipc_request_id, raw in zip(ordered, ids, raw_results):
+                    norm = self._normalize_get_property_batch_reply(raw, ipc_request_id)
+                    if norm.get("error") != "success":
+                        out[pname] = None
+                        continue
+                    out[pname] = norm.get("data")
+                return out
+            except (ConnectionRefusedError, FileNotFoundError):
+                self.logger.warning(
+                    "MPV socket not available during batch snapshot, restarting mpv…",
+                    extra={
+                        "operation": "MPVCommandBatch",
+                        "attempt": attempt + 1,
+                    },
+                )
+                try:
+                    if not self._restart_systemd_service() or not self._wait_for_socket():
+                        _retry_sleep_after_failure(
+                            ConnectionRefusedError("socket"), attempt
+                        )
+                        continue
+                    self._reset_ipc_session()
+                except Exception:
+                    _retry_sleep_after_failure(ConnectionRefusedError("socket"), attempt)
+                    continue
+                continue
+            except Exception as e:
+                self._reset_ipc_session()
+                if attempt == PlaybackConstants.MAX_RETRIES - 1:
+                    self.logger.warning(
+                        "MPV get_properties_snapshot failed",
+                        extra={
+                            "operation": "MPVCommandBatch",
+                            "attempt": attempt + 1,
+                            "error": str(e),
+                            "type": type(e).__name__,
+                        },
+                    )
+                else:
+                    self.logger.debug(
+                        f"Batched MPV snapshot attempt {attempt + 1} failed",
+                        extra={
+                            "operation": "MPVCommandBatch",
+                            "error": str(e),
+                            "type": type(e).__name__,
+                        },
+                    )
+                if _ipc_error_should_restart_mpv(e):
+                    _maybe_restart_mpv_batch(
+                        reason=str(e),
+                        attempt_num=attempt + 1,
+                        ipc_request_id=first_rid,
+                    )
+                _retry_sleep_after_failure(e, attempt)
+
+        empty: Dict[str, Optional[Any]] = {p: None for p in ordered}
+        return empty
 
     def _send_command(self, command: Dict[str, Any], timeout: float = 5.0) -> Optional[Dict[str, Any]]:
         """Отправка команды в MPV. Успехи — только DEBUG (слайдшоу иначе забивает journal)."""
