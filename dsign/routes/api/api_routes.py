@@ -64,11 +64,18 @@ def init_api_routes(api_bp, services):
     _system_status_cache_lock = Lock()
     _system_status_cache_ttl_sec: float = 2.0
 
+    _mpv_audio_poll_cache: dict = {"ts": 0.0, "payload": None}
+    _mpv_audio_poll_cache_lock = Lock()
+    _mpv_audio_poll_cache_ttl_sec: float = 12.0
+
     def _invalidate_system_status_cache() -> None:
-        """So the next /api/system/status poll returns fresh audio (not a 2s stale snapshot)."""
+        """So the next /api/system/status poll returns fresh audio (not a stale snapshot)."""
         with _system_status_cache_lock:
             _system_status_cache["payload"] = None
             _system_status_cache["ts"] = 0.0
+        with _mpv_audio_poll_cache_lock:
+            _mpv_audio_poll_cache["payload"] = None
+            _mpv_audio_poll_cache["ts"] = 0.0
 
     _network_status_cache: dict = {"ts": 0.0, "payload": None}
     _network_status_cache_lock = Lock()
@@ -462,36 +469,65 @@ def init_api_routes(api_bp, services):
 
     def _audio_get_mpv() -> dict | None:
         """MPV software volume (0..100) when output bypasses amixer (common on Bookworm + direct HDMI)."""
+        mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
+        if not mgr:
+            return None
         try:
-            mgr = getattr(playback_service, "_mpv_manager", None) if playback_service else None
-            if not mgr:
-                return None
-            vr = mgr._send_command({"command": ["get_property", "volume"]}, timeout=2.0)
-            mr = mgr._send_command({"command": ["get_property", "mute"]}, timeout=2.0)
-            if not vr or vr.get("error") != "success" or "data" not in vr:
-                return None
-            vraw = vr["data"]
-            try:
-                vnum = int(round(float(vraw)))
-            except (TypeError, ValueError):
-                vnum = None
-            mraw = mr.get("data") if (mr and mr.get("error") == "success" and "data" in mr) else None
-            if mraw is None:
-                mdata = None
-            elif isinstance(mraw, bool):
-                mdata = mraw
-            elif isinstance(mraw, (int, float)):
-                mdata = bool(mraw)
-            else:
-                ms = str(mraw).strip().lower()
-                mdata = ms in ("yes", "true", "1", "on")
-            return {
-                "available": True,
-                "volume_percent": vnum,
-                "muted": mdata,
-            }
+            env_ttl_raw = os.getenv("DSIGN_MPV_AUDIO_POLL_CACHE_SEC", "").strip()
+            ttl = (
+                float(env_ttl_raw)
+                if env_ttl_raw
+                else float(_mpv_audio_poll_cache_ttl_sec)
+            )
+        except ValueError:
+            ttl = float(_mpv_audio_poll_cache_ttl_sec)
+        ttl = max(2.0, min(120.0, ttl))
+
+        now = time.time()
+        with _mpv_audio_poll_cache_lock:
+            cached = _mpv_audio_poll_cache.get("payload")
+            ts = float(_mpv_audio_poll_cache.get("ts") or 0.0)
+            if cached is not None and (now - ts) < ttl:
+                return dict(cached)
+
+        try:
+            snap = mgr.get_properties_snapshot(["volume", "mute"], timeout=2.0)
         except Exception:
             return None
+        if not snap:
+            return None
+        vraw = snap.get("volume")
+        mraw = snap.get("mute")
+        if vraw is None and mraw is None:
+            return None
+
+        try:
+            vnum = int(round(float(vraw)))
+        except (TypeError, ValueError):
+            vnum = None
+
+        if mraw is None:
+            mdata = None
+        elif isinstance(mraw, bool):
+            mdata = mraw
+        elif isinstance(mraw, (int, float)):
+            mdata = bool(mraw)
+        else:
+            ms = str(mraw).strip().lower()
+            mdata = ms in ("yes", "true", "1", "on")
+
+        payload = {
+            "available": True,
+            "volume_percent": vnum,
+            "muted": mdata,
+        }
+        try:
+            with _mpv_audio_poll_cache_lock:
+                _mpv_audio_poll_cache["payload"] = dict(payload)
+                _mpv_audio_poll_cache["ts"] = now
+        except Exception:
+            pass
+        return payload
 
     def _audio_set_mpv(volume_percent: int | None, muted: bool | None) -> None:
         try:

@@ -18,7 +18,7 @@ import queue
 import socket
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 class MPVIPCClosedError(ConnectionError):
@@ -137,6 +137,87 @@ class MpvJsonIpcSession:
         if not isinstance(result, dict):
             raise MPVIPCClosedError("mpv IPC unexpected reply payload")
         return result
+
+    def commands_batch(
+        self,
+        items: List[tuple[int, Dict[str, Any]]],
+        *,
+        timeout: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Send several IPC commands and collect replies (order matches ``items``).
+
+        Replies may arrive interleaved from mpv; each ``request_id`` has its own wait queue.
+        Raises on first per-command deadline miss (drops any still-registered ids for this batch).
+        """
+        if not items:
+            return []
+
+        qs: List[queue.Queue] = []
+        ids: List[int] = []
+        chunks: List[bytes] = []
+
+        try:
+            for ipc_request_id, payload in items:
+                q: queue.Queue = queue.Queue(maxsize=8)
+                qs.append(q)
+                ids.append(ipc_request_id)
+                with self._pending_lock:
+                    self._pending[ipc_request_id] = q
+                body = dict(payload)
+                body["request_id"] = ipc_request_id
+                chunks.append((json.dumps(body, ensure_ascii=False) + "\n").encode("utf-8"))
+        except BaseException:
+            for ipc_request_id in ids:
+                with self._pending_lock:
+                    self._pending.pop(ipc_request_id, None)
+            raise
+
+        try:
+            self._ensure_connected_and_reader()
+            with self._conn_lock:
+                if self._sock is None:
+                    raise MPVIPCClosedError("mpv IPC socket not connected")
+                try:
+                    self._sock.sendall(b"".join(chunks))
+                except OSError as se:
+                    self._close_socket_unlocked(fail_pending=False)
+                    raise MPVIPCClosedError(f"mpv IPC reset during send: {se}") from se
+        except BaseException:
+            for ipc_request_id in ids:
+                with self._pending_lock:
+                    self._pending.pop(ipc_request_id, None)
+            raise
+
+        n = len(qs)
+        budget = float(timeout)
+        if n > 1:
+            budget = min(35.0, budget + 0.45 * float(n - 1))
+        deadline = time.monotonic() + max(0.05, budget)
+        results: List[Dict[str, Any]] = []
+        try:
+            for q in qs:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise MPVIPCTimeoutError(
+                        "No command reply from MPV (events only or empty buffer)"
+                    )
+                try:
+                    raw = q.get(timeout=remaining)
+                except queue.Empty:
+                    raise MPVIPCTimeoutError(
+                        "No command reply from MPV (events only or empty buffer)"
+                    )
+                if isinstance(raw, BaseException):
+                    raise raw
+                if not isinstance(raw, dict):
+                    raise MPVIPCClosedError("mpv IPC unexpected reply payload")
+                results.append(raw)
+            return results
+        finally:
+            for ipc_request_id in ids:
+                with self._pending_lock:
+                    self._pending.pop(ipc_request_id, None)
 
     # --- internals ---
 

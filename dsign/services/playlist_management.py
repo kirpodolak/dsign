@@ -201,34 +201,31 @@ class PlaylistManager:
                 return True
             self._stop_event.wait(timeout=min(step, remaining))
 
-    def _mpv_get_prop_bool(self, name: str, timeout: float = 3.0) -> Optional[bool]:
-        """Return bool property value, or None if unavailable / error."""
+    def _mpv_snapshot(self, props: List[str], *, timeout: float = 3.0) -> Dict[str, Optional[Any]]:
+        """Batched property read-through (persistent IPC phase 2)."""
         try:
-            resp = self._mpv_manager._send_command(
-                {"command": ["get_property", name]},
-                timeout=timeout,
-            )
+            return self._mpv_manager.get_properties_snapshot(props, timeout=timeout)
         except Exception:
-            return None
-        if not resp or resp.get("error") != "success":
-            return None
-        data = resp.get("data")
-        if isinstance(data, bool):
-            return data
+            return {p: None for p in props}
+
+    @staticmethod
+    def _snap_bool(snap: Dict[str, Any], key: str) -> Optional[bool]:
+        val = snap.get(key) if snap else None
+        if isinstance(val, bool):
+            return val
         return None
 
-    def _mpv_get_prop_number(self, name: str, timeout: float = 3.0) -> Optional[float]:
-        """Return numeric property (time-pos, duration, ...), or None if unavailable."""
-        try:
-            resp = self._mpv_manager._send_command(
-                {"command": ["get_property", name]},
-                timeout=timeout,
-            )
-        except Exception:
+    @staticmethod
+    def _snap_str(snap: Dict[str, Any], key: str) -> Optional[str]:
+        snap = snap or {}
+        val = snap.get(key)
+        if val is None:
             return None
-        if not resp or resp.get("error") != "success":
-            return None
-        data = resp.get("data")
+        return str(val)
+
+    def _snap_number(self, snap: Dict[str, Any], key: str) -> Optional[float]:
+        snap = snap or {}
+        data = snap.get(key)
         if isinstance(data, (int, float)) and not isinstance(data, bool):
             return float(data)
         if isinstance(data, str):
@@ -242,21 +239,6 @@ class PlaylistManager:
                 except ValueError:
                     return None
         return None
-
-    def _mpv_get_prop_string(self, name: str, timeout: float = 3.0) -> Optional[str]:
-        try:
-            resp = self._mpv_manager._send_command(
-                {"command": ["get_property", name]},
-                timeout=timeout,
-            )
-        except Exception:
-            return None
-        if not resp or resp.get("error") != "success":
-            return None
-        data = resp.get("data")
-        if data is None:
-            return None
-        return str(data)
 
     def _normalize_mpv_http_headers(
         self,
@@ -886,7 +868,8 @@ class PlaylistManager:
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
-            idle = self._mpv_get_prop_bool("idle-active", timeout=3.0)
+            snap = self._mpv_snapshot(["idle-active"], timeout=3.0)
+            idle = self._snap_bool(snap, "idle-active")
             if idle is False:
                 return True
             self._stop_event.wait(timeout=0.15)
@@ -902,24 +885,35 @@ class PlaylistManager:
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
-            idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+            snap = self._mpv_snapshot(
+                [
+                    "idle-active",
+                    "eof-reached",
+                    "demuxer",
+                    "stream-open-filename",
+                    "path",
+                    "demuxer-cache-time",
+                ],
+                timeout=2.0,
+            )
+            idle = self._snap_bool(snap, "idle-active")
             if idle is True:
                 return False
-            eof = self._mpv_get_prop_bool("eof-reached", timeout=2.0)
+            eof = self._snap_bool(snap, "eof-reached")
             if eof is True:
                 return False
 
-            dem = self._mpv_get_prop_string("demuxer", timeout=2.0)
+            dem = self._snap_str(snap, "demuxer")
             if dem and str(dem).strip():
                 return True
-            soc = self._mpv_get_prop_string("stream-open-filename", timeout=2.0)
+            soc = self._snap_str(snap, "stream-open-filename")
             if soc and len(str(soc).strip()) > 8:
                 return True
-            pth = self._mpv_get_prop_string("path", timeout=2.0)
+            pth = self._snap_str(snap, "path")
             if pth and len(str(pth).strip()) > 8:
                 return True
 
-            dct = self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0)
+            dct = self._snap_number(snap, "demuxer-cache-time")
             if dct is not None and dct > 0.02:
                 return True
 
@@ -965,62 +959,82 @@ class PlaylistManager:
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
+
+            snap_loop: Dict[str, Any] = {}
             if is_ytdl:
-                # When ytdl_hook resolves, MPV's `path` often switches to the resolved URL first,
-                # while time-pos/duration are still unavailable. Use that as readiness signal.
-                cur_stream = self._mpv_get_prop_string("stream-open-filename", timeout=2.0)
+                snap_loop = self._mpv_snapshot(
+                    [
+                        "stream-open-filename",
+                        "path",
+                        "demuxer-cache-time",
+                        "demuxer-cache-duration",
+                        "demuxer",
+                        "time-pos",
+                        "duration",
+                    ],
+                    timeout=2.0,
+                )
+                cur_stream = self._snap_str(snap_loop, "stream-open-filename")
                 if cur_stream and not str(cur_stream).startswith("ytdl://"):
                     return True
-                cur_path = self._mpv_get_prop_string("path", timeout=2.0)
+                cur_path = self._snap_str(snap_loop, "path")
                 if cur_path and not str(cur_path).startswith("ytdl://"):
                     return True
-                # Some mpv builds keep a synthetic `ytdl://...` path until playback starts.
-                # Same signals as HLS: cache/time-pos/duration mean demuxer is alive.
-                dct = self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0)
+                dct = self._snap_number(snap_loop, "demuxer-cache-time")
                 if dct is not None and dct > 0.05:
                     return True
-                dcdur = self._mpv_get_prop_number("demuxer-cache-duration", timeout=2.0)
+                dcdur = self._snap_number(snap_loop, "demuxer-cache-duration")
                 if dcdur is not None and dcdur > 0.05:
                     return True
-                dem = self._mpv_get_prop_string("demuxer", timeout=2.0)
+                dem = self._snap_str(snap_loop, "demuxer")
                 if dem and str(dem).strip():
-                    tp_y = self._mpv_get_prop_number("time-pos", timeout=2.0)
+                    tp_y = self._snap_number(snap_loop, "time-pos")
                     if tp_y is not None:
                         return True
-                    dur_y = self._mpv_get_prop_number("duration", timeout=2.0)
+                    dur_y = self._snap_number(snap_loop, "duration")
                     if dur_y is not None and dur_y > 0:
                         return True
             else:
-                # For already-resolved `edl://` items we still want to see that MPV has opened
-                # something non-empty. Without this, VK can look "ready" and then instantly EOF.
-                cur_stream = self._mpv_get_prop_string("stream-open-filename", timeout=2.0)
-                cur_path = self._mpv_get_prop_string("path", timeout=2.0)
-                if (cur_stream and len(str(cur_stream)) > 0) or (cur_path and len(str(cur_path)) > 0):
+                snap_loop = self._mpv_snapshot(
+                    [
+                        "stream-open-filename",
+                        "path",
+                        "demuxer-cache-time",
+                        "demuxer-cache-duration",
+                        "idle-active",
+                        "eof-reached",
+                        "paused-for-cache",
+                        "core-idle",
+                        "time-pos",
+                        "duration",
+                    ],
+                    timeout=2.0,
+                )
+                cur_stream = self._snap_str(snap_loop, "stream-open-filename")
+                cur_path = self._snap_str(snap_loop, "path")
+                if (cur_stream and len(str(cur_stream)) > 0) or (
+                    cur_path and len(str(cur_path)) > 0
+                ):
                     # do not early-return; keep probing time-pos/duration below
                     pass
-                # HLS (e.g. Rutube): demuxer can buffer for a long time before time-pos/duration
-                # appear; treat meaningful cache as "playback started".
-                dct = self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0)
+                dct = self._snap_number(snap_loop, "demuxer-cache-time")
                 if dct is not None and dct > 0.05:
                     return True
-                dcdur = self._mpv_get_prop_number("demuxer-cache-duration", timeout=2.0)
+                dcdur = self._snap_number(snap_loop, "demuxer-cache-duration")
                 if dcdur is not None and dcdur > 0.05:
                     return True
 
-                idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
-                eof = self._mpv_get_prop_bool("eof-reached", timeout=2.0)
-                paused_cache = self._mpv_get_prop_bool("paused-for-cache", timeout=2.0)
-                core_idle = self._mpv_get_prop_bool("core-idle", timeout=2.0)
+                idle = self._snap_bool(snap_loop, "idle-active")
+                eof = self._snap_bool(snap_loop, "eof-reached")
+                paused_cache = self._snap_bool(snap_loop, "paused-for-cache")
+                core_idle = self._snap_bool(snap_loop, "core-idle")
 
-                # eof-reached / paused-for-cache are often "property unavailable" → None; never require
-                # strict False or we never signal ready on those mpv builds (Rutube HLS).
                 if idle is False and eof is not True:
                     if paused_cache is True:
                         pass
                     elif paused_cache is False:
                         return True
                     else:
-                        # paused-for-cache unknown: trust core-idle or grace window
                         if core_idle is False:
                             return True
                         if time.monotonic() >= grace_until:
@@ -1029,10 +1043,10 @@ class PlaylistManager:
             if heavy_every > 1 and (tick % heavy_every) != 0:
                 self._stop_event.wait(timeout=max(0.15, float(poll_sec)))
                 continue
-            tp = self._mpv_get_prop_number("time-pos", timeout=2.0)
+            tp = self._snap_number(snap_loop, "time-pos")
             if tp is not None:
                 return True
-            dur = self._mpv_get_prop_number("duration", timeout=2.0)
+            dur = self._snap_number(snap_loop, "duration")
             if dur is not None and dur > 0:
                 return True
             self._stop_event.wait(timeout=max(0.1, float(poll_sec)))
@@ -1053,13 +1067,16 @@ class PlaylistManager:
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
-            idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
+            snap = self._mpv_snapshot(
+                ["idle-active", "demuxer", "demuxer-cache-time"], timeout=2.0
+            )
+            idle = self._snap_bool(snap, "idle-active")
             if idle is False:
                 saw_not_idle = True
-            dem = self._mpv_get_prop_string("demuxer", timeout=2.0)
+            dem = self._snap_str(snap, "demuxer")
             if dem and str(dem).strip():
                 saw_demuxer = True
-            elif self._mpv_get_prop_number("demuxer-cache-time", timeout=2.0) not in (None, 0.0):
+            elif self._snap_number(snap, "demuxer-cache-time") not in (None, 0.0):
                 saw_demuxer = True
 
             if saw_not_idle and idle is True and saw_demuxer:
@@ -1097,15 +1114,23 @@ class PlaylistManager:
             if time.time() - start > 6 * 3600:
                 break
 
-            eof = self._mpv_get_prop_bool("eof-reached", timeout=3.0)
+            snap = self._mpv_snapshot(
+                [
+                    "eof-reached",
+                    "duration",
+                    "time-pos",
+                    "idle-active",
+                    "core-idle",
+                ],
+                timeout=3.0,
+            )
+            eof = self._snap_bool(snap, "eof-reached")
             if eof is True:
                 break
 
-            # Local files: reliable end detection when idle/eof properties are sticky (e.g. after
-            # keep-open on a previous still image).
             if not is_network:
-                dur = self._mpv_get_prop_number("duration", timeout=2.0)
-                tp = self._mpv_get_prop_number("time-pos", timeout=2.0)
+                dur = self._snap_number(snap, "duration")
+                tp = self._snap_number(snap, "time-pos")
                 if (
                     dur is not None
                     and dur > 0.5
@@ -1114,7 +1139,7 @@ class PlaylistManager:
                 ):
                     break
 
-            idle = self._mpv_get_prop_bool("idle-active", timeout=3.0)
+            idle = self._snap_bool(snap, "idle-active")
             if idle is True and time.monotonic() >= grace_until:
                 if is_network:
                     if stream_ready:
@@ -1128,7 +1153,7 @@ class PlaylistManager:
             else:
                 consecutive_idle = 0
 
-            core_idle = self._mpv_get_prop_bool("core-idle", timeout=3.0)
+            core_idle = self._snap_bool(snap, "core-idle")
             if (
                 eof is False
                 and core_idle is True
@@ -1146,19 +1171,34 @@ class PlaylistManager:
         This helps distinguish 'mpv never tried to open URL' vs 'opened but blocked (403/TLS)'.
         """
         try:
-            props = ["path", "stream-open-filename", "media-title", "file-format", "demuxer"]
-            snap: Dict[str, Any] = {}
-            for p in props:
-                try:
-                    r = self._mpv_manager._send_command({"command": ["get_property", p]}, timeout=2.0)
-                    if r and r.get("error") == "success":
-                        snap[p] = r.get("data")
-                except Exception:
-                    pass
-            idle = self._mpv_get_prop_bool("idle-active", timeout=2.0)
-            core_idle = self._mpv_get_prop_bool("core-idle", timeout=2.0)
-            tp = self._mpv_get_prop_number("time-pos", timeout=2.0)
-            dur = self._mpv_get_prop_number("duration", timeout=2.0)
+            snap = self._mpv_manager.get_properties_snapshot(
+                [
+                    "path",
+                    "stream-open-filename",
+                    "media-title",
+                    "file-format",
+                    "demuxer",
+                    "idle-active",
+                    "core-idle",
+                    "time-pos",
+                    "duration",
+                ],
+                timeout=2.0,
+            )
+            mpv_props = {
+                k: snap.get(k)
+                for k in (
+                    "path",
+                    "stream-open-filename",
+                    "media-title",
+                    "file-format",
+                    "demuxer",
+                )
+            }
+            idle = self._snap_bool(snap, "idle-active")
+            core_idle = self._snap_bool(snap, "core-idle")
+            tp = self._snap_number(snap, "time-pos")
+            dur = self._snap_number(snap, "duration")
             self.logger.warning(
                 "MPV network stream debug snapshot",
                 extra={
@@ -1168,7 +1208,7 @@ class PlaylistManager:
                     "core_idle": core_idle,
                     "time_pos": tp,
                     "duration": dur,
-                    "mpv_props": snap,
+                    "mpv_props": mpv_props,
                 },
             )
         except Exception:
