@@ -29,8 +29,8 @@ TTYVTDisallocate=no
 
 # Подготовка директории и прав
 ExecStartPre=/bin/chvt 1
-ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv
-ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv
+ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
+ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 
@@ -42,6 +42,9 @@ ExecStart=/usr/local/bin/dsign-mpv-launch
 ExecStartPost=-/bin/systemctl --no-block restart dsign-show-startup-ip.service
 # Run via bash to avoid execute-bit / noexec issues.
 ExecStartPost=-/bin/bash /usr/local/bin/dsign-mpv-post-start
+
+# Preserve mpv.log across restarts (otherwise new mpv truncates the file).
+ExecStopPost=-/usr/local/bin/dsign-mpv-archive-log
 
 # Настройки перезапуска
 Restart=always
