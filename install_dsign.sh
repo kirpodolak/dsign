@@ -173,7 +173,7 @@ TTYVHangup=yes
 TTYVTDisallocate=yes
 UMask=0002
 ExecStartPre=/bin/chvt 1
-ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
+ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv/archive /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/chown -R dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
@@ -181,6 +181,7 @@ ExecStart=/usr/local/bin/dsign-mpv-launch
 # Startup IP OSD helper should run on every MPV (re)start.
 # Use systemd oneshot unit so it doesn't get stuck active(exited).
 ExecStartPost=-/bin/systemctl --no-block restart dsign-show-startup-ip.service
+ExecStopPost=-/bin/bash /usr/local/bin/dsign-mpv-archive-log
 Restart=always
 RestartSec=5s
 StartLimitInterval=60s
@@ -195,12 +196,12 @@ install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/
 sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
-chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-mpv-launch
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-archive-log" /usr/local/bin/dsign-mpv-archive-log
+sed -i 's/\r$//' /usr/local/bin/dsign-mpv-archive-log
+chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
 
 mkdir -p /var/lib/dsign/config
 chown "$DSIGN_USER:$DSIGN_USER" /var/lib/dsign/config
-
-cat > /etc/systemd/system/dsign-network-assistant.service <<EOL
 [Unit]
 Description=Digital Signage Network Assistant (OSD)
 After=network.target
