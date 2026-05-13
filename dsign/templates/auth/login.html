@@ -49,7 +49,7 @@
 
         <form id="login-form" class="login-form" method="POST" action="{{ url_for('auth.login') }}" novalidate>
             {{ form.hidden_tag() }}
-            <input type="hidden" name="next" value="{{ request.args.get('next', '') }}">
+            <input type="hidden" name="next" value="{{ request.args.get('next') or request.args.get('redirect', '') }}">
 
             <div class="login-field">
                 <label class="login-label" for="username">Username</label>
