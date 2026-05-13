@@ -32,9 +32,9 @@ const CONFIG = {
             previewImage: '/api/media/mpv_screenshot'
         },
         headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('meta[name="csrf-token"]')?.content || 
-                          document.cookie.match(/csrf_token=([^;]+)/)?.[1] || ''                
+            'Accept': 'application/json',
+            'X-CSRFToken': document.querySelector('meta[name="csrf-token"]')?.content ||
+                          document.cookie.match(/csrf_token=([^;]+)/)?.[1] || ''
         }
     },
     selectors: {
@@ -111,15 +111,36 @@ const api = {
                             document.cookie.match(/csrf_token=([^;]+)/)?.[1] || 
                             '';
 
+            const method = (fetchOptions.method || 'GET').toUpperCase();
+            const mergedHeaders = {
+                ...CONFIG.api.headers,
+                'X-CSRFToken': csrfToken,
+                ...(fetchOptions.headers || {})
+            };
+            if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+                if (!mergedHeaders['Content-Type'] && !mergedHeaders['content-type']) {
+                    mergedHeaders['Content-Type'] = 'application/json';
+                }
+            } else {
+                delete mergedHeaders['Content-Type'];
+                delete mergedHeaders['content-type'];
+            }
+
             const response = await fetch(`${CONFIG.api.baseUrl}${url}`, {
                 ...fetchOptions,
-                headers: {
-                    ...CONFIG.api.headers,
-                    'X-CSRFToken': csrfToken,
-                    ...(fetchOptions.headers || {})
-                },
+                method,
+                headers: mergedHeaders,
                 credentials: 'include' // Ensure cookies are sent with requests
             });
+
+            if (response.status === 401) {
+                const path = window.location.pathname || '';
+                if (!path.includes('/api/auth/login')) {
+                    const next = encodeURIComponent(path + window.location.search);
+                    window.location.href = `/api/auth/login?next=${next}`;
+                }
+                throw new Error('Authentication required');
+            }
 
             if (!response.ok) {
                 let errorDetails = '';
