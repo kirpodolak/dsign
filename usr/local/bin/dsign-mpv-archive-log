@@ -1,6 +1,8 @@
 #!/bin/bash
 # Snapshot mpv log when dsign-mpv stops so the next start does not truncate evidence.
-# Run as: /bin/bash /usr/local/bin/dsign-mpv-archive-log (systemd ExecStopPost; do not rely on +x).
+# Prefer LF line endings. If you see `$'\r': command not found`, run:
+#   sudo sed -i 's/\r$//' /usr/local/bin/dsign-mpv-archive-log
+# Unit may also pipe this file through `tr -d '\r'` before bash.
 
 set -u
 

@@ -181,7 +181,7 @@ ExecStart=/usr/local/bin/dsign-mpv-launch
 # Startup IP OSD helper should run on every MPV (re)start.
 # Use systemd oneshot unit so it doesn't get stuck active(exited).
 ExecStartPost=-/bin/systemctl --no-block restart dsign-show-startup-ip.service
-ExecStopPost=-/bin/bash /usr/local/bin/dsign-mpv-archive-log
+ExecStopPost=-/bin/bash -c "tr -d '\\r' < /usr/local/bin/dsign-mpv-archive-log | bash"
 Restart=always
 RestartSec=5s
 StartLimitInterval=60s

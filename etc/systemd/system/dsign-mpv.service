@@ -42,9 +42,9 @@ ExecStart=/usr/local/bin/dsign-mpv-launch
 ExecStartPost=-/bin/systemctl --no-block restart dsign-show-startup-ip.service
 # Run via bash to avoid execute-bit / noexec issues.
 ExecStartPost=-/bin/bash /usr/local/bin/dsign-mpv-post-start
-# Copy log before mpv truncates it on next start. Use bash (same as post-start): direct
-# ExecStopPost=/path/script can fail with "Permission denied" if the file is not +x.
-ExecStopPost=-/bin/bash /usr/local/bin/dsign-mpv-archive-log
+# Copy log before mpv truncates it on next start. Pipe through tr so CRLF deployments
+# (Windows editor / core.autocrlf) do not break bash; same pattern as sed in install_dsign.sh.
+ExecStopPost=-/bin/bash -c "tr -d '\\r' < /usr/local/bin/dsign-mpv-archive-log | bash"
 
 # Настройки перезапуска
 Restart=always
