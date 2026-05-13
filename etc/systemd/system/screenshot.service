@@ -27,8 +27,12 @@ ReadWritePaths=/home/dsign/dsign/static/images/ /var/lib/dsign/mpv/
 # playing-media fallback reads playlist files under UPLOAD_FOLDER (install default)
 BindReadOnlyPaths=/var/lib/dsign/media
 
-# ffmpeg kmsgrab needs KMS nodes when mpv IPC cannot save screenshots (vo=drm)
-DeviceAllow=/dev/dri rw
+# ffmpeg kmsgrab needs KMS device nodes when mpv IPC cannot save screenshots (vo=drm).
+# `DeviceAllow=` must name character devices; `/dev/dri` is a directory and makes systemd log:
+#   "/dev/dri is not a device" on every unit reload/timer touch (~every 5 minutes here).
+# Add more lines via drop-in if your box uses card1/renderD129 etc.
+DeviceAllow=/dev/dri/card0 rw
+DeviceAllow=/dev/dri/renderD128 rw
 
 [Install]
 WantedBy=multi-user.target
