@@ -37,16 +37,21 @@ async function fetchAPI(endpoint, options = {}) {
             url += (url.includes('?') ? '&' : '?') + queryParams.toString();
         }
 
-        // Prepare headers
+        const method = options.method?.toUpperCase() || 'GET';
+
+        // Prepare headers (GET/HEAD без тела не должны объявлять Content-Type: application/json — иначе Flask request.is_json)
         const headers = {
-            'Content-Type': 'application/json',
             'Accept': 'application/json',
             ...(authToken && { 'Authorization': `Bearer ${authToken}` }),
             ...options.headers
         };
+        if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
+            if (!headers['Content-Type'] && !headers['content-type']) {
+                headers['Content-Type'] = 'application/json';
+            }
+        }
 
         // Add CSRF token for state-changing requests
-        const method = options.method?.toUpperCase() || 'GET';
         if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
             const csrfToken = getCSRFToken();
             if (csrfToken) {
