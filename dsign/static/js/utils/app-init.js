@@ -185,11 +185,12 @@ export class AuthService {
      * Handle unauthorized access
      */
     handleUnauthorized() {
-        if (window.location.pathname.startsWith('/auth/login')) {
+        const path = window.location.pathname || '';
+        if (path.startsWith('/auth/login') || path.startsWith('/api/auth/login')) {
             return;
         }
 
-        const redirectPath = encodeURIComponent(window.location.pathname + window.location.search);
+        const redirectPath = encodeURIComponent(path + window.location.search);
         window.location.href = `/api/auth/login?next=${redirectPath}`;
     }
 

@@ -2,7 +2,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from flask_login import LoginManager
 from flask_socketio import SocketIO
-from flask import request
+from flask import request, jsonify, redirect, url_for
 import os
 import logging
 from typing import Dict, Any
@@ -88,6 +88,18 @@ def _configure_auth(app) -> None:
     login_manager.login_view = 'auth.login'
     login_manager.login_message = 'Please log in to access this page.'
     login_manager.init_app(app)
+
+    @login_manager.unauthorized_handler
+    def _handle_unauthorized():
+        """API: JSON 401 вместо редиректа на HTML-логин (избегает 302→GET login→405 у fetch)."""
+        path = request.path or ''
+        if path.startswith('/api/'):
+            return jsonify({
+                'success': False,
+                'error': 'Authentication required',
+                'authenticated': False,
+            }), 401
+        return redirect(url_for(login_manager.login_view, next=request.url))
     
     # Импорт модели User только внутри функции
     from .models import User

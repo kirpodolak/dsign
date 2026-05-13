@@ -535,8 +535,8 @@ class AuthService {
         const currentPath = window.location.pathname;
         if (!currentPath.includes('/api/auth/login')) {
             this.logger.warn('Redirecting to login');
-            const redirectUrl = encodeURIComponent(currentPath + window.location.search);
-            window.location.href = `/api/auth/login?redirect=${redirectUrl}`;
+            const next = encodeURIComponent(currentPath + window.location.search);
+            window.location.href = `/api/auth/login?next=${next}`;
         }
     }
 
@@ -620,11 +620,16 @@ class APIService {
                 headers: options.headers
             });
 
+            const method = (options.method || 'GET').toUpperCase();
             const headers = {
                 'Accept': 'application/json',
-                'Content-Type': 'application/json',
                 ...options.headers
             };
+            if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+                if (!headers['Content-Type'] && !headers['content-type']) {
+                    headers['Content-Type'] = 'application/json';
+                }
+            }
 
             const response = await fetch(url, {
                 credentials: 'include',

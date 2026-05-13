@@ -47,10 +47,23 @@ def _is_safe_next_url(target: str) -> bool:
     )
 
 def _get_next_url(default: str):
-    candidate = request.args.get('next') or request.form.get('next') or ''
+    candidate = (
+        request.args.get('next')
+        or request.args.get('redirect')
+        or request.form.get('next')
+        or request.form.get('redirect')
+        or ''
+    )
     if _is_safe_next_url(candidate):
         return candidate
     return default
+
+
+def _login_get_prefers_json() -> bool:
+    """GET /login без тела: Content-Type: application/json или явный приоритет JSON в Accept."""
+    if request.is_json:
+        return True
+    return request.accept_mimetypes.best_match(['application/json', 'text/html']) == 'application/json'
 
 def _is_ajax_request() -> bool:
     return request.headers.get('X-Requested-With') == 'XMLHttpRequest'
@@ -276,13 +289,15 @@ def login():
                     'errors': form.errors
                 }), 400
         
-        # GET request handling
-        if request.is_json:
+        # GET: JSON/API-клиенты — не 405; подсказка на POST с credentials или вход через браузер
+        if _login_get_prefers_json():
             return jsonify({
                 'success': False,
-                'error': 'Method not allowed'
-            }), 405
-            
+                'authenticated': False,
+                'error': 'Authentication required',
+                'message': 'Send credentials with POST (application/json or form), or open this URL in a browser for the login form.',
+            }), 401
+
         return render_template('auth/login.html', form=form)
         
     except Exception as e:
@@ -706,8 +721,9 @@ def reset_limits():
 def auth_status():
     """Authentication status endpoint"""
     if not current_user.is_authenticated:
-        return jsonify({'authenticated': False}), 401
-    
+        # 200: «кто я» без сессии — не ошибка; иначе fetch с 401 дергает handleUnauthorized и ломает проверку.
+        return jsonify({'authenticated': False})
+
     return jsonify({
         'authenticated': True,
         'user': {
