@@ -51,8 +51,18 @@ const GALLERY_CONFIG = {
   previewContainer: '#preview-container',
   closeModalBtn: '#preview-modal-close',
   filenameElement: '#preview-filename',
+  previewFolderElement: '#preview-folder',
   filesizeElement: '#preview-filesize',
-  dateElement: '#preview-date'
+  dateElement: '#preview-date',
+  folderNav: '#gallery-folder-nav',
+  folderColumn: '#gallery-folder-column',
+  folderListScroller: '#gallery-folder-list-scroller',
+  newFolderNameInput: '#gallery-new-folder-name',
+  createFolderBtn: '#gallery-create-folder-btn',
+  viewAllBtn: '#gallery-view-all',
+  viewByFolderBtn: '#gallery-view-by-folder',
+  bulkMoveSelect: '#gallery-bulk-folder-select',
+  bulkMoveBtn: '#gallery-bulk-move-btn',
 };
 
 class MediaGallery {
@@ -66,10 +76,18 @@ class MediaGallery {
     this.transcodeStatus = {};
     this.transcodePollTimer = null;
     this.selectedFiles = new Set();
-    
+    this.viewMode = 'all';
+    /** In by_folder view: null = unsorted (no meta row), number = folder id */
+    this.folderTargetId = null;
+    this._searchReloadTimer = null;
+
     this.initElements();
     this.initEventListeners();
+    this._syncFolderColumnState();
+    this._syncViewToggleButtons();
+    void this._renderFolderNav();
     this.loadMediaFiles();
+    this._syncBulkMoveUi();
     MediaGallery.instance = this;
   }
 
@@ -112,7 +130,19 @@ class MediaGallery {
   async loadMediaFiles() {
     try {
       const params = new URLSearchParams();
-      params.set('view', 'all');
+      if (this.viewMode === 'by_folder') {
+        params.set('view', 'by_folder');
+        if (this.folderTargetId != null) {
+          params.set('folder_id', String(this.folderTargetId));
+        }
+      } else {
+        params.set('view', 'all');
+      }
+      const sort = this.elements.sortSelect?.value || 'name-asc';
+      params.set('sort', sort);
+      const q = (this.elements.searchInput?.value || '').trim();
+      if (q) params.set('search', q);
+
       const url = `/api/media/files?${params.toString()}`;
     
       const response = await fetch(url, {
@@ -146,6 +176,8 @@ class MediaGallery {
         is_video: file.is_video || false,
         is_external: Boolean(file.is_external),
         external: file.external || null,
+        folder_id: file.folder_id ?? null,
+        folder_name: file.folder_name ?? null,
       }));
 
       // Merge transcode status (best-effort)
@@ -161,28 +193,7 @@ class MediaGallery {
 
   processFiles(files) {
     if (!Array.isArray(files)) return [];
-    
-    let filtered = [...files];
-    if (this.elements.searchInput?.value) {
-      const searchTerm = this.elements.searchInput.value.toLowerCase().trim();
-      filtered = filtered.filter(file => 
-        file.name?.toLowerCase().includes(searchTerm)
-      );
-    }
-
-    const sortValue = this.elements.sortSelect?.value;
-    filtered.sort((a, b) => {
-      switch (sortValue) {
-        case 'name-asc': return a.name?.localeCompare(b.name);
-        case 'name-desc': return b.name?.localeCompare(a.name);
-        case 'date-newest': return (b.date || 0) - (a.date || 0);
-        case 'date-oldest': return (a.date || 0) - (b.date || 0);
-        case 'type': return a.type?.localeCompare(b.type);
-        default: return 0;
-      }
-    });
-
-    return filtered;
+    return [...files];
   }
 
   groupFiles(files) {
@@ -323,6 +334,17 @@ class MediaGallery {
         }
       }
 
+      const folderPin = document.createElement('span');
+      folderPin.className =
+        'file-folder-pin' + (!file.folder_name ? ' file-folder-pin--unsorted' : '');
+      const lang = getUiLang();
+      folderPin.title = file.folder_name
+        ? `${t('gallery_folder_label', lang)}: ${file.folder_name}`
+        : `${t('gallery_folder_label', lang)}: ${t('pl_filter_unsorted', lang)}`;
+      folderPin.setAttribute('aria-hidden', 'true');
+      folderPin.innerHTML = '<span class="file-folder-pin__glyph">📁</span>';
+      previewContainer.appendChild(folderPin);
+
       if (provider) {
         const badge = document.createElement('div');
         badge.className = `provider-badge provider-badge--${provider.key}`;
@@ -331,6 +353,7 @@ class MediaGallery {
       }
 
       previewContainer.addEventListener('click', (e) => {
+        if (e.target.closest('.file-folder-pin')) return;
         if (e.target?.tagName !== 'INPUT' && e.target?.tagName !== 'LABEL') {
           this.showPreview({
             ...file,
@@ -377,6 +400,7 @@ class MediaGallery {
           this.selectedFiles.delete(filename);
         }
         this.toggleDeleteButton(this.selectedFiles.size > 0);
+        this._syncBulkMoveUi();
       });
     });
   }
@@ -456,6 +480,7 @@ class MediaGallery {
     if (this.elements.deleteSelectedBtn) {
       this.elements.deleteSelectedBtn.disabled = !enabled;
     }
+    this._syncBulkMoveUi();
   }
 
   toggleSelectAllButton(enabled) {
@@ -470,6 +495,16 @@ class MediaGallery {
         !this.elements.dateElement) return;
     
     this.elements.filenameElement.textContent = file.name || 'Unnamed file';
+    const pf = this.elements.previewFolderElement;
+    if (pf) {
+      const lang = getUiLang();
+      if (file.folder_name) {
+        pf.textContent = `${t('gallery_folder_label', lang)}: ${file.folder_name}`;
+      } else {
+        pf.textContent = `${t('gallery_folder_label', lang)}: ${t('pl_filter_unsorted', lang)}`;
+      }
+      pf.hidden = false;
+    }
     this.elements.filesizeElement.textContent = formatFileSize(file.size);
     this.elements.dateElement.textContent = formatDate(file.date);
     
@@ -637,6 +672,10 @@ class MediaGallery {
     if (this.elements.previewModal) {
       this.elements.previewModal.setAttribute('hidden', '');
       document.body.style.overflow = '';
+      if (this.elements.previewFolderElement) {
+        this.elements.previewFolderElement.hidden = true;
+        this.elements.previewFolderElement.textContent = '';
+      }
       
       const video = this.elements.previewContainer?.querySelector('video');
       if (video) {
@@ -696,6 +735,10 @@ class MediaGallery {
         window.App.Alerts.show('No valid files to upload (allowed: images and videos up to 1 GB)', 'error');
       }
       return;
+    }
+
+    if (this.viewMode === 'by_folder' && this.folderTargetId != null) {
+      formData.append('folder_id', String(this.folderTargetId));
     }
 
     try {
@@ -881,6 +924,8 @@ class MediaGallery {
         window.App.Alerts.show(`Deleted ${this.selectedFiles.size} file(s) successfully`, 'success');
       }
       this.selectedFiles.clear();
+      this.toggleDeleteButton(false);
+      this._syncBulkMoveUi();
       await this.loadMediaFiles();
     } catch (error) {
       console.error('Delete error:', error);
@@ -958,16 +1003,32 @@ class MediaGallery {
     }
 
     if (this.elements.searchInput) {
-      this.elements.searchInput.addEventListener('input', () => this.renderGallery(this.currentFiles));
+      this.elements.searchInput.addEventListener('input', () => {
+        clearTimeout(this._searchReloadTimer);
+        this._searchReloadTimer = setTimeout(() => this.loadMediaFiles(), 320);
+      });
     }
 
     if (this.elements.sortSelect) {
-      this.elements.sortSelect.addEventListener('change', () => this.renderGallery(this.currentFiles));
+      this.elements.sortSelect.addEventListener('change', () => this.loadMediaFiles());
     }
 
     if (this.elements.groupSelect) {
       this.elements.groupSelect.addEventListener('change', () => this.renderGallery(this.currentFiles));
     }
+
+    if (this.elements.createFolderBtn && this.elements.newFolderNameInput) {
+      this.elements.createFolderBtn.addEventListener('click', () => this._createFolderFromInput());
+      this.elements.newFolderNameInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          this._createFolderFromInput();
+        }
+      });
+    }
+
+    this._bindViewToggleButtons();
+    this._bindBulkMove();
 
     if (this.elements.closeModalBtn) {
       this.elements.closeModalBtn.addEventListener('click', this.closePreview.bind(this));
@@ -990,11 +1051,315 @@ class MediaGallery {
     document.addEventListener('dsign:language-changed', () => {
       applyI18n();
       this._syncSelectAllLabel();
+      void this._renderFolderNav();
     });
 
     window.addEventListener('visibilitychange', () => {
       if (!document.hidden) this.loadMediaFiles();
     });
+  }
+
+  _getCsrf() {
+    return document.querySelector('input[name="csrf_token"]')?.value || '';
+  }
+
+  _syncBulkMoveUi() {
+    const btn = this.elements.bulkMoveBtn;
+    if (!btn) return;
+    btn.disabled = (this.selectedFiles?.size || 0) === 0;
+  }
+
+  _bindBulkMove() {
+    if (this.elements.bulkMoveBtn) {
+      this.elements.bulkMoveBtn.addEventListener('click', () => this._bulkMoveSelected());
+    }
+  }
+
+  async _bulkMoveSelected() {
+    const keys = Array.from(this.selectedFiles || []);
+    const lang = getUiLang();
+    if (!keys.length) {
+      window.App?.Alerts?.show?.(t('gallery_bulk_move_none', lang), 'warning');
+      return;
+    }
+    const sel = this.elements.bulkMoveSelect;
+    const raw = sel?.value;
+    const folderId = raw === '' || raw == null ? null : Number(raw);
+    if (folderId != null && !Number.isFinite(folderId)) {
+      window.App?.Alerts?.show?.(t('gallery_bulk_move_err', lang), 'error');
+      return;
+    }
+    const items = keys.map((storage_key) => ({ storage_key, folder_id: folderId }));
+    const csrf = this._getCsrf();
+    try {
+      const res = await fetch('/api/media/item-meta/batch', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...(csrf ? { 'X-CSRFToken': csrf } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ items }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      window.App?.Alerts?.show?.(
+        t('gallery_bulk_moved', lang).replace('{n}', String(data.updated ?? keys.length)),
+        'success'
+      );
+      this.selectedFiles.clear();
+      document.querySelectorAll('.file-checkbox').forEach((cb) => {
+        cb.checked = false;
+      });
+      this._syncBulkMoveUi();
+      this.toggleDeleteButton(false);
+      await this._renderFolderNav();
+      await this.loadMediaFiles();
+    } catch (e) {
+      window.App?.Alerts?.show?.(`${t('gallery_bulk_move_err', lang)}: ${e.message}`, 'error');
+    }
+  }
+
+  _fillBulkFolderSelect(folders) {
+    const sel = this.elements.bulkMoveSelect;
+    if (!sel) return;
+    const lang = getUiLang();
+    const cur = sel.value;
+    sel.innerHTML = '';
+    const o0 = document.createElement('option');
+    o0.value = '';
+    o0.textContent = t('pl_filter_unsorted', lang);
+    sel.appendChild(o0);
+    for (const f of folders || []) {
+      const o = document.createElement('option');
+      o.value = String(f.id);
+      o.textContent = f.name || `Folder ${f.id}`;
+      sel.appendChild(o);
+    }
+    if (cur && [...sel.options].some((op) => op.value === cur)) sel.value = cur;
+  }
+
+  _syncViewToggleButtons() {
+    const a = this.elements.viewAllBtn;
+    const b = this.elements.viewByFolderBtn;
+    if (a) a.classList.toggle('is-active', this.viewMode === 'all');
+    if (b) b.classList.toggle('is-active', this.viewMode === 'by_folder');
+  }
+
+  _syncFolderColumnState() {
+    const col = this.elements.folderColumn;
+    if (col) col.classList.toggle('gallery-folder-column--inactive', this.viewMode === 'all');
+  }
+
+  _bindViewToggleButtons() {
+    const setMode = (mode) => {
+      if (this.viewMode === mode) return;
+      const prev = this.viewMode;
+      this.viewMode = mode;
+      if (mode === 'all') {
+        this.folderTargetId = null;
+      } else if (mode === 'by_folder' && prev === 'all') {
+        this.folderTargetId = null;
+      }
+      this._syncFolderColumnState();
+      this._syncViewToggleButtons();
+      void this._renderFolderNav().then(() => this.loadMediaFiles());
+    };
+    this.elements.viewAllBtn?.addEventListener('click', () => setMode('all'));
+    this.elements.viewByFolderBtn?.addEventListener('click', () => setMode('by_folder'));
+  }
+
+  async _renderFolderNav() {
+    const nav = this.elements.folderNav;
+    if (!nav) return;
+    nav.innerHTML = '';
+    const lang = getUiLang();
+
+    const unsRow = document.createElement('div');
+    unsRow.className = 'gallery-folder-row gallery-folder-row--solo';
+    const unsInner = document.createElement('div');
+    unsInner.className = 'gallery-folder-row__inner';
+    const uns = document.createElement('button');
+    uns.type = 'button';
+    uns.className =
+      'gallery-folder-nav__btn' + (this.folderTargetId === null ? ' is-active' : '');
+    uns.dataset.i18n = 'pl_filter_unsorted';
+    uns.textContent = t('pl_filter_unsorted', lang);
+    uns.addEventListener('click', () => {
+      this.folderTargetId = null;
+      void this._renderFolderNav().then(() => this.loadMediaFiles());
+    });
+    unsInner.appendChild(uns);
+    unsRow.appendChild(unsInner);
+    nav.appendChild(unsRow);
+
+    let folders = [];
+    try {
+      const res = await fetch('/api/media/folders', {
+        headers: { Accept: 'application/json' },
+        credentials: 'include',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.success) {
+        folders = data.folders || [];
+      }
+    } catch (e) {
+      console.error('Failed to load folders', e);
+    }
+
+    this._fillBulkFolderSelect(folders);
+
+    for (const f of folders) {
+      const row = document.createElement('div');
+      row.className = 'gallery-folder-row';
+      const inner = document.createElement('div');
+      inner.className = 'gallery-folder-row__inner';
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className =
+        'gallery-folder-nav__btn gallery-folder-nav__btn--row' +
+        (this.folderTargetId === f.id ? ' is-active' : '');
+      b.textContent = f.name || `Folder ${f.id}`;
+      const fid = f.id;
+      b.addEventListener('click', () => {
+        this.folderTargetId = fid;
+        void this._renderFolderNav().then(() => this.loadMediaFiles());
+      });
+
+      const icons = document.createElement('div');
+      icons.className = 'gallery-folder-row__icons';
+      const renameBtn = document.createElement('button');
+      renameBtn.type = 'button';
+      renameBtn.className = 'gallery-folder-row__icon-btn';
+      renameBtn.title = t('gallery_folder_rename', lang);
+      renameBtn.setAttribute('aria-label', t('gallery_folder_rename', lang));
+      renameBtn.textContent = '✎';
+      renameBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void this._renameFolder(fid, f.name);
+      });
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'gallery-folder-row__icon-btn';
+      delBtn.title = t('gallery_folder_delete', lang);
+      delBtn.setAttribute('aria-label', t('gallery_folder_delete', lang));
+      delBtn.textContent = '🗑';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void this._deleteFolder(fid, f.name);
+      });
+
+      icons.appendChild(renameBtn);
+      icons.appendChild(delBtn);
+      inner.appendChild(b);
+      inner.appendChild(icons);
+      row.appendChild(inner);
+      nav.appendChild(row);
+    }
+  }
+
+  async _renameFolder(folderId, currentName) {
+    const lang = getUiLang();
+    const next = window.prompt(t('gallery_folder_rename_prompt', lang), currentName || '');
+    if (next == null) return;
+    const name = String(next).trim();
+    if (!name || name === currentName) return;
+    const csrf = this._getCsrf();
+    try {
+      const res = await fetch(`/api/media/folders/${folderId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...(csrf ? { 'X-CSRFToken': csrf } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      window.App?.Alerts?.show?.(t('gallery_folder_renamed', lang), 'success');
+      await this._renderFolderNav();
+      await this.loadMediaFiles();
+    } catch (e) {
+      window.App?.Alerts?.show?.(`${t('gallery_folder_rename_err', lang)}: ${e.message}`, 'error');
+    }
+  }
+
+  async _deleteFolder(folderId, folderName) {
+    const lang = getUiLang();
+    const label = folderName || String(folderId);
+    if (!window.confirm(t('gallery_folder_delete_confirm', lang).replace('{name}', label))) {
+      return;
+    }
+    const csrf = this._getCsrf();
+    try {
+      const res = await fetch(`/api/media/folders/${folderId}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...(csrf ? { 'X-CSRFToken': csrf } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ mode: 'metadata' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      if (this.folderTargetId === folderId) {
+        this.folderTargetId = null;
+      }
+      window.App?.Alerts?.show?.(t('gallery_folder_deleted', lang), 'success');
+      await this._renderFolderNav();
+      await this.loadMediaFiles();
+    } catch (e) {
+      window.App?.Alerts?.show?.(`${t('gallery_folder_delete_err', lang)}: ${e.message}`, 'error');
+    }
+  }
+
+  async _createFolderFromInput() {
+    const inp = this.elements.newFolderNameInput;
+    const name = String(inp?.value || '').trim();
+    const lang = getUiLang();
+    if (!name) {
+      window.App?.Alerts?.show?.(t('gallery_new_folder_ph', lang), 'warning');
+      return;
+    }
+    const csrf = this._getCsrf();
+    try {
+      const res = await fetch('/api/media/folders', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...(csrf ? { 'X-CSRFToken': csrf } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      if (inp) inp.value = '';
+      window.App?.Alerts?.show?.(t('gallery_folder_created', lang), 'success');
+      const newId = data.folder?.id;
+      if (this.viewMode === 'by_folder' && newId != null) {
+        this.folderTargetId = newId;
+      }
+      await this._renderFolderNav();
+      await this.loadMediaFiles();
+    } catch (e) {
+      window.App?.Alerts?.show?.(`${t('gallery_folder_create_err', lang)}: ${e.message}`, 'error');
+    }
   }
 
   _syncSelectAllLabel() {
