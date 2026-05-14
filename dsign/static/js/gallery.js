@@ -61,8 +61,11 @@ const GALLERY_CONFIG = {
   createFolderBtn: '#gallery-create-folder-btn',
   viewAllBtn: '#gallery-view-all',
   viewByFolderBtn: '#gallery-view-by-folder',
-  bulkMoveSelect: '#gallery-bulk-folder-select',
-  bulkMoveBtn: '#gallery-bulk-move-btn',
+  moveSelectedBtn: '#gallery-move-selected-btn',
+  moveModal: '#gallery-move-modal',
+  moveModalSelect: '#gallery-move-modal-folder-select',
+  moveModalConfirm: '#gallery-move-modal-confirm',
+  moveModalCancel: '#gallery-move-modal-cancel',
 };
 
 class MediaGallery {
@@ -80,6 +83,8 @@ class MediaGallery {
     /** In by_folder view: null = unsorted (no meta row), number = folder id */
     this.folderTargetId = null;
     this._searchReloadTimer = null;
+    /** @type {Array<{id:number,name:string}>} */
+    this._foldersCache = [];
 
     this.initElements();
     this.initEventListeners();
@@ -87,7 +92,7 @@ class MediaGallery {
     this._syncViewToggleButtons();
     void this._renderFolderNav();
     this.loadMediaFiles();
-    this._syncBulkMoveUi();
+    this._syncMoveToolbarBtn();
     MediaGallery.instance = this;
   }
 
@@ -400,7 +405,7 @@ class MediaGallery {
           this.selectedFiles.delete(filename);
         }
         this.toggleDeleteButton(this.selectedFiles.size > 0);
-        this._syncBulkMoveUi();
+        this._syncMoveToolbarBtn();
       });
     });
   }
@@ -480,7 +485,7 @@ class MediaGallery {
     if (this.elements.deleteSelectedBtn) {
       this.elements.deleteSelectedBtn.disabled = !enabled;
     }
-    this._syncBulkMoveUi();
+    this._syncMoveToolbarBtn();
   }
 
   toggleSelectAllButton(enabled) {
@@ -551,6 +556,10 @@ class MediaGallery {
       }
     }
     
+    if (this.elements.moveModal && !this.elements.moveModal.hasAttribute('hidden')) {
+      this._closeMoveModal();
+    }
+
     if (this.elements.previewModal) {
       this.elements.previewModal.removeAttribute('hidden');
       document.body.style.overflow = 'hidden';
@@ -671,7 +680,10 @@ class MediaGallery {
   closePreview() {
     if (this.elements.previewModal) {
       this.elements.previewModal.setAttribute('hidden', '');
-      document.body.style.overflow = '';
+      const moveM = this.elements.moveModal;
+      if (!moveM || moveM.hasAttribute('hidden')) {
+        document.body.style.overflow = '';
+      }
       if (this.elements.previewFolderElement) {
         this.elements.previewFolderElement.hidden = true;
         this.elements.previewFolderElement.textContent = '';
@@ -925,7 +937,7 @@ class MediaGallery {
       }
       this.selectedFiles.clear();
       this.toggleDeleteButton(false);
-      this._syncBulkMoveUi();
+      this._syncMoveToolbarBtn();
       await this.loadMediaFiles();
     } catch (error) {
       console.error('Delete error:', error);
@@ -1028,7 +1040,7 @@ class MediaGallery {
     }
 
     this._bindViewToggleButtons();
-    this._bindBulkMove();
+    this._bindMoveModal();
 
     if (this.elements.closeModalBtn) {
       this.elements.closeModalBtn.addEventListener('click', this.closePreview.bind(this));
@@ -1042,9 +1054,17 @@ class MediaGallery {
     });
 
     document.addEventListener('keydown', (e) => {
-      const modal = this.elements.previewModal;
-      if (e.key === 'Escape' && modal && !modal.hasAttribute('hidden')) {
-        this.closePreview();
+      if (e.key === 'Escape') {
+        const moveM = this.elements.moveModal;
+        if (moveM && !moveM.hasAttribute('hidden')) {
+          this._closeMoveModal();
+          e.preventDefault();
+          return;
+        }
+        const modal = this.elements.previewModal;
+        if (modal && !modal.hasAttribute('hidden')) {
+          this.closePreview();
+        }
       }
     });
 
@@ -1063,27 +1083,90 @@ class MediaGallery {
     return document.querySelector('input[name="csrf_token"]')?.value || '';
   }
 
-  _syncBulkMoveUi() {
-    const btn = this.elements.bulkMoveBtn;
+  _syncMoveToolbarBtn() {
+    const btn = this.elements.moveSelectedBtn;
     if (!btn) return;
     btn.disabled = (this.selectedFiles?.size || 0) === 0;
   }
 
-  _bindBulkMove() {
-    if (this.elements.bulkMoveBtn) {
-      this.elements.bulkMoveBtn.addEventListener('click', () => this._bulkMoveSelected());
-    }
+  _bindMoveModal() {
+    this.elements.moveSelectedBtn?.addEventListener('click', () => void this._openMoveModal());
+    this.elements.moveModalCancel?.addEventListener('click', () => this._closeMoveModal());
+    this.elements.moveModalConfirm?.addEventListener('click', () => void this._onMoveModalConfirm());
+    this.elements.moveModal?.addEventListener('click', (e) => {
+      if (e.target?.closest?.('[data-gallery-move-dismiss]')) {
+        this._closeMoveModal();
+      }
+    });
   }
 
-  async _bulkMoveSelected() {
-    const keys = Array.from(this.selectedFiles || []);
+  _fillMoveModalSelect(folders) {
+    const sel = this.elements.moveModalSelect;
+    if (!sel) return;
     const lang = getUiLang();
-    if (!keys.length) {
+    sel.innerHTML = '';
+    const o0 = document.createElement('option');
+    o0.value = '';
+    o0.textContent = t('pl_filter_unsorted', lang);
+    sel.appendChild(o0);
+    for (const f of folders || []) {
+      const o = document.createElement('option');
+      o.value = String(f.id);
+      o.textContent = f.name || `Folder ${f.id}`;
+      sel.appendChild(o);
+    }
+    sel.value = '';
+  }
+
+  async _openMoveModal() {
+    const lang = getUiLang();
+    const n = this.selectedFiles?.size || 0;
+    if (!n) {
       window.App?.Alerts?.show?.(t('gallery_bulk_move_none', lang), 'warning');
       return;
     }
-    const sel = this.elements.bulkMoveSelect;
-    const raw = sel?.value;
+    if (this.elements.previewModal && !this.elements.previewModal.hasAttribute('hidden')) {
+      this.closePreview();
+    }
+    let folders = [];
+    try {
+      const res = await fetch('/api/media/folders', {
+        headers: { Accept: 'application/json' },
+        credentials: 'include',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.success) {
+        folders = data.folders || [];
+        this._foldersCache = folders;
+      }
+    } catch (e) {
+      console.error('Failed to load folders for move modal', e);
+    }
+    this._fillMoveModalSelect(folders);
+    const m = this.elements.moveModal;
+    if (m) {
+      m.removeAttribute('hidden');
+      document.body.style.overflow = 'hidden';
+    }
+    queueMicrotask(() => this.elements.moveModalSelect?.focus());
+  }
+
+  _closeMoveModal() {
+    const m = this.elements.moveModal;
+    if (m) m.setAttribute('hidden', '');
+    const pv = this.elements.previewModal;
+    if (pv && !pv.hasAttribute('hidden')) return;
+    document.body.style.overflow = '';
+  }
+
+  async _onMoveModalConfirm() {
+    const keys = Array.from(this.selectedFiles || []);
+    const lang = getUiLang();
+    if (!keys.length) {
+      this._closeMoveModal();
+      return;
+    }
+    const raw = this.elements.moveModalSelect?.value;
     const folderId = raw === '' || raw == null ? null : Number(raw);
     if (folderId != null && !Number.isFinite(folderId)) {
       window.App?.Alerts?.show?.(t('gallery_bulk_move_err', lang), 'error');
@@ -1114,32 +1197,14 @@ class MediaGallery {
       document.querySelectorAll('.file-checkbox').forEach((cb) => {
         cb.checked = false;
       });
-      this._syncBulkMoveUi();
+      this._syncMoveToolbarBtn();
       this.toggleDeleteButton(false);
+      this._closeMoveModal();
       await this._renderFolderNav();
       await this.loadMediaFiles();
     } catch (e) {
       window.App?.Alerts?.show?.(`${t('gallery_bulk_move_err', lang)}: ${e.message}`, 'error');
     }
-  }
-
-  _fillBulkFolderSelect(folders) {
-    const sel = this.elements.bulkMoveSelect;
-    if (!sel) return;
-    const lang = getUiLang();
-    const cur = sel.value;
-    sel.innerHTML = '';
-    const o0 = document.createElement('option');
-    o0.value = '';
-    o0.textContent = t('pl_filter_unsorted', lang);
-    sel.appendChild(o0);
-    for (const f of folders || []) {
-      const o = document.createElement('option');
-      o.value = String(f.id);
-      o.textContent = f.name || `Folder ${f.id}`;
-      sel.appendChild(o);
-    }
-    if (cur && [...sel.options].some((op) => op.value === cur)) sel.value = cur;
   }
 
   _syncViewToggleButtons() {
@@ -1210,7 +1275,7 @@ class MediaGallery {
       console.error('Failed to load folders', e);
     }
 
-    this._fillBulkFolderSelect(folders);
+    this._foldersCache = folders;
 
     for (const f of folders) {
       const row = document.createElement('div');
