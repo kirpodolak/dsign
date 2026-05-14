@@ -26,16 +26,6 @@
           <div id="gallery-folder-nav" class="gallery-folder-nav" role="navigation" aria-label="Folder list"></div>
         </div>
       </div>
-      <div class="gallery-side__card gallery-folder-column__bulk" id="gallery-bulk-move-card">
-        <div class="gallery-side__title" data-i18n="gallery_bulk_move_card_title">Перемещение</div>
-        <div class="gallery-bulk-move gallery-bulk-move--column" id="gallery-bulk-move">
-          <label class="gallery-bulk-move__label" for="gallery-bulk-folder-select">
-            <span data-i18n="gallery_bulk_move_label">В папку</span>
-          </label>
-          <select id="gallery-bulk-folder-select" class="gallery-bulk-move__select" aria-label="Target folder"></select>
-          <button type="button" id="gallery-bulk-move-btn" class="btn primary gallery-bulk-move__btn" data-i18n="gallery_bulk_move_btn">Переместить</button>
-        </div>
-      </div>
     </aside>
 
     <div class="gallery-main">
@@ -46,6 +36,9 @@
           </button>
           <button id="delete-selected" type="button" class="btn danger">
             <span aria-hidden="true">🗑</span> <span data-i18n="delete_selected">Удалить выбранные</span>
+          </button>
+          <button id="gallery-move-selected-btn" type="button" class="btn secondary" disabled data-i18n="gallery_toolbar_move">
+            Переместить
           </button>
         </div>
         <div class="gallery-actions__right" role="group" aria-label="View mode">
@@ -113,6 +106,22 @@
       </div>
     </aside>
   </div>
+
+<div id="gallery-move-modal" class="gallery-move-modal" role="dialog" aria-modal="true" aria-labelledby="gallery-move-modal-title" hidden>
+  <div class="gallery-move-modal__backdrop" data-gallery-move-dismiss="1"></div>
+  <div class="gallery-move-modal__panel">
+    <h2 id="gallery-move-modal-title" class="gallery-move-modal__title" data-i18n="gallery_move_modal_title">Переместить выбранное</h2>
+    <p class="gallery-move-modal__hint" data-i18n="gallery_move_modal_hint">Выберите папку назначения.</p>
+    <label class="gallery-move-modal__label" for="gallery-move-modal-folder-select">
+      <span data-i18n="gallery_move_modal_folder_label">Куда</span>
+    </label>
+    <select id="gallery-move-modal-folder-select" class="gallery-move-modal__select" aria-label="Target folder"></select>
+    <div class="gallery-move-modal__actions">
+      <button type="button" id="gallery-move-modal-cancel" class="btn secondary" data-i18n="btn_cancel">Отмена</button>
+      <button type="button" id="gallery-move-modal-confirm" class="btn primary" data-i18n="gallery_move_modal_confirm">Подтвердить</button>
+    </div>
+  </div>
+</div>
 
 <div id="preview-modal" class="preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-filename" hidden>
   <div class="preview-modal__panel">
