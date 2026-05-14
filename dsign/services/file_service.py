@@ -11,7 +11,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from datetime import datetime
-from dsign.models import Playlist
+from dsign.models import MediaFolder, MediaItemMeta
 from dsign.config.config import Config
 from .logger import ServiceLogger
 
@@ -105,8 +105,8 @@ class FileService:
             has_valid_size = file_size <= self.MAX_LOGO_SIZE
         return has_valid_extension and has_valid_size
 
-    def get_media_files(self, playlist_id: Optional[int] = None) -> List[dict]:
-        """Получение списка медиафайлов с метаданными"""
+    def get_media_files(self) -> List[dict]:
+        """Список локальных медиафайлов в корне upload_folder (ключ = filename)."""
         try:
             files = []
             for f in self.upload_folder.iterdir():
@@ -637,6 +637,97 @@ class FileService:
             return logo_path.stat().st_size
         return 0
         
+    def list_media_for_gallery(
+        self,
+        db_session,
+        *,
+        view: str = "all",
+        folder_id: Optional[int] = None,
+        search: str = "",
+        sort: str = "name-asc",
+    ) -> List[dict]:
+        """
+        Склад медиа для галереи: локальные + external, опционально фильтр по папке (media_item_meta).
+
+        view=all — все ключи; view=by_folder + folder_id — в этой папке;
+        view=by_folder без folder_id — несортированные (нет строки в media_item_meta).
+        """
+        try:
+            local = self.get_media_files()
+            meta_rows = db_session.query(MediaItemMeta).all()
+            meta_map = {m.storage_key: int(m.folder_id) for m in meta_rows}
+            folders = {f.id: f.name for f in db_session.query(MediaFolder).all()}
+
+            files: List[dict] = []
+            for f in local:
+                fn = f.get("filename")
+                if not fn:
+                    continue
+                fid = meta_map.get(fn)
+                folder_name = folders.get(fid) if fid is not None else None
+                row = {
+                    **f,
+                    "folder_id": fid,
+                    "folder_name": folder_name,
+                }
+                files.append(row)
+
+            try:
+                from dsign.models import ExternalMedia
+
+                ext_rows = db_session.query(ExternalMedia).order_by(ExternalMedia.created_at.desc()).all()
+                for r in ext_rows or []:
+                    d = r.to_media_file_dict()
+                    key = d.get("filename")
+                    fid = meta_map.get(key) if key else None
+                    folder_name = folders.get(fid) if fid is not None else None
+                    files.append({**d, "folder_id": fid, "folder_name": folder_name})
+            except Exception:
+                pass
+
+            view_norm = (view or "all").strip().lower()
+            if view_norm == "by_folder":
+                if folder_id is not None:
+                    want = int(folder_id)
+                    files = [x for x in files if x.get("folder_id") == want]
+                else:
+                    files = [x for x in files if x.get("folder_id") is None]
+
+            q = (search or "").strip().lower()
+            if q:
+                def _match(item: dict) -> bool:
+                    fn = str(item.get("filename") or "").lower()
+                    if q in fn:
+                        return True
+                    ext = item.get("external") if isinstance(item.get("external"), dict) else {}
+                    title = str(ext.get("title") or "").lower()
+                    return q in title
+
+                files = [x for x in files if _match(x)]
+
+            sort_key = (sort or "name-asc").strip().lower()
+
+            if sort_key == "name-desc":
+                files.sort(key=lambda x: str(x.get("filename") or "").lower(), reverse=True)
+            elif sort_key == "name-asc":
+                files.sort(key=lambda x: str(x.get("filename") or "").lower())
+            elif sort_key == "date-newest":
+                files.sort(key=lambda x: float(x.get("modified") or 0), reverse=True)
+            elif sort_key == "date-oldest":
+                files.sort(key=lambda x: float(x.get("modified") or 0))
+            elif sort_key == "type":
+                files.sort(key=lambda x: str(x.get("type") or "").lower())
+            else:
+                files.sort(key=lambda x: str(x.get("filename") or "").lower())
+
+            return files
+        except Exception as e:
+            self._log_error(
+                f"list_media_for_gallery failed: {str(e)}",
+                extra={"action": "list_media_for_gallery"},
+            )
+            raise
+
     def get_media_thumbnail(self, filename: str) -> Optional[str]:
         """Получение пути к миниатюре через ThumbnailService"""
         if not hasattr(self, 'thumbnail_service') or not self.thumbnail_service:
@@ -651,44 +742,3 @@ class FileService:
             self._log_error(f"Thumbnail error: {str(e)}", 
                           extra={'filename': filename, 'action': 'generate_thumbnail'})
             return None
-            
-    def get_media_files_with_playlist_info(self, playlist_id=None, db_session=None):
-        """Получает файлы с информацией о принадлежности к плейлисту"""
-        try:
-            all_files = self.get_media_files()
-
-            if not playlist_id or playlist_id == 'all':
-                return all_files
-
-            # Редактор плейлиста: idle logo не является медиа слайда — не показывать в списке.
-            logo_l = self.DEFAULT_LOGO.lower()
-            all_files = [f for f in all_files if f.get('filename', '').lower() != logo_l]
-
-            if not db_session:
-                raise RuntimeError("Database session not provided")
-            
-            playlist_files = set()
-            duration_by_name: dict = {}
-            muted_by_name: dict = {}
-            playlist = db_session.query(Playlist).get(playlist_id)
-            if playlist:
-                for pf in playlist.files or []:
-                    playlist_files.add(pf.file_name)
-                    # Persisted display duration for images (videos often store 0); UI reads this key.
-                    duration_by_name[pf.file_name] = pf.duration
-                    muted_by_name[pf.file_name] = bool(getattr(pf, "muted", False))
-
-            return [{
-                **file,
-                'included': file['filename'] in playlist_files,
-                # Sync with playlist_files.duration from DB (null if file not in playlist).
-                'duration': duration_by_name.get(file['filename']),
-                'muted': muted_by_name.get(file['filename'], False),
-                # `is_video` is already provided by get_media_files(); keep it stable if present.
-                'is_video': bool(file.get('is_video')) or file.get('type', '').lower() in {'mp4', 'avi', 'webm', 'mov', 'mkv', 'm4v'}
-            } for file in all_files]
-            
-        except Exception as e:
-            self._log_error(f"Error in get_media_files_with_playlist_info: {str(e)}", 
-                          extra={'playlist_id': playlist_id, 'action': 'get_playlist_files'})
-            raise

@@ -215,9 +215,9 @@ export class PlaylistManager {
         }
 
         try {
-            const cacheKey = `media-files-v2-${this.playlistId}`;
+            const cacheKey = `playlist-editor-files-${this.playlistId}`;
             const cachedData = sessionStorage.getItem(cacheKey);
-            
+
             if (cachedData) {
                 const cache = JSON.parse(cachedData);
                 if (Date.now() - cache.timestamp < 60000) {
@@ -226,21 +226,52 @@ export class PlaylistManager {
                 }
             }
 
-            const response = await fetch(`/api/media/files?playlist_id=${this.playlistId}`, {
-                headers: { 'Accept': 'application/json' },
-                credentials: 'include'
+            const [itemsRes, mediaRes] = await Promise.all([
+                fetch(`/api/playlists/${this.playlistId}/items`, {
+                    headers: { 'Accept': 'application/json' },
+                    credentials: 'include'
+                }),
+                fetch(`/api/media/files?view=all`, {
+                    headers: { 'Accept': 'application/json' },
+                    credentials: 'include'
+                })
+            ]);
+
+            if (!itemsRes.ok) throw new Error(`Ошибка списка плейлиста: ${itemsRes.status}`);
+            if (!mediaRes.ok) throw new Error(`Ошибка склада медиа: ${mediaRes.status}`);
+
+            const itemsData = await itemsRes.json();
+            const mediaData = await mediaRes.json();
+            if (!itemsData?.success) throw new Error(itemsData?.error || 'Неверный ответ items');
+            if (!mediaData?.success) throw new Error(mediaData?.error || 'Неверный ответ media');
+
+            const byName = new Map();
+            for (const it of itemsData.items || []) {
+                if (it && it.file_name) {
+                    byName.set(it.file_name, it);
+                }
+            }
+
+            const idleLogo = 'idle_logo.jpg';
+            const rawFiles = (mediaData.files || []).filter(
+                (f) => String(f.filename || '').toLowerCase() !== idleLogo
+            );
+
+            const files = rawFiles.map((file) => {
+                const it = byName.get(file.filename);
+                return {
+                    ...file,
+                    included: Boolean(it),
+                    duration: it != null ? it.duration : null,
+                    muted: it ? Boolean(it.muted) : false
+                };
             });
-        
-            if (!response.ok) throw new Error(`Ошибка сервера: ${response.status}`);
-            
-            const data = await response.json();
-            if (!data?.success) throw new Error(data?.error || 'Неверный формат ответа');
-            
-            sessionStorage.setItem(cacheKey, JSON.stringify({ 
-                timestamp: Date.now(), 
-                data: data 
+
+            sessionStorage.setItem(cacheKey, JSON.stringify({
+                timestamp: Date.now(),
+                data: { files }
             }));
-            this.renderFileTable(data.files);
+            this.renderFileTable(files);
         } catch (error) {
             console.error('Ошибка загрузки файлов:', error);
             this.ui.showAlert(`Не удалось загрузить медиафайлы: ${error.message}`, 'error');
@@ -458,8 +489,7 @@ export class PlaylistManager {
             }
 
             this.ui.showAlert('Плейлист сохранен. Переход на главную…', 'success');
-            sessionStorage.removeItem(`media-files-v2-${this.playlistId}`);
-            sessionStorage.removeItem(`media-files-${this.playlistId}`);
+            sessionStorage.removeItem(`playlist-editor-files-${this.playlistId}`);
 
             if (window.App?.Sockets) {
                 window.App.Sockets.emit('playlist_updated', {

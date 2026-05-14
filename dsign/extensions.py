@@ -50,6 +50,15 @@ def init_extensions(app) -> Dict[str, Any]:
 
         # 1. Инициализация Flask-расширений
         db.init_app(app)
+        # Register models and create missing tables (SQLite; additive schema, no Alembic in-tree).
+        import dsign.models as _dsign_models  # noqa: F401
+
+        with app.app_context():
+            try:
+                db.create_all()
+            except Exception as e:
+                app.logger.error("db.create_all() failed: %s", e, exc_info=True)
+                raise
         bcrypt.init_app(app)
         
         # Настройка SocketIO
