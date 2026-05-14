@@ -10,7 +10,15 @@ from flask import jsonify, request, send_from_directory, abort, current_app, sen
 from flask_login import login_required, current_user, login_user, logout_user
 from flask_wtf.csrf import validate_csrf
 from werkzeug.utils import secure_filename
-from dsign.models import PlaybackProfile, PlaylistProfileAssignment, Playlist, User, db
+from dsign.models import (
+    PlaybackProfile,
+    PlaylistProfileAssignment,
+    Playlist,
+    User,
+    db,
+    MediaFolder,
+    MediaItemMeta,
+)
 from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
 from PIL import Image
 from dsign.config.config import THUMBNAIL_FOLDER, THUMBNAIL_URL
@@ -2098,7 +2106,38 @@ def init_api_routes(api_bp, services):
             # ServiceLogger may not support exc_info kwarg; keep logs simple and always return JSON.
             current_app.logger.error(f"API error updating playlist files {playlist_id}: {str(e)}")
             return jsonify({"success": False, "error": str(e)}), 500
-    
+
+    @api_bp.route('/playlists/<int:playlist_id>/items', methods=['GET'])
+    @login_required
+    def get_playlist_items(playlist_id):
+        try:
+            payload = playlist_service.get_playlist_items(playlist_id)
+            return jsonify(payload)
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 404
+        except Exception as e:
+            current_app.logger.error(f"Error getting playlist items {playlist_id}: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/playlists/<int:playlist_id>/files/append', methods=['POST'])
+    @login_required
+    def append_playlist_files(playlist_id):
+        try:
+            data = request.get_json() or {}
+            items = data.get("items")
+            if not isinstance(items, list):
+                return jsonify({"success": False, "error": "Expected JSON object with 'items' array"}), 400
+            keys = [str(x).strip() for x in items if str(x).strip()]
+            if not keys:
+                return jsonify({"success": False, "error": "items must be a non-empty list of storage keys"}), 400
+            result = playlist_service.append_playlist_items(playlist_id, keys)
+            return jsonify(result)
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 404
+        except Exception as e:
+            current_app.logger.error(f"Error appending playlist files {playlist_id}: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
     # ======================
     # Media File Handling (/api/media)
     # ======================
@@ -2106,48 +2145,30 @@ def init_api_routes(api_bp, services):
     @login_required
     def get_media_files():
         try:
-            playlist_id = request.args.get('playlist_id')
-            files = file_service.get_media_files_with_playlist_info(
-                playlist_id=playlist_id,
-                db_session=db.session
+            view = (request.args.get("view") or "all").strip().lower()
+            if view not in ("all", "by_folder"):
+                return jsonify({"success": False, "error": "Invalid view (use all or by_folder)"}), 400
+
+            raw_folder = request.args.get("folder_id")
+            folder_id = None
+            if raw_folder is not None and str(raw_folder).strip() != "":
+                try:
+                    folder_id = int(raw_folder)
+                except (TypeError, ValueError):
+                    return jsonify({"success": False, "error": "Invalid folder_id"}), 400
+
+            search = request.args.get("search") or ""
+            sort = request.args.get("sort") or "name-asc"
+
+            files = file_service.list_media_for_gallery(
+                db.session,
+                view=view,
+                folder_id=folder_id,
+                search=search,
+                sort=sort,
             )
 
-            # Append external media (Rutube / VK Video etc.) so UI can treat them like regular media.
-            try:
-                from dsign.models import ExternalMedia
-                ext_rows = db.session.query(ExternalMedia).order_by(ExternalMedia.created_at.desc()).all()
-                ext_items = [r.to_media_file_dict() for r in (ext_rows or [])]
-            except Exception:
-                ext_items = []
-
-            # Merge, keeping filesystem items first for familiarity.
-            merged = (files or []) + (ext_items or [])
-
-            # If playlist_id is provided, mark included/duration/muted for external items too.
-            if playlist_id and playlist_id != "all":
-                try:
-                    from dsign.models import Playlist
-                    pid = int(playlist_id)
-                    playlist = db.session.query(Playlist).get(pid)
-                    if playlist:
-                        included = {pf.file_name: pf for pf in (playlist.files or [])}
-                        for item in merged:
-                            fn = item.get("filename")
-                            pf = included.get(fn)
-                            if pf:
-                                item["included"] = True
-                                item["duration"] = getattr(pf, "duration", None)
-                                item["muted"] = bool(getattr(pf, "muted", False))
-                            else:
-                                item["included"] = False
-                except Exception:
-                    pass
-        
-            return jsonify({
-                "success": True,
-                "files": merged,
-                "count": len(merged)
-            })
+            return jsonify({"success": True, "files": files, "count": len(files)})
         except Exception as e:
             current_app.logger.error(f"Error getting media files: {str(e)}")
             return jsonify({
@@ -2160,6 +2181,8 @@ def init_api_routes(api_bp, services):
     @login_required
     def delete_media_files():
         try:
+            from dsign.services.media_catalog_service import remove_storage_key_everywhere
+
             data = request.get_json()
             if not data or 'files' not in data or not isinstance(data['files'], list):
                 return jsonify({
@@ -2174,30 +2197,26 @@ def init_api_routes(api_bp, services):
                     "error": "No valid media keys provided"
                 }), 400
 
-            # Split local filenames and external keys (ext-<id>)
-            local_files = [secure_filename(k) for k in raw_keys if not str(k).startswith("ext-")]
-            ext_keys = [k for k in raw_keys if str(k).startswith("ext-")]
-
-            deleted = {"local": None, "external": []}
-            if local_files:
-                deleted["local"] = file_service.delete_files(local_files)
-
-            if ext_keys:
-                ext_svc = getattr(current_app, "external_media_service", None)
-                if ext_svc:
-                    for k in ext_keys:
-                        ok = False
-                        try:
-                            ok = bool(ext_svc.delete_by_key(k))
-                        except Exception:
-                            ok = False
-                        deleted["external"].append({"key": k, "deleted": ok})
+            ext_svc = getattr(current_app, "external_media_service", None)
+            deleted = []
+            failed = []
+            for k in raw_keys:
+                res = remove_storage_key_everywhere(
+                    db_session=db.session,
+                    playlist_service=playlist_service,
+                    file_service=file_service,
+                    external_media_service=ext_svc,
+                    storage_key=k,
+                )
+                if res.get("success"):
+                    deleted.append(k)
                 else:
-                    deleted["external"] = [{"key": k, "deleted": False, "error": "external_media_service not available"} for k in ext_keys]
+                    failed.append({"key": k, "error": res.get("error")})
 
             return jsonify({
-                "success": True,
-                "deleted": deleted
+                "success": len(failed) == 0,
+                "deleted": deleted,
+                "failed": failed,
             })
         except Exception as e:
             current_app.logger.error(f"Error deleting media files: {str(e)}")
@@ -2205,6 +2224,120 @@ def init_api_routes(api_bp, services):
                 "success": False,
                 "error": str(e)
             }), 500
+
+    @api_bp.route('/media/folders', methods=['GET'])
+    @login_required
+    def list_media_folders():
+        rows = db.session.query(MediaFolder).order_by(MediaFolder.name.asc()).all()
+        return jsonify({
+            "success": True,
+            "folders": [{"id": r.id, "name": r.name, "created_at": r.created_at} for r in rows],
+        })
+
+    @api_bp.route('/media/folders', methods=['POST'])
+    @login_required
+    def create_media_folder():
+        data = request.get_json() or {}
+        name = str(data.get("name") or "").strip()
+        if not name:
+            return jsonify({"success": False, "error": "name is required"}), 400
+        row = MediaFolder(name=name[:255], created_at=int(time.time()))
+        db.session.add(row)
+        db.session.commit()
+        return jsonify({
+            "success": True,
+            "folder": {"id": row.id, "name": row.name, "created_at": row.created_at},
+        })
+
+    @api_bp.route('/media/folders/<int:folder_id>', methods=['DELETE'])
+    @login_required
+    def delete_media_folder(folder_id):
+        from dsign.services.media_catalog_service import remove_storage_key_everywhere
+
+        folder = db.session.get(MediaFolder, folder_id)
+        if not folder:
+            return jsonify({"success": False, "error": "Folder not found"}), 404
+
+        mode_raw = (request.args.get("mode") or "").strip().lower()
+        if not mode_raw:
+            body = request.get_json(silent=True) or {}
+            mode_raw = str(body.get("mode") or "metadata").strip().lower()
+        mode = "with_files" if mode_raw in ("with_files", "cascade", "delete_files") else "metadata"
+
+        if mode == "metadata":
+            db.session.delete(folder)
+            db.session.commit()
+            return jsonify({"success": True, "mode": "metadata"})
+
+        keys = [
+            m.storage_key
+            for m in db.session.query(MediaItemMeta).filter_by(folder_id=folder_id).all()
+        ]
+        if len(keys) > 50:
+            body = request.get_json(silent=True) or {}
+            if not bool(body.get("confirm_bulk_delete")):
+                return jsonify({
+                    "success": False,
+                    "error": "bulk_delete_confirmation_required",
+                    "file_count": len(keys),
+                }), 409
+
+        ext_svc = getattr(current_app, "external_media_service", None)
+        errors = []
+        for k in keys:
+            res = remove_storage_key_everywhere(
+                db_session=db.session,
+                playlist_service=playlist_service,
+                file_service=file_service,
+                external_media_service=ext_svc,
+                storage_key=k,
+            )
+            if not res.get("success"):
+                errors.append({"key": k, "error": res.get("error")})
+
+        db.session.delete(folder)
+        db.session.commit()
+        return jsonify({
+            "success": True,
+            "mode": "with_files",
+            "removed_keys": keys,
+            "errors": errors,
+        })
+
+    @api_bp.route('/media/item-meta', methods=['POST'])
+    @login_required
+    def upsert_media_item_folder():
+        data = request.get_json() or {}
+        key = str(data.get("storage_key") or "").strip()
+        if not key:
+            return jsonify({"success": False, "error": "storage_key is required"}), 400
+
+        if "folder_id" not in data:
+            return jsonify({"success": False, "error": "folder_id is required (null for unsorted)"}), 400
+
+        if data.get("folder_id") in (None, ""):
+            db.session.query(MediaItemMeta).filter(MediaItemMeta.storage_key == key).delete(
+                synchronize_session=False
+            )
+            db.session.commit()
+            return jsonify({"success": True, "unsorted": True})
+
+        try:
+            fid = int(data.get("folder_id"))
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "Invalid folder_id"}), 400
+
+        folder = db.session.get(MediaFolder, fid)
+        if not folder:
+            return jsonify({"success": False, "error": "Folder not found"}), 404
+
+        row = db.session.get(MediaItemMeta, key)
+        if row:
+            row.folder_id = fid
+        else:
+            db.session.add(MediaItemMeta(storage_key=key, folder_id=fid))
+        db.session.commit()
+        return jsonify({"success": True, "storage_key": key, "folder_id": fid})
 
     @api_bp.route('/media/external', methods=['POST'])
     @login_required
@@ -2249,6 +2382,17 @@ def init_api_routes(api_bp, services):
                     "error": "No files provided"
                 }), 400
 
+            raw_folder = request.form.get("folder_id")
+            target_folder_id = None
+            if raw_folder not in (None, ""):
+                try:
+                    target_folder_id = int(raw_folder)
+                except (TypeError, ValueError):
+                    return jsonify({"success": False, "error": "Invalid folder_id"}), 400
+                folder_row = db.session.get(MediaFolder, target_folder_id)
+                if not folder_row:
+                    return jsonify({"success": False, "error": "Folder not found"}), 404
+
             # Use persisted settings.json toggle (default OFF) for transcoding.
             try:
                 cur = settings_service.load_settings() if settings_service else {}
@@ -2284,6 +2428,16 @@ def init_api_routes(api_bp, services):
                         transcode_status[fn] = st
             except Exception:
                 transcode_status = {}
+
+            if target_folder_id is not None and saved_files:
+                for fn in saved_files:
+                    row = db.session.get(MediaItemMeta, fn)
+                    if row:
+                        row.folder_id = target_folder_id
+                    else:
+                        db.session.add(MediaItemMeta(storage_key=fn, folder_id=target_folder_id))
+                db.session.commit()
+
             return jsonify({
                 "success": True,
                 "files": saved_files,
