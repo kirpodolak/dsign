@@ -1,4 +1,5 @@
 import { t, getUiLang, applyI18n } from './i18n.js';
+import { AddToPlaylistModal } from './add-to-playlist-modal.js';
 
 // Кэш для превью медиафайлов
 const previewCache = new Map();
@@ -151,6 +152,7 @@ export class PlaylistManager {
         this.playlistId = getPlaylistId();
         this.fileListEl = document.getElementById('file-list');
         this.saveBtn = document.getElementById('save-playlist');
+        this.addMediaBtn = document.getElementById('add-media-modal-btn');
         this.exportBtn = document.getElementById('export-m3u');
         this.emptyMessage = document.getElementById('empty-playlist-message');
         this.ui = new PlaylistUI();
@@ -167,7 +169,19 @@ export class PlaylistManager {
         }
 
         this.saveBtn.addEventListener('click', () => this.savePlaylist());
-        
+
+        if (this.addMediaBtn && this.playlistId) {
+            this._addModal = new AddToPlaylistModal(this.playlistId, {
+                getCSRFToken,
+                onAppended: () => {
+                    sessionStorage.removeItem(`playlist-editor-files-${this.playlistId}`);
+                    this.loadMediaFiles();
+                },
+                showMessage: (msg, type = 'info') => this.ui.showAlert(msg, type),
+            });
+            this.addMediaBtn.addEventListener('click', () => this._addModal.open());
+        }
+
         if (this.exportBtn) {
             this.exportBtn.addEventListener('click', () => this.exportM3U());
         }
@@ -185,8 +199,7 @@ export class PlaylistManager {
         if (window.App?.Sockets?.socket) {
             window.App.Sockets.socket.on('playlist_updated', (data) => {
                 if (data.playlist_id == this.playlistId) {
-                    sessionStorage.removeItem(`media-files-v2-${this.playlistId}`);
-                    sessionStorage.removeItem(`media-files-${this.playlistId}`);
+                    sessionStorage.removeItem(`playlist-editor-files-${this.playlistId}`);
                     this.loadMediaFiles();
                     
                     if (data.m3u_generated) {
