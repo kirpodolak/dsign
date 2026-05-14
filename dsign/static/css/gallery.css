@@ -138,35 +138,78 @@ body.page-gallery .app-main {
     box-shadow: 0 0 0 2px rgba(92, 107, 192, 0.42);
 }
 
-.gallery-bulk-move {
+.gallery-move-modal[hidden] {
+    display: none !important;
+}
+
+.gallery-move-modal:not([hidden]) {
+    position: fixed;
+    inset: 0;
+    z-index: 2800;
     display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
+    align-items: center;
+    justify-content: center;
+    padding: clamp(12px, 3vw, 28px);
+    box-sizing: border-box;
 }
 
-.gallery-bulk-move--column .gallery-bulk-move__select {
-    width: 100%;
-    max-width: none;
+.gallery-move-modal__backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.55);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
 }
 
-.gallery-bulk-move__btn {
-    width: 100%;
+.gallery-move-modal__panel {
+    position: relative;
+    z-index: 1;
+    width: min(96vw, 400px);
+    padding: 1.25rem 1.35rem 1.1rem;
+    background: #fff;
+    border-radius: 14px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(226, 232, 240, 0.95);
 }
 
-.gallery-bulk-move__label {
-    font-size: 0.82rem;
+.gallery-move-modal__title {
+    margin: 0 0 0.35rem;
+    font-size: 1.1rem;
+    font-weight: 650;
+    color: #0f172a;
+}
+
+.gallery-move-modal__hint {
+    margin: 0 0 1rem;
+    font-size: 0.875rem;
     color: #64748b;
+    line-height: 1.4;
 }
 
-.gallery-bulk-move__select {
-    min-width: 0;
-    max-width: 100%;
-    padding: 6px 10px;
-    border-radius: 8px;
+.gallery-move-modal__label {
+    display: block;
+    margin: 0 0 0.35rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #475569;
+}
+
+.gallery-move-modal__select {
+    width: 100%;
+    margin-bottom: 1.1rem;
+    padding: 0.55rem 0.65rem;
+    border-radius: 10px;
     border: 1px solid rgba(203, 213, 225, 0.95);
     background: #fff;
-    font-size: 0.85rem;
+    font-size: 0.9rem;
+    color: #0f172a;
+}
+
+.gallery-move-modal__actions {
+    display: flex;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 10px;
 }
 
 .gallery-actions .btn {
@@ -970,9 +1013,6 @@ body.page-gallery .app-main {
     width: 100%;
 }
 
-.gallery-folder-column__bulk {
-    flex-shrink: 0;
-}
 
 .file-folder-pin {
     position: absolute;
