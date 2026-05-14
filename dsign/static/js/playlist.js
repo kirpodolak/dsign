@@ -187,7 +187,15 @@ export class PlaylistManager {
         }
         
         this.loadMediaFiles();
-        this.setupCheckboxHandlers();
+        this.fileListEl.addEventListener('click', (e) => {
+            const btn = e.target.closest('.pl-row-remove');
+            if (!btn || !this.fileListEl.contains(btn)) return;
+            e.preventDefault();
+            const tr = btn.closest('tr');
+            tr?.remove();
+            this._renumberPlaylistRows();
+            sessionStorage.removeItem(`playlist-editor-files-${this.playlistId}`);
+        });
 
         document.addEventListener('dsign:language-changed', () => {
             applyI18n();
@@ -210,14 +218,17 @@ export class PlaylistManager {
         }
     }
 
-    // Обработчик изменений чекбоксов
-    setupCheckboxHandlers() {
-        document.addEventListener('change', (e) => {
-            if (e.target.classList.contains('include-checkbox')) {
-                const filename = e.target.dataset.filename;
-                console.log(`File ${filename} ${e.target.checked ? 'added to' : 'removed from'} playlist`);
-            }
+    _renumberPlaylistRows() {
+        if (!this.fileListEl) return;
+        this.fileListEl.querySelectorAll('tr').forEach((tr, i) => {
+            const num = tr.querySelector('.playlist-col-num');
+            if (num) num.textContent = String(i + 1);
         });
+        if (!this.fileListEl.querySelector('tr')) {
+            if (this.emptyMessage) this.emptyMessage.style.display = 'block';
+        } else if (this.emptyMessage) {
+            this.emptyMessage.style.display = 'none';
+        }
     }
 
     // Загрузка медиафайлов с кэшированием
@@ -239,46 +250,24 @@ export class PlaylistManager {
                 }
             }
 
-            const [itemsRes, mediaRes] = await Promise.all([
-                fetch(`/api/playlists/${this.playlistId}/items`, {
-                    headers: { 'Accept': 'application/json' },
-                    credentials: 'include'
-                }),
-                fetch(`/api/media/files?view=all`, {
-                    headers: { 'Accept': 'application/json' },
-                    credentials: 'include'
-                })
-            ]);
+            const itemsRes = await fetch(`/api/playlists/${this.playlistId}/items`, {
+                headers: { 'Accept': 'application/json' },
+                credentials: 'include'
+            });
 
             if (!itemsRes.ok) throw new Error(`Ошибка списка плейлиста: ${itemsRes.status}`);
-            if (!mediaRes.ok) throw new Error(`Ошибка склада медиа: ${mediaRes.status}`);
 
             const itemsData = await itemsRes.json();
-            const mediaData = await mediaRes.json();
             if (!itemsData?.success) throw new Error(itemsData?.error || 'Неверный ответ items');
-            if (!mediaData?.success) throw new Error(mediaData?.error || 'Неверный ответ media');
 
-            const byName = new Map();
-            for (const it of itemsData.items || []) {
-                if (it && it.file_name) {
-                    byName.set(it.file_name, it);
-                }
-            }
-
-            const idleLogo = 'idle_logo.jpg';
-            const rawFiles = (mediaData.files || []).filter(
-                (f) => String(f.filename || '').toLowerCase() !== idleLogo
-            );
-
-            const files = rawFiles.map((file) => {
-                const it = byName.get(file.filename);
-                return {
-                    ...file,
-                    included: Boolean(it),
-                    duration: it != null ? it.duration : null,
-                    muted: it ? Boolean(it.muted) : false
-                };
-            });
+            const list = (itemsData.items || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+            const files = list.map((it) => ({
+                filename: it.file_name,
+                duration: it.duration,
+                muted: Boolean(it.muted),
+                is_video: Boolean(it.is_video),
+                is_external: Boolean(it.is_external),
+            }));
 
             sessionStorage.setItem(cacheKey, JSON.stringify({
                 timestamp: Date.now(),
@@ -331,10 +320,39 @@ export class PlaylistManager {
 
         files.forEach((file, index) => {
             const row = document.createElement('tr');
+            row.dataset.filename = file.filename;
+
+            const isVideo =
+                Boolean(file.is_video) ||
+                Boolean(file.is_external) ||
+                String(file.filename || '').startsWith('ext-') ||
+                ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v'].some((ext) =>
+                    String(file.filename || '').toLowerCase().endsWith(ext)
+                );
+            row.dataset.isVideo = isVideo ? 'true' : 'false';
+
+            const numTd = document.createElement('td');
+            numTd.className = 'playlist-col-num';
+            numTd.textContent = String(index + 1);
+
+            const rmTd = document.createElement('td');
+            rmTd.className = 'playlist-col-remove';
+            const rmBtn = document.createElement('button');
+            rmBtn.type = 'button';
+            rmBtn.className = 'pl-row-remove btn secondary';
+            rmBtn.setAttribute('aria-label', t('pl_row_remove_aria', lang));
+            rmBtn.innerHTML = '<span aria-hidden="true">×</span>';
+            rmTd.appendChild(rmBtn);
+
+            const prevTd = document.createElement('td');
+            prevTd.className = 'playlist-col-preview';
+            const wrap = document.createElement('div');
+            wrap.className = 'playlist-thumb-wrap';
+
             const img = document.createElement('img');
             img.src = '/static/images/default-preview.jpg';
             img.alt = 'Preview';
-            img.className = `playlist-thumb-img${file.is_video ? ' playlist-thumb-img--video' : ''}`;
+            img.className = `playlist-thumb-img${isVideo ? ' playlist-thumb-img--video' : ''}`;
             img.dataset.filename = file.filename;
             img.loading = 'lazy';
             img.decoding = 'async';
@@ -350,7 +368,6 @@ export class PlaylistManager {
                     return;
                 }
                 this.dataset.thumbRetries = String(cur + 1);
-                // Exponential-ish backoff: 0.8s, 1.6s, 3.2s, ...
                 const delay = Math.min(15000, Math.round(800 * Math.pow(2, cur)));
                 this.src = '/static/images/default-preview.jpg';
                 setTimeout(() => {
@@ -360,15 +377,33 @@ export class PlaylistManager {
                     this.src = `${base}${joiner}r=${Date.now()}`;
                 }, delay);
             };
-        
-            const isVideo =
-                Boolean(file.is_video) ||
-                Boolean(file.is_external) ||
-                String(file.filename || '').startsWith('ext-') ||
-                ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v'].some(ext => String(file.filename || '').toLowerCase().endsWith(ext));
-            const videoFullLabel = t('pl_video_full', lang);
 
-            // Use DB duration when present (avoid `|| 10` which treats 0 as missing).
+            wrap.appendChild(img);
+            prevTd.appendChild(wrap);
+
+            const nameTd = document.createElement('td');
+            nameTd.className = 'playlist-col-name';
+            nameTd.textContent = file.filename;
+
+            const muteTd = document.createElement('td');
+            muteTd.className = 'playlist-col-mute';
+            if (isVideo) {
+                const mc = document.createElement('input');
+                mc.type = 'checkbox';
+                mc.className = 'mute-checkbox';
+                mc.dataset.filename = file.filename;
+                if (file.muted) mc.checked = true;
+                muteTd.appendChild(mc);
+            } else {
+                const span = document.createElement('span');
+                span.className = 'playlist-video-hint';
+                span.textContent = '—';
+                muteTd.appendChild(span);
+            }
+
+            const durTd = document.createElement('td');
+            durTd.className = 'playlist-col-duration';
+            const videoFullLabel = t('pl_video_full', lang);
             const imageSeconds = (() => {
                 const d = file.duration;
                 if (d != null && d !== '') {
@@ -377,30 +412,29 @@ export class PlaylistManager {
                 }
                 return 10;
             })();
-        
-            row.innerHTML = `
-                <td class="playlist-col-num">${index + 1}</td>
-                <td class="playlist-col-check"><input type="checkbox" class="include-checkbox" data-filename="${file.filename}" ${file.included ? 'checked' : ''}></td>
-                <td class="playlist-col-preview"><div class="playlist-thumb-wrap"></div></td>
-                <td class="playlist-col-name">${file.filename}</td>
-                <td class="playlist-col-mute">
-                    ${isVideo ? `<input type="checkbox" class="mute-checkbox" data-filename="${file.filename}" ${file.muted ? 'checked' : ''}>` : '<span class="playlist-video-hint">—</span>'}
-                </td>
-                <td class="playlist-col-duration">
-                    ${isVideo ?
-                        `<span class="playlist-video-hint">${videoFullLabel}</span>` :
-                        `<input type="number" class="duration-input" data-filename="${file.filename}"
-                          value="${imageSeconds}" min="1">`
-                    }
-                </td>
-            `;
+            if (isVideo) {
+                const span = document.createElement('span');
+                span.className = 'playlist-video-hint';
+                span.textContent = videoFullLabel;
+                durTd.appendChild(span);
+            } else {
+                const inp = document.createElement('input');
+                inp.type = 'number';
+                inp.className = 'duration-input';
+                inp.dataset.filename = file.filename;
+                inp.value = String(imageSeconds);
+                inp.min = '1';
+                durTd.appendChild(inp);
+            }
 
-            row.querySelector('.playlist-thumb-wrap').appendChild(img);
+            row.appendChild(numTd);
+            row.appendChild(rmTd);
+            row.appendChild(prevTd);
+            row.appendChild(nameTd);
+            row.appendChild(muteTd);
+            row.appendChild(durTd);
             this.fileListEl.appendChild(row);
 
-            // Observe for lazy-load (fallback to immediate if not supported).
-            // Always trigger requests for the first visible-ish chunk so user sees activity,
-            // then rely on IntersectionObserver for the rest.
             if (index < 24) {
                 img.src = previewUrl;
             } else if (this._thumbObserver) {
@@ -425,13 +459,11 @@ export class PlaylistManager {
             const selectedFiles = [];
             let hasErrors = false;
             let selectedOrder = 0;
+            const lang = getUiLang();
 
             for (const [index, row] of rows.entries()) {
                 try {
-                    const checkbox = row.querySelector('.include-checkbox');
-                    if (!checkbox?.checked) continue;
-
-                    const filename = checkbox.dataset.filename;
+                    const filename = row.dataset.filename;
                     if (!filename || typeof filename !== 'string') {
                         throw new Error(`Некорректное имя файла в строке ${index + 1}`);
                     }
@@ -439,8 +471,10 @@ export class PlaylistManager {
                     const lower = String(filename || '').toLowerCase();
                     const isExternal = lower.startsWith('ext-');
                     const fileExt = lower.includes('.') ? lower.split('.').pop() : '';
-                    const isVideo = isExternal || ['mp4', 'avi', 'mov', 'mkv', 'webm', 'm4v'].includes(fileExt);
-                    const isImage = ['jpg', 'jpeg', 'png'].includes(fileExt);
+                    const isVideo =
+                        row.dataset.isVideo === 'true' ||
+                        isExternal ||
+                        ['mp4', 'avi', 'mov', 'mkv', 'webm', 'm4v'].includes(fileExt);
 
                     let duration = 10;
                     if (!isVideo) {
@@ -456,8 +490,6 @@ export class PlaylistManager {
                         file_name: filename,
                         duration: isVideo ? 0 : duration,
                         muted: isVideo ? Boolean(row.querySelector('.mute-checkbox')?.checked) : false,
-                        // Order must be dense (1..N) for selected items.
-                        // Using the table row index creates gaps when some items are unchecked.
                         order: (selectedOrder += 1)
                     });
 
@@ -470,10 +502,6 @@ export class PlaylistManager {
 
             if (hasErrors) {
                 throw new Error('Обнаружены ошибки в данных файлов');
-            }
-
-            if (selectedFiles.length === 0) {
-                throw new Error('Не выбрано ни одного файла');
             }
 
             const response = await fetch(`/api/playlists/${this.playlistId}/files`, {
@@ -501,7 +529,10 @@ export class PlaylistManager {
                 throw new Error(errorMsg);
             }
 
-            this.ui.showAlert('Плейлист сохранен. Переход на главную…', 'success');
+            this.ui.showAlert(
+                selectedFiles.length ? t('playlist_save_success', lang) : t('playlist_save_cleared', lang),
+                'success'
+            );
             sessionStorage.removeItem(`playlist-editor-files-${this.playlistId}`);
 
             if (window.App?.Sockets) {

@@ -75,7 +75,7 @@
     text-align: center;
 }
 
-.playlist-table__th--check {
+.playlist-table__th--remove {
     width: 4.5rem;
     text-align: center;
 }
@@ -126,16 +126,22 @@
     width: 3rem;
 }
 
-.playlist-table td.playlist-col-check {
+.playlist-table td.playlist-col-remove {
     text-align: center;
     width: 4.5rem;
+    vertical-align: middle;
 }
 
-.playlist-table td.playlist-col-check input[type="checkbox"] {
-    width: 1.1rem;
-    height: 1.1rem;
-    accent-color: var(--primary-color, #4f46e5);
-    cursor: pointer;
+.playlist-table td.playlist-col-remove .pl-row-remove {
+    min-width: 2.25rem;
+    padding: 0.25rem 0.5rem;
+    font-size: 1.1rem;
+    line-height: 1;
+}
+
+.playlist-table td.playlist-col-remove .pl-row-remove:hover {
+    border-color: var(--danger-color, #dc2626);
+    color: var(--danger-color, #dc2626);
 }
 
 .playlist-table td.playlist-col-preview {
