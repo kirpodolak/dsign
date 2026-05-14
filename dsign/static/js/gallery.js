@@ -55,9 +55,14 @@ const GALLERY_CONFIG = {
   filesizeElement: '#preview-filesize',
   dateElement: '#preview-date',
   folderNav: '#gallery-folder-nav',
-  folderCard: '#gallery-folders-card',
+  folderColumn: '#gallery-folder-column',
+  folderListScroller: '#gallery-folder-list-scroller',
   newFolderNameInput: '#gallery-new-folder-name',
   createFolderBtn: '#gallery-create-folder-btn',
+  viewAllBtn: '#gallery-view-all',
+  viewByFolderBtn: '#gallery-view-by-folder',
+  bulkMoveSelect: '#gallery-bulk-folder-select',
+  bulkMoveBtn: '#gallery-bulk-move-btn',
 };
 
 class MediaGallery {
@@ -78,7 +83,11 @@ class MediaGallery {
 
     this.initElements();
     this.initEventListeners();
+    this._syncFolderColumnState();
+    this._syncViewToggleButtons();
+    void this._renderFolderNav();
     this.loadMediaFiles();
+    this._syncBulkMoveUi();
     MediaGallery.instance = this;
   }
 
@@ -391,6 +400,7 @@ class MediaGallery {
           this.selectedFiles.delete(filename);
         }
         this.toggleDeleteButton(this.selectedFiles.size > 0);
+        this._syncBulkMoveUi();
       });
     });
   }
@@ -470,6 +480,7 @@ class MediaGallery {
     if (this.elements.deleteSelectedBtn) {
       this.elements.deleteSelectedBtn.disabled = !enabled;
     }
+    this._syncBulkMoveUi();
   }
 
   toggleSelectAllButton(enabled) {
@@ -913,6 +924,8 @@ class MediaGallery {
         window.App.Alerts.show(`Deleted ${this.selectedFiles.size} file(s) successfully`, 'success');
       }
       this.selectedFiles.clear();
+      this.toggleDeleteButton(false);
+      this._syncBulkMoveUi();
       await this.loadMediaFiles();
     } catch (error) {
       console.error('Delete error:', error);
@@ -1014,8 +1027,8 @@ class MediaGallery {
       });
     }
 
-    this._bindViewModeRadios();
-    this._syncFolderNavVisibility();
+    this._bindViewToggleButtons();
+    this._bindBulkMove();
 
     if (this.elements.closeModalBtn) {
       this.elements.closeModalBtn.addEventListener('click', this.closePreview.bind(this));
@@ -1038,9 +1051,7 @@ class MediaGallery {
     document.addEventListener('dsign:language-changed', () => {
       applyI18n();
       this._syncSelectAllLabel();
-      if (this.viewMode === 'by_folder') {
-        this._renderFolderNav();
-      }
+      void this._renderFolderNav();
     });
 
     window.addEventListener('visibilitychange', () => {
@@ -1048,25 +1059,117 @@ class MediaGallery {
     });
   }
 
-  _bindViewModeRadios() {
-    document.querySelectorAll('input[name="gallery-view-mode"]').forEach((r) => {
-      r.addEventListener('change', () => {
-        if (!r.checked) return;
-        this.viewMode = r.value === 'by_folder' ? 'by_folder' : 'all';
-        this._syncFolderNavVisibility();
-        if (this.viewMode === 'by_folder') {
-          this.folderTargetId = null;
-          this._renderFolderNav().then(() => this.loadMediaFiles());
-        } else {
-          this.loadMediaFiles();
-        }
-      });
-    });
+  _getCsrf() {
+    return document.querySelector('input[name="csrf_token"]')?.value || '';
   }
 
-  _syncFolderNavVisibility() {
-    const nav = this.elements.folderNav;
-    if (nav) nav.hidden = this.viewMode !== 'by_folder';
+  _syncBulkMoveUi() {
+    const btn = this.elements.bulkMoveBtn;
+    if (!btn) return;
+    btn.disabled = (this.selectedFiles?.size || 0) === 0;
+  }
+
+  _bindBulkMove() {
+    if (this.elements.bulkMoveBtn) {
+      this.elements.bulkMoveBtn.addEventListener('click', () => this._bulkMoveSelected());
+    }
+  }
+
+  async _bulkMoveSelected() {
+    const keys = Array.from(this.selectedFiles || []);
+    const lang = getUiLang();
+    if (!keys.length) {
+      window.App?.Alerts?.show?.(t('gallery_bulk_move_none', lang), 'warning');
+      return;
+    }
+    const sel = this.elements.bulkMoveSelect;
+    const raw = sel?.value;
+    const folderId = raw === '' || raw == null ? null : Number(raw);
+    if (folderId != null && !Number.isFinite(folderId)) {
+      window.App?.Alerts?.show?.(t('gallery_bulk_move_err', lang), 'error');
+      return;
+    }
+    const items = keys.map((storage_key) => ({ storage_key, folder_id: folderId }));
+    const csrf = this._getCsrf();
+    try {
+      const res = await fetch('/api/media/item-meta/batch', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...(csrf ? { 'X-CSRFToken': csrf } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ items }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      window.App?.Alerts?.show?.(
+        t('gallery_bulk_moved', lang).replace('{n}', String(data.updated ?? keys.length)),
+        'success'
+      );
+      this.selectedFiles.clear();
+      document.querySelectorAll('.file-checkbox').forEach((cb) => {
+        cb.checked = false;
+      });
+      this._syncBulkMoveUi();
+      this.toggleDeleteButton(false);
+      await this._renderFolderNav();
+      await this.loadMediaFiles();
+    } catch (e) {
+      window.App?.Alerts?.show?.(`${t('gallery_bulk_move_err', lang)}: ${e.message}`, 'error');
+    }
+  }
+
+  _fillBulkFolderSelect(folders) {
+    const sel = this.elements.bulkMoveSelect;
+    if (!sel) return;
+    const lang = getUiLang();
+    const cur = sel.value;
+    sel.innerHTML = '';
+    const o0 = document.createElement('option');
+    o0.value = '';
+    o0.textContent = t('pl_filter_unsorted', lang);
+    sel.appendChild(o0);
+    for (const f of folders || []) {
+      const o = document.createElement('option');
+      o.value = String(f.id);
+      o.textContent = f.name || `Folder ${f.id}`;
+      sel.appendChild(o);
+    }
+    if (cur && [...sel.options].some((op) => op.value === cur)) sel.value = cur;
+  }
+
+  _syncViewToggleButtons() {
+    const a = this.elements.viewAllBtn;
+    const b = this.elements.viewByFolderBtn;
+    if (a) a.classList.toggle('is-active', this.viewMode === 'all');
+    if (b) b.classList.toggle('is-active', this.viewMode === 'by_folder');
+  }
+
+  _syncFolderColumnState() {
+    const col = this.elements.folderColumn;
+    if (col) col.classList.toggle('gallery-folder-column--inactive', this.viewMode === 'all');
+  }
+
+  _bindViewToggleButtons() {
+    const setMode = (mode) => {
+      if (this.viewMode === mode) return;
+      const prev = this.viewMode;
+      this.viewMode = mode;
+      if (mode === 'all') {
+        this.folderTargetId = null;
+      } else if (mode === 'by_folder' && prev === 'all') {
+        this.folderTargetId = null;
+      }
+      this._syncFolderColumnState();
+      this._syncViewToggleButtons();
+      void this._renderFolderNav().then(() => this.loadMediaFiles());
+    };
+    this.elements.viewAllBtn?.addEventListener('click', () => setMode('all'));
+    this.elements.viewByFolderBtn?.addEventListener('click', () => setMode('by_folder'));
   }
 
   async _renderFolderNav() {
@@ -1075,6 +1178,10 @@ class MediaGallery {
     nav.innerHTML = '';
     const lang = getUiLang();
 
+    const unsRow = document.createElement('div');
+    unsRow.className = 'gallery-folder-row gallery-folder-row--solo';
+    const unsMain = document.createElement('div');
+    unsMain.className = 'gallery-folder-row__main';
     const uns = document.createElement('button');
     uns.type = 'button';
     uns.className =
@@ -1083,32 +1190,137 @@ class MediaGallery {
     uns.textContent = t('pl_filter_unsorted', lang);
     uns.addEventListener('click', () => {
       this.folderTargetId = null;
-      this._renderFolderNav().then(() => this.loadMediaFiles());
+      void this._renderFolderNav().then(() => this.loadMediaFiles());
     });
-    nav.appendChild(uns);
+    unsMain.appendChild(uns);
+    unsRow.appendChild(unsMain);
+    nav.appendChild(unsRow);
 
+    let folders = [];
     try {
       const res = await fetch('/api/media/folders', {
         headers: { Accept: 'application/json' },
         credentials: 'include',
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data?.success) return;
-      for (const f of data.folders || []) {
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.className =
-          'gallery-folder-nav__btn' + (this.folderTargetId === f.id ? ' is-active' : '');
-        b.textContent = f.name || `Folder ${f.id}`;
-        const fid = f.id;
-        b.addEventListener('click', () => {
-          this.folderTargetId = fid;
-          this._renderFolderNav().then(() => this.loadMediaFiles());
-        });
-        nav.appendChild(b);
+      if (res.ok && data?.success) {
+        folders = data.folders || [];
       }
     } catch (e) {
       console.error('Failed to load folders', e);
+    }
+
+    this._fillBulkFolderSelect(folders);
+
+    for (const f of folders) {
+      const row = document.createElement('div');
+      row.className = 'gallery-folder-row';
+      const main = document.createElement('div');
+      main.className = 'gallery-folder-row__main';
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className =
+        'gallery-folder-nav__btn' + (this.folderTargetId === f.id ? ' is-active' : '');
+      b.textContent = f.name || `Folder ${f.id}`;
+      const fid = f.id;
+      b.addEventListener('click', () => {
+        this.folderTargetId = fid;
+        void this._renderFolderNav().then(() => this.loadMediaFiles());
+      });
+      main.appendChild(b);
+
+      const actions = document.createElement('div');
+      actions.className = 'gallery-folder-row__actions';
+      const renameBtn = document.createElement('button');
+      renameBtn.type = 'button';
+      renameBtn.className = 'gallery-folder-row__action';
+      renameBtn.title = t('gallery_folder_rename', lang);
+      renameBtn.setAttribute('aria-label', t('gallery_folder_rename', lang));
+      renameBtn.textContent = '✎';
+      renameBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void this._renameFolder(fid, f.name);
+      });
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'gallery-folder-row__action';
+      delBtn.title = t('gallery_folder_delete', lang);
+      delBtn.setAttribute('aria-label', t('gallery_folder_delete', lang));
+      delBtn.textContent = '🗑';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void this._deleteFolder(fid, f.name);
+      });
+
+      actions.appendChild(renameBtn);
+      actions.appendChild(delBtn);
+      row.appendChild(main);
+      row.appendChild(actions);
+      nav.appendChild(row);
+    }
+  }
+
+  async _renameFolder(folderId, currentName) {
+    const lang = getUiLang();
+    const next = window.prompt(t('gallery_folder_rename_prompt', lang), currentName || '');
+    if (next == null) return;
+    const name = String(next).trim();
+    if (!name || name === currentName) return;
+    const csrf = this._getCsrf();
+    try {
+      const res = await fetch(`/api/media/folders/${folderId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...(csrf ? { 'X-CSRFToken': csrf } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      window.App?.Alerts?.show?.(t('gallery_folder_renamed', lang), 'success');
+      await this._renderFolderNav();
+      await this.loadMediaFiles();
+    } catch (e) {
+      window.App?.Alerts?.show?.(`${t('gallery_folder_rename_err', lang)}: ${e.message}`, 'error');
+    }
+  }
+
+  async _deleteFolder(folderId, folderName) {
+    const lang = getUiLang();
+    const label = folderName || String(folderId);
+    if (!window.confirm(t('gallery_folder_delete_confirm', lang).replace('{name}', label))) {
+      return;
+    }
+    const csrf = this._getCsrf();
+    try {
+      const res = await fetch(`/api/media/folders/${folderId}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...(csrf ? { 'X-CSRFToken': csrf } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ mode: 'metadata' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      if (this.folderTargetId === folderId) {
+        this.folderTargetId = null;
+      }
+      window.App?.Alerts?.show?.(t('gallery_folder_deleted', lang), 'success');
+      await this._renderFolderNav();
+      await this.loadMediaFiles();
+    } catch (e) {
+      window.App?.Alerts?.show?.(`${t('gallery_folder_delete_err', lang)}: ${e.message}`, 'error');
     }
   }
 
@@ -1120,7 +1332,7 @@ class MediaGallery {
       window.App?.Alerts?.show?.(t('gallery_new_folder_ph', lang), 'warning');
       return;
     }
-    const csrf = document.querySelector('input[name="csrf_token"]')?.value;
+    const csrf = this._getCsrf();
     try {
       const res = await fetch('/api/media/folders', {
         method: 'POST',
@@ -1138,9 +1350,12 @@ class MediaGallery {
       }
       if (inp) inp.value = '';
       window.App?.Alerts?.show?.(t('gallery_folder_created', lang), 'success');
-      if (this.viewMode === 'by_folder') {
-        await this._renderFolderNav();
+      const newId = data.folder?.id;
+      if (this.viewMode === 'by_folder' && newId != null) {
+        this.folderTargetId = newId;
       }
+      await this._renderFolderNav();
+      await this.loadMediaFiles();
     } catch (e) {
       window.App?.Alerts?.show?.(`${t('gallery_folder_create_err', lang)}: ${e.message}`, 'error');
     }

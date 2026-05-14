@@ -2249,6 +2249,23 @@ def init_api_routes(api_bp, services):
             "folder": {"id": row.id, "name": row.name, "created_at": row.created_at},
         })
 
+    @api_bp.route('/media/folders/<int:folder_id>', methods=['PATCH'])
+    @login_required
+    def rename_media_folder(folder_id):
+        data = request.get_json() or {}
+        name = str(data.get("name") or "").strip()
+        if not name:
+            return jsonify({"success": False, "error": "name is required"}), 400
+        folder = db.session.get(MediaFolder, folder_id)
+        if not folder:
+            return jsonify({"success": False, "error": "Folder not found"}), 404
+        folder.name = name[:255]
+        db.session.commit()
+        return jsonify({
+            "success": True,
+            "folder": {"id": folder.id, "name": folder.name, "created_at": folder.created_at},
+        })
+
     @api_bp.route('/media/folders/<int:folder_id>', methods=['DELETE'])
     @login_required
     def delete_media_folder(folder_id):
@@ -2338,6 +2355,64 @@ def init_api_routes(api_bp, services):
             db.session.add(MediaItemMeta(storage_key=key, folder_id=fid))
         db.session.commit()
         return jsonify({"success": True, "storage_key": key, "folder_id": fid})
+
+    @api_bp.route('/media/item-meta/batch', methods=['POST'])
+    @login_required
+    def batch_upsert_media_item_folder():
+        """Массовое назначение папки для ключей склада (storage_key)."""
+        data = request.get_json() or {}
+        items = data.get("items")
+        if not isinstance(items, list) or not items:
+            return jsonify({"success": False, "error": "items (non-empty list) is required"}), 400
+
+        updated = 0
+        errors = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                errors.append({"error": "invalid_item"})
+                continue
+            key = str(raw.get("storage_key") or "").strip()
+            if not key:
+                errors.append({"error": "missing_storage_key"})
+                continue
+
+            if raw.get("folder_id") in (None, ""):
+                db.session.query(MediaItemMeta).filter(MediaItemMeta.storage_key == key).delete(
+                    synchronize_session=False
+                )
+                updated += 1
+                continue
+
+            try:
+                fid = int(raw.get("folder_id"))
+            except (TypeError, ValueError):
+                errors.append({"storage_key": key, "error": "Invalid folder_id"})
+                continue
+
+            folder_row = db.session.get(MediaFolder, fid)
+            if not folder_row:
+                errors.append({"storage_key": key, "error": "Folder not found"})
+                continue
+
+            row = db.session.get(MediaItemMeta, key)
+            if row:
+                row.folder_id = fid
+            else:
+                db.session.add(MediaItemMeta(storage_key=key, folder_id=fid))
+            updated += 1
+
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            current_app.logger.error("batch item-meta commit failed: %s", e, exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
+        return jsonify({
+            "success": True,
+            "updated": updated,
+            "errors": errors,
+        })
 
     @api_bp.route('/media/external', methods=['POST'])
     @login_required
