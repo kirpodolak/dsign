@@ -560,7 +560,164 @@ class PlaylistService:
                 'error': str(e)
             })
             raise RuntimeError(f"Failed to update playlist files {playlist_id}") from e
-    
+
+    def get_playlist_items(self, playlist_id: int) -> Dict[str, Any]:
+        """Строки плейлиста для редактора / модалки (без списка всего склада)."""
+        playlist = self.db_session.query(Playlist).get(playlist_id)
+        if not playlist:
+            raise ValueError(f"Playlist {playlist_id} not found")
+
+        items: List[Dict[str, Any]] = []
+        for f in sorted(playlist.files or [], key=lambda x: (int(x.order or 0), int(x.id or 0))):
+            fn = f.file_name
+            is_ext = str(fn).startswith("ext-")
+            lower = str(fn).lower()
+            ext_part = lower.rsplit(".", 1)[-1] if "." in lower else ""
+            is_video = is_ext or ext_part in {"mp4", "avi", "webm", "mov", "mkv", "m4v"}
+            items.append(
+                {
+                    "id": f.id,
+                    "file_name": fn,
+                    "order": f.order,
+                    "duration": f.duration,
+                    "muted": bool(getattr(f, "muted", False)),
+                    "is_video": is_video,
+                    "is_external": is_ext,
+                }
+            )
+        return {"success": True, "playlist_id": playlist_id, "items": items}
+
+    def append_playlist_items(self, playlist_id: int, keys: List[str]) -> Dict[str, Any]:
+        """Добавить ключи в конец плейлиста (duration/muted по правилам склада)."""
+        playlist = self.db_session.query(Playlist).get(playlist_id)
+        if not playlist:
+            raise ValueError(f"Playlist {playlist_id} not found")
+
+        from dsign.services.file_service import FileService
+
+        idle_logo = str(FileService.DEFAULT_LOGO or "idle_logo.jpg").lower()
+
+        media_root = current_app.config.get("MEDIA_ROOT", "")
+        ext_svc = getattr(current_app, "external_media_service", None)
+
+        existing = {f.file_name for f in (playlist.files or [])}
+        max_order = PlaylistFiles.get_max_order(playlist_id)
+        next_order = int(max_order or 0)
+        added: List[str] = []
+        skipped: List[Dict[str, str]] = []
+
+        def _default_duration(name: str) -> int:
+            if str(name).startswith("ext-"):
+                return 0
+            low = str(name).lower()
+            ext = low.rsplit(".", 1)[-1] if "." in low else ""
+            if ext in {"jpg", "jpeg", "png", "gif"}:
+                return 10
+            if ext in {"mp4", "avi", "webm", "mov", "mkv", "m4v"}:
+                return 0
+            return 0
+
+        for raw in keys or []:
+            key = str(raw or "").strip()
+            if not key:
+                continue
+            if key.lower() == idle_logo:
+                skipped.append({"key": key, "reason": "idle_logo"})
+                continue
+            if key in existing:
+                skipped.append({"key": key, "reason": "already_in_playlist"})
+                continue
+
+            if key.startswith("ext-"):
+                if not ext_svc or not ext_svc.get_by_key(key):
+                    skipped.append({"key": key, "reason": "not_found"})
+                    continue
+            else:
+                fp = os.path.join(media_root, key)
+                if not os.path.isfile(fp):
+                    skipped.append({"key": key, "reason": "not_found"})
+                    continue
+
+            next_order += 1
+            self.db_session.add(
+                PlaylistFiles(
+                    playlist_id=playlist_id,
+                    file_name=key,
+                    duration=_default_duration(key),
+                    muted=False,
+                    order=next_order,
+                )
+            )
+            existing.add(key)
+            added.append(key)
+
+        playlist.last_modified = int(time.time())
+        self.db_session.commit()
+
+        try:
+            self._generate_m3u_for_playlist(playlist)
+        except Exception as m3u_error:
+            self._log_error(
+                "M3U generation failed after append",
+                {"playlist_id": playlist_id, "error": str(m3u_error)},
+            )
+            return {
+                "success": True,
+                "added": added,
+                "skipped": skipped,
+                "warning": "Items appended but M3U generation failed",
+            }
+
+        self._log_info(
+            "Playlist items appended",
+            {"playlist_id": playlist_id, "added_count": len(added)},
+        )
+        return {"success": True, "added": added, "skipped": skipped}
+
+    def _compact_playlist_orders(self, playlist_id: int) -> None:
+        rows = (
+            self.db_session.query(PlaylistFiles)
+            .filter_by(playlist_id=playlist_id)
+            .order_by(PlaylistFiles.order.asc(), PlaylistFiles.id.asc())
+            .all()
+        )
+        for i, row in enumerate(rows, start=1):
+            row.order = i
+
+    def remove_storage_key_from_all_playlists(self, storage_key: str) -> None:
+        """
+        Удалить storage_key из всех PlaylistFiles, уплотнить order, перегенерировать M3U.
+        Не делает commit — вызывающий код фиксирует транзакцию.
+        """
+        key = str(storage_key or "").strip()
+        if not key:
+            return
+
+        pids = [
+            r[0]
+            for r in self.db_session.query(PlaylistFiles.playlist_id)
+            .filter(PlaylistFiles.file_name == key)
+            .distinct()
+            .all()
+        ]
+        self.db_session.query(PlaylistFiles).filter(PlaylistFiles.file_name == key).delete(
+            synchronize_session=False
+        )
+        self.db_session.flush()
+
+        for pid in pids:
+            self._compact_playlist_orders(pid)
+            pl = self.db_session.query(Playlist).get(pid)
+            if not pl:
+                continue
+            try:
+                self._generate_m3u_for_playlist(pl)
+            except Exception as e:
+                self._log_warning(
+                    "M3U regen failed after removing storage key from playlist",
+                    {"playlist_id": pid, "key": key, "error": str(e)},
+                )
+
     def reorder_single_item(self, playlist_id: int, item_id: int, new_position: int) -> bool:
         """Изменение порядка элементов плейлиста"""
         try:
