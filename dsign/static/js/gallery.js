@@ -111,8 +111,9 @@ class MediaGallery {
 
   async loadMediaFiles() {
     try {
-      const playlist_id = new URLSearchParams(window.location.search).get('playlist_id') || 'all';
-      const url = `/api/media/files?playlist_id=${playlist_id}`;
+      const params = new URLSearchParams();
+      params.set('view', 'all');
+      const url = `/api/media/files?${params.toString()}`;
     
       const response = await fetch(url, {
         headers: { 'Accept': 'application/json' },
