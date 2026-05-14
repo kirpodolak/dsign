@@ -284,6 +284,33 @@ class ExternalMedia(db.Model):
             },
         }
 
+
+class MediaFolder(db.Model):
+    """User-defined folder for organizing warehouse media (gallery metadata only)."""
+
+    __tablename__ = "media_folders"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.Integer, default=lambda: int(time.time()), nullable=False)
+
+
+class MediaItemMeta(db.Model):
+    """
+    Assigns a storage key (local filename or ext-<id>) to a folder.
+    No row means the item is unsorted (virtual «Несортированное»).
+    """
+
+    __tablename__ = "media_item_meta"
+
+    storage_key = db.Column(db.String(512), primary_key=True)
+    folder_id = db.Column(
+        db.Integer,
+        db.ForeignKey("media_folders.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+
 class PlaylistProfileAssignment(db.Model):
     """Связь плейлиста с профилем воспроизведения"""
     __tablename__ = 'playlist_profile_assignments'
