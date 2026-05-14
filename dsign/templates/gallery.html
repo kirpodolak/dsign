@@ -28,6 +28,22 @@
     </div>
 
     <aside class="gallery-side" aria-label="Gallery controls">
+      <div class="gallery-side__card" id="gallery-folders-card">
+        <div class="gallery-side__title" data-i18n="gallery_folders_title">Папки</div>
+        <div class="gallery-view-mode" role="group" aria-label="View mode">
+          <label class="gallery-view-mode__opt">
+            <input type="radio" name="gallery-view-mode" value="all" checked> <span data-i18n="pl_filter_all">Все медиа</span>
+          </label>
+          <label class="gallery-view-mode__opt">
+            <input type="radio" name="gallery-view-mode" value="by_folder"> <span data-i18n="gallery_view_by_folder">По папкам</span>
+          </label>
+        </div>
+        <div id="gallery-folder-nav" class="gallery-folder-nav" hidden></div>
+        <div class="gallery-folder-create">
+          <input type="text" id="gallery-new-folder-name" class="gallery-folder-create__input" maxlength="255" data-i18n-placeholder="gallery_new_folder_ph" placeholder="Имя папки">
+          <button type="button" id="gallery-create-folder-btn" class="btn secondary" data-i18n="gallery_create_folder">Создать папку</button>
+        </div>
+      </div>
       <div class="gallery-side__card">
         <div class="gallery-side__title" data-i18n="gallery_search_sort">Поиск и сортировка</div>
         <div class="controls controls--stack">
@@ -88,6 +104,7 @@
     <div id="preview-container" class="preview-modal__media"></div>
     <div class="preview-modal__meta">
       <h3 id="preview-filename"></h3>
+      <p id="preview-folder" class="preview-modal__folder" hidden></p>
       <p id="preview-filesize"></p>
       <p id="preview-date"></p>
     </div>
