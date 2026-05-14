@@ -1180,8 +1180,8 @@ class MediaGallery {
 
     const unsRow = document.createElement('div');
     unsRow.className = 'gallery-folder-row gallery-folder-row--solo';
-    const unsMain = document.createElement('div');
-    unsMain.className = 'gallery-folder-row__main';
+    const unsInner = document.createElement('div');
+    unsInner.className = 'gallery-folder-row__inner';
     const uns = document.createElement('button');
     uns.type = 'button';
     uns.className =
@@ -1192,8 +1192,8 @@ class MediaGallery {
       this.folderTargetId = null;
       void this._renderFolderNav().then(() => this.loadMediaFiles());
     });
-    unsMain.appendChild(uns);
-    unsRow.appendChild(unsMain);
+    unsInner.appendChild(uns);
+    unsRow.appendChild(unsInner);
     nav.appendChild(unsRow);
 
     let folders = [];
@@ -1215,25 +1215,25 @@ class MediaGallery {
     for (const f of folders) {
       const row = document.createElement('div');
       row.className = 'gallery-folder-row';
-      const main = document.createElement('div');
-      main.className = 'gallery-folder-row__main';
+      const inner = document.createElement('div');
+      inner.className = 'gallery-folder-row__inner';
       const b = document.createElement('button');
       b.type = 'button';
       b.className =
-        'gallery-folder-nav__btn' + (this.folderTargetId === f.id ? ' is-active' : '');
+        'gallery-folder-nav__btn gallery-folder-nav__btn--row' +
+        (this.folderTargetId === f.id ? ' is-active' : '');
       b.textContent = f.name || `Folder ${f.id}`;
       const fid = f.id;
       b.addEventListener('click', () => {
         this.folderTargetId = fid;
         void this._renderFolderNav().then(() => this.loadMediaFiles());
       });
-      main.appendChild(b);
 
-      const actions = document.createElement('div');
-      actions.className = 'gallery-folder-row__actions';
+      const icons = document.createElement('div');
+      icons.className = 'gallery-folder-row__icons';
       const renameBtn = document.createElement('button');
       renameBtn.type = 'button';
-      renameBtn.className = 'gallery-folder-row__action';
+      renameBtn.className = 'gallery-folder-row__icon-btn';
       renameBtn.title = t('gallery_folder_rename', lang);
       renameBtn.setAttribute('aria-label', t('gallery_folder_rename', lang));
       renameBtn.textContent = '✎';
@@ -1244,7 +1244,7 @@ class MediaGallery {
 
       const delBtn = document.createElement('button');
       delBtn.type = 'button';
-      delBtn.className = 'gallery-folder-row__action';
+      delBtn.className = 'gallery-folder-row__icon-btn';
       delBtn.title = t('gallery_folder_delete', lang);
       delBtn.setAttribute('aria-label', t('gallery_folder_delete', lang));
       delBtn.textContent = '🗑';
@@ -1253,10 +1253,11 @@ class MediaGallery {
         void this._deleteFolder(fid, f.name);
       });
 
-      actions.appendChild(renameBtn);
-      actions.appendChild(delBtn);
-      row.appendChild(main);
-      row.appendChild(actions);
+      icons.appendChild(renameBtn);
+      icons.appendChild(delBtn);
+      inner.appendChild(b);
+      inner.appendChild(icons);
+      row.appendChild(inner);
       nav.appendChild(row);
     }
   }

@@ -1,5 +1,7 @@
 {% extends "layout.html" %}
 
+{% block body_class %} page-gallery{% endblock %}
+
 {% block body_extra_attrs %} data-page-title-i18n="page_gallery_title"{% endblock %}
 
 {% block styles %}
@@ -15,13 +17,23 @@
         <div class="gallery-side__title" data-i18n="gallery_new_folder_card_title">Новая папка</div>
         <div class="gallery-folder-create">
           <input type="text" id="gallery-new-folder-name" class="gallery-folder-create__input" maxlength="255" data-i18n-placeholder="gallery_new_folder_ph" placeholder="Имя папки">
-          <button type="button" id="gallery-create-folder-btn" class="btn secondary" data-i18n="gallery_create_folder">Создать папку</button>
+          <button type="button" id="gallery-create-folder-btn" class="btn primary" data-i18n="gallery_create_folder">Создать папку</button>
         </div>
       </div>
       <div class="gallery-side__card gallery-folder-column__list-card" id="gallery-folder-list-card">
         <div class="gallery-side__title" data-i18n="gallery_folders_list_title">Папки</div>
         <div class="gallery-folder-list-scroller" id="gallery-folder-list-scroller">
           <div id="gallery-folder-nav" class="gallery-folder-nav" role="navigation" aria-label="Folder list"></div>
+        </div>
+      </div>
+      <div class="gallery-side__card gallery-folder-column__bulk" id="gallery-bulk-move-card">
+        <div class="gallery-side__title" data-i18n="gallery_bulk_move_card_title">Перемещение</div>
+        <div class="gallery-bulk-move gallery-bulk-move--column" id="gallery-bulk-move">
+          <label class="gallery-bulk-move__label" for="gallery-bulk-folder-select">
+            <span data-i18n="gallery_bulk_move_label">В папку</span>
+          </label>
+          <select id="gallery-bulk-folder-select" class="gallery-bulk-move__select" aria-label="Target folder"></select>
+          <button type="button" id="gallery-bulk-move-btn" class="btn primary gallery-bulk-move__btn" data-i18n="gallery_bulk_move_btn">Переместить</button>
         </div>
       </div>
     </aside>
@@ -35,19 +47,10 @@
           <button id="delete-selected" type="button" class="btn danger">
             <span aria-hidden="true">🗑</span> <span data-i18n="delete_selected">Удалить выбранные</span>
           </button>
-          <div class="gallery-bulk-move" id="gallery-bulk-move">
-            <label class="gallery-bulk-move__label" for="gallery-bulk-folder-select">
-              <span data-i18n="gallery_bulk_move_label">В папку</span>
-            </label>
-            <select id="gallery-bulk-folder-select" class="gallery-bulk-move__select" aria-label="Target folder"></select>
-            <button type="button" id="gallery-bulk-move-btn" class="btn secondary gallery-bulk-move__btn" data-i18n="gallery_bulk_move_btn">Переместить</button>
-          </div>
         </div>
         <div class="gallery-actions__right" role="group" aria-label="View mode">
-          <div class="gallery-view-toggle">
-            <button type="button" id="gallery-view-all" class="gallery-view-toggle__btn is-active" data-i18n="pl_filter_all">Все медиа</button>
-            <button type="button" id="gallery-view-by-folder" class="gallery-view-toggle__btn" data-i18n="gallery_view_by_folder">По папкам</button>
-          </div>
+          <button type="button" id="gallery-view-all" class="btn secondary gallery-view-mode-btn is-active" data-i18n="pl_filter_all">Все медиа</button>
+          <button type="button" id="gallery-view-by-folder" class="btn secondary gallery-view-mode-btn" data-i18n="gallery_view_by_folder">По папкам</button>
         </div>
       </div>
 
