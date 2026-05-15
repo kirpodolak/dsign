@@ -56,6 +56,7 @@ const GALLERY_CONFIG = {
   dateElement: '#preview-date',
   folderNav: '#gallery-folder-nav',
   folderColumn: '#gallery-folder-column',
+  folderListPanel: '#gallery-folder-list-panel',
   folderListScroller: '#gallery-folder-list-scroller',
   newFolderNameInput: '#gallery-new-folder-name',
   createFolderBtn: '#gallery-create-folder-btn',
@@ -89,12 +90,15 @@ class MediaGallery {
     this._folderNavSig = '';
     this._folderNavDelegated = false;
     this._folderNavFetchGen = 0;
+    this._folderScrollHintsBound = false;
 
     this.initElements();
     this.initEventListeners();
     this._syncFolderColumnState();
     this._syncViewToggleButtons();
-    void this._rebuildFolderNav();
+    void this._rebuildFolderNav().then(() => {
+      this._syncFolderScrollHints();
+    });
     this.loadMediaFiles();
     this._syncMoveToolbarBtn();
     MediaGallery.instance = this;
@@ -1044,6 +1048,7 @@ class MediaGallery {
     }
 
     this._initFolderNavDelegation();
+    this._bindFolderScrollHints();
     this._bindViewToggleButtons();
     this._bindMoveModal();
 
@@ -1245,6 +1250,31 @@ class MediaGallery {
     this.elements.viewByFolderBtn?.addEventListener('click', () => setMode('by_folder'));
   }
 
+  _bindFolderScrollHints() {
+    const scroller = this.elements.folderListScroller;
+    if (!scroller || this._folderScrollHintsBound) return;
+    this._folderScrollHintsBound = true;
+    scroller.addEventListener('scroll', () => this._syncFolderScrollHints(), { passive: true });
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(() => this._syncFolderScrollHints());
+      ro.observe(scroller);
+      const nav = this.elements.folderNav;
+      if (nav) ro.observe(nav);
+    }
+    window.addEventListener('resize', () => this._syncFolderScrollHints());
+  }
+
+  _syncFolderScrollHints() {
+    const scroller = this.elements.folderListScroller;
+    const panel = this.elements.folderListPanel;
+    if (!scroller || !panel) return;
+    const max = scroller.scrollHeight - scroller.clientHeight;
+    const overflow = max > 6;
+    panel.classList.toggle('is-overflow', overflow);
+    panel.classList.toggle('is-at-top', scroller.scrollTop <= 4);
+    panel.classList.toggle('is-at-bottom', scroller.scrollTop >= max - 4);
+  }
+
   _folderNavSignature(folders) {
     const list = (folders || [])
       .map((f) => [Number(f.id), String(f.name || '')])
@@ -1349,6 +1379,7 @@ class MediaGallery {
     if (!needFullRebuild) {
       this._updateFolderNavActive();
       if (scroller) scroller.scrollTop = scrollTop;
+      requestAnimationFrame(() => this._syncFolderScrollHints());
       return;
     }
 
@@ -1414,6 +1445,7 @@ class MediaGallery {
 
     this._updateFolderNavActive();
     if (scroller) scroller.scrollTop = scrollTop;
+    requestAnimationFrame(() => this._syncFolderScrollHints());
   }
 
   async _renameFolder(folderId, currentName) {
