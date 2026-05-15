@@ -88,6 +88,7 @@ class MediaGallery {
     /** @type {string} */
     this._folderNavSig = '';
     this._folderNavDelegated = false;
+    this._folderNavFetchGen = 0;
 
     this.initElements();
     this.initEventListeners();
@@ -1075,7 +1076,9 @@ class MediaGallery {
     document.addEventListener('dsign:language-changed', () => {
       applyI18n();
       this._syncSelectAllLabel();
-      void this._rebuildFolderNav();
+      const uns = this.elements.folderNav?.querySelector('[data-folder-select="unsorted"]');
+      if (uns) uns.textContent = t('pl_filter_unsorted', getUiLang());
+      this._updateFolderNavActive();
     });
 
     window.addEventListener('visibilitychange', () => {
@@ -1235,7 +1238,8 @@ class MediaGallery {
       }
       this._syncFolderColumnState();
       this._syncViewToggleButtons();
-      void this._rebuildFolderNav().then(() => this.loadMediaFiles());
+      this._updateFolderNavActive();
+      void this.loadMediaFiles();
     };
     this.elements.viewAllBtn?.addEventListener('click', () => setMode('all'));
     this.elements.viewByFolderBtn?.addEventListener('click', () => setMode('by_folder'));
@@ -1296,44 +1300,59 @@ class MediaGallery {
       } else {
         return;
       }
+      const scroller = this.elements.folderListScroller;
+      const scrollTop = scroller?.scrollTop ?? 0;
       this._updateFolderNavActive();
-      void this.loadMediaFiles();
+      void this.loadMediaFiles().then(() => {
+        if (scroller) scroller.scrollTop = scrollTop;
+      });
     });
+  }
+
+  async _fetchMediaFolders() {
+    const res = await fetch('/api/media/folders', {
+      headers: { Accept: 'application/json' },
+      credentials: 'include',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.success) {
+      throw new Error(data?.error || `HTTP ${res.status}`);
+    }
+    return data.folders || [];
   }
 
   /**
    * Rebuild folder list from API only when the folder set changed; otherwise keep DOM and refresh active row.
    */
-  async _rebuildFolderNav() {
+  async _rebuildFolderNav({ refreshList = true } = {}) {
     const nav = this.elements.folderNav;
     if (!nav) return;
     const lang = getUiLang();
+    const scroller = this.elements.folderListScroller;
+    const scrollTop = scroller?.scrollTop ?? 0;
 
-    let folders = [];
-    try {
-      const res = await fetch('/api/media/folders', {
-        headers: { Accept: 'application/json' },
-        credentials: 'include',
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data?.success) {
-        folders = data.folders || [];
+    if (refreshList || !this._foldersCache.length) {
+      const gen = ++this._folderNavFetchGen;
+      try {
+        const folders = await this._fetchMediaFolders();
+        if (gen !== this._folderNavFetchGen) return;
+        this._foldersCache = folders;
+      } catch (e) {
+        console.error('Failed to load folders', e);
       }
-    } catch (e) {
-      console.error('Failed to load folders', e);
     }
 
-    this._foldersCache = folders;
+    const folders = this._foldersCache || [];
     const sig = this._folderNavSignature(folders);
     const needFullRebuild = !nav.querySelector('[data-folder-select]') || sig !== this._folderNavSig;
-    this._folderNavSig = sig;
 
     if (!needFullRebuild) {
       this._updateFolderNavActive();
-      applyI18n(nav);
+      if (scroller) scroller.scrollTop = scrollTop;
       return;
     }
 
+    this._folderNavSig = sig;
     nav.innerHTML = '';
 
     const unsRow = document.createElement('div');
@@ -1394,7 +1413,7 @@ class MediaGallery {
     }
 
     this._updateFolderNavActive();
-    applyI18n(nav);
+    if (scroller) scroller.scrollTop = scrollTop;
   }
 
   async _renameFolder(folderId, currentName) {
