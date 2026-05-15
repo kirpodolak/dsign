@@ -32,6 +32,9 @@ export class AddToPlaylistModal {
     this._sort = 'name-asc';
     this._cart = [];
     this._cartSet = new Set();
+    /** @type {string} */
+    this._foldersNavSig = '';
+    this._navDelegated = false;
     this._files = [];
     this._searchTimer = null;
     this._boundDocKeydown = (e) => {
@@ -102,6 +105,24 @@ export class AddToPlaylistModal {
       this._reloadGrid();
     });
     wrap.querySelector('#pl-add-submit').addEventListener('click', () => this._submitAppend());
+    this._initNavDelegation();
+  }
+
+  _initNavDelegation() {
+    const nav = this._root?.querySelector('#pl-add-folder-nav');
+    if (!nav || this._navDelegated) return;
+    this._navDelegated = true;
+    nav.addEventListener('click', async (e) => {
+      const b = e.target.closest('.pl-add-modal__nav-btn');
+      if (!b || !nav.contains(b)) return;
+      const mode = b.dataset.mode;
+      if (!mode) return;
+      const fidRaw = b.dataset.folderId;
+      this._navMode = mode;
+      this._folderId = fidRaw != null && fidRaw !== '' ? Number(fidRaw) : null;
+      this._updatePlAddNavActive();
+      await this._reloadGrid();
+    });
   }
 
   async open() {
@@ -112,19 +133,23 @@ export class AddToPlaylistModal {
     this._sort = 'name-asc';
     this._navMode = 'all';
     this._folderId = null;
-    this._root.hidden = false;
-    this._root.setAttribute('aria-hidden', 'false');
-    document.addEventListener('keydown', this._boundDocKeydown);
-    document.body.classList.add('pl-add-modal--open');
-    applyI18n(this._root);
+    this._foldersNavSig = '';
 
-    await Promise.all([this._loadPlaylistKeys(), this._loadFolders(), this._reloadNav()]);
+    await this._loadPlaylistKeys();
+    await this._loadFolders();
+    await this._reloadNav(true);
     const inp = this._root.querySelector('#pl-add-search');
     if (inp) inp.value = this._search;
     const sortSel = this._root.querySelector('#pl-add-sort');
     if (sortSel) sortSel.value = this._sort;
     await this._reloadGrid();
     this._renderCart();
+
+    this._root.hidden = false;
+    this._root.setAttribute('aria-hidden', 'false');
+    document.addEventListener('keydown', this._boundDocKeydown);
+    document.body.classList.add('pl-add-modal--open');
+    applyI18n(this._root);
   }
 
   close() {
@@ -156,52 +181,60 @@ export class AddToPlaylistModal {
     });
     if (!res.ok) return;
     const data = await res.json();
+    if (!data?.success) return;
     this._folders = data.folders || [];
   }
 
-  async _reloadNav() {
+  _foldersNavSignature() {
+    const list = (this._folders || [])
+      .map((f) => [Number(f.id), String(f.name || '')])
+      .sort((a, b) => a[0] - b[0]);
+    return JSON.stringify(list);
+  }
+
+  _updatePlAddNavActive() {
     const nav = this._root.querySelector('#pl-add-folder-nav');
     if (!nav) return;
+    nav.querySelectorAll('.pl-add-modal__nav-btn').forEach((b) => {
+      const mode = b.dataset.mode;
+      const fidRaw = b.dataset.folderId;
+      const fid = fidRaw != null && fidRaw !== '' ? Number(fidRaw) : null;
+      let active = false;
+      if (mode === 'all') active = this._navMode === 'all';
+      else if (mode === 'unsorted') active = this._navMode === 'unsorted';
+      else if (mode === 'folder') active = this._navMode === 'folder' && Number(fid) === Number(this._folderId);
+      b.classList.toggle('is-active', active);
+    });
+  }
+
+  async _reloadNav(forceFull = false) {
+    const nav = this._root.querySelector('#pl-add-folder-nav');
+    if (!nav) return;
+    const sig = this._foldersNavSignature();
+    const unchanged = !forceFull && sig === this._foldersNavSig && nav.childElementCount > 0;
+    if (unchanged) {
+      this._updatePlAddNavActive();
+      applyI18n(nav);
+      return;
+    }
+    this._foldersNavSig = sig;
     nav.innerHTML = '';
-    const mkBtn = (labelKey, mode, folderId) => {
+    const mkBtn = (labelKey, mode, folderId, labelText) => {
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'pl-add-modal__nav-btn';
       b.dataset.mode = mode;
       if (folderId != null) b.dataset.folderId = String(folderId);
-      b.setAttribute('data-i18n', labelKey);
-      const active =
-        (mode === 'all' && this._navMode === 'all') ||
-        (mode === 'unsorted' && this._navMode === 'unsorted') ||
-        (mode === 'folder' && this._navMode === 'folder' && Number(folderId) === Number(this._folderId));
-      if (active) b.classList.add('is-active');
-      b.addEventListener('click', async () => {
-        this._navMode = mode;
-        this._folderId = folderId != null ? Number(folderId) : null;
-        await this._reloadNav();
-        await this._reloadGrid();
-      });
+      if (labelKey) b.setAttribute('data-i18n', labelKey);
+      if (labelText) b.textContent = labelText;
       nav.appendChild(b);
     };
     mkBtn('pl_filter_all', 'all', null);
     mkBtn('pl_filter_unsorted', 'unsorted', null);
     for (const f of this._folders) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'pl-add-modal__nav-btn';
-      b.dataset.mode = 'folder';
-      b.dataset.folderId = String(f.id);
-      b.textContent = f.name || `Folder ${f.id}`;
-      const active = this._navMode === 'folder' && Number(this._folderId) === Number(f.id);
-      if (active) b.classList.add('is-active');
-      b.addEventListener('click', async () => {
-        this._navMode = 'folder';
-        this._folderId = Number(f.id);
-        await this._reloadNav();
-        await this._reloadGrid();
-      });
-      nav.appendChild(b);
+      mkBtn(null, 'folder', f.id, f.name || `Folder ${f.id}`);
     }
+    this._updatePlAddNavActive();
     applyI18n(nav);
   }
 
