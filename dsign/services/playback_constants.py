@@ -7,6 +7,12 @@ class PlaybackConstants:
     SOCKET_DIR = os.path.dirname(SOCKET_PATH)
     DEFAULT_RESOLUTION = '1920x1080'
     DEFAULT_ASPECT_RATIO = '16:9'
+    # VK via ytdl://: prefer muxed A/V <=1080p (4K software decode overheats signage PCs).
+    VK_YTDL_FORMAT = (
+        "best[height<=1080][acodec!=none]/"
+        "bestvideo[height<=1080]+bestaudio/"
+        "best[height<=1080]"
+    )
     MAX_RETRIES = 3  # Увеличено с 3
     # Used between retries for errors where MPV likely needs systemd recovery (socket missing, etc.).
     RETRY_DELAY = 5.0  # Увеличено с 1.0
