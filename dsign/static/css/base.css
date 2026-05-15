@@ -129,7 +129,7 @@ body.app-body {
   gap: 0.75rem;
   min-height: var(--app-header-h);
   padding: 0.4rem 1rem;
-  max-width: 1280px;
+  max-width: min(100%, 1580px);
   margin: 0 auto;
   width: 100%;
 }
@@ -326,7 +326,7 @@ body.app-body {
 
 .app-main {
   flex: 1;
-  max-width: 1280px;
+  max-width: min(100%, 1580px);
   margin: 0 auto;
   width: 100%;
   padding: 1.25rem 1rem 2rem;

@@ -32,6 +32,8 @@ export class AddToPlaylistModal {
     this._sort = 'name-asc';
     this._cart = [];
     this._cartSet = new Set();
+    /** @type {string} */
+    this._foldersNavSig = '';
     this._files = [];
     this._searchTimer = null;
     this._boundDocKeydown = (e) => {
@@ -118,7 +120,9 @@ export class AddToPlaylistModal {
     document.body.classList.add('pl-add-modal--open');
     applyI18n(this._root);
 
-    await Promise.all([this._loadPlaylistKeys(), this._loadFolders(), this._reloadNav()]);
+    await this._loadPlaylistKeys();
+    await this._loadFolders();
+    await this._reloadNav(true);
     const inp = this._root.querySelector('#pl-add-search');
     if (inp) inp.value = this._search;
     const sortSel = this._root.querySelector('#pl-add-sort');
@@ -159,9 +163,39 @@ export class AddToPlaylistModal {
     this._folders = data.folders || [];
   }
 
-  async _reloadNav() {
+  _foldersNavSignature() {
+    const list = (this._folders || [])
+      .map((f) => [Number(f.id), String(f.name || '')])
+      .sort((a, b) => a[0] - b[0]);
+    return JSON.stringify(list);
+  }
+
+  _updatePlAddNavActive() {
     const nav = this._root.querySelector('#pl-add-folder-nav');
     if (!nav) return;
+    nav.querySelectorAll('.pl-add-modal__nav-btn').forEach((b) => {
+      const mode = b.dataset.mode;
+      const fidRaw = b.dataset.folderId;
+      const fid = fidRaw != null && fidRaw !== '' ? Number(fidRaw) : null;
+      let active = false;
+      if (mode === 'all') active = this._navMode === 'all';
+      else if (mode === 'unsorted') active = this._navMode === 'unsorted';
+      else if (mode === 'folder') active = this._navMode === 'folder' && Number(fid) === Number(this._folderId);
+      b.classList.toggle('is-active', active);
+    });
+  }
+
+  async _reloadNav(forceFull = false) {
+    const nav = this._root.querySelector('#pl-add-folder-nav');
+    if (!nav) return;
+    const sig = this._foldersNavSignature();
+    const unchanged = !forceFull && sig === this._foldersNavSig && nav.childElementCount > 0;
+    if (unchanged) {
+      this._updatePlAddNavActive();
+      applyI18n(nav);
+      return;
+    }
+    this._foldersNavSig = sig;
     nav.innerHTML = '';
     const mkBtn = (labelKey, mode, folderId) => {
       const b = document.createElement('button');
@@ -178,7 +212,7 @@ export class AddToPlaylistModal {
       b.addEventListener('click', async () => {
         this._navMode = mode;
         this._folderId = folderId != null ? Number(folderId) : null;
-        await this._reloadNav();
+        this._updatePlAddNavActive();
         await this._reloadGrid();
       });
       nav.appendChild(b);
@@ -197,7 +231,7 @@ export class AddToPlaylistModal {
       b.addEventListener('click', async () => {
         this._navMode = 'folder';
         this._folderId = Number(f.id);
-        await this._reloadNav();
+        this._updatePlAddNavActive();
         await this._reloadGrid();
       });
       nav.appendChild(b);

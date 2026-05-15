@@ -1,8 +1,4 @@
 /* Утилиты разметки галереи (заголовки карточек и т.п.) */
-body.page-gallery .app-main {
-    max-width: min(100%, 1580px);
-}
-
 .gallery-page__header {
     display: flex;
     align-items: baseline;
@@ -35,17 +31,16 @@ body.page-gallery .app-main {
     grid-template-columns: var(--gallery-rail) minmax(0, 1fr) var(--gallery-rail);
     gap: 18px;
     align-items: stretch;
+    min-height: calc(100dvh - var(--app-header-h, 3.5rem) - 6.5rem);
 }
 
 .gallery-folder-column {
-    position: sticky;
-    top: calc(12px + 64px);
-    align-self: start;
+    align-self: stretch;
     display: flex;
     flex-direction: column;
     gap: 12px;
     min-height: 0;
-    max-height: calc(100vh - 88px);
+    height: 100%;
     width: 100%;
     min-width: 0;
     transition: opacity 0.2s ease, filter 0.2s ease;
@@ -68,8 +63,8 @@ body.page-gallery .app-main {
 
 .gallery-folder-list-scroller {
     flex: 1;
-    min-height: 100px;
-    max-height: min(38vh, calc(100vh - 440px));
+    min-height: 0;
+    max-height: none;
     overflow-y: auto;
     overflow-x: hidden;
     overscroll-behavior-y: contain;
@@ -84,6 +79,10 @@ body.page-gallery .app-main {
 
 .gallery-main {
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
 }
 
 .gallery-actions {
@@ -219,8 +218,9 @@ body.page-gallery .app-main {
 
 .gallery-grid-scroll {
     margin-top: 12px;
-    height: calc(100vh - 260px);
-    min-height: 420px;
+    flex: 1;
+    min-height: 0;
+    height: auto;
     overflow: auto;
     border-radius: 12px;
     border: 1px solid rgba(226, 232, 240, 0.9);
@@ -233,14 +233,20 @@ body.page-gallery .app-main {
 }
 
 .gallery-side {
-    position: sticky;
-    top: calc(12px + 64px);
-    align-self: start;
+    align-self: stretch;
     display: flex;
     flex-direction: column;
     gap: 12px;
     width: 100%;
     min-width: 0;
+    min-height: 100%;
+    height: 100%;
+}
+
+.gallery-side::after {
+    content: '';
+    flex: 1 1 0;
+    min-height: 0;
 }
 
 .gallery-side__card {
