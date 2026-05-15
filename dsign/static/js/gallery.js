@@ -96,9 +96,7 @@ class MediaGallery {
     this.initEventListeners();
     this._syncFolderColumnState();
     this._syncViewToggleButtons();
-    void this._rebuildFolderNav().then(() => {
-      this._syncFolderScrollHints();
-    });
+    void this._rebuildFolderNav().then(() => this._scheduleFolderScrollHintsSync());
     this.loadMediaFiles();
     this._syncMoveToolbarBtn();
     MediaGallery.instance = this;
@@ -1256,23 +1254,44 @@ class MediaGallery {
     this._folderScrollHintsBound = true;
     scroller.addEventListener('scroll', () => this._syncFolderScrollHints(), { passive: true });
     if (typeof ResizeObserver !== 'undefined') {
-      const ro = new ResizeObserver(() => this._syncFolderScrollHints());
+      const ro = new ResizeObserver(() => this._scheduleFolderScrollHintsSync());
       ro.observe(scroller);
+      const panel = this.elements.folderListPanel;
+      if (panel) ro.observe(panel);
       const nav = this.elements.folderNav;
       if (nav) ro.observe(nav);
     }
     window.addEventListener('resize', () => this._syncFolderScrollHints());
   }
 
+  _scheduleFolderScrollHintsSync() {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => this._syncFolderScrollHints());
+    });
+  }
+
   _syncFolderScrollHints() {
     const scroller = this.elements.folderListScroller;
     const panel = this.elements.folderListPanel;
     if (!scroller || !panel) return;
-    const max = scroller.scrollHeight - scroller.clientHeight;
+    const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
     const overflow = max > 6;
     panel.classList.toggle('is-overflow', overflow);
     panel.classList.toggle('is-at-top', scroller.scrollTop <= 4);
     panel.classList.toggle('is-at-bottom', scroller.scrollTop >= max - 4);
+  }
+
+  _scrollActiveFolderIntoView() {
+    const scroller = this.elements.folderListScroller;
+    const nav = this.elements.folderNav;
+    if (!scroller || !nav) return;
+    const active =
+      nav.querySelector('[data-folder-select].is-active') ||
+      nav.querySelector('[data-folder-select]');
+    if (active) {
+      active.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+    }
+    this._scheduleFolderScrollHintsSync();
   }
 
   _folderNavSignature(folders) {
@@ -1379,7 +1398,7 @@ class MediaGallery {
     if (!needFullRebuild) {
       this._updateFolderNavActive();
       if (scroller) scroller.scrollTop = scrollTop;
-      requestAnimationFrame(() => this._syncFolderScrollHints());
+      this._scheduleFolderScrollHintsSync();
       return;
     }
 
@@ -1445,7 +1464,7 @@ class MediaGallery {
 
     this._updateFolderNavActive();
     if (scroller) scroller.scrollTop = scrollTop;
-    requestAnimationFrame(() => this._syncFolderScrollHints());
+    this._scheduleFolderScrollHintsSync();
   }
 
   async _renameFolder(folderId, currentName) {
@@ -1541,7 +1560,8 @@ class MediaGallery {
       if (this.viewMode === 'by_folder' && newId != null) {
         this.folderTargetId = newId;
       }
-      await this._rebuildFolderNav();
+      await this._rebuildFolderNav({ refreshList: true });
+      this._scrollActiveFolderIntoView();
       await this.loadMediaFiles();
     } catch (e) {
       window.App?.Alerts?.show?.(`${t('gallery_folder_create_err', lang)}: ${e.message}`, 'error');
