@@ -58,6 +58,7 @@ const GALLERY_CONFIG = {
   folderColumn: '#gallery-folder-column',
   folderListPanel: '#gallery-folder-list-panel',
   folderListScroller: '#gallery-folder-list-scroller',
+  folderListCard: '#gallery-folder-list-card',
   newFolderNameInput: '#gallery-new-folder-name',
   createFolderBtn: '#gallery-create-folder-btn',
   viewAllBtn: '#gallery-view-all',
@@ -1254,34 +1255,61 @@ class MediaGallery {
     if (!scroller || !panel || this._folderScrollHintsBound) return;
     this._folderScrollHintsBound = true;
     scroller.addEventListener('scroll', () => this._syncFolderScrollHints(), { passive: true });
-    panel.addEventListener(
-      'wheel',
-      (e) => {
-        const max = scroller.scrollHeight - scroller.clientHeight;
-        if (max <= 0) return;
-        const dy = e.deltaY;
-        if (!dy) return;
-        const next = Math.max(0, Math.min(max, scroller.scrollTop + dy));
-        if (next === scroller.scrollTop) return;
-        scroller.scrollTop = next;
-        e.preventDefault();
-        this._syncFolderScrollHints();
-      },
-      { passive: false, capture: true }
-    );
+    const onWheel = (e) => {
+      this._lockFolderPanelLayout();
+      const max = scroller.scrollHeight - scroller.clientHeight;
+      if (max <= 1) return;
+      const dy = e.deltaY;
+      if (!dy) return;
+      const next = Math.max(0, Math.min(max, scroller.scrollTop + dy));
+      if (next === scroller.scrollTop) return;
+      scroller.scrollTop = next;
+      e.preventDefault();
+      e.stopPropagation();
+      this._syncFolderScrollHints();
+    };
+    panel.addEventListener('wheel', onWheel, { passive: false });
+    scroller.addEventListener('wheel', onWheel, { passive: false });
     if (typeof ResizeObserver !== 'undefined') {
       const ro = new ResizeObserver(() => this._scheduleFolderScrollHintsSync());
       ro.observe(scroller);
       ro.observe(panel);
+      const listCard = this.elements.folderListCard;
+      if (listCard) ro.observe(listCard);
       const nav = this.elements.folderNav;
       if (nav) ro.observe(nav);
     }
     window.addEventListener('resize', () => this._scheduleFolderScrollHintsSync());
   }
 
+  _lockFolderPanelLayout() {
+    const listCard = this.elements.folderListCard;
+    const panel = this.elements.folderListPanel;
+    if (!listCard || !panel) return;
+    const title = listCard.querySelector(':scope > .gallery-side__title');
+    const cardStyle = getComputedStyle(listCard);
+    const padY =
+      (parseFloat(cardStyle.paddingTop) || 0) + (parseFloat(cardStyle.paddingBottom) || 0);
+    const titleH = title ? title.offsetHeight : 0;
+    const titleMb = title
+      ? parseFloat(getComputedStyle(title).marginBottom) || 0
+      : 0;
+    const innerH = Math.floor(listCard.clientHeight - padY - titleH - titleMb);
+    if (innerH > 0) {
+      panel.style.flex = '0 0 auto';
+      panel.style.height = `${innerH}px`;
+      panel.style.maxHeight = `${innerH}px`;
+      panel.style.minHeight = '0';
+    }
+  }
+
   _scheduleFolderScrollHintsSync() {
     requestAnimationFrame(() => {
-      requestAnimationFrame(() => this._syncFolderScrollHints());
+      this._lockFolderPanelLayout();
+      requestAnimationFrame(() => {
+        this._lockFolderPanelLayout();
+        this._syncFolderScrollHints();
+      });
     });
   }
 

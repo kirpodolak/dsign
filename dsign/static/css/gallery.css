@@ -67,6 +67,12 @@ body.page-gallery .page-title {
     overflow: hidden;
 }
 
+.gallery-folder-column,
+.gallery-main,
+.gallery-side {
+    min-height: 0;
+}
+
 .gallery-folder-column {
     align-self: stretch;
     display: flex;
@@ -107,24 +113,19 @@ body.page-gallery .page-title {
 .gallery-folder-list-panel {
     position: relative;
     flex: 1 1 0;
-    display: grid;
-    grid-template: minmax(0, 1fr) / minmax(0, 1fr);
     width: 100%;
     min-height: 0;
     max-height: 100%;
     overflow: hidden;
+    isolation: isolate;
 }
 
 .gallery-folder-list-scroller {
-    grid-row: 1;
-    grid-column: 1;
-    align-self: stretch;
-    justify-self: stretch;
+    position: absolute;
+    inset: 0;
+    z-index: 1;
     box-sizing: border-box;
     width: 100%;
-    height: 100%;
-    max-height: 100%;
-    min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
     overscroll-behavior-y: contain;
@@ -146,12 +147,10 @@ body.page-gallery .page-title {
 }
 
 .gallery-folder-scroll-hint {
-    grid-row: 1;
-    grid-column: 1;
-    position: relative;
-    left: auto;
-    right: auto;
-    z-index: 3;
+    position: absolute;
+    left: 0;
+    right: 0;
+    z-index: 2;
     display: flex;
     justify-content: center;
     pointer-events: none;
@@ -169,8 +168,7 @@ body.page-gallery .page-title {
 }
 
 .gallery-folder-scroll-hint--bottom {
-    align-self: end;
-    justify-self: stretch;
+    bottom: 0;
     height: 1.35rem;
     align-items: flex-end;
     padding-bottom: 2px;
