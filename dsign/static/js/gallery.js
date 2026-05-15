@@ -1250,38 +1250,38 @@ class MediaGallery {
 
   _bindFolderScrollHints() {
     const scroller = this.elements.folderListScroller;
-    if (!scroller || this._folderScrollHintsBound) return;
+    const panel = this.elements.folderListPanel;
+    if (!scroller || !panel || this._folderScrollHintsBound) return;
     this._folderScrollHintsBound = true;
     scroller.addEventListener('scroll', () => this._syncFolderScrollHints(), { passive: true });
+    panel.addEventListener(
+      'wheel',
+      (e) => {
+        const max = scroller.scrollHeight - scroller.clientHeight;
+        if (max <= 0) return;
+        const dy = e.deltaY;
+        if (!dy) return;
+        const next = Math.max(0, Math.min(max, scroller.scrollTop + dy));
+        if (next === scroller.scrollTop) return;
+        scroller.scrollTop = next;
+        e.preventDefault();
+        this._syncFolderScrollHints();
+      },
+      { passive: false, capture: true }
+    );
     if (typeof ResizeObserver !== 'undefined') {
       const ro = new ResizeObserver(() => this._scheduleFolderScrollHintsSync());
       ro.observe(scroller);
-      const panel = this.elements.folderListPanel;
-      if (panel) ro.observe(panel);
+      ro.observe(panel);
       const nav = this.elements.folderNav;
       if (nav) ro.observe(nav);
     }
     window.addEventListener('resize', () => this._scheduleFolderScrollHintsSync());
   }
 
-  _enforceFolderScrollerClip() {
-    const scroller = this.elements.folderListScroller;
-    const panel = this.elements.folderListPanel;
-    if (!scroller || !panel) return;
-    const h = Math.round(panel.getBoundingClientRect().height);
-    if (h > 0) {
-      scroller.style.height = `${h}px`;
-      scroller.style.maxHeight = `${h}px`;
-    }
-  }
-
   _scheduleFolderScrollHintsSync() {
     requestAnimationFrame(() => {
-      this._enforceFolderScrollerClip();
-      requestAnimationFrame(() => {
-        this._enforceFolderScrollerClip();
-        this._syncFolderScrollHints();
-      });
+      requestAnimationFrame(() => this._syncFolderScrollHints());
     });
   }
 
