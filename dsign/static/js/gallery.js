@@ -1228,6 +1228,8 @@ class MediaGallery {
   _syncFolderColumnState() {
     const col = this.elements.folderColumn;
     if (col) col.classList.toggle('gallery-folder-column--inactive', this.viewMode === 'all');
+    this._clearFolderPanelInlineLayout();
+    this._scheduleFolderScrollHintsSync();
   }
 
   _bindViewToggleButtons() {
