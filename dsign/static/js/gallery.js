@@ -1261,7 +1261,7 @@ class MediaGallery {
       const nav = this.elements.folderNav;
       if (nav) ro.observe(nav);
     }
-    window.addEventListener('resize', () => this._syncFolderScrollHints());
+    window.addEventListener('resize', () => this._scheduleFolderScrollHintsSync());
   }
 
   _enforceFolderScrollerClip() {

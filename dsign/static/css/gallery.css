@@ -59,7 +59,7 @@ body.page-gallery .page-title {
     grid-template-columns: var(--gallery-rail) minmax(0, 1fr) var(--gallery-rail);
     grid-template-rows: minmax(0, 1fr);
     gap: 18px;
-    align-items: start;
+    align-items: stretch;
     flex: 1;
     min-height: 0;
     height: 100%;
@@ -68,16 +68,16 @@ body.page-gallery .page-title {
 }
 
 .gallery-folder-column {
-    align-self: start;
+    align-self: stretch;
     display: flex;
     flex-direction: column;
     gap: 12px;
     min-height: 0;
+    height: 100%;
     max-height: 100%;
     width: 100%;
     min-width: 0;
     overflow: hidden;
-    flex-shrink: 0;
     transition: opacity 0.2s ease, filter 0.2s ease;
 }
 
@@ -93,24 +93,28 @@ body.page-gallery .page-title {
 }
 
 .gallery-folder-column__list-card {
-    flex: 0 0 auto;
+    flex: 1 1 auto;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     min-height: 0;
 }
 
+.gallery-folder-column__list-card > .gallery-side__title {
+    flex: 0 0 auto;
+}
+
 .gallery-folder-list-panel {
     position: relative;
-    flex: 0 0 var(--gallery-folder-list-h);
+    flex: 1 1 auto;
     display: grid;
     grid-template: minmax(0, 1fr) / minmax(0, 1fr);
     width: 100%;
-    height: var(--gallery-folder-list-h);
-    max-height: var(--gallery-folder-list-h);
     min-height: var(--gallery-folder-list-h);
+    height: 100%;
+    max-height: 100%;
     overflow: hidden;
-    contain: strict;
+    contain: layout style;
 }
 
 .gallery-folder-list-scroller {
@@ -120,10 +124,10 @@ body.page-gallery .page-title {
     justify-self: stretch;
     box-sizing: border-box;
     width: 100%;
-    height: var(--gallery-folder-list-h);
-    max-height: var(--gallery-folder-list-h);
+    height: 100%;
+    max-height: 100%;
     min-height: 0;
-    overflow-y: scroll;
+    overflow-y: auto;
     overflow-x: hidden;
     overscroll-behavior-y: contain;
     -webkit-overflow-scrolling: touch;
@@ -1199,17 +1203,18 @@ body.page-gallery .page-title {
     .gallery-folder-column {
         position: static;
         max-height: none;
+        height: auto;
     }
 
-    .gallery-folder-list-panel,
-    .gallery-folder-list-scroller {
-        height: min(var(--gallery-folder-list-h), 40vh);
-        max-height: min(var(--gallery-folder-list-h), 40vh);
-        min-height: min(var(--gallery-folder-list-h), 40vh);
+    .gallery-folder-column__list-card {
+        flex: 0 0 auto;
     }
 
     .gallery-folder-list-panel {
-        flex-basis: min(var(--gallery-folder-list-h), 40vh);
+        flex: 0 0 auto;
+        height: min(var(--gallery-folder-list-h), 40vh);
+        max-height: min(var(--gallery-folder-list-h), 40vh);
+        min-height: min(var(--gallery-folder-list-h), 40vh);
     }
 
     .gallery-actions__right {
