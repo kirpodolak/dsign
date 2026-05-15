@@ -53,11 +53,8 @@ body.page-gallery .page-title {
     --gallery-folder-row-h: 2.5rem;
     --gallery-folder-row-gap: 6px;
     --gallery-folder-visible-rows: 8;
-    --gallery-folder-list-h: calc(
-        var(--gallery-folder-visible-rows) * var(--gallery-folder-row-h) +
-        (var(--gallery-folder-visible-rows) - 1) * var(--gallery-folder-row-gap) +
-        8px
-    );
+    /* 8 rows × 2.5rem + 7 gaps × 6px + padding — fixed cap (do not grow with folder count) */
+    --gallery-folder-list-h: 22.625rem;
     display: grid;
     grid-template-columns: var(--gallery-rail) minmax(0, 1fr) var(--gallery-rail);
     grid-template-rows: minmax(0, 1fr);
@@ -71,16 +68,16 @@ body.page-gallery .page-title {
 }
 
 .gallery-folder-column {
-    align-self: stretch;
+    align-self: start;
     display: flex;
     flex-direction: column;
     gap: 12px;
     min-height: 0;
     max-height: 100%;
-    height: 100%;
     width: 100%;
     min-width: 0;
     overflow: hidden;
+    flex-shrink: 0;
     transition: opacity 0.2s ease, filter 0.2s ease;
 }
 
@@ -105,18 +102,28 @@ body.page-gallery .page-title {
 
 .gallery-folder-list-panel {
     position: relative;
-    flex: 0 0 auto;
+    flex: 0 0 var(--gallery-folder-list-h);
+    display: grid;
+    grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+    width: 100%;
     height: var(--gallery-folder-list-h);
     max-height: var(--gallery-folder-list-h);
     min-height: var(--gallery-folder-list-h);
     overflow: hidden;
-    contain: layout style;
+    contain: strict;
 }
 
 .gallery-folder-list-scroller {
-    height: 100%;
-    max-height: 100%;
-    overflow-y: auto;
+    grid-row: 1;
+    grid-column: 1;
+    align-self: stretch;
+    justify-self: stretch;
+    box-sizing: border-box;
+    width: 100%;
+    height: var(--gallery-folder-list-h);
+    max-height: var(--gallery-folder-list-h);
+    min-height: 0;
+    overflow-y: scroll;
     overflow-x: hidden;
     overscroll-behavior-y: contain;
     -webkit-overflow-scrolling: touch;
@@ -127,7 +134,7 @@ body.page-gallery .page-title {
     background: rgba(248, 250, 252, 0.6);
     padding: 4px;
     scrollbar-width: thin;
-    scrollbar-color: rgba(92, 107, 192, 0.45) transparent;
+    scrollbar-color: rgba(92, 107, 192, 0.55) rgba(226, 232, 240, 0.35);
 }
 
 .gallery-folder-list-scroller::-webkit-scrollbar {
@@ -140,9 +147,11 @@ body.page-gallery .page-title {
 }
 
 .gallery-folder-scroll-hint {
-    position: absolute;
-    left: 0;
-    right: 0;
+    grid-row: 1;
+    grid-column: 1;
+    position: relative;
+    left: auto;
+    right: auto;
     z-index: 3;
     display: flex;
     justify-content: center;
@@ -152,7 +161,8 @@ body.page-gallery .page-title {
 }
 
 .gallery-folder-scroll-hint--top {
-    top: 0;
+    align-self: start;
+    justify-self: stretch;
     height: 1.35rem;
     align-items: flex-start;
     padding-top: 2px;
@@ -160,7 +170,8 @@ body.page-gallery .page-title {
 }
 
 .gallery-folder-scroll-hint--bottom {
-    bottom: 0;
+    align-self: end;
+    justify-self: stretch;
     height: 1.35rem;
     align-items: flex-end;
     padding-bottom: 2px;
@@ -1060,6 +1071,8 @@ body.page-gallery .page-title {
     flex-direction: column;
     gap: var(--gallery-folder-row-gap);
     min-height: 0;
+    width: 100%;
+    /* Content may exceed scroller; scrolling happens on .gallery-folder-list-scroller only */
 }
 
 .gallery-folder-row {
@@ -1071,7 +1084,8 @@ body.page-gallery .page-title {
     align-items: center;
     gap: 6px;
     width: 100%;
-    min-height: 2.5rem;
+    min-height: var(--gallery-folder-row-h);
+    max-height: var(--gallery-folder-row-h);
 }
 
 .gallery-folder-row--solo .gallery-folder-nav__btn {
@@ -1187,10 +1201,15 @@ body.page-gallery .page-title {
         max-height: none;
     }
 
-    .gallery-folder-list-panel {
+    .gallery-folder-list-panel,
+    .gallery-folder-list-scroller {
         height: min(var(--gallery-folder-list-h), 40vh);
         max-height: min(var(--gallery-folder-list-h), 40vh);
         min-height: min(var(--gallery-folder-list-h), 40vh);
+    }
+
+    .gallery-folder-list-panel {
+        flex-basis: min(var(--gallery-folder-list-h), 40vh);
     }
 
     .gallery-actions__right {

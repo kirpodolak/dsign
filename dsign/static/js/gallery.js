@@ -1264,9 +1264,24 @@ class MediaGallery {
     window.addEventListener('resize', () => this._syncFolderScrollHints());
   }
 
+  _enforceFolderScrollerClip() {
+    const scroller = this.elements.folderListScroller;
+    const panel = this.elements.folderListPanel;
+    if (!scroller || !panel) return;
+    const h = Math.round(panel.getBoundingClientRect().height);
+    if (h > 0) {
+      scroller.style.height = `${h}px`;
+      scroller.style.maxHeight = `${h}px`;
+    }
+  }
+
   _scheduleFolderScrollHintsSync() {
     requestAnimationFrame(() => {
-      requestAnimationFrame(() => this._syncFolderScrollHints());
+      this._enforceFolderScrollerClip();
+      requestAnimationFrame(() => {
+        this._enforceFolderScrollerClip();
+        this._syncFolderScrollHints();
+      });
     });
   }
 
