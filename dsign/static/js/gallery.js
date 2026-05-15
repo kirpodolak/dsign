@@ -56,7 +56,9 @@ const GALLERY_CONFIG = {
   dateElement: '#preview-date',
   folderNav: '#gallery-folder-nav',
   folderColumn: '#gallery-folder-column',
+  folderListPanel: '#gallery-folder-list-panel',
   folderListScroller: '#gallery-folder-list-scroller',
+  folderListCard: '#gallery-folder-list-card',
   newFolderNameInput: '#gallery-new-folder-name',
   createFolderBtn: '#gallery-create-folder-btn',
   viewAllBtn: '#gallery-view-all',
@@ -85,12 +87,17 @@ class MediaGallery {
     this._searchReloadTimer = null;
     /** @type {Array<{id:number,name:string}>} */
     this._foldersCache = [];
+    /** @type {string} */
+    this._folderNavSig = '';
+    this._folderNavDelegated = false;
+    this._folderNavFetchGen = 0;
+    this._folderScrollHintsBound = false;
 
     this.initElements();
     this.initEventListeners();
     this._syncFolderColumnState();
     this._syncViewToggleButtons();
-    void this._renderFolderNav();
+    void this._rebuildFolderNav().then(() => this._scheduleFolderScrollHintsSync());
     this.loadMediaFiles();
     this._syncMoveToolbarBtn();
     MediaGallery.instance = this;
@@ -1039,6 +1046,8 @@ class MediaGallery {
       });
     }
 
+    this._initFolderNavDelegation();
+    this._bindFolderScrollHints();
     this._bindViewToggleButtons();
     this._bindMoveModal();
 
@@ -1071,7 +1080,9 @@ class MediaGallery {
     document.addEventListener('dsign:language-changed', () => {
       applyI18n();
       this._syncSelectAllLabel();
-      void this._renderFolderNav();
+      const uns = this.elements.folderNav?.querySelector('[data-folder-select="unsorted"]');
+      if (uns) uns.textContent = t('pl_filter_unsorted', getUiLang());
+      this._updateFolderNavActive();
     });
 
     window.addEventListener('visibilitychange', () => {
@@ -1200,7 +1211,7 @@ class MediaGallery {
       this._syncMoveToolbarBtn();
       this.toggleDeleteButton(false);
       this._closeMoveModal();
-      await this._renderFolderNav();
+      await this._rebuildFolderNav();
       await this.loadMediaFiles();
     } catch (e) {
       window.App?.Alerts?.show?.(`${t('gallery_bulk_move_err', lang)}: ${e.message}`, 'error');
@@ -1217,6 +1228,8 @@ class MediaGallery {
   _syncFolderColumnState() {
     const col = this.elements.folderColumn;
     if (col) col.classList.toggle('gallery-folder-column--inactive', this.viewMode === 'all');
+    this._clearFolderPanelInlineLayout();
+    this._scheduleFolderScrollHintsSync();
   }
 
   _bindViewToggleButtons() {
@@ -1231,17 +1244,197 @@ class MediaGallery {
       }
       this._syncFolderColumnState();
       this._syncViewToggleButtons();
-      void this._renderFolderNav().then(() => this.loadMediaFiles());
+      this._updateFolderNavActive();
+      void this.loadMediaFiles().then(() => this._scheduleFolderScrollHintsSync());
     };
     this.elements.viewAllBtn?.addEventListener('click', () => setMode('all'));
     this.elements.viewByFolderBtn?.addEventListener('click', () => setMode('by_folder'));
   }
 
-  async _renderFolderNav() {
+  _bindFolderScrollHints() {
+    const scroller = this.elements.folderListScroller;
+    const panel = this.elements.folderListPanel;
+    if (!scroller || !panel || this._folderScrollHintsBound) return;
+    this._folderScrollHintsBound = true;
+    scroller.addEventListener('scroll', () => this._syncFolderScrollHints(), { passive: true });
+    const onWheel = (e) => {
+      const max = scroller.scrollHeight - scroller.clientHeight;
+      if (max <= 1) return;
+      const dy = e.deltaY;
+      if (!dy) return;
+      const next = Math.max(0, Math.min(max, scroller.scrollTop + dy));
+      if (next === scroller.scrollTop) return;
+      scroller.scrollTop = next;
+      e.preventDefault();
+      e.stopPropagation();
+      this._syncFolderScrollHints();
+    };
+    panel.addEventListener('wheel', onWheel, { passive: false });
+    scroller.addEventListener('wheel', onWheel, { passive: false });
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(() => this._scheduleFolderScrollHintsSync());
+      ro.observe(scroller);
+      ro.observe(panel);
+      const listCard = this.elements.folderListCard;
+      if (listCard) ro.observe(listCard);
+      const nav = this.elements.folderNav;
+      if (nav) ro.observe(nav);
+    }
+    window.addEventListener('resize', () => this._scheduleFolderScrollHintsSync());
+  }
+
+  _clearFolderPanelInlineLayout() {
+    const panel = this.elements.folderListPanel;
+    if (!panel) return;
+    panel.style.removeProperty('flex');
+    panel.style.removeProperty('height');
+    panel.style.removeProperty('max-height');
+    panel.style.removeProperty('min-height');
+  }
+
+  _scheduleFolderScrollHintsSync() {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        this._clearFolderPanelInlineLayout();
+        this._syncFolderScrollHints();
+      });
+    });
+  }
+
+  _syncFolderScrollHints() {
+    const scroller = this.elements.folderListScroller;
+    const panel = this.elements.folderListPanel;
+    if (!scroller || !panel) return;
+    const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    const overflow = max > 6;
+    panel.classList.toggle('is-overflow', overflow);
+    panel.classList.toggle('is-at-top', scroller.scrollTop <= 4);
+    panel.classList.toggle('is-at-bottom', scroller.scrollTop >= max - 4);
+  }
+
+  _scrollActiveFolderIntoView() {
+    const scroller = this.elements.folderListScroller;
+    const nav = this.elements.folderNav;
+    if (!scroller || !nav) return;
+    const active =
+      nav.querySelector('[data-folder-select].is-active') ||
+      nav.querySelector('[data-folder-select]');
+    if (active) {
+      active.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+    }
+    this._scheduleFolderScrollHintsSync();
+  }
+
+  _folderNavSignature(folders) {
+    const list = (folders || [])
+      .map((f) => [Number(f.id), String(f.name || '')])
+      .sort((a, b) => a[0] - b[0]);
+    return JSON.stringify(list);
+  }
+
+  _updateFolderNavActive() {
     const nav = this.elements.folderNav;
     if (!nav) return;
-    nav.innerHTML = '';
+    nav.querySelectorAll('[data-folder-select]').forEach((el) => {
+      const sel = el.dataset.folderSelect || '';
+      let active = false;
+      if (sel === 'unsorted') active = this.folderTargetId == null;
+      else if (sel.startsWith('folder:')) active = Number(sel.slice(7)) === Number(this.folderTargetId);
+      el.classList.toggle('is-active', active);
+    });
+  }
+
+  _initFolderNavDelegation() {
+    const nav = this.elements.folderNav;
+    if (!nav || this._folderNavDelegated) return;
+    this._folderNavDelegated = true;
+    nav.addEventListener('click', (e) => {
+      const renameBtn = e.target.closest('[data-gallery-folder-action="rename"]');
+      if (renameBtn) {
+        e.preventDefault();
+        const id = Number(renameBtn.dataset.folderId);
+        const enc = renameBtn.dataset.folderNameEnc || '';
+        const name = enc ? decodeURIComponent(enc) : '';
+        void this._renameFolder(id, name);
+        return;
+      }
+      const delBtn = e.target.closest('[data-gallery-folder-action="delete"]');
+      if (delBtn) {
+        e.preventDefault();
+        const id = Number(delBtn.dataset.folderId);
+        const enc = delBtn.dataset.folderNameEnc || '';
+        const name = enc ? decodeURIComponent(enc) : '';
+        void this._deleteFolder(id, name);
+        return;
+      }
+      const selectBtn = e.target.closest('[data-folder-select]');
+      if (!selectBtn) return;
+      if (this.viewMode !== 'by_folder') return;
+      const col = this.elements.folderColumn;
+      if (col?.classList.contains('gallery-folder-column--inactive')) return;
+      const tgt = selectBtn.dataset.folderSelect || '';
+      if (tgt === 'unsorted') {
+        this.folderTargetId = null;
+      } else if (tgt.startsWith('folder:')) {
+        this.folderTargetId = Number(tgt.slice(7));
+      } else {
+        return;
+      }
+      const scroller = this.elements.folderListScroller;
+      const scrollTop = scroller?.scrollTop ?? 0;
+      this._updateFolderNavActive();
+      void this.loadMediaFiles().then(() => {
+        if (scroller) scroller.scrollTop = scrollTop;
+      });
+    });
+  }
+
+  async _fetchMediaFolders() {
+    const res = await fetch('/api/media/folders', {
+      headers: { Accept: 'application/json' },
+      credentials: 'include',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.success) {
+      throw new Error(data?.error || `HTTP ${res.status}`);
+    }
+    return data.folders || [];
+  }
+
+  /**
+   * Rebuild folder list from API only when the folder set changed; otherwise keep DOM and refresh active row.
+   */
+  async _rebuildFolderNav({ refreshList = true } = {}) {
+    const nav = this.elements.folderNav;
+    if (!nav) return;
     const lang = getUiLang();
+    const scroller = this.elements.folderListScroller;
+    const scrollTop = scroller?.scrollTop ?? 0;
+
+    if (refreshList || !this._foldersCache.length) {
+      const gen = ++this._folderNavFetchGen;
+      try {
+        const folders = await this._fetchMediaFolders();
+        if (gen !== this._folderNavFetchGen) return;
+        this._foldersCache = folders;
+      } catch (e) {
+        console.error('Failed to load folders', e);
+      }
+    }
+
+    const folders = this._foldersCache || [];
+    const sig = this._folderNavSignature(folders);
+    const needFullRebuild = !nav.querySelector('[data-folder-select]') || sig !== this._folderNavSig;
+
+    if (!needFullRebuild) {
+      this._updateFolderNavActive();
+      if (scroller) scroller.scrollTop = scrollTop;
+      this._scheduleFolderScrollHintsSync();
+      return;
+    }
+
+    this._folderNavSig = sig;
+    nav.innerHTML = '';
 
     const unsRow = document.createElement('div');
     unsRow.className = 'gallery-folder-row gallery-folder-row--solo';
@@ -1249,33 +1442,13 @@ class MediaGallery {
     unsInner.className = 'gallery-folder-row__inner';
     const uns = document.createElement('button');
     uns.type = 'button';
-    uns.className =
-      'gallery-folder-nav__btn' + (this.folderTargetId === null ? ' is-active' : '');
+    uns.className = 'gallery-folder-nav__btn';
+    uns.dataset.folderSelect = 'unsorted';
     uns.dataset.i18n = 'pl_filter_unsorted';
     uns.textContent = t('pl_filter_unsorted', lang);
-    uns.addEventListener('click', () => {
-      this.folderTargetId = null;
-      void this._renderFolderNav().then(() => this.loadMediaFiles());
-    });
     unsInner.appendChild(uns);
     unsRow.appendChild(unsInner);
     nav.appendChild(unsRow);
-
-    let folders = [];
-    try {
-      const res = await fetch('/api/media/folders', {
-        headers: { Accept: 'application/json' },
-        credentials: 'include',
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data?.success) {
-        folders = data.folders || [];
-      }
-    } catch (e) {
-      console.error('Failed to load folders', e);
-    }
-
-    this._foldersCache = folders;
 
     for (const f of folders) {
       const row = document.createElement('div');
@@ -1284,15 +1457,11 @@ class MediaGallery {
       inner.className = 'gallery-folder-row__inner';
       const b = document.createElement('button');
       b.type = 'button';
-      b.className =
-        'gallery-folder-nav__btn gallery-folder-nav__btn--row' +
-        (this.folderTargetId === f.id ? ' is-active' : '');
+      b.className = 'gallery-folder-nav__btn gallery-folder-nav__btn--row';
+      b.dataset.folderSelect = `folder:${f.id}`;
       b.textContent = f.name || `Folder ${f.id}`;
       const fid = f.id;
-      b.addEventListener('click', () => {
-        this.folderTargetId = fid;
-        void this._renderFolderNav().then(() => this.loadMediaFiles());
-      });
+      const nameEnc = encodeURIComponent(String(f.name || ''));
 
       const icons = document.createElement('div');
       icons.className = 'gallery-folder-row__icons';
@@ -1302,10 +1471,9 @@ class MediaGallery {
       renameBtn.title = t('gallery_folder_rename', lang);
       renameBtn.setAttribute('aria-label', t('gallery_folder_rename', lang));
       renameBtn.textContent = '✎';
-      renameBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        void this._renameFolder(fid, f.name);
-      });
+      renameBtn.dataset.galleryFolderAction = 'rename';
+      renameBtn.dataset.folderId = String(fid);
+      renameBtn.dataset.folderNameEnc = nameEnc;
 
       const delBtn = document.createElement('button');
       delBtn.type = 'button';
@@ -1313,10 +1481,9 @@ class MediaGallery {
       delBtn.title = t('gallery_folder_delete', lang);
       delBtn.setAttribute('aria-label', t('gallery_folder_delete', lang));
       delBtn.textContent = '🗑';
-      delBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        void this._deleteFolder(fid, f.name);
-      });
+      delBtn.dataset.galleryFolderAction = 'delete';
+      delBtn.dataset.folderId = String(fid);
+      delBtn.dataset.folderNameEnc = nameEnc;
 
       icons.appendChild(renameBtn);
       icons.appendChild(delBtn);
@@ -1325,6 +1492,10 @@ class MediaGallery {
       row.appendChild(inner);
       nav.appendChild(row);
     }
+
+    this._updateFolderNavActive();
+    if (scroller) scroller.scrollTop = scrollTop;
+    this._scheduleFolderScrollHintsSync();
   }
 
   async _renameFolder(folderId, currentName) {
@@ -1350,7 +1521,7 @@ class MediaGallery {
         throw new Error(data?.error || `HTTP ${res.status}`);
       }
       window.App?.Alerts?.show?.(t('gallery_folder_renamed', lang), 'success');
-      await this._renderFolderNav();
+      await this._rebuildFolderNav();
       await this.loadMediaFiles();
     } catch (e) {
       window.App?.Alerts?.show?.(`${t('gallery_folder_rename_err', lang)}: ${e.message}`, 'error');
@@ -1383,7 +1554,7 @@ class MediaGallery {
         this.folderTargetId = null;
       }
       window.App?.Alerts?.show?.(t('gallery_folder_deleted', lang), 'success');
-      await this._renderFolderNav();
+      await this._rebuildFolderNav();
       await this.loadMediaFiles();
     } catch (e) {
       window.App?.Alerts?.show?.(`${t('gallery_folder_delete_err', lang)}: ${e.message}`, 'error');
@@ -1420,7 +1591,8 @@ class MediaGallery {
       if (this.viewMode === 'by_folder' && newId != null) {
         this.folderTargetId = newId;
       }
-      await this._renderFolderNav();
+      await this._rebuildFolderNav({ refreshList: true });
+      this._scrollActiveFolderIntoView();
       await this.loadMediaFiles();
     } catch (e) {
       window.App?.Alerts?.show?.(`${t('gallery_folder_create_err', lang)}: ${e.message}`, 'error');
