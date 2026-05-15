@@ -74,6 +74,8 @@ body.page-gallery .page-title {
 }
 
 .gallery-folder-column {
+    position: relative;
+    z-index: 2;
     align-self: stretch;
     display: flex;
     flex-direction: column;
@@ -84,14 +86,18 @@ body.page-gallery .page-title {
     width: 100%;
     min-width: 0;
     overflow: hidden;
-    transition: opacity 0.2s ease, filter 0.2s ease;
+    transition: opacity 0.2s ease;
 }
 
 .gallery-folder-column--inactive {
     opacity: 0.42;
-    filter: grayscale(0.2);
     pointer-events: none;
     user-select: none;
+}
+
+.gallery-folder-column--inactive .gallery-folder-column__create,
+.gallery-folder-column--inactive .gallery-folder-list-panel {
+    opacity: 0.85;
 }
 
 .gallery-folder-column__create {
@@ -113,19 +119,22 @@ body.page-gallery .page-title {
 .gallery-folder-list-panel {
     position: relative;
     flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
     width: 100%;
     min-height: 0;
     max-height: 100%;
     overflow: hidden;
-    isolation: isolate;
 }
 
 .gallery-folder-list-scroller {
-    position: absolute;
-    inset: 0;
+    position: relative;
     z-index: 1;
+    flex: 1 1 0;
     box-sizing: border-box;
     width: 100%;
+    min-height: 0;
+    max-height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
     overscroll-behavior-y: contain;
@@ -159,8 +168,7 @@ body.page-gallery .page-title {
 }
 
 .gallery-folder-scroll-hint--top {
-    align-self: start;
-    justify-self: stretch;
+    top: 0;
     height: 1.35rem;
     align-items: flex-start;
     padding-top: 2px;

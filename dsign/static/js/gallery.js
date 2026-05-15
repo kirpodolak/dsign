@@ -1243,7 +1243,7 @@ class MediaGallery {
       this._syncFolderColumnState();
       this._syncViewToggleButtons();
       this._updateFolderNavActive();
-      void this.loadMediaFiles();
+      void this.loadMediaFiles().then(() => this._scheduleFolderScrollHintsSync());
     };
     this.elements.viewAllBtn?.addEventListener('click', () => setMode('all'));
     this.elements.viewByFolderBtn?.addEventListener('click', () => setMode('by_folder'));
@@ -1256,7 +1256,6 @@ class MediaGallery {
     this._folderScrollHintsBound = true;
     scroller.addEventListener('scroll', () => this._syncFolderScrollHints(), { passive: true });
     const onWheel = (e) => {
-      this._lockFolderPanelLayout();
       const max = scroller.scrollHeight - scroller.clientHeight;
       if (max <= 1) return;
       const dy = e.deltaY;
@@ -1282,32 +1281,19 @@ class MediaGallery {
     window.addEventListener('resize', () => this._scheduleFolderScrollHintsSync());
   }
 
-  _lockFolderPanelLayout() {
-    const listCard = this.elements.folderListCard;
+  _clearFolderPanelInlineLayout() {
     const panel = this.elements.folderListPanel;
-    if (!listCard || !panel) return;
-    const title = listCard.querySelector(':scope > .gallery-side__title');
-    const cardStyle = getComputedStyle(listCard);
-    const padY =
-      (parseFloat(cardStyle.paddingTop) || 0) + (parseFloat(cardStyle.paddingBottom) || 0);
-    const titleH = title ? title.offsetHeight : 0;
-    const titleMb = title
-      ? parseFloat(getComputedStyle(title).marginBottom) || 0
-      : 0;
-    const innerH = Math.floor(listCard.clientHeight - padY - titleH - titleMb);
-    if (innerH > 0) {
-      panel.style.flex = '0 0 auto';
-      panel.style.height = `${innerH}px`;
-      panel.style.maxHeight = `${innerH}px`;
-      panel.style.minHeight = '0';
-    }
+    if (!panel) return;
+    panel.style.removeProperty('flex');
+    panel.style.removeProperty('height');
+    panel.style.removeProperty('max-height');
+    panel.style.removeProperty('min-height');
   }
 
   _scheduleFolderScrollHintsSync() {
     requestAnimationFrame(() => {
-      this._lockFolderPanelLayout();
       requestAnimationFrame(() => {
-        this._lockFolderPanelLayout();
+        this._clearFolderPanelInlineLayout();
         this._syncFolderScrollHints();
       });
     });
