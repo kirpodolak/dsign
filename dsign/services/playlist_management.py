@@ -670,7 +670,8 @@ class PlaylistManager:
         default ytdl format selection. That can result in an `edl://` item that opens and then
         immediately ends (black screen + rapid on_after_end_file).
 
-        Prefer `best` for VK to bias towards a single playable muxed stream (HLS/MP4) when available.
+        Prefer muxed streams capped at 1080p for VK. Uncapped `best` often resolves to 4K H.264,
+        which software-decodes on signage hardware and runs much hotter than typical Rutube HLS.
         """
         try:
             provider = str(item.get("provider") or "").strip().lower()
@@ -684,7 +685,13 @@ class PlaylistManager:
         if provider == "vkvideo" or "vkvideo.ru" in url or "vk.com/video" in url:
             try:
                 self._mpv_manager._send_command(
-                    {"command": ["set_property", "ytdl-format", "best"]},
+                    {
+                        "command": [
+                            "set_property",
+                            "ytdl-format",
+                            PlaybackConstants.VK_YTDL_FORMAT,
+                        ]
+                    },
                     timeout=5.0,
                 )
             except Exception:
