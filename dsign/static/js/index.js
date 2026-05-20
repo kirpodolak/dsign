@@ -45,15 +45,17 @@ const CONFIG = {
         modalClose: '.modal .close',
         playlistForm: '#create-playlist-form',
         statusIndicator: '#playlist-status',
-        uploadLogoBtn: '#upload-logo-btn',
+        logoReplaceBtn: '#logo-replace-btn',
         logoForm: '#logo-upload-form',
-        settingsPanel: '.info-panel .info-card',
+        settingsPanel: '#settings-container',
         logoImage: '#idle-logo',
         previewImage: '#mpv-preview-image',
+        mpvPreviewPlaceholder: '#mpv-preview-placeholder',
+        dashboardBroadcastValue: '#dashboard-broadcast-value',
+        dashboardBroadcastBadge: '#dashboard-broadcast-badge',
         currentSettings: '#current-settings',
         loadingIndicator: '#loading-indicator',
-        logoFileInput: '#logo-upload-form input[type="file"]',
-        logoSelectedFile: '#logo-selected-file',
+        logoFileInput: '#logo-upload',
         refreshPreviewBtn: '#refresh-mpv-preview',
         mpvLastUpdate: '#mpv-last-update'
     },
@@ -398,6 +400,82 @@ const ui = {
         return `${text.slice(0, maxLen - 3)}...`;
     },
 
+    thumbnailUrl(filename) {
+        if (!filename) return '';
+        return `/api/media/thumbnail/${encodeURIComponent(filename)}`;
+    },
+
+    updateDashboardHero(broadcastRaw, playbackState) {
+        const lang = getUiLang();
+        const st = String(playbackState || 'idle').toLowerCase();
+        const valueEl = elements.dashboardBroadcastValue;
+        const badgeEl = elements.dashboardBroadcastBadge;
+        if (valueEl) {
+            valueEl.textContent = this._truncateText(broadcastRaw, 48) || '—';
+        }
+        if (badgeEl) {
+            badgeEl.dataset.state = st === 'playing' ? 'playing' : (st === 'stopped' ? 'stopped' : 'idle');
+            if (st === 'playing') {
+                badgeEl.textContent = t('status_playing', lang);
+            } else if (st === 'stopped') {
+                badgeEl.textContent = t('status_stopped', lang);
+            } else {
+                badgeEl.textContent = t('status_idle', lang);
+            }
+        }
+    },
+
+    _activePlaylist(runtime = {}) {
+        const playlists = Array.isArray(runtime.playlists) ? runtime.playlists : [];
+        const playbackStatus = runtime.playbackStatus || {};
+        const rawPid = playbackStatus?.playlist_id;
+        if (rawPid === null || rawPid === undefined || rawPid === '') return null;
+        return playlists.find((item) => String(item.id) === String(rawPid)) || null;
+    },
+
+    syncMpvPreviewDisplay(runtime = {}) {
+        const playbackStatus = runtime.playbackStatus || {};
+        const playbackState = String(playbackStatus?.status || '').toLowerCase();
+        const img = elements.previewImage;
+        const placeholder = elements.mpvPreviewPlaceholder;
+        if (!img) return;
+
+        if (playbackState === 'playing') {
+            if (placeholder) placeholder.classList.remove('is-visible');
+            return;
+        }
+
+        const active = this._activePlaylist(runtime);
+        const previewFile = active?.preview_filename;
+        const hasFiles = Number(active?.files_count || 0) > 0;
+        const lang = getUiLang();
+
+        if (!hasFiles || !previewFile) {
+            img.style.display = 'none';
+            img.removeAttribute('src');
+            if (placeholder) {
+                placeholder.textContent = t('no_preview', lang);
+                placeholder.classList.add('is-visible');
+            }
+            return;
+        }
+
+        const src = `${this.thumbnailUrl(previewFile)}?t=${Date.now()}`;
+        img.onload = function onThumbLoad() {
+            this.style.display = 'block';
+            if (placeholder) placeholder.classList.remove('is-visible');
+        };
+        img.onerror = function onThumbError() {
+            this.style.display = 'none';
+            if (placeholder) {
+                placeholder.textContent = t('no_preview', lang);
+                placeholder.classList.add('is-visible');
+            }
+        };
+        img.style.display = 'none';
+        img.src = src;
+    },
+
     _renderMetricBar(percent) {
         if (percent === null) return '';
         const safePercent = this._clampPercent(percent);
@@ -453,7 +531,7 @@ const ui = {
         const broadcastRaw = playbackState === 'playing'
             ? (activePlaylist?.name || `Playlist #${activePlaylistId ?? ''}`.trim() || 'Playlist')
             : t('broadcast_logo', lang);
-        const broadcastValue = this._truncateText(broadcastRaw, 32);
+        this.updateDashboardHero(broadcastRaw, playbackState);
 
         const storageData = systemStatus?.storage?.media || systemStatus?.storage?.root || null;
         const storagePercent = this._clampPercent(storageData?.used_percent);
@@ -490,10 +568,6 @@ const ui = {
                         <div class="metric-value">${this.escapeHtml(volumeValue)}</div>
                     </div>
                     <div class="metric-item metric-item--full">
-                        <div class="metric-label">${this.escapeHtml(t('metric_broadcast', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(broadcastValue)}</div>
-                    </div>
-                    <div class="metric-item metric-item--full">
                         <div class="metric-label">${this.escapeHtml(t('metric_storage', lang))}</div>
                         <div class="metric-value">${this.escapeHtml(storageValue)}</div>
                         ${this._renderMetricBar(storagePercent)}
@@ -521,6 +595,7 @@ const ui = {
         `;
         elements.settingsPanel.innerHTML = html;
         this.updatePreviewAutoStatus(settings);
+        this.syncMpvPreviewDisplay(runtime);
     },
 
     renderPlaylists(playlists) {
@@ -552,14 +627,22 @@ const ui = {
         const st = t('stop_title', lang);
         const et = t('edit_title', lang);
         const dt = t('delete_title', lang);
+        const noPreview = t('no_preview', lang);
         const icons = {
             play: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 5v14l12-7-12-7z" fill="currentColor"/></svg>',
             stop: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 7h10v10H7z" fill="currentColor"/></svg>',
             edit: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 17.25V21h3.75L17.8 9.94l-3.75-3.75L3 17.25z" fill="currentColor"/><path d="M20.7 7.04a1 1 0 0 0 0-1.41L18.37 3.3a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.82-1.84z" fill="currentColor"/></svg>',
             del: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 7h12l-1 14H7L6 7z" fill="currentColor"/><path d="M9 4h6l1 2H8l1-2z" fill="currentColor"/></svg>',
         };
-        tableBody.innerHTML = playlistsArray.map(playlist => `
+        tableBody.innerHTML = playlistsArray.map(playlist => {
+            const previewFile = playlist.preview_filename;
+            const hasPreview = Number(playlist.files_count || 0) > 0 && previewFile;
+            const thumbHtml = hasPreview
+                ? `<div class="playlist-thumb-wrap"><img class="playlist-thumb-img" src="${this.escapeHtml(this.thumbnailUrl(previewFile))}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none';this.nextElementSibling?.classList.add('is-visible')"><span class="playlist-thumb-placeholder">${this.escapeHtml(noPreview)}</span></div>`
+                : `<div class="playlist-thumb-wrap"><span class="playlist-thumb-placeholder is-visible">${this.escapeHtml(noPreview)}</span></div>`;
+            return `
             <tr data-id="${playlist.id}">
+                <td class="playlist-thumb-cell">${thumbHtml}</td>
                 <td class="playlist-td-name">${this.escapeHtml(playlist.name || un)}</td>
                 <td class="playlist-td-customer">${this.escapeHtml(playlist.customer)}</td>
                 <td class="playlist-td-files">${playlist.files_count || 0}</td>
@@ -591,7 +674,8 @@ const ui = {
                     </div>
                 </td>
             </tr>
-        `).join('');
+        `;
+        }).join('');
     },
 
     refreshLanguageUI() {
@@ -609,6 +693,10 @@ const ui = {
             console.warn(e);
         }
         this.updatePreviewAutoStatus(state.currentSettings || {});
+        this.syncMpvPreviewDisplay({
+            playlists: state.playlists,
+            playbackStatus: state.playbackStatus,
+        });
     },
 
     escapeHtml(unsafe) {
@@ -679,6 +767,17 @@ const ui = {
                 this.setPlaybackRowState(id, 'idle');
             }
         });
+
+        const lang = getUiLang();
+        const activePlaylist = pid ? list.find((item) => String(item.id) === pid) : null;
+        const broadcastRaw = st === 'playing'
+            ? (activePlaylist?.name || `Playlist #${pid ?? ''}`.trim() || 'Playlist')
+            : t('broadcast_logo', lang);
+        this.updateDashboardHero(broadcastRaw, st);
+        this.syncMpvPreviewDisplay({ playlists: list, playbackStatus: statusPayload });
+        if (st === 'playing') {
+            this.updatePreviewImage({ updateTimestamp: false });
+        }
     },
 
     updateLogo(logoPath) {
@@ -722,11 +821,22 @@ const ui = {
     updatePreviewImage(options = {}) {
         if (!elements.previewImage) return;
 
+        const playbackState = String(state.playbackStatus?.status || '').toLowerCase();
+        if (playbackState !== 'playing') {
+            this.syncMpvPreviewDisplay({
+                playlists: state.playlists,
+                playbackStatus: state.playbackStatus,
+            });
+            return;
+        }
+
         const { updateTimestamp = true } = options || {};
+        const placeholder = elements.mpvPreviewPlaceholder;
         const newSrc = `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
 
         elements.previewImage.onload = function() {
             this.style.display = 'block';
+            if (placeholder) placeholder.classList.remove('is-visible');
             state.previewLoadAttempts = 0;
             if (updateTimestamp && elements.mpvLastUpdate) {
                 elements.mpvLastUpdate.textContent = new Date().toLocaleTimeString();
@@ -735,7 +845,7 @@ const ui = {
 
         elements.previewImage.onerror = function() {
             state.previewLoadAttempts++;
-            
+
             if (state.previewLoadAttempts >= CONFIG.maxImageLoadAttempts && !state.fallbackPreviewUsed) {
                 console.warn('Max preview load attempts reached, using fallback');
                 state.fallbackPreviewUsed = true;
@@ -744,9 +854,14 @@ const ui = {
                 setTimeout(() => {
                     this.src = `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
                 }, 3000);
+            } else if (placeholder) {
+                this.style.display = 'none';
+                placeholder.textContent = t('no_preview', getUiLang());
+                placeholder.classList.add('is-visible');
             }
         };
-    
+
+        if (placeholder) placeholder.classList.remove('is-visible');
         elements.previewImage.style.display = 'none';
         elements.previewImage.src = newSrc;
     },
@@ -772,15 +887,15 @@ const ui = {
         reader.readAsDataURL(file);
     },
 
-    updateLogoFileSelection(file) {
-        const selectedLabel = elements.logoSelectedFile;
-        if (selectedLabel) {
-            selectedLabel.textContent = file ? file.name : t('no_file', getUiLang());
-        }
-
-        if (elements.uploadLogoBtn) {
-            elements.uploadLogoBtn.disabled = !file;
-        }
+    setLogoUploadBusy(busy) {
+        const btn = elements.logoReplaceBtn;
+        if (!btn) return;
+        const spinner = btn.querySelector('.loading-spinner');
+        btn.disabled = busy;
+        btn.querySelectorAll('span:not(.loading-spinner)').forEach((el) => {
+            el.style.display = busy ? 'none' : '';
+        });
+        if (spinner) spinner.style.display = busy ? 'inline-block' : 'none';
     }
 };
 
@@ -941,44 +1056,39 @@ const handlers = {
             }
         });
 
-        // Logo upload
-        elements.uploadLogoBtn?.addEventListener('click', async () => {
-            const fileInput = elements.logoFileInput;
-            if (!fileInput.files || fileInput.files.length === 0) {
-                showError('Please select a logo file first');
-                return;
-            }
+        elements.logoReplaceBtn?.addEventListener('click', () => {
+            elements.logoFileInput?.click();
+        });
 
-            const file = fileInput.files[0];
+        elements.logoFileInput?.addEventListener('change', async (e) => {
+            const file = e.target.files && e.target.files[0] ? e.target.files[0] : null;
+            if (!file) return;
+
             if (!file.type.match('image.*')) {
                 showError('Only image files are allowed');
+                e.target.value = '';
                 return;
             }
 
             if (file.size > 5 * 1024 * 1024) {
                 showError('File size should be less than 5MB');
+                e.target.value = '';
                 return;
             }
 
-            const btnText = elements.uploadLogoBtn.querySelector('.btn-text');
-            const spinner = elements.uploadLogoBtn.querySelector('.loading-spinner');
-            btnText.style.display = 'none';
-            spinner.style.display = 'inline-block';
-            elements.uploadLogoBtn.disabled = true;
+            ui.previewLogo(file);
+            ui.setLogoUploadBusy(true);
 
             try {
                 const formData = new FormData(elements.logoForm);
                 const result = await api.uploadLogo(formData);
-                
+
                 state.fallbackLogoUsed = false;
                 state.logoLoadAttempts = 0;
-                
+
                 ui.updateLogo(result.filename);
                 showAlert('Logo updated successfully', 'success');
-                
-                fileInput.value = '';
-                ui.updateLogoFileSelection(null);
-                
+
                 const settings = await api.getSettings();
                 state.currentSettings = settings;
                 ui.renderSettings(settings, {
@@ -990,19 +1100,11 @@ const handlers = {
             } catch (error) {
                 console.error('Logo upload failed:', error);
                 showError('Failed to upload logo: ' + error.message);
-                ui.updateLogo(state.currentSettings.display?.logo);
+                ui.updateLogo(state.currentSettings?.display?.logo);
             } finally {
-                btnText.style.display = 'inline-block';
-                spinner.style.display = 'none';
-                elements.uploadLogoBtn.disabled = false;
+                e.target.value = '';
+                ui.setLogoUploadBusy(false);
             }
-        });
-
-        // Logo file preview
-        elements.logoFileInput?.addEventListener('change', (e) => {
-            const file = e.target.files && e.target.files[0] ? e.target.files[0] : null;
-            ui.updateLogoFileSelection(file);
-            if (file) ui.previewLogo(file);
         });
 
         // Refresh preview button

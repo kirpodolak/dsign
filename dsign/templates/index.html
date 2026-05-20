@@ -1,5 +1,6 @@
 {% extends "layout.html" %}
 
+{% block body_class %} page-home{% endblock %}
 {% block body_extra_attrs %} data-page-title-i18n="page_home_title"{% endblock %}
 
 {% block styles %}
@@ -9,58 +10,63 @@
 {% block content %}
 <h1 class="page-title" data-i18n="page_home_title">Control Panel</h1>
 
-<div class="info-panel">
-    <div id="settings-container" class="info-card info-card--metrics">
-        <h3 data-i18n="current_settings">Current Settings</h3>
-        <!-- Данные настроек будут загружены через JS -->
+<section class="home-dashboard" aria-label="Dashboard">
+    <div class="dashboard-hero" id="dashboard-hero">
+        <div class="dashboard-hero__main">
+            <span class="dashboard-hero__label" data-i18n="metric_broadcast">Broadcast</span>
+            <span class="dashboard-hero__value" id="dashboard-broadcast-value">—</span>
+        </div>
+        <span class="dashboard-hero__badge" id="dashboard-broadcast-badge" data-state="idle"></span>
     </div>
 
-    <div class="mpv-preview">
-        <h3 data-i18n="mpv_preview">MPV Player Preview</h3>
-        <div class="mpv-preview-container">
-            <img id="mpv-preview-image" 
-                 src="{{ url_for('api.get_mpv_screenshot') }}" 
-                 class="mpv-preview-image"
-                 style="display: none;"
-                 onload="this.style.display='block'"
-                 onerror="this.onerror=null;this.src='{{ url_for('static', filename='images/default-preview.jpg') }}?t='+Date.now()">
-            <button id="refresh-mpv-preview" class="mpv-refresh-btn" data-i18n-title="refresh_preview" title="Refresh preview">
-                <span aria-hidden="true">⟳</span>
-            </button>
+    <div class="dashboard-grid">
+        <div id="settings-container" class="dashboard-card dashboard-card--metrics">
+            <!-- Metrics loaded via JS -->
         </div>
-        <div class="mpv-status">
-            <span data-i18n="last_updated_label">Last updated</span>: <span id="mpv-last-update">—</span>
-            <span id="mpv-auto-refresh-status" class="mpv-auto-refresh-status"></span>
-        </div>
-    </div>
 
-    <div class="logo-preview">
-        <h3 data-i18n="current_logo">Current Logo</h3>
-        <img id="idle-logo"
-             src="{{ url_for('api.serve_media', filename='idle_logo.jpg') }}"
-             style="display: none;"
-             onload="this.style.display='block'"
-             onerror="this.onerror=null;this.src='{{ url_for('static', filename='default-logo.jpg') }}?t={{ default_logo_cache_buster }}'">
-
-        <form id="logo-upload-form" enctype="multipart/form-data">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <div class="logo-upload">
-                <input type="file" id="logo-upload" class="logo-upload-input" name="logo" accept="image/jpeg, image/png" required>
-                <div class="logo-upload-controls">
-                    <label for="logo-upload" class="logo-btn logo-btn--choose">
-                        <span aria-hidden="true">📁</span>
-                        <span data-i18n="choose_file">Choose File</span>
-                    </label>
-                    <button type="button" id="upload-logo-btn" class="logo-btn logo-btn--apply" disabled>
-                        <span class="btn-text" data-i18n="apply_logo">Apply Logo</span>
-                        <span class="loading-spinner" style="display:none;"></span>
-                    </button>
-                </div>
-                <p id="logo-selected-file" class="logo-selected-file" data-i18n="no_file">No file selected</p>
+        <div class="dashboard-card dashboard-card--mpv">
+            <div class="dashboard-card__head">
+                <h3 class="dashboard-card__title" data-i18n="mpv_preview">MPV Player Preview</h3>
+                <button type="button" id="refresh-mpv-preview" class="mpv-refresh-btn" data-i18n-title="refresh_preview" title="Refresh preview">
+                    <span aria-hidden="true">⟳</span>
+                </button>
             </div>
-        </form>
+            <div class="preview-frame preview-frame--16x9 mpv-preview-container">
+                <img id="mpv-preview-image"
+                     src="{{ url_for('api.get_mpv_screenshot') }}"
+                     class="mpv-preview-image"
+                     alt=""
+                     style="display: none;">
+                <div id="mpv-preview-placeholder" class="preview-placeholder is-visible" data-i18n="no_preview">No preview</div>
+            </div>
+            <div class="mpv-status">
+                <span data-i18n="last_updated_label">Last updated</span>: <span id="mpv-last-update">—</span>
+                <span id="mpv-auto-refresh-status" class="mpv-auto-refresh-status"></span>
+            </div>
+        </div>
+
+        <div class="dashboard-card dashboard-card--logo">
+            <h3 class="dashboard-card__title" data-i18n="current_logo">Current Logo</h3>
+            <div class="preview-frame preview-frame--logo">
+                <img id="idle-logo"
+                     src="{{ url_for('api.serve_media', filename='idle_logo.jpg') }}"
+                     alt=""
+                     style="display: none;"
+                     onload="this.style.display='block'"
+                     onerror="this.onerror=null;this.src='{{ url_for('static', filename='default-logo.jpg') }}?t={{ default_logo_cache_buster }}'">
+            </div>
+            <form id="logo-upload-form" enctype="multipart/form-data">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="file" id="logo-upload" class="logo-upload-input" name="logo" accept="image/jpeg,image/png" required>
+                <button type="button" id="logo-replace-btn" class="logo-btn logo-btn--replace">
+                    <span aria-hidden="true">📷</span>
+                    <span data-i18n="replace_logo">Replace logo</span>
+                    <span class="loading-spinner" style="display:none;"></span>
+                </button>
+            </form>
+        </div>
     </div>
-</div>
+</section>
 
 <div class="playlist-section">
     <div class="section-header">
@@ -75,6 +81,7 @@
     <div class="playlist-table-wrap">
         <table class="playlist-table" id="playlist-table">
             <colgroup>
+                <col class="playlist-col-preview">
                 <col class="playlist-col-name">
                 <col class="playlist-col-customer">
                 <col class="playlist-col-files">
@@ -83,6 +90,7 @@
             </colgroup>
             <thead>
                 <tr>
+                    <th scope="col" data-i18n="playlist_col_preview">Preview</th>
                     <th scope="col" data-i18n="playlist_col_name">Name</th>
                     <th scope="col" data-i18n="playlist_col_customer">Customer</th>
                     <th scope="col" data-i18n="playlist_col_files">Files</th>
