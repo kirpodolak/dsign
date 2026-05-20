@@ -10,58 +10,64 @@
 {% block content %}
 <div class="home-layout">
     <aside class="home-sidebar" aria-label="Dashboard sidebar">
-        <section class="now-screen" aria-labelledby="now-screen-heading">
-            <div class="now-screen__head">
-                <h2 id="now-screen-heading" class="panel-label" data-i18n="now_on_screen">Now on screen</h2>
-                <div class="now-screen__meta">
-                    <span class="now-screen__updated">
-                        <span data-i18n="last_updated_label">Updated</span>:
-                        <span id="mpv-last-update">—</span>
-                    </span>
-                    <button type="button" id="refresh-mpv-preview" class="now-screen__refresh" data-i18n-title="refresh_preview" title="Refresh preview">
-                        <span aria-hidden="true">⟳</span>
-                    </button>
+        <div class="sidebar-section">
+            <h3 class="sidebar-section__title" data-i18n="now_on_screen">Now on screen</h3>
+            <div class="live-card">
+                <div class="live-stage mpv-preview-container">
+                    <img id="mpv-preview-image"
+                         src="{{ url_for('api.get_mpv_screenshot') }}"
+                         class="live-thumb mpv-preview-image"
+                         alt=""
+                         style="display: none;">
+                    <div id="mpv-preview-placeholder" class="live-placeholder" data-i18n="no_preview">No preview</div>
+                    <div class="live-overlay">
+                        <div class="live-overlay__row">
+                            <div class="live-overlay__text">
+                                <div id="now-screen-title" class="live-title">—</div>
+                                <div class="live-meta">
+                                    <span data-i18n="last_updated_label">Updated</span>:
+                                    <span id="mpv-last-update">—</span>
+                                </div>
+                            </div>
+                            <button type="button" id="refresh-mpv-preview" class="live-refresh" data-i18n-title="refresh_preview" title="Refresh preview">
+                                <span aria-hidden="true">↻</span>
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
-            <p id="now-screen-title" class="now-screen__title">—</p>
-            <div class="preview-frame preview-frame--16x9 mpv-preview-container">
-                <img id="mpv-preview-image"
-                     src="{{ url_for('api.get_mpv_screenshot') }}"
-                     class="mpv-preview-image"
-                     alt=""
-                     style="display: none;">
-                <div id="mpv-preview-placeholder" class="preview-placeholder is-visible" data-i18n="no_preview">No preview</div>
-            </div>
-            <div id="mpv-auto-refresh-status" class="mpv-auto-refresh-status"></div>
-        </section>
+        </div>
 
-        <section class="system-panel" aria-labelledby="system-panel-heading">
-            <h2 id="system-panel-heading" class="panel-label" data-i18n="system_panel">System</h2>
-            <div id="settings-container" class="system-metrics">
+        <div class="sidebar-section">
+            <h3 class="sidebar-section__title" data-i18n="system_panel">System</h3>
+            <div id="settings-container" class="metrics-grid">
                 <!-- Metrics loaded via JS -->
             </div>
-        </section>
+        </div>
 
-        <section class="waiting-screen" aria-labelledby="waiting-screen-heading">
-            <h2 id="waiting-screen-heading" class="panel-label" data-i18n="waiting_screen">Waiting screen</h2>
-            <p class="waiting-screen__hint" data-i18n="waiting_screen_hint">Shown when idle</p>
-            <div class="preview-frame preview-frame--logo waiting-screen__logo">
-                <img id="idle-logo"
-                     src="{{ url_for('api.serve_media', filename='idle_logo.jpg') }}"
-                     alt=""
-                     style="display: none;"
-                     onload="this.style.display='block'"
-                     onerror="this.onerror=null;this.src='{{ url_for('static', filename='default-logo.jpg') }}?t={{ default_logo_cache_buster }}'">
+        <div class="sidebar-section waiting-screen">
+            <h3 class="sidebar-section__title" data-i18n="waiting_screen">Waiting screen</h3>
+            <div class="idle-card">
+                <div class="idle-logo">
+                    <img id="idle-logo"
+                         src="{{ url_for('api.serve_media', filename='idle_logo.jpg') }}"
+                         alt=""
+                         style="display: none;"
+                         onload="this.style.display='block'"
+                         onerror="this.onerror=null;this.src='{{ url_for('static', filename='default-logo.jpg') }}?t={{ default_logo_cache_buster }}'">
+                </div>
+                <p class="idle-text" data-i18n="waiting_screen_hint">Shown when idle</p>
+                <form id="logo-upload-form" enctype="multipart/form-data">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="file" id="logo-upload" class="logo-upload-input" name="logo" accept="image/jpeg,image/png" required>
+                    <button type="button" id="logo-replace-btn" class="btn-sm logo-btn--replace">
+                        <span aria-hidden="true">🖼</span>
+                        <span data-i18n="replace_logo">Replace logo</span>
+                        <span class="loading-spinner" style="display:none;"></span>
+                    </button>
+                </form>
             </div>
-            <form id="logo-upload-form" enctype="multipart/form-data">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="file" id="logo-upload" class="logo-upload-input" name="logo" accept="image/jpeg,image/png" required>
-                <button type="button" id="logo-replace-btn" class="logo-btn logo-btn--replace">
-                    <span data-i18n="replace_logo">Replace logo</span>
-                    <span class="loading-spinner" style="display:none;"></span>
-                </button>
-            </form>
-        </section>
+        </div>
     </aside>
 
     <main class="home-playlists" aria-labelledby="playlists-heading">
@@ -74,7 +80,7 @@
         </div>
 
         <div id="playlist-status"></div>
-        <div id="playlist-cards" class="playlist-cards" role="list"></div>
+        <div id="playlist-cards" class="cards-grid" role="list"></div>
     </main>
 </div>
 

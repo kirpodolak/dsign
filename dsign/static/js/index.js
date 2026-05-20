@@ -346,22 +346,16 @@ const ui = {
         }
     },
 
-    updatePreviewAutoStatus(settings) {
-        const el = document.querySelector('#mpv-auto-refresh-status');
-        if (!el) return;
-        const sec = Number(settings?.display?.preview_auto_interval_sec || 0);
-        const lang = getUiLang();
-        if (!sec) {
-            el.innerHTML = [
-                `<span class="mpv-auto-refresh-line"><strong>${t('auto_preview_bold', lang)}:</strong> ${t('transcode_off', lang)}</span>`,
-                `<span class="mpv-auto-refresh-line">${t('preview_block_hint', lang)}</span>`,
-            ].join('');
-            el.classList.add('is-off');
-        } else {
-            const mins = Math.round(sec / 60);
-            el.innerHTML = t('preview_lines_on', lang, mins);
-            el.classList.remove('is-off');
-        }
+    updatePreviewAutoStatus() {
+        /* Auto-preview hint removed from home UI */
+    },
+
+    _metricBarHtml(percent) {
+        const safe = this._clampPercent(percent);
+        if (safe === null) return '';
+        const barClass = this._barClass(safe);
+        const fillClass = barClass === 'is-danger' ? 'is-danger' : (barClass === 'is-warn' ? 'is-warn' : '');
+        return `<div class="metric-bar"><div class="metric-bar-fill ${fillClass}" style="width:${Math.round(safe)}%;"></div></div>`;
     },
 
     _clampPercent(value) {
@@ -410,6 +404,46 @@ const ui = {
         }
     },
 
+    formatCardMeta(customer, filesCount, lang) {
+        const cust = String(customer ?? '').trim() || '—';
+        const files = this.formatFilesCount(filesCount, lang);
+        if (lang === 'ru') {
+            return `Заказчик: ${cust} • ${files}`;
+        }
+        return `Customer: ${cust} • ${files}`;
+    },
+
+    showNowScreenIdleLogo(options = {}) {
+        const { updateTimestamp = false } = options || {};
+        const img = elements.previewImage;
+        const placeholder = elements.mpvPreviewPlaceholder;
+        if (!img) return;
+
+        const base = state.fallbackLogoUsed
+            ? CONFIG.defaultLogo
+            : `${CONFIG.api.endpoints.serveMedia}/idle_logo.jpg`;
+        const src = `${base}?t=${Date.now()}`;
+
+        img.onload = function onLogoLoad() {
+            this.style.display = 'block';
+            if (placeholder) placeholder.classList.remove('is-visible');
+            if (updateTimestamp && elements.mpvLastUpdate) {
+                elements.mpvLastUpdate.textContent = new Date().toLocaleTimeString();
+            }
+        };
+        img.onerror = function onLogoError() {
+            if (!state.fallbackLogoUsed) {
+                state.fallbackLogoUsed = true;
+                ui.showNowScreenIdleLogo();
+                return;
+            }
+            this.style.display = 'none';
+            if (placeholder) placeholder.classList.add('is-visible');
+        };
+        img.style.display = 'none';
+        img.src = src;
+    },
+
     formatFilesCount(count, lang) {
         const n = Number(count) || 0;
         if (lang === 'ru') {
@@ -431,46 +465,12 @@ const ui = {
     },
 
     syncMpvPreviewDisplay(runtime = {}) {
-        const playbackStatus = runtime.playbackStatus || {};
+        const playbackStatus = runtime.playbackStatus || state.playbackStatus || {};
         const playbackState = String(playbackStatus?.status || '').toLowerCase();
-        const img = elements.previewImage;
-        const placeholder = elements.mpvPreviewPlaceholder;
-        if (!img) return;
-
         if (playbackState === 'playing') {
-            if (placeholder) placeholder.classList.remove('is-visible');
             return;
         }
-
-        const active = this._activePlaylist(runtime);
-        const previewFile = active?.preview_filename;
-        const hasFiles = Number(active?.files_count || 0) > 0;
-        const lang = getUiLang();
-
-        if (!hasFiles || !previewFile) {
-            img.style.display = 'none';
-            img.removeAttribute('src');
-            if (placeholder) {
-                placeholder.textContent = t('no_preview', lang);
-                placeholder.classList.add('is-visible');
-            }
-            return;
-        }
-
-        const src = `${this.thumbnailUrl(previewFile)}?t=${Date.now()}`;
-        img.onload = function onThumbLoad() {
-            this.style.display = 'block';
-            if (placeholder) placeholder.classList.remove('is-visible');
-        };
-        img.onerror = function onThumbError() {
-            this.style.display = 'none';
-            if (placeholder) {
-                placeholder.textContent = t('no_preview', lang);
-                placeholder.classList.add('is-visible');
-            }
-        };
-        img.style.display = 'none';
-        img.src = src;
+        this.showNowScreenIdleLogo();
     },
 
     _renderMetricBar(percent) {
@@ -532,9 +532,10 @@ const ui = {
 
         const storageData = systemStatus?.storage?.media || systemStatus?.storage?.root || null;
         const storagePercent = this._clampPercent(storageData?.used_percent);
-        const storageValue = storagePercent !== null
-            ? `${Math.round(storagePercent)}% (${this._formatBytes(storageData.used)} / ${this._formatBytes(storageData.total)})`
-            : t('value_na', lang);
+        const storagePercentText = storagePercent !== null ? `${Math.round(storagePercent)}%` : t('value_na', lang);
+        const storageSubLabel = storageData
+            ? `${this._formatBytes(storageData.used)} / ${this._formatBytes(storageData.total)}`
+            : '';
 
         const cpuTempRaw = Number(systemStatus?.cpu?.temp_c);
         const cpuTemp = Number.isFinite(cpuTempRaw) ? cpuTempRaw : null;
@@ -550,38 +551,46 @@ const ui = {
 
         const ipValue = networkStatus?.primary_ip || t('value_na', lang);
 
-        const cpuCombined = cpuTemp === null && cpuLoad === null
-            ? t('value_na', lang)
-            : `${cpuTempValue}${cpuLoad === null ? '' : ` (${t('metric_cpu_load', lang)} ${cpuLoadValue})`}`;
+        const screenDisplay = String(screenResolution).replace(/x/i, '×');
+        const cpuLoadLabel = cpuLoad === null
+            ? ''
+            : `${t('metric_cpu_load', lang)} ${cpuLoadValue}`;
 
         const html = `
-            <div class="system-metric">
-                <div class="system-metric__label">${this.escapeHtml(t('metric_screen', lang))}</div>
-                <div class="system-metric__value">${this.escapeHtml(screenResolution)}</div>
+            <div class="metric">
+                <div class="metric-icon" aria-hidden="true">📺</div>
+                <div class="metric-value">${this.escapeHtml(screenDisplay)}</div>
+                <div class="metric-label">${this.escapeHtml(t('metric_screen', lang))}</div>
             </div>
-            <div class="system-metric">
-                <div class="system-metric__label">${this.escapeHtml(t('metric_volume', lang))}</div>
-                <div class="system-metric__value">${this.escapeHtml(volumeValue)}</div>
+            <div class="metric">
+                <div class="metric-icon" aria-hidden="true">🔊</div>
+                <div class="metric-value">${this.escapeHtml(volumeValue)}</div>
+                <div class="metric-label">${this.escapeHtml(t('metric_volume', lang))}</div>
             </div>
-            <div class="system-metric system-metric--wide">
-                <div class="system-metric__label">${this.escapeHtml(t('metric_storage', lang))}</div>
-                <div class="system-metric__value">${this.escapeHtml(storageValue)}</div>
+            <div class="metric">
+                <div class="metric-icon" aria-hidden="true">💾</div>
+                <div class="metric-value">${this.escapeHtml(storagePercentText)}</div>
+                ${this._metricBarHtml(storagePercent)}
+                <div class="metric-label">${this.escapeHtml(storageSubLabel || t('metric_storage', lang))}</div>
             </div>
-            <div class="system-metric">
-                <div class="system-metric__label">${this.escapeHtml(t('metric_cpu_temp', lang))}</div>
-                <div class="system-metric__value">${this.escapeHtml(cpuCombined)}</div>
+            <div class="metric">
+                <div class="metric-icon" aria-hidden="true">🌡</div>
+                <div class="metric-value">${this.escapeHtml(cpuTempValue)}</div>
+                ${this._metricBarHtml(cpuLoad)}
+                <div class="metric-label">${this.escapeHtml(cpuLoadLabel || t('metric_cpu_temp', lang))}</div>
             </div>
-            <div class="system-metric">
-                <div class="system-metric__label">${this.escapeHtml(t('metric_transcode', lang))}</div>
-                <div class="system-metric__value">${this.escapeHtml(transcodeValue)}</div>
+            <div class="metric">
+                <div class="metric-icon" aria-hidden="true">🎬</div>
+                <div class="metric-value">${this.escapeHtml(transcodeValue)}</div>
+                <div class="metric-label">${this.escapeHtml(t('metric_transcode', lang))}</div>
             </div>
-            <div class="system-metric">
-                <div class="system-metric__label">${this.escapeHtml(t('metric_ip', lang))}</div>
-                <div class="system-metric__value">${this.escapeHtml(ipValue)}</div>
+            <div class="metric">
+                <div class="metric-icon" aria-hidden="true">🌐</div>
+                <div class="metric-value">${this.escapeHtml(ipValue)}</div>
+                <div class="metric-label">${this.escapeHtml(t('metric_ip', lang))}</div>
             </div>
         `;
         elements.settingsPanel.innerHTML = html;
-        this.updatePreviewAutoStatus(settings);
         this.syncMpvPreviewDisplay(runtime);
     },
 
@@ -599,42 +608,32 @@ const ui = {
         const st = t('stop_title', lang);
         const et = t('edit_title', lang);
         const dt = t('delete_title', lang);
-        const noPreview = t('no_preview', lang);
+        const noPreview = `📷 ${t('no_preview', lang)}`;
 
         grid.innerHTML = playlistsArray.map((playlist) => {
             const previewFile = playlist.preview_filename;
             const hasPreview = Number(playlist.files_count || 0) > 0 && previewFile;
             const thumbSrc = hasPreview ? this.escapeHtml(this.thumbnailUrl(previewFile)) : '';
-            const filesLabel = this.escapeHtml(this.formatFilesCount(playlist.files_count, lang));
+            const meta = this.escapeHtml(this.formatCardMeta(playlist.customer, playlist.files_count, lang));
 
             return `
             <article class="playlist-card" data-id="${playlist.id}" role="listitem">
-                <span class="playlist-card__badge playlist-card__badge--idle"></span>
-                <div class="playlist-card__preview">
-                    ${hasPreview ? `<img src="${thumbSrc}" alt="" loading="lazy" decoding="async" onerror="this.hidden=true;this.nextElementSibling.hidden=false">` : ''}
-                    <div class="playlist-card__preview-empty" ${hasPreview ? 'hidden' : ''}>
-                        <span class="playlist-card__preview-icon" aria-hidden="true">📷</span>
+                <div class="card-thumb-wrap">
+                    ${hasPreview ? `<img class="card-thumb" src="${thumbSrc}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none';this.nextElementSibling.hidden=false;">` : ''}
+                    <div class="card-thumb-placeholder" ${hasPreview ? 'hidden' : ''}>
                         <span>${this.escapeHtml(noPreview)}</span>
                     </div>
+                    <span class="card-status status-idle"></span>
                 </div>
-                <div class="playlist-card__body">
-                    <h3 class="playlist-card__name">${this.escapeHtml(playlist.name || un)}</h3>
-                    <p class="playlist-card__customer">${this.escapeHtml(playlist.customer || '')}</p>
-                    <p class="playlist-card__files">${filesLabel}</p>
-                </div>
-                <div class="playlist-card__actions">
-                    <button type="button" class="btn play" data-id="${playlist.id}" title="${this.escapeHtml(pt)}">
-                        <span class="btn-label">${this.escapeHtml(pt)}</span>
-                    </button>
-                    <button type="button" class="btn stop" data-id="${playlist.id}" title="${this.escapeHtml(st)}" disabled>
-                        <span class="btn-label">${this.escapeHtml(st)}</span>
-                    </button>
-                    <button type="button" class="btn edit" data-id="${playlist.id}" title="${this.escapeHtml(et)}">
-                        <span class="btn-label">${this.escapeHtml(et)}</span>
-                    </button>
-                    <button type="button" class="btn delete" data-id="${playlist.id}" title="${this.escapeHtml(dt)}">
-                        <span class="btn-label">${this.escapeHtml(dt)}</span>
-                    </button>
+                <div class="card-body">
+                    <div class="card-title">${this.escapeHtml(playlist.name || un)}</div>
+                    <div class="card-meta">${meta}</div>
+                    <div class="card-actions">
+                        <button type="button" class="icon-btn play" data-id="${playlist.id}" title="${this.escapeHtml(pt)}">▶</button>
+                        <button type="button" class="icon-btn stop" data-id="${playlist.id}" title="${this.escapeHtml(st)}" disabled>⏹</button>
+                        <button type="button" class="icon-btn edit" data-id="${playlist.id}" title="${this.escapeHtml(et)}">✏</button>
+                        <button type="button" class="icon-btn danger delete" data-id="${playlist.id}" title="${this.escapeHtml(dt)}">🗑</button>
+                    </div>
                 </div>
             </article>
             `;
@@ -655,7 +654,6 @@ const ui = {
         } catch (e) {
             console.warn(e);
         }
-        this.updatePreviewAutoStatus(state.currentSettings || {});
         this.syncMpvPreviewDisplay({
             playlists: state.playlists,
             playbackStatus: state.playbackStatus,
@@ -682,27 +680,27 @@ const ui = {
 
         const playBtn = card.querySelector('.btn.play');
         const stopBtn = card.querySelector('.btn.stop');
-        const badge = card.querySelector('.playlist-card__badge');
+        const badge = card.querySelector('.card-status');
         if (!playBtn || !stopBtn || !badge) return;
 
         const lang = getUiLang();
-        card.classList.toggle('is-playing', mode === 'playing');
+        card.classList.toggle('active', mode === 'playing');
 
         if (mode === 'playing') {
             playBtn.disabled = true;
             stopBtn.disabled = false;
             badge.textContent = `▶ ${t('status_playing', lang)}`;
-            badge.className = 'playlist-card__badge playlist-card__badge--playing';
+            badge.className = 'card-status status-live';
         } else if (mode === 'stopped') {
             playBtn.disabled = false;
             stopBtn.disabled = true;
             badge.textContent = `■ ${t('status_stopped', lang)}`;
-            badge.className = 'playlist-card__badge playlist-card__badge--stopped';
+            badge.className = 'card-status status-stopped';
         } else {
             playBtn.disabled = false;
             stopBtn.disabled = true;
-            badge.textContent = `○ ${t('status_idle', lang)}`;
-            badge.className = 'playlist-card__badge playlist-card__badge--idle';
+            badge.textContent = `⚪ ${t('status_idle', lang)}`;
+            badge.className = 'card-status status-idle';
         }
     },
 
@@ -786,10 +784,7 @@ const ui = {
 
         const playbackState = String(state.playbackStatus?.status || '').toLowerCase();
         if (playbackState !== 'playing') {
-            this.syncMpvPreviewDisplay({
-                playlists: state.playlists,
-                playbackStatus: state.playbackStatus,
-            });
+            this.showNowScreenIdleLogo(options);
             return;
         }
 
@@ -929,8 +924,11 @@ const handlers = {
             ui.updateLogo(settings.display?.logo);
             // Initial paint: if Auto preview is enabled, show that preview is refreshing.
             // Otherwise keep the timestamp unchanged to avoid implying background capture.
-            const initPreviewAutoSec = Number(settings?.display?.preview_auto_interval_sec || 0);
-            ui.updatePreviewImage({ updateTimestamp: initPreviewAutoSec > 0 });
+            if (String(state.playbackStatus?.status || '').toLowerCase() === 'playing') {
+                ui.updatePreviewImage({ updateTimestamp: true });
+            } else {
+                ui.showNowScreenIdleLogo();
+            }
 
             this.setupEventListeners();
             document.addEventListener('dsign:language-changed', () => {
@@ -1025,6 +1023,9 @@ const handlers = {
                 state.logoLoadAttempts = 0;
 
                 ui.updateLogo(result.filename);
+                if (String(state.playbackStatus?.status || '').toLowerCase() !== 'playing') {
+                    ui.showNowScreenIdleLogo({ updateTimestamp: true });
+                }
                 showAlert('Logo updated successfully', 'success');
 
                 const settings = await api.getSettings();
@@ -1048,11 +1049,17 @@ const handlers = {
         // Refresh preview button
         elements.refreshPreviewBtn?.addEventListener('click', async () => {
             if (state.isPreviewRefreshing) return;
-            
+
+            const playbackState = String(state.playbackStatus?.status || '').toLowerCase();
+            if (playbackState !== 'playing') {
+                ui.showNowScreenIdleLogo({ updateTimestamp: true });
+                return;
+            }
+
             try {
                 elements.refreshPreviewBtn.disabled = true;
                 setBtnIconText(elements.refreshPreviewBtn, '⟳');
-                
+
                 const r = await api.refreshPreview();
                 const now = Date.now();
                 const retryMs = Math.max(0, Math.round((r?.retry_in_sec || 0) * 1000));
@@ -1321,8 +1328,7 @@ const handlers = {
 
         const intervalMs = Math.max(15000, intervalSec * 1000);
         state.previewRefreshId = setInterval(() => {
-            // Do not trigger expensive capture here; only refresh the <img> src.
-            // Also avoid hammering the browser cache if the user just requested a manual capture.
+            if (String(state.playbackStatus?.status || '').toLowerCase() !== 'playing') return;
             if (Date.now() < (state.previewCaptureCooldownUntil || 0)) return;
             ui.updatePreviewImage({ updateTimestamp: true });
         }, intervalMs);
