@@ -38,22 +38,22 @@ const CONFIG = {
         }
     },
     selectors: {
-        playlistTable: '#playlist-table',
-        playlistTableBody: '#playlist-table-body',
+        playlistCards: '#playlist-cards',
         createPlaylistBtn: '#create-playlist-btn',
         modal: '#create-playlist-modal',
         modalClose: '.modal .close',
         playlistForm: '#create-playlist-form',
         statusIndicator: '#playlist-status',
-        uploadLogoBtn: '#upload-logo-btn',
+        logoReplaceBtn: '#logo-replace-btn',
         logoForm: '#logo-upload-form',
-        settingsPanel: '.info-panel .info-card',
+        settingsPanel: '#settings-container',
         logoImage: '#idle-logo',
         previewImage: '#mpv-preview-image',
+        mpvPreviewPlaceholder: '#mpv-preview-placeholder',
+        nowScreenTitle: '#now-screen-title',
         currentSettings: '#current-settings',
         loadingIndicator: '#loading-indicator',
-        logoFileInput: '#logo-upload-form input[type="file"]',
-        logoSelectedFile: '#logo-selected-file',
+        logoFileInput: '#logo-upload',
         refreshPreviewBtn: '#refresh-mpv-preview',
         mpvLastUpdate: '#mpv-last-update'
     },
@@ -76,6 +76,20 @@ const elements = Object.fromEntries(
         .map(([key, selector]) => [key, document.querySelector(selector)])
 );
 
+function sortPlaylistsByOrder(playlists) {
+    return [...(playlists || [])].sort((a, b) => {
+        const ao = Number(a.sort_order ?? 0);
+        const bo = Number(b.sort_order ?? 0);
+        if (ao !== bo) return ao - bo;
+        return Number(a.id) - Number(b.id);
+    });
+}
+
+function playlistsFromDomOrder(orderIds, playlists) {
+    const byId = new Map((playlists || []).map((p) => [Number(p.id), p]));
+    return orderIds.map((id) => byId.get(id)).filter(Boolean);
+}
+
 // Application state
 const state = {
     playlists: [],
@@ -95,6 +109,9 @@ const state = {
     refreshInFlight: false,
     refreshBackoffMs: 0,
     autoRefreshTickCount: 0,
+    lastMpvPreviewRefreshAt: 0,
+    mpvPreviewRequestId: 0,
+    lastAppliedPlaybackKey: '',
 };
 
 // API functions
@@ -181,10 +198,17 @@ const api = {
         const response = await this.request(CONFIG.api.endpoints.playlists);
         const playlists = Array.isArray(response) ? response : (response.playlists || []);
         // Ensure customer is always a string (even empty)
-        return playlists.map(playlist => ({
+        return sortPlaylistsByOrder(playlists.map(playlist => ({
             ...playlist,
             customer: playlist.customer || ''
-        }));
+        })));
+    },
+
+    async reorderPlaylists(order) {
+        return this.request(`${CONFIG.api.endpoints.playlists}/reorder`, {
+            method: 'POST',
+            body: JSON.stringify({ order })
+        });
     },
 
     async createPlaylist(data) {
@@ -346,22 +370,16 @@ const ui = {
         }
     },
 
-    updatePreviewAutoStatus(settings) {
-        const el = document.querySelector('#mpv-auto-refresh-status');
-        if (!el) return;
-        const sec = Number(settings?.display?.preview_auto_interval_sec || 0);
-        const lang = getUiLang();
-        if (!sec) {
-            el.innerHTML = [
-                `<span class="mpv-auto-refresh-line"><strong>${t('auto_preview_bold', lang)}:</strong> ${t('transcode_off', lang)}</span>`,
-                `<span class="mpv-auto-refresh-line">${t('preview_block_hint', lang)}</span>`,
-            ].join('');
-            el.classList.add('is-off');
-        } else {
-            const mins = Math.round(sec / 60);
-            el.innerHTML = t('preview_lines_on', lang, mins);
-            el.classList.remove('is-off');
-        }
+    updatePreviewAutoStatus() {
+        /* Auto-preview hint removed from home UI */
+    },
+
+    _metricBarHtml(percent) {
+        const safe = this._clampPercent(percent);
+        if (safe === null) return '';
+        const barClass = this._barClass(safe);
+        const fillClass = barClass === 'is-danger' ? 'is-danger' : (barClass === 'is-warn' ? 'is-warn' : '');
+        return `<div class="metric-bar"><div class="metric-bar-fill ${fillClass}" style="width:${Math.round(safe)}%;"></div></div>`;
     },
 
     _clampPercent(value) {
@@ -396,6 +414,67 @@ const ui = {
         if (!text) return '';
         if (text.length <= maxLen) return text;
         return `${text.slice(0, maxLen - 3)}...`;
+    },
+
+    thumbnailUrl(filename) {
+        if (!filename) return '';
+        return `/api/media/thumbnail/${encodeURIComponent(filename)}`;
+    },
+
+    updateNowOnScreen(broadcastRaw) {
+        const titleEl = elements.nowScreenTitle;
+        if (titleEl) {
+            titleEl.textContent = this._truncateText(broadcastRaw, 64) || '—';
+        }
+    },
+
+    _nowScreenTitle(playbackStatus, playlists) {
+        const lang = getUiLang();
+        const st = String(playbackStatus?.status || '').toLowerCase();
+        if (st === 'playing') {
+            const rawPid = playbackStatus?.playlist_id;
+            const active = (playlists || []).find((item) => String(item.id) === String(rawPid));
+            return active?.name || `Playlist #${rawPid ?? ''}`.trim() || t('unnamed', lang);
+        }
+        return t('status_idle', lang);
+    },
+
+    _cardActionIcons() {
+        return {
+            play: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M9 5v14l12-7-12-7z" fill="currentColor"/></svg>',
+            stop: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M6 6h12v12H6z" fill="currentColor"/></svg>',
+            edit: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" fill="currentColor"/></svg>',
+            del: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z" fill="currentColor"/></svg>',
+        };
+    },
+
+    formatCardMeta(customer, filesCount, lang) {
+        const cust = String(customer ?? '').trim() || '—';
+        const files = this.formatFilesCount(filesCount, lang);
+        if (lang === 'ru') {
+            return `Заказчик: ${cust} • ${files}`;
+        }
+        return `Customer: ${cust} • ${files}`;
+    },
+
+    formatFilesCount(count, lang) {
+        const n = Number(count) || 0;
+        if (lang === 'ru') {
+            const mod10 = n % 10;
+            const mod100 = n % 100;
+            if (mod10 === 1 && mod100 !== 11) return `${n} файл`;
+            if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${n} файла`;
+            return `${n} файлов`;
+        }
+        return n === 1 ? `${n} file` : `${n} files`;
+    },
+
+    _activePlaylist(runtime = {}) {
+        const playlists = Array.isArray(runtime.playlists) ? runtime.playlists : [];
+        const playbackStatus = runtime.playbackStatus || {};
+        const rawPid = playbackStatus?.playlist_id;
+        if (rawPid === null || rawPid === undefined || rawPid === '') return null;
+        return playlists.find((item) => String(item.id) === String(rawPid)) || null;
     },
 
     _renderMetricBar(percent) {
@@ -447,24 +526,17 @@ const ui = {
             ? t('value_mute', lang)
             : (volumeNum !== null ? `${Math.max(0, Math.min(100, Math.round(volumeNum)))}%` : t('value_na', lang));
 
-        const playbackState = String(playbackStatus?.status || '').toLowerCase();
-        const activePlaylistId = playbackStatus?.playlist_id;
-        const activePlaylist = playlists.find((item) => String(item.id) === String(activePlaylistId));
-        const broadcastRaw = playbackState === 'playing'
-            ? (activePlaylist?.name || `Playlist #${activePlaylistId ?? ''}`.trim() || 'Playlist')
-            : t('broadcast_logo', lang);
-        const broadcastValue = this._truncateText(broadcastRaw, 32);
+        this.updateNowOnScreen(this._nowScreenTitle(playbackStatus, playlists));
 
         const storageData = systemStatus?.storage?.media || systemStatus?.storage?.root || null;
         const storagePercent = this._clampPercent(storageData?.used_percent);
-        const storageValue = storagePercent !== null
-            ? `${Math.round(storagePercent)}% (${this._formatBytes(storageData.used)} / ${this._formatBytes(storageData.total)})`
-            : t('value_na', lang);
+        const storagePercentText = storagePercent !== null ? `${Math.round(storagePercent)}%` : t('value_na', lang);
+        const storageSubLabel = storageData
+            ? `${this._formatBytes(storageData.used)} / ${this._formatBytes(storageData.total)}`
+            : '';
 
         const cpuTempRaw = Number(systemStatus?.cpu?.temp_c);
         const cpuTemp = Number.isFinite(cpuTempRaw) ? cpuTempRaw : null;
-        const cpuTempPercent =
-            cpuTemp === null ? null : Math.max(0, Math.min(100, (cpuTemp / 85) * 100));
         const cpuTempValue = cpuTemp === null ? t('value_na', lang) : `${cpuTemp.toFixed(1)}°C`;
 
         const cpuLoadRaw = Number(systemStatus?.cpu?.usage_percent ?? systemStatus?.cpu?.load_percent);
@@ -477,125 +549,103 @@ const ui = {
 
         const ipValue = networkStatus?.primary_ip || t('value_na', lang);
 
+        const screenDisplay = String(screenResolution).replace(/x/i, '×');
+        const cpuLoadLabel = cpuLoad === null
+            ? ''
+            : `${t('metric_cpu_load', lang)} ${cpuLoadValue}`;
+
         const html = `
-            <div class="settings-section">
-                <h3>${this.escapeHtml(t('metric_ops_title', lang))}</h3>
-                <div class="metrics-grid">
-                    <div class="metric-item">
-                        <div class="metric-label">${this.escapeHtml(t('metric_screen', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(screenResolution)}</div>
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">${this.escapeHtml(t('metric_volume', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(volumeValue)}</div>
-                    </div>
-                    <div class="metric-item metric-item--full">
-                        <div class="metric-label">${this.escapeHtml(t('metric_broadcast', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(broadcastValue)}</div>
-                    </div>
-                    <div class="metric-item metric-item--full">
-                        <div class="metric-label">${this.escapeHtml(t('metric_storage', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(storageValue)}</div>
-                        ${this._renderMetricBar(storagePercent)}
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">${this.escapeHtml(t('metric_cpu_temp', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(cpuTempValue)}</div>
-                        ${this._renderMetricBar(cpuTempPercent)}
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">${this.escapeHtml(t('metric_cpu_load', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(cpuLoadValue)}</div>
-                        ${this._renderMetricBar(cpuLoad)}
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">${this.escapeHtml(t('metric_transcode', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(transcodeValue)}</div>
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">${this.escapeHtml(t('metric_ip', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(ipValue)}</div>
-                    </div>
-                </div>
+            <div class="metric">
+                <div class="metric-icon" aria-hidden="true">📺</div>
+                <div class="metric-value">${this.escapeHtml(screenDisplay)}</div>
+                <div class="metric-label">${this.escapeHtml(t('metric_screen', lang))}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-icon" aria-hidden="true">🔊</div>
+                <div class="metric-value">${this.escapeHtml(volumeValue)}</div>
+                <div class="metric-label">${this.escapeHtml(t('metric_volume', lang))}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-icon" aria-hidden="true">💾</div>
+                <div class="metric-value">${this.escapeHtml(storagePercentText)}</div>
+                ${this._metricBarHtml(storagePercent)}
+                <div class="metric-label">${this.escapeHtml(storageSubLabel || t('metric_storage', lang))}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-icon" aria-hidden="true">🌡</div>
+                <div class="metric-value">${this.escapeHtml(cpuTempValue)}</div>
+                ${this._metricBarHtml(cpuLoad)}
+                <div class="metric-label">${this.escapeHtml(cpuLoadLabel || t('metric_cpu_temp', lang))}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-icon" aria-hidden="true">🎬</div>
+                <div class="metric-value">${this.escapeHtml(transcodeValue)}</div>
+                <div class="metric-label">${this.escapeHtml(t('metric_transcode', lang))}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-icon" aria-hidden="true">🌐</div>
+                <div class="metric-value">${this.escapeHtml(ipValue)}</div>
+                <div class="metric-label">${this.escapeHtml(t('metric_ip', lang))}</div>
             </div>
         `;
         elements.settingsPanel.innerHTML = html;
-        this.updatePreviewAutoStatus(settings);
     },
 
     renderPlaylists(playlists) {
-        let tableBody = document.querySelector('#playlist-table-body');
-        if (!tableBody) {
-            const table = document.querySelector('#playlist-table');
-            if (table) {
-                tableBody = document.createElement('tbody');
-                tableBody.id = 'playlist-table-body';
-                table.appendChild(tableBody);
-            } else {
-                console.error('Playlist table not found');
-                return;
-            }
+        const grid = elements.playlistCards;
+        if (!grid) {
+            console.error('Playlist cards container not found');
+            return;
         }
 
         const playlistsArray = Array.isArray(playlists) ? playlists : [];
-    
-        console.log('Rendering playlists with customer data:', playlistsArray.map(p => ({
-            id: p.id,
-            name: p.name,
-            customer: p.customer,
-            files_count: p.files_count
-        })));
-
         const lang = getUiLang();
         const un = t('unnamed', lang);
         const pt = t('play_title', lang);
         const st = t('stop_title', lang);
         const et = t('edit_title', lang);
         const dt = t('delete_title', lang);
-        const icons = {
-            play: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 5v14l12-7-12-7z" fill="currentColor"/></svg>',
-            stop: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 7h10v10H7z" fill="currentColor"/></svg>',
-            edit: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 17.25V21h3.75L17.8 9.94l-3.75-3.75L3 17.25z" fill="currentColor"/><path d="M20.7 7.04a1 1 0 0 0 0-1.41L18.37 3.3a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.82-1.84z" fill="currentColor"/></svg>',
-            del: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 7h12l-1 14H7L6 7z" fill="currentColor"/><path d="M9 4h6l1 2H8l1-2z" fill="currentColor"/></svg>',
-        };
-        tableBody.innerHTML = playlistsArray.map(playlist => `
-            <tr data-id="${playlist.id}">
-                <td class="playlist-td-name">${this.escapeHtml(playlist.name || un)}</td>
-                <td class="playlist-td-customer">${this.escapeHtml(playlist.customer)}</td>
-                <td class="playlist-td-files">${playlist.files_count || 0}</td>
-                <td class="playlist-td-status">
-                    <div class="playlist-td-inner">
-                        <span class="status-badge"></span>
+        const noPreview = `📷 ${t('no_preview', lang)}`;
+        const icons = this._cardActionIcons();
+
+        grid.innerHTML = playlistsArray.map((playlist) => {
+            const previewFile = playlist.preview_filename;
+            const hasPreview = Number(playlist.files_count || 0) > 0 && previewFile;
+            const thumbSrc = hasPreview ? this.escapeHtml(this.thumbnailUrl(previewFile)) : '';
+            const meta = this.escapeHtml(this.formatCardMeta(playlist.customer, playlist.files_count, lang));
+
+            return `
+            <article class="playlist-card" data-id="${playlist.id}" role="listitem" draggable="true">
+                <div class="card-thumb-wrap">
+                    ${hasPreview ? `<img class="card-thumb" src="${thumbSrc}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none';this.nextElementSibling.hidden=false;">` : ''}
+                    <div class="card-thumb-placeholder" ${hasPreview ? 'hidden' : ''}>
+                        <span>${this.escapeHtml(noPreview)}</span>
                     </div>
-                </td>
-                <td class="playlist-td-actions">
-                    <div class="playlist-td-inner">
-                        <div class="actions">
-                        <button class="btn play" data-id="${playlist.id}" title="${this.escapeHtml(pt)}">
-                            <span class="btn-icon" aria-hidden="true">${icons.play}</span>
-                            <span class="sr-only">${this.escapeHtml(pt)}</span>
-                        </button>
-                        <button class="btn stop" data-id="${playlist.id}" title="${this.escapeHtml(st)}" disabled>
-                            <span class="btn-icon" aria-hidden="true">${icons.stop}</span>
-                            <span class="sr-only">${this.escapeHtml(st)}</span>
-                        </button>
-                        <button class="btn edit" data-id="${playlist.id}" title="${this.escapeHtml(et)}">
-                            <span class="btn-icon" aria-hidden="true">${icons.edit}</span>
-                            <span class="sr-only">${this.escapeHtml(et)}</span>
-                        </button>
-                        <button class="btn delete" data-id="${playlist.id}" title="${this.escapeHtml(dt)}">
-                            <span class="btn-icon" aria-hidden="true">${icons.del}</span>
-                            <span class="sr-only">${this.escapeHtml(dt)}</span>
-                        </button>
-                        </div>
+                    <span class="card-status status-idle"></span>
+                </div>
+                <div class="card-body">
+                    <div class="card-title">${this.escapeHtml(playlist.name || un)}</div>
+                    <div class="card-meta">${meta}</div>
+                    <div class="card-actions">
+                        <button type="button" class="icon-btn play" data-id="${playlist.id}" title="${this.escapeHtml(pt)}">${icons.play}<span class="sr-only">${this.escapeHtml(pt)}</span></button>
+                        <button type="button" class="icon-btn stop" data-id="${playlist.id}" title="${this.escapeHtml(st)}" disabled>${icons.stop}<span class="sr-only">${this.escapeHtml(st)}</span></button>
+                        <button type="button" class="icon-btn edit" data-id="${playlist.id}" title="${this.escapeHtml(et)}">${icons.edit}<span class="sr-only">${this.escapeHtml(et)}</span></button>
+                        <button type="button" class="icon-btn danger delete" data-id="${playlist.id}" title="${this.escapeHtml(dt)}">${icons.del}<span class="sr-only">${this.escapeHtml(dt)}</span></button>
                     </div>
-                </td>
-            </tr>
-        `).join('');
+                </div>
+            </article>
+            `;
+        }).join('');
+
+        try {
+            this.applyPlaybackStatusFromServer(state.playbackStatus, playlistsArray);
+        } catch (e) {
+            console.warn('Failed to apply playback status to cards:', e);
+        }
     },
 
     refreshLanguageUI() {
-        if (!elements.settingsPanel && !document.querySelector('#playlist-table-body')) return;
+        if (!elements.settingsPanel && !elements.playlistCards) return;
         this.renderSettings(state.currentSettings, {
             playlists: state.playlists,
             playbackStatus: state.playbackStatus,
@@ -608,7 +658,6 @@ const ui = {
         } catch (e) {
             console.warn(e);
         }
-        this.updatePreviewAutoStatus(state.currentSettings || {});
     },
 
     escapeHtml(unsafe) {
@@ -625,34 +674,34 @@ const ui = {
      * @param {string|number} playlistId
      * @param {'playing'|'stopped'|'idle'} mode
      */
-    setPlaybackRowState(playlistId, mode) {
-        const rows = document.querySelectorAll(`tr[data-id="${playlistId}"]`);
-        if (!rows.length) return;
+    setPlaybackCardState(playlistId, mode) {
+        const card = document.querySelector(`.playlist-card[data-id="${playlistId}"]`);
+        if (!card) return;
 
-        rows.forEach((row) => {
-            const playBtn = row.querySelector('.play');
-            const stopBtn = row.querySelector('.stop');
-            const statusBadge = row.querySelector('.status-badge');
-            if (!playBtn || !stopBtn || !statusBadge) return;
+        const playBtn = card.querySelector('button.play');
+        const stopBtn = card.querySelector('button.stop');
+        const badge = card.querySelector('.card-status');
+        if (!playBtn || !stopBtn || !badge) return;
 
-            const lang = getUiLang();
-            if (mode === 'playing') {
-                playBtn.disabled = true;
-                stopBtn.disabled = false;
-                statusBadge.textContent = t('status_playing', lang);
-                statusBadge.className = 'status-badge active playing';
-            } else if (mode === 'stopped') {
-                playBtn.disabled = false;
-                stopBtn.disabled = true;
-                statusBadge.textContent = t('status_stopped', lang);
-                statusBadge.className = 'status-badge stopped';
-            } else {
-                playBtn.disabled = false;
-                stopBtn.disabled = true;
-                statusBadge.textContent = t('status_idle', lang);
-                statusBadge.className = 'status-badge idle';
-            }
-        });
+        const lang = getUiLang();
+        card.classList.toggle('active', mode === 'playing');
+
+        if (mode === 'playing') {
+            playBtn.disabled = true;
+            stopBtn.disabled = false;
+            badge.textContent = `▶ ${t('status_playing', lang)}`;
+            badge.className = 'card-status status-live';
+        } else if (mode === 'stopped') {
+            playBtn.disabled = false;
+            stopBtn.disabled = true;
+            badge.textContent = `■ ${t('status_stopped', lang)}`;
+            badge.className = 'card-status status-stopped';
+        } else {
+            playBtn.disabled = false;
+            stopBtn.disabled = true;
+            badge.textContent = `⚪ ${t('status_idle', lang)}`;
+            badge.className = 'card-status status-idle';
+        }
     },
 
     /**
@@ -667,18 +716,27 @@ const ui = {
 
         const rawPid = statusPayload && statusPayload.playlist_id;
         const pid =
-            rawPid != null && rawPid !== '' ? String(rawPid) : null;
+            rawPid != null && rawPid !== '' ? String(rawPid) : '';
         const st = String(statusPayload?.status || '').toLowerCase();
 
         ids.forEach((id) => {
             if (pid === id && st === 'playing') {
-                this.setPlaybackRowState(id, 'playing');
+                this.setPlaybackCardState(id, 'playing');
             } else if (pid === id && st === 'stopped') {
-                this.setPlaybackRowState(id, 'stopped');
+                this.setPlaybackCardState(id, 'stopped');
             } else {
-                this.setPlaybackRowState(id, 'idle');
+                this.setPlaybackCardState(id, 'idle');
             }
         });
+
+        const playbackKey = `${st}|${pid}`;
+        const playbackChanged = playbackKey !== state.lastAppliedPlaybackKey;
+        state.lastAppliedPlaybackKey = playbackKey;
+
+        this.updateNowOnScreen(this._nowScreenTitle(statusPayload, list));
+        if (playbackChanged) {
+            this.updatePreviewImage({ updateTimestamp: false, force: true });
+        }
     },
 
     updateLogo(logoPath) {
@@ -722,33 +780,61 @@ const ui = {
     updatePreviewImage(options = {}) {
         if (!elements.previewImage) return;
 
-        const { updateTimestamp = true } = options || {};
-        const newSrc = `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
+        const { updateTimestamp = true, force = false } = options || {};
+        const now = Date.now();
+        const minGapMs = 5000;
+        if (!force && state.lastMpvPreviewRefreshAt && now - state.lastMpvPreviewRefreshAt < minGapMs) {
+            return;
+        }
 
-        elements.previewImage.onload = function() {
-            this.style.display = 'block';
+        const img = elements.previewImage;
+        const placeholder = elements.mpvPreviewPlaceholder;
+        const requestId = ++state.mpvPreviewRequestId;
+        const newSrc = `${CONFIG.api.endpoints.previewImage}?t=${now}`;
+
+        const onSuccess = () => {
+            if (requestId !== state.mpvPreviewRequestId) return;
+            img.style.display = 'block';
+            if (placeholder) placeholder.classList.remove('is-visible');
             state.previewLoadAttempts = 0;
+            state.lastMpvPreviewRefreshAt = Date.now();
             if (updateTimestamp && elements.mpvLastUpdate) {
                 elements.mpvLastUpdate.textContent = new Date().toLocaleTimeString();
             }
         };
 
-        elements.previewImage.onerror = function() {
-            state.previewLoadAttempts++;
-            
+        const onFail = () => {
+            if (requestId !== state.mpvPreviewRequestId) return;
+            state.previewLoadAttempts += 1;
             if (state.previewLoadAttempts >= CONFIG.maxImageLoadAttempts && !state.fallbackPreviewUsed) {
-                console.warn('Max preview load attempts reached, using fallback');
                 state.fallbackPreviewUsed = true;
-                this.src = `${CONFIG.defaultPreview}?t=${Date.now()}`;
-            } else if (!state.fallbackPreviewUsed) {
-                setTimeout(() => {
-                    this.src = `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
-                }, 3000);
+                const fallback = new Image();
+                fallback.onload = () => {
+                    img.src = fallback.src;
+                    onSuccess();
+                };
+                fallback.src = `${CONFIG.defaultPreview}?t=${Date.now()}`;
+                return;
+            }
+            if (!state.fallbackPreviewUsed) {
+                setTimeout(() => ui.updatePreviewImage({ updateTimestamp, force: true }), 3000);
+                return;
+            }
+            img.style.display = 'none';
+            if (placeholder) {
+                placeholder.textContent = t('no_preview', getUiLang());
+                placeholder.classList.add('is-visible');
             }
         };
-    
-        elements.previewImage.style.display = 'none';
-        elements.previewImage.src = newSrc;
+
+        const loader = new Image();
+        loader.onload = () => {
+            if (requestId !== state.mpvPreviewRequestId) return;
+            img.src = loader.src;
+            onSuccess();
+        };
+        loader.onerror = onFail;
+        loader.src = newSrc;
     },
 
     toggleModal(show = true) {
@@ -772,15 +858,15 @@ const ui = {
         reader.readAsDataURL(file);
     },
 
-    updateLogoFileSelection(file) {
-        const selectedLabel = elements.logoSelectedFile;
-        if (selectedLabel) {
-            selectedLabel.textContent = file ? file.name : t('no_file', getUiLang());
-        }
-
-        if (elements.uploadLogoBtn) {
-            elements.uploadLogoBtn.disabled = !file;
-        }
+    setLogoUploadBusy(busy) {
+        const btn = elements.logoReplaceBtn;
+        if (!btn) return;
+        const spinner = btn.querySelector('.loading-spinner');
+        btn.disabled = busy;
+        btn.querySelectorAll('span:not(.loading-spinner)').forEach((el) => {
+            el.style.display = busy ? 'none' : '';
+        });
+        if (spinner) spinner.style.display = busy ? 'inline-block' : 'none';
     }
 };
 
@@ -788,11 +874,6 @@ const ui = {
 const handlers = {
     async init() {
         try {
-            console.log('Initializing application...');
-            
-            await this.ensureTableBodyExists();
-            console.log('Playlist table element found:', elements.playlistTableBody);
-
             const [settings, playlists, playbackStatusResp, systemStatusResp, networkStatusResp] = await Promise.all([
                 api.getSettings(),
                 api.getPlaylists(),
@@ -809,8 +890,6 @@ const handlers = {
                     return null;
                 }),
             ]);
-
-            console.log('Received playlists:', playlists);
 
             state.currentSettings = settings;
             state.playlists = playlists;
@@ -844,18 +923,7 @@ const handlers = {
                 networkStatus: state.networkStatus,
             });
             ui.renderPlaylists(playlists);
-
-            try {
-                ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
-            } catch (e) {
-                console.warn('Failed to apply playback status to UI:', e);
-            }
-
             ui.updateLogo(settings.display?.logo);
-            // Initial paint: if Auto preview is enabled, show that preview is refreshing.
-            // Otherwise keep the timestamp unchanged to avoid implying background capture.
-            const initPreviewAutoSec = Number(settings?.display?.preview_auto_interval_sec || 0);
-            ui.updatePreviewImage({ updateTimestamp: initPreviewAutoSec > 0 });
 
             this.setupEventListeners();
             document.addEventListener('dsign:language-changed', () => {
@@ -866,35 +934,22 @@ const handlers = {
                 }
             });
             this.setupSocketSubscriptions();
-            this.startAutoRefresh();
-            this.startPreviewRefresh(settings);
+
+            requestAnimationFrame(() => {
+                try {
+                    ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
+                    ui.updatePreviewImage({ updateTimestamp: true, force: true });
+                } catch (e) {
+                    console.warn('Initial playback/preview paint failed', e);
+                }
+                this.startAutoRefresh();
+                this.startPreviewRefresh(settings);
+            });
 
         } catch (error) {
             console.error('Initialization failed:', error);
             showError('Failed to initialize application');
         }
-    },
-
-    async ensureTableBodyExists() {
-        return new Promise((resolve) => {
-            const checkTableBody = () => {
-                if (elements.playlistTableBody) {
-                    resolve();
-                } else {
-                    const table = document.querySelector('#playlist-table');
-                    if (table) {
-                        const tableBody = document.createElement('tbody');
-                        tableBody.id = 'playlist-table-body';
-                        table.appendChild(tableBody);
-                        elements.playlistTableBody = tableBody;
-                        resolve();
-                    } else {
-                        setTimeout(checkTableBody, 100);
-                    }
-                }
-            };
-            checkTableBody();
-        });
     },
 
     setupEventListeners() {
@@ -924,12 +979,13 @@ const handlers = {
                     customer: formData.get('customer') || ''
                 });
 
-                state.playlists = [...state.playlists, {
+                state.playlists = sortPlaylistsByOrder([...state.playlists, {
                     id: response.playlist_id,
                     name: formData.get('name'),
                     customer: formData.get('customer') || '',
-                    files_count: 0
-                }];
+                    files_count: 0,
+                    sort_order: state.playlists.length,
+                }]);
                 
                 ui.renderPlaylists(state.playlists);
                 ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
@@ -941,44 +997,40 @@ const handlers = {
             }
         });
 
-        // Logo upload
-        elements.uploadLogoBtn?.addEventListener('click', async () => {
-            const fileInput = elements.logoFileInput;
-            if (!fileInput.files || fileInput.files.length === 0) {
-                showError('Please select a logo file first');
-                return;
-            }
+        elements.logoReplaceBtn?.addEventListener('click', () => {
+            elements.logoFileInput?.click();
+        });
 
-            const file = fileInput.files[0];
+        elements.logoFileInput?.addEventListener('change', async (e) => {
+            const file = e.target.files && e.target.files[0] ? e.target.files[0] : null;
+            if (!file) return;
+
             if (!file.type.match('image.*')) {
                 showError('Only image files are allowed');
+                e.target.value = '';
                 return;
             }
 
             if (file.size > 5 * 1024 * 1024) {
                 showError('File size should be less than 5MB');
+                e.target.value = '';
                 return;
             }
 
-            const btnText = elements.uploadLogoBtn.querySelector('.btn-text');
-            const spinner = elements.uploadLogoBtn.querySelector('.loading-spinner');
-            btnText.style.display = 'none';
-            spinner.style.display = 'inline-block';
-            elements.uploadLogoBtn.disabled = true;
+            ui.previewLogo(file);
+            ui.setLogoUploadBusy(true);
 
             try {
                 const formData = new FormData(elements.logoForm);
                 const result = await api.uploadLogo(formData);
-                
+
                 state.fallbackLogoUsed = false;
                 state.logoLoadAttempts = 0;
-                
+
                 ui.updateLogo(result.filename);
+                ui.updatePreviewImage({ updateTimestamp: true, force: true });
                 showAlert('Logo updated successfully', 'success');
-                
-                fileInput.value = '';
-                ui.updateLogoFileSelection(null);
-                
+
                 const settings = await api.getSettings();
                 state.currentSettings = settings;
                 ui.renderSettings(settings, {
@@ -990,40 +1042,32 @@ const handlers = {
             } catch (error) {
                 console.error('Logo upload failed:', error);
                 showError('Failed to upload logo: ' + error.message);
-                ui.updateLogo(state.currentSettings.display?.logo);
+                ui.updateLogo(state.currentSettings?.display?.logo);
             } finally {
-                btnText.style.display = 'inline-block';
-                spinner.style.display = 'none';
-                elements.uploadLogoBtn.disabled = false;
+                e.target.value = '';
+                ui.setLogoUploadBusy(false);
             }
         });
 
-        // Logo file preview
-        elements.logoFileInput?.addEventListener('change', (e) => {
-            const file = e.target.files && e.target.files[0] ? e.target.files[0] : null;
-            ui.updateLogoFileSelection(file);
-            if (file) ui.previewLogo(file);
-        });
+        this.setupPlaylistDragDrop();
 
         // Refresh preview button
         elements.refreshPreviewBtn?.addEventListener('click', async () => {
             if (state.isPreviewRefreshing) return;
-            
+
             try {
                 elements.refreshPreviewBtn.disabled = true;
-                setBtnIconText(elements.refreshPreviewBtn, '⟳');
-                
+
                 const r = await api.refreshPreview();
                 const now = Date.now();
                 const retryMs = Math.max(0, Math.round((r?.retry_in_sec || 0) * 1000));
                 if (r?.skipped) {
                     // Capture was throttled on server; just reload existing image and inform user.
                     state.previewCaptureCooldownUntil = now + retryMs;
-                    ui.updatePreviewImage({ updateTimestamp: false });
+                    ui.updatePreviewImage({ updateTimestamp: false, force: true });
                     showAlert('Preview is up to date', 'info');
                 } else if (r?.success) {
-                    // Service may still be writing the file; reload after a short delay.
-                    setTimeout(() => ui.updatePreviewImage({ updateTimestamp: true }), 1200);
+                    setTimeout(() => ui.updatePreviewImage({ updateTimestamp: true, force: true }), 1200);
                     showAlert('Preview refreshed', 'success');
                 } else {
                     throw new Error(r?.error || 'Preview refresh failed');
@@ -1033,12 +1077,11 @@ const handlers = {
                 showError('Failed to refresh preview');
             } finally {
                 elements.refreshPreviewBtn.disabled = false;
-                setBtnIconText(elements.refreshPreviewBtn, '⟳');
             }
         });
 
         // Playlist actions
-        elements.playlistTable?.addEventListener('click', async (e) => {
+        elements.playlistCards?.addEventListener('click', async (e) => {
             const btn = e.target.closest('button');
             if (!btn || !btn.dataset.id) return;
 
@@ -1091,9 +1134,9 @@ const handlers = {
                             }
                             
                             // Remove the playlist row immediately
-                            const row = document.querySelector(`tr[data-id="${playlistId}"]`);
-                            if (row) {
-                                row.remove();
+                            const card = document.querySelector(`.playlist-card[data-id="${playlistId}"]`);
+                            if (card) {
+                                card.remove();
                             }
                             
                             // Update state
@@ -1121,6 +1164,92 @@ const handlers = {
                 showError(error.status === 403 ? 
                     'Permission denied' : 'Action failed: ' + error.message);
             }
+        });
+    },
+
+    setupPlaylistDragDrop() {
+        const grid = elements.playlistCards;
+        if (!grid || grid.dataset.dndBound === '1') return;
+        grid.dataset.dndBound = '1';
+
+        let draggedId = null;
+        let dragOverCard = null;
+
+        const blockDragTarget = (el) => el?.closest?.('button, a, input, textarea, select, label');
+
+        grid.addEventListener('dragstart', (e) => {
+            const card = e.target.closest('.playlist-card');
+            if (!card || blockDragTarget(e.target)) {
+                e.preventDefault();
+                return;
+            }
+            draggedId = card.dataset.id;
+            card.classList.add('is-dragging');
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', draggedId);
+        });
+
+        grid.addEventListener('dragend', () => {
+            grid.querySelectorAll('.playlist-card.is-dragging').forEach((c) => c.classList.remove('is-dragging'));
+            dragOverCard?.classList.remove('is-drag-over');
+            dragOverCard = null;
+            draggedId = null;
+        });
+
+        grid.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            const card = e.target.closest('.playlist-card');
+            const dragging = grid.querySelector('.playlist-card.is-dragging');
+            if (!card || !dragging || card === dragging) return;
+            e.dataTransfer.dropEffect = 'move';
+            if (dragOverCard && dragOverCard !== card) {
+                dragOverCard.classList.remove('is-drag-over');
+            }
+            dragOverCard = card;
+            card.classList.add('is-drag-over');
+            const rect = card.getBoundingClientRect();
+            const after = e.clientY - rect.top > rect.height / 2;
+            if (after) {
+                card.after(dragging);
+            } else {
+                card.before(dragging);
+            }
+        });
+
+        grid.addEventListener('dragleave', (e) => {
+            const card = e.target.closest('.playlist-card');
+            if (card && card === dragOverCard && !card.contains(e.relatedTarget)) {
+                card.classList.remove('is-drag-over');
+                if (dragOverCard === card) dragOverCard = null;
+            }
+        });
+
+        grid.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            dragOverCard?.classList.remove('is-drag-over');
+            dragOverCard = null;
+            grid.querySelectorAll('.playlist-card.is-dragging').forEach((c) => c.classList.remove('is-dragging'));
+
+            if (!draggedId) return;
+
+            const orderIds = [...grid.querySelectorAll('.playlist-card')].map((c) => Number(c.dataset.id));
+            const prevPlaylists = state.playlists.map((p) => ({ ...p }));
+            state.playlists = playlistsFromDomOrder(orderIds, state.playlists);
+
+            try {
+                const result = await api.reorderPlaylists(orderIds);
+                if (!result?.success) {
+                    throw new Error(result?.error || 'Reorder failed');
+                }
+                state.playlists = state.playlists.map((p, idx) => ({ ...p, sort_order: idx }));
+            } catch (err) {
+                console.warn('Playlist reorder failed:', err);
+                state.playlists = prevPlaylists;
+                ui.renderPlaylists(state.playlists);
+                ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
+                showError('Failed to save playlist order');
+            }
+            draggedId = null;
         });
     },
 
@@ -1178,7 +1307,7 @@ const handlers = {
         };
 
         const scheduleNext = (delayMs) => {
-            const safeDelay = Math.max(1000, Number(delayMs) || 0);
+            const safeDelay = Math.max(3000, Number(delayMs) || 0);
             state.refreshTimerId = setTimeout(tick, safeDelay);
         };
 
@@ -1264,9 +1393,8 @@ const handlers = {
             scheduleNext(delay);
         };
 
-        // Reset backoff when we (re)start the loop.
         state.refreshBackoffMs = 0;
-        scheduleNext(1000);
+        scheduleNext(computeBaseIntervalMs());
     },
 
     startPreviewRefresh(settings) {
@@ -1281,10 +1409,8 @@ const handlers = {
 
         const intervalMs = Math.max(15000, intervalSec * 1000);
         state.previewRefreshId = setInterval(() => {
-            // Do not trigger expensive capture here; only refresh the <img> src.
-            // Also avoid hammering the browser cache if the user just requested a manual capture.
             if (Date.now() < (state.previewCaptureCooldownUntil || 0)) return;
-            ui.updatePreviewImage({ updateTimestamp: true });
+            ui.updatePreviewImage({ updateTimestamp: true, force: false });
         }, intervalMs);
     },
 
