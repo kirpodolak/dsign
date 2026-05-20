@@ -417,7 +417,7 @@ const ui = {
 
     _cardActionIcons() {
         return {
-            play: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M8 5v14l11-7-12z" fill="currentColor"/></svg>',
+            play: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M9 5v14l12-7-12-7z" fill="currentColor"/></svg>',
             stop: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M6 6h12v12H6z" fill="currentColor"/></svg>',
             edit: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" fill="currentColor"/></svg>',
             del: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z" fill="currentColor"/></svg>',
@@ -502,9 +502,6 @@ const ui = {
             ? t('value_mute', lang)
             : (volumeNum !== null ? `${Math.max(0, Math.min(100, Math.round(volumeNum)))}%` : t('value_na', lang));
 
-        const playbackState = String(playbackStatus?.status || '').toLowerCase();
-        const activePlaylistId = playbackStatus?.playlist_id;
-        const activePlaylist = playlists.find((item) => String(item.id) === String(activePlaylistId));
         this.updateNowOnScreen(this._nowScreenTitle(playbackStatus, playlists));
 
         const storageData = systemStatus?.storage?.media || systemStatus?.storage?.root || null;
