@@ -127,7 +127,11 @@ class PlaylistService:
         """Получение всех плейлистов"""
         try:
             self._log_debug('Fetching all playlists')
-            playlists = self.db_session.query(Playlist).order_by(Playlist.last_modified.desc()).all()
+            playlists = (
+                self.db_session.query(Playlist)
+                .order_by(Playlist.sort_order.asc(), Playlist.id.asc())
+                .all()
+            )
             
             result = []
             for playlist in playlists:
@@ -168,11 +172,17 @@ class PlaylistService:
             if not data or 'name' not in data:
                 raise ValueError("Playlist name is required")
 
+            max_order = (
+                self.db_session.query(func.max(Playlist.sort_order)).scalar()
+            )
+            next_order = int(max_order if max_order is not None else -1) + 1
+
             playlist = Playlist(
                 name=data['name'],
                 customer=data.get('customer', ''),
                 created_at=int(time.time()),
-                last_modified=int(time.time())
+                last_modified=int(time.time()),
+                sort_order=next_order,
             )
             
             self.db_session.add(playlist)
@@ -717,6 +727,49 @@ class PlaylistService:
                     "M3U regen failed after removing storage key from playlist",
                     {"playlist_id": pid, "key": key, "error": str(e)},
                 )
+
+    def reorder_playlists(self, playlist_ids: List[int]) -> Dict[str, bool]:
+        """Persist home-page card order (playlists.sort_order)."""
+        if not playlist_ids:
+            raise ValueError("Playlist order is required")
+
+        try:
+            unique_ids = []
+            seen = set()
+            for raw in playlist_ids:
+                pid = int(raw)
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                unique_ids.append(pid)
+
+            rows = (
+                self.db_session.query(Playlist)
+                .filter(Playlist.id.in_(unique_ids))
+                .all()
+            )
+            by_id = {row.id: row for row in rows}
+            if len(by_id) != len(unique_ids):
+                missing = [pid for pid in unique_ids if pid not in by_id]
+                raise ValueError(f"Unknown playlist id(s): {missing}")
+
+            all_ids = {
+                r[0]
+                for r in self.db_session.query(Playlist.id).all()
+            }
+            if set(unique_ids) != all_ids:
+                raise ValueError("Order must include every playlist")
+
+            for idx, pid in enumerate(unique_ids):
+                by_id[pid].sort_order = idx
+
+            self.db_session.commit()
+            self._log_info('Playlists reordered', {'count': len(unique_ids)})
+            return {"success": True}
+        except Exception as e:
+            self.db_session.rollback()
+            self._log_error('Failed to reorder playlists', {'error': str(e)})
+            raise RuntimeError("Failed to reorder playlists") from e
 
     def reorder_single_item(self, playlist_id: int, item_id: int, new_position: int) -> bool:
         """Изменение порядка элементов плейлиста"""
