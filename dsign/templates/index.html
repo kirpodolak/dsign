@@ -1,5 +1,6 @@
 {% extends "layout.html" %}
 
+{% block body_class %} page-home{% endblock %}
 {% block body_extra_attrs %} data-page-title-i18n="page_home_title"{% endblock %}
 
 {% block styles %}
@@ -7,94 +8,81 @@
 {% endblock %}
 
 {% block content %}
-<h1 class="page-title" data-i18n="page_home_title">Control Panel</h1>
-
-<div class="info-panel">
-    <div id="settings-container" class="info-card info-card--metrics">
-        <h3 data-i18n="current_settings">Current Settings</h3>
-        <!-- Данные настроек будут загружены через JS -->
-    </div>
-
-    <div class="mpv-preview">
-        <h3 data-i18n="mpv_preview">MPV Player Preview</h3>
-        <div class="mpv-preview-container">
-            <img id="mpv-preview-image" 
-                 src="{{ url_for('api.get_mpv_screenshot') }}" 
-                 class="mpv-preview-image"
-                 style="display: none;"
-                 onload="this.style.display='block'"
-                 onerror="this.onerror=null;this.src='{{ url_for('static', filename='images/default-preview.jpg') }}?t='+Date.now()">
-            <button id="refresh-mpv-preview" class="mpv-refresh-btn" data-i18n-title="refresh_preview" title="Refresh preview">
-                <span aria-hidden="true">⟳</span>
-            </button>
+<div class="home-layout">
+    <aside class="home-sidebar" aria-label="Dashboard sidebar">
+        <div class="sidebar-section">
+            <h3 class="sidebar-section__title" data-i18n="now_on_screen">Now on screen</h3>
+            <div class="live-card">
+                <div class="live-stage mpv-preview-container">
+                    <img id="mpv-preview-image"
+                         src="{{ url_for('api.get_mpv_screenshot') }}"
+                         class="live-thumb mpv-preview-image"
+                         alt=""
+                         style="display: none;">
+                    <div id="mpv-preview-placeholder" class="live-placeholder" data-i18n="no_preview">No preview</div>
+                    <div class="live-overlay">
+                        <div class="live-overlay__row">
+                            <div class="live-overlay__text">
+                                <div id="now-screen-title" class="live-title">—</div>
+                                <div class="live-meta">
+                                    <span data-i18n="last_updated_label">Updated</span>:
+                                    <span id="mpv-last-update">—</span>
+                                </div>
+                            </div>
+                            <button type="button" id="refresh-mpv-preview" class="svc-action-btn live-preview-refresh" data-i18n-title="refresh_preview" title="Refresh preview">
+                                <svg class="svc-action-btn__svg" viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M1 4v6h6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
-        <div class="mpv-status">
-            <span data-i18n="last_updated_label">Last updated</span>: <span id="mpv-last-update">—</span>
-            <span id="mpv-auto-refresh-status" class="mpv-auto-refresh-status"></span>
+
+        <div class="sidebar-section">
+            <h3 class="sidebar-section__title" data-i18n="system_panel">System</h3>
+            <div id="settings-container" class="metrics-grid">
+                <!-- Metrics loaded via JS -->
+            </div>
         </div>
-    </div>
 
-    <div class="logo-preview">
-        <h3 data-i18n="current_logo">Current Logo</h3>
-        <img id="idle-logo"
-             src="{{ url_for('api.serve_media', filename='idle_logo.jpg') }}"
-             style="display: none;"
-             onload="this.style.display='block'"
-             onerror="this.onerror=null;this.src='{{ url_for('static', filename='default-logo.jpg') }}?t={{ default_logo_cache_buster }}'">
-
-        <form id="logo-upload-form" enctype="multipart/form-data">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <div class="logo-upload">
-                <input type="file" id="logo-upload" class="logo-upload-input" name="logo" accept="image/jpeg, image/png" required>
-                <div class="logo-upload-controls">
-                    <label for="logo-upload" class="logo-btn logo-btn--choose">
-                        <span aria-hidden="true">📁</span>
-                        <span data-i18n="choose_file">Choose File</span>
-                    </label>
-                    <button type="button" id="upload-logo-btn" class="logo-btn logo-btn--apply" disabled>
-                        <span class="btn-text" data-i18n="apply_logo">Apply Logo</span>
+        <div class="sidebar-section waiting-screen">
+            <h3 class="sidebar-section__title" data-i18n="waiting_screen">Waiting screen</h3>
+            <div class="idle-card">
+                <div class="idle-logo">
+                    <img id="idle-logo"
+                         src="{{ url_for('api.serve_media', filename='idle_logo.jpg') }}"
+                         alt=""
+                         style="display: none;"
+                         onload="this.style.display='block'"
+                         onerror="this.onerror=null;this.src='{{ url_for('static', filename='default-logo.jpg') }}?t={{ default_logo_cache_buster }}'">
+                </div>
+                <form id="logo-upload-form" enctype="multipart/form-data">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="file" id="logo-upload" class="logo-upload-input" name="logo" accept="image/jpeg,image/png" required>
+                    <button type="button" id="logo-replace-btn" class="btn primary home-btn--replace-logo">
+                        <span data-i18n="replace_logo">Replace</span>
                         <span class="loading-spinner" style="display:none;"></span>
                     </button>
-                </div>
-                <p id="logo-selected-file" class="logo-selected-file" data-i18n="no_file">No file selected</p>
+                </form>
             </div>
-        </form>
-    </div>
-</div>
+        </div>
+    </aside>
 
-<div class="playlist-section">
-    <div class="section-header">
-        <h2 data-i18n="playlists_heading">Playlists</h2>
-        <button id="create-playlist-btn" class="btn primary" type="button">
-            <span aria-hidden="true">＋</span> <span data-i18n="btn_new_playlist">New Playlist</span>
-        </button>
-    </div>
+    <main class="home-playlists" aria-labelledby="playlists-heading">
+        <div class="home-playlists__head">
+            <h1 id="playlists-heading" class="home-playlists__title" data-i18n="playlists_heading">Playlists</h1>
+            <button id="create-playlist-btn" class="btn primary home-btn--new-playlist" type="button">
+                <span class="home-btn__plus" aria-hidden="true">+</span>
+                <span data-i18n="btn_new_playlist">New Playlist</span>
+            </button>
+        </div>
 
-    <div id="playlist-status"></div>
-
-    <div class="playlist-table-wrap">
-        <table class="playlist-table" id="playlist-table">
-            <colgroup>
-                <col class="playlist-col-name">
-                <col class="playlist-col-customer">
-                <col class="playlist-col-files">
-                <col class="playlist-col-status">
-                <col class="playlist-col-actions">
-            </colgroup>
-            <thead>
-                <tr>
-                    <th scope="col" data-i18n="playlist_col_name">Name</th>
-                    <th scope="col" data-i18n="playlist_col_customer">Customer</th>
-                    <th scope="col" data-i18n="playlist_col_files">Files</th>
-                    <th scope="col" data-i18n="playlist_col_status">Status</th>
-                    <th scope="col" data-i18n="playlist_col_actions">Actions</th>
-                </tr>
-            </thead>
-            <tbody id="playlist-table-body">
-                <!-- Filled by JavaScript -->
-            </tbody>
-        </table>
-    </div>
+        <div id="playlist-status"></div>
+        <div id="playlist-cards" class="cards-grid" role="list"></div>
+    </main>
 </div>
 
 <div id="create-playlist-modal" class="modal" style="display:none;">
