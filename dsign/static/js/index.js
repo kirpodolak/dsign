@@ -95,6 +95,9 @@ const state = {
     refreshInFlight: false,
     refreshBackoffMs: 0,
     autoRefreshTickCount: 0,
+    lastMpvPreviewRefreshAt: 0,
+    mpvPreviewRequestId: 0,
+    lastAppliedPlaybackKey: '',
 };
 
 // API functions
@@ -565,7 +568,6 @@ const ui = {
             </div>
         `;
         elements.settingsPanel.innerHTML = html;
-        this.updatePreviewImage({ updateTimestamp: false });
     },
 
     renderPlaylists(playlists) {
@@ -635,7 +637,6 @@ const ui = {
         } catch (e) {
             console.warn(e);
         }
-        this.updatePreviewImage({ updateTimestamp: false });
     },
 
     escapeHtml(unsafe) {
@@ -694,7 +695,7 @@ const ui = {
 
         const rawPid = statusPayload && statusPayload.playlist_id;
         const pid =
-            rawPid != null && rawPid !== '' ? String(rawPid) : null;
+            rawPid != null && rawPid !== '' ? String(rawPid) : '';
         const st = String(statusPayload?.status || '').toLowerCase();
 
         ids.forEach((id) => {
@@ -707,8 +708,14 @@ const ui = {
             }
         });
 
+        const playbackKey = `${st}|${pid}`;
+        const playbackChanged = playbackKey !== state.lastAppliedPlaybackKey;
+        state.lastAppliedPlaybackKey = playbackKey;
+
         this.updateNowOnScreen(this._nowScreenTitle(statusPayload, list));
-        this.updatePreviewImage({ updateTimestamp: false });
+        if (playbackChanged) {
+            this.updatePreviewImage({ updateTimestamp: false, force: true });
+        }
     },
 
     updateLogo(logoPath) {
@@ -752,40 +759,61 @@ const ui = {
     updatePreviewImage(options = {}) {
         if (!elements.previewImage) return;
 
-        const { updateTimestamp = true } = options || {};
-        const placeholder = elements.mpvPreviewPlaceholder;
-        const newSrc = `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
+        const { updateTimestamp = true, force = false } = options || {};
+        const now = Date.now();
+        const minGapMs = 5000;
+        if (!force && state.lastMpvPreviewRefreshAt && now - state.lastMpvPreviewRefreshAt < minGapMs) {
+            return;
+        }
 
-        elements.previewImage.onload = function() {
-            this.style.display = 'block';
+        const img = elements.previewImage;
+        const placeholder = elements.mpvPreviewPlaceholder;
+        const requestId = ++state.mpvPreviewRequestId;
+        const newSrc = `${CONFIG.api.endpoints.previewImage}?t=${now}`;
+
+        const onSuccess = () => {
+            if (requestId !== state.mpvPreviewRequestId) return;
+            img.style.display = 'block';
             if (placeholder) placeholder.classList.remove('is-visible');
             state.previewLoadAttempts = 0;
+            state.lastMpvPreviewRefreshAt = Date.now();
             if (updateTimestamp && elements.mpvLastUpdate) {
                 elements.mpvLastUpdate.textContent = new Date().toLocaleTimeString();
             }
         };
 
-        elements.previewImage.onerror = function() {
-            state.previewLoadAttempts++;
-
+        const onFail = () => {
+            if (requestId !== state.mpvPreviewRequestId) return;
+            state.previewLoadAttempts += 1;
             if (state.previewLoadAttempts >= CONFIG.maxImageLoadAttempts && !state.fallbackPreviewUsed) {
-                console.warn('Max preview load attempts reached, using fallback');
                 state.fallbackPreviewUsed = true;
-                this.src = `${CONFIG.defaultPreview}?t=${Date.now()}`;
-            } else if (!state.fallbackPreviewUsed) {
-                setTimeout(() => {
-                    this.src = `${CONFIG.api.endpoints.previewImage}?t=${Date.now()}`;
-                }, 3000);
-            } else if (placeholder) {
-                this.style.display = 'none';
+                const fallback = new Image();
+                fallback.onload = () => {
+                    img.src = fallback.src;
+                    onSuccess();
+                };
+                fallback.src = `${CONFIG.defaultPreview}?t=${Date.now()}`;
+                return;
+            }
+            if (!state.fallbackPreviewUsed) {
+                setTimeout(() => ui.updatePreviewImage({ updateTimestamp, force: true }), 3000);
+                return;
+            }
+            img.style.display = 'none';
+            if (placeholder) {
                 placeholder.textContent = t('no_preview', getUiLang());
                 placeholder.classList.add('is-visible');
             }
         };
 
-        if (placeholder) placeholder.classList.remove('is-visible');
-        elements.previewImage.style.display = 'none';
-        elements.previewImage.src = newSrc;
+        const loader = new Image();
+        loader.onload = () => {
+            if (requestId !== state.mpvPreviewRequestId) return;
+            img.src = loader.src;
+            onSuccess();
+        };
+        loader.onerror = onFail;
+        loader.src = newSrc;
     },
 
     toggleModal(show = true) {
@@ -825,8 +853,6 @@ const ui = {
 const handlers = {
     async init() {
         try {
-            console.log('Initializing application...');
-            
             const [settings, playlists, playbackStatusResp, systemStatusResp, networkStatusResp] = await Promise.all([
                 api.getSettings(),
                 api.getPlaylists(),
@@ -843,8 +869,6 @@ const handlers = {
                     return null;
                 }),
             ]);
-
-            console.log('Received playlists:', playlists);
 
             state.currentSettings = settings;
             state.playlists = playlists;
@@ -878,17 +902,7 @@ const handlers = {
                 networkStatus: state.networkStatus,
             });
             ui.renderPlaylists(playlists);
-
-            try {
-                ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
-            } catch (e) {
-                console.warn('Failed to apply playback status to UI:', e);
-            }
-
             ui.updateLogo(settings.display?.logo);
-            // Initial paint: if Auto preview is enabled, show that preview is refreshing.
-            // Otherwise keep the timestamp unchanged to avoid implying background capture.
-            ui.updatePreviewImage({ updateTimestamp: true });
 
             this.setupEventListeners();
             document.addEventListener('dsign:language-changed', () => {
@@ -899,8 +913,17 @@ const handlers = {
                 }
             });
             this.setupSocketSubscriptions();
-            this.startAutoRefresh();
-            this.startPreviewRefresh(settings);
+
+            requestAnimationFrame(() => {
+                try {
+                    ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
+                    ui.updatePreviewImage({ updateTimestamp: true, force: true });
+                } catch (e) {
+                    console.warn('Initial playback/preview paint failed', e);
+                }
+                this.startAutoRefresh();
+                this.startPreviewRefresh(settings);
+            });
 
         } catch (error) {
             console.error('Initialization failed:', error);
@@ -983,7 +1006,7 @@ const handlers = {
                 state.logoLoadAttempts = 0;
 
                 ui.updateLogo(result.filename);
-                ui.updatePreviewImage({ updateTimestamp: true });
+                ui.updatePreviewImage({ updateTimestamp: true, force: true });
                 showAlert('Logo updated successfully', 'success');
 
                 const settings = await api.getSettings();
@@ -1018,11 +1041,10 @@ const handlers = {
                 if (r?.skipped) {
                     // Capture was throttled on server; just reload existing image and inform user.
                     state.previewCaptureCooldownUntil = now + retryMs;
-                    ui.updatePreviewImage({ updateTimestamp: false });
+                    ui.updatePreviewImage({ updateTimestamp: false, force: true });
                     showAlert('Preview is up to date', 'info');
                 } else if (r?.success) {
-                    // Service may still be writing the file; reload after a short delay.
-                    setTimeout(() => ui.updatePreviewImage({ updateTimestamp: true }), 1200);
+                    setTimeout(() => ui.updatePreviewImage({ updateTimestamp: true, force: true }), 1200);
                     showAlert('Preview refreshed', 'success');
                 } else {
                     throw new Error(r?.error || 'Preview refresh failed');
@@ -1177,7 +1199,7 @@ const handlers = {
         };
 
         const scheduleNext = (delayMs) => {
-            const safeDelay = Math.max(1000, Number(delayMs) || 0);
+            const safeDelay = Math.max(3000, Number(delayMs) || 0);
             state.refreshTimerId = setTimeout(tick, safeDelay);
         };
 
@@ -1263,9 +1285,8 @@ const handlers = {
             scheduleNext(delay);
         };
 
-        // Reset backoff when we (re)start the loop.
         state.refreshBackoffMs = 0;
-        scheduleNext(1000);
+        scheduleNext(computeBaseIntervalMs());
     },
 
     startPreviewRefresh(settings) {
@@ -1281,7 +1302,7 @@ const handlers = {
         const intervalMs = Math.max(15000, intervalSec * 1000);
         state.previewRefreshId = setInterval(() => {
             if (Date.now() < (state.previewCaptureCooldownUntil || 0)) return;
-            ui.updatePreviewImage({ updateTimestamp: true });
+            ui.updatePreviewImage({ updateTimestamp: true, force: false });
         }, intervalMs);
     },
 

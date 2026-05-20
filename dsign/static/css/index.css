@@ -32,11 +32,12 @@ body.page-home .app-main {
     flex-shrink: 0;
     background: var(--home-surface);
     border-right: 1px solid var(--home-border);
-    padding: 24px 20px;
+    padding: 20px 16px;
     display: flex;
     flex-direction: column;
-    gap: 28px;
+    gap: 20px;
     overflow-y: auto;
+    max-height: calc(100vh - var(--app-header-h, 3.5rem));
 }
 
 .sidebar-section__title {
@@ -193,37 +194,39 @@ body.page-home .app-main {
     background: #ef4444;
 }
 
-/* Waiting screen */
+/* Waiting screen — logo 16:9, no side “ears” */
+.waiting-screen .sidebar-section__title {
+    margin-bottom: 10px;
+}
+
 .idle-card {
     border: 1px dashed var(--home-border);
     border-radius: var(--home-radius-sm);
-    padding: 16px;
-    text-align: center;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: stretch;
 }
 
 .idle-logo {
     width: 100%;
-    max-width: 160px;
-    height: 72px;
-    margin: 0 auto 10px;
-    background: #f8fafc;
+    aspect-ratio: 16 / 9;
+    margin: 0;
+    padding: 0;
+    background: #fff;
     border-radius: 6px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
     overflow: hidden;
+    display: block;
+    line-height: 0;
 }
 
 .idle-logo img {
-    max-width: 100%;
-    max-height: 100%;
+    width: 100%;
+    height: 100%;
     object-fit: contain;
-}
-
-.idle-text {
-    font-size: 12px;
-    color: var(--home-muted);
-    margin: 0 0 12px;
+    display: block;
+    background: #fff;
 }
 
 .logo-upload-input {
@@ -234,14 +237,15 @@ body.page-home .app-main {
     pointer-events: none;
 }
 
-/* Primary actions — same palette as gallery */
+/* Primary actions — match gallery .btn / .btn.primary */
 body.page-home .btn.primary,
 body.page-home .home-btn--replace-logo {
     padding: 10px 20px;
     border: none;
     border-radius: 8px;
     font-weight: 500;
-    font-size: 13px;
+    font-size: 0.9rem;
+    line-height: 1.2;
     background-color: #5c6bc0;
     color: #fff;
     cursor: pointer;
@@ -251,6 +255,18 @@ body.page-home .home-btn--replace-logo {
     justify-content: center;
     gap: 8px;
     width: 100%;
+}
+
+body.page-home .home-playlists__head .btn.primary.home-btn--new-playlist {
+    width: auto;
+    font-size: 0.9375rem;
+    gap: 10px;
+}
+
+body.page-home .home-btn__plus {
+    font-size: 1.25rem;
+    font-weight: 700;
+    line-height: 1;
 }
 
 body.page-home .btn.primary:hover,
@@ -263,10 +279,6 @@ body.page-home .home-btn--replace-logo:disabled {
     opacity: 0.65;
     cursor: wait;
     transform: none;
-}
-
-body.page-home .home-playlists__head .btn.primary {
-    width: auto;
 }
 
 .loading-spinner {

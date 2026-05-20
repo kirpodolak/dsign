@@ -56,7 +56,6 @@
                          onload="this.style.display='block'"
                          onerror="this.onerror=null;this.src='{{ url_for('static', filename='default-logo.jpg') }}?t={{ default_logo_cache_buster }}'">
                 </div>
-                <p class="idle-text" data-i18n="waiting_screen_hint">Shown when idle</p>
                 <form id="logo-upload-form" enctype="multipart/form-data">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="file" id="logo-upload" class="logo-upload-input" name="logo" accept="image/jpeg,image/png" required>
@@ -72,8 +71,8 @@
     <main class="home-playlists" aria-labelledby="playlists-heading">
         <div class="home-playlists__head">
             <h1 id="playlists-heading" class="home-playlists__title" data-i18n="playlists_heading">Playlists</h1>
-            <button id="create-playlist-btn" class="btn primary" type="button">
-                <span aria-hidden="true">＋</span>
+            <button id="create-playlist-btn" class="btn primary home-btn--new-playlist" type="button">
+                <span class="home-btn__plus" aria-hidden="true">+</span>
                 <span data-i18n="btn_new_playlist">New Playlist</span>
             </button>
         </div>
