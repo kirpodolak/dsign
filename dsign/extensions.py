@@ -56,6 +56,7 @@ def init_extensions(app) -> Dict[str, Any]:
         with app.app_context():
             try:
                 db.create_all()
+                _ensure_playlist_sort_order_column(app)
             except Exception as e:
                 app.logger.error("db.create_all() failed: %s", e, exc_info=True)
                 raise
@@ -120,6 +121,29 @@ def _configure_auth(app) -> None:
         except Exception as e:
             app.logger.error(f"Error loading user {user_id}: {str(e)}")
             return None
+
+def _ensure_playlist_sort_order_column(app) -> None:
+    """SQLite: add playlists.sort_order if missing (home page drag-and-drop order)."""
+    from sqlalchemy import inspect, text
+    from .models import Playlist
+
+    try:
+        insp = inspect(db.engine)
+        if 'playlists' not in insp.get_table_names():
+            return
+        cols = {c['name'] for c in insp.get_columns('playlists')}
+        if 'sort_order' not in cols:
+            with db.engine.begin() as conn:
+                conn.execute(text('ALTER TABLE playlists ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0'))
+            app.logger.info('Added playlists.sort_order column')
+            rows = Playlist.query.order_by(Playlist.last_modified.desc(), Playlist.id.asc()).all()
+            for idx, row in enumerate(rows):
+                row.sort_order = idx
+            db.session.commit()
+    except Exception as e:
+        app.logger.warning('playlist sort_order migration skipped: %s', e)
+        db.session.rollback()
+
 
 def _ensure_directories(app) -> None:
     """Создание необходимых директорий"""
