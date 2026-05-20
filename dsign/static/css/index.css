@@ -234,31 +234,39 @@ body.page-home .app-main {
     pointer-events: none;
 }
 
-.btn-sm {
+/* Primary actions — same palette as gallery */
+body.page-home .btn.primary,
+body.page-home .home-btn--replace-logo {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 8px;
+    font-weight: 500;
+    font-size: 13px;
+    background-color: #5c6bc0;
+    color: #fff;
+    cursor: pointer;
+    transition: all 0.2s;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 6px;
-    padding: 6px 14px;
-    border-radius: 6px;
-    border: 1px solid var(--home-border);
-    background: var(--home-surface);
-    color: var(--home-text);
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: border-color 0.15s, color 0.15s;
+    gap: 8px;
     width: 100%;
 }
 
-.btn-sm:hover:not(:disabled) {
-    border-color: var(--home-accent);
-    color: var(--home-accent);
+body.page-home .btn.primary:hover,
+body.page-home .home-btn--replace-logo:hover:not(:disabled) {
+    background-color: #3949ab;
+    transform: translateY(-2px);
 }
 
-.btn-sm:disabled {
+body.page-home .home-btn--replace-logo:disabled {
     opacity: 0.65;
     cursor: wait;
+    transform: none;
+}
+
+body.page-home .home-playlists__head .btn.primary {
+    width: auto;
 }
 
 .loading-spinner {
@@ -361,6 +369,7 @@ body.page-home .app-main {
     position: absolute;
     top: 10px;
     left: 10px;
+    z-index: 2;
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -370,6 +379,8 @@ body.page-home .app-main {
     border-radius: 20px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
+    line-height: 1.2;
+    white-space: nowrap;
 }
 
 .status-live {
@@ -418,8 +429,8 @@ body.page-home .app-main {
 }
 
 .icon-btn {
-    width: 32px;
-    height: 32px;
+    width: 36px;
+    height: 36px;
     border-radius: 8px;
     border: 1px solid var(--home-border);
     background: var(--home-surface);
@@ -428,9 +439,26 @@ body.page-home .app-main {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 14px;
     transition: all 0.15s;
     padding: 0;
+    flex-shrink: 0;
+}
+
+.icon-btn svg {
+    display: block;
+    pointer-events: none;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
 
 .icon-btn:hover:not(:disabled) {

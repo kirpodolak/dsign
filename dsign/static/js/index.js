@@ -404,6 +404,26 @@ const ui = {
         }
     },
 
+    _nowScreenTitle(playbackStatus, playlists) {
+        const lang = getUiLang();
+        const st = String(playbackStatus?.status || '').toLowerCase();
+        if (st === 'playing') {
+            const rawPid = playbackStatus?.playlist_id;
+            const active = (playlists || []).find((item) => String(item.id) === String(rawPid));
+            return active?.name || `Playlist #${rawPid ?? ''}`.trim() || t('unnamed', lang);
+        }
+        return t('status_idle', lang);
+    },
+
+    _cardActionIcons() {
+        return {
+            play: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M8 5v14l11-7-12z" fill="currentColor"/></svg>',
+            stop: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M6 6h12v12H6z" fill="currentColor"/></svg>',
+            edit: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" fill="currentColor"/></svg>',
+            del: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z" fill="currentColor"/></svg>',
+        };
+    },
+
     formatCardMeta(customer, filesCount, lang) {
         const cust = String(customer ?? '').trim() || '—';
         const files = this.formatFilesCount(filesCount, lang);
@@ -411,37 +431,6 @@ const ui = {
             return `Заказчик: ${cust} • ${files}`;
         }
         return `Customer: ${cust} • ${files}`;
-    },
-
-    showNowScreenIdleLogo(options = {}) {
-        const { updateTimestamp = false } = options || {};
-        const img = elements.previewImage;
-        const placeholder = elements.mpvPreviewPlaceholder;
-        if (!img) return;
-
-        const base = state.fallbackLogoUsed
-            ? CONFIG.defaultLogo
-            : `${CONFIG.api.endpoints.serveMedia}/idle_logo.jpg`;
-        const src = `${base}?t=${Date.now()}`;
-
-        img.onload = function onLogoLoad() {
-            this.style.display = 'block';
-            if (placeholder) placeholder.classList.remove('is-visible');
-            if (updateTimestamp && elements.mpvLastUpdate) {
-                elements.mpvLastUpdate.textContent = new Date().toLocaleTimeString();
-            }
-        };
-        img.onerror = function onLogoError() {
-            if (!state.fallbackLogoUsed) {
-                state.fallbackLogoUsed = true;
-                ui.showNowScreenIdleLogo();
-                return;
-            }
-            this.style.display = 'none';
-            if (placeholder) placeholder.classList.add('is-visible');
-        };
-        img.style.display = 'none';
-        img.src = src;
     },
 
     formatFilesCount(count, lang) {
@@ -462,15 +451,6 @@ const ui = {
         const rawPid = playbackStatus?.playlist_id;
         if (rawPid === null || rawPid === undefined || rawPid === '') return null;
         return playlists.find((item) => String(item.id) === String(rawPid)) || null;
-    },
-
-    syncMpvPreviewDisplay(runtime = {}) {
-        const playbackStatus = runtime.playbackStatus || state.playbackStatus || {};
-        const playbackState = String(playbackStatus?.status || '').toLowerCase();
-        if (playbackState === 'playing') {
-            return;
-        }
-        this.showNowScreenIdleLogo();
     },
 
     _renderMetricBar(percent) {
@@ -525,10 +505,7 @@ const ui = {
         const playbackState = String(playbackStatus?.status || '').toLowerCase();
         const activePlaylistId = playbackStatus?.playlist_id;
         const activePlaylist = playlists.find((item) => String(item.id) === String(activePlaylistId));
-        const broadcastRaw = playbackState === 'playing'
-            ? (activePlaylist?.name || `Playlist #${activePlaylistId ?? ''}`.trim() || 'Playlist')
-            : t('broadcast_logo', lang);
-        this.updateNowOnScreen(broadcastRaw);
+        this.updateNowOnScreen(this._nowScreenTitle(playbackStatus, playlists));
 
         const storageData = systemStatus?.storage?.media || systemStatus?.storage?.root || null;
         const storagePercent = this._clampPercent(storageData?.used_percent);
@@ -591,7 +568,7 @@ const ui = {
             </div>
         `;
         elements.settingsPanel.innerHTML = html;
-        this.syncMpvPreviewDisplay(runtime);
+        this.updatePreviewImage({ updateTimestamp: false });
     },
 
     renderPlaylists(playlists) {
@@ -609,6 +586,7 @@ const ui = {
         const et = t('edit_title', lang);
         const dt = t('delete_title', lang);
         const noPreview = `📷 ${t('no_preview', lang)}`;
+        const icons = this._cardActionIcons();
 
         grid.innerHTML = playlistsArray.map((playlist) => {
             const previewFile = playlist.preview_filename;
@@ -629,15 +607,21 @@ const ui = {
                     <div class="card-title">${this.escapeHtml(playlist.name || un)}</div>
                     <div class="card-meta">${meta}</div>
                     <div class="card-actions">
-                        <button type="button" class="icon-btn play" data-id="${playlist.id}" title="${this.escapeHtml(pt)}">▶</button>
-                        <button type="button" class="icon-btn stop" data-id="${playlist.id}" title="${this.escapeHtml(st)}" disabled>⏹</button>
-                        <button type="button" class="icon-btn edit" data-id="${playlist.id}" title="${this.escapeHtml(et)}">✏</button>
-                        <button type="button" class="icon-btn danger delete" data-id="${playlist.id}" title="${this.escapeHtml(dt)}">🗑</button>
+                        <button type="button" class="icon-btn play" data-id="${playlist.id}" title="${this.escapeHtml(pt)}">${icons.play}<span class="sr-only">${this.escapeHtml(pt)}</span></button>
+                        <button type="button" class="icon-btn stop" data-id="${playlist.id}" title="${this.escapeHtml(st)}" disabled>${icons.stop}<span class="sr-only">${this.escapeHtml(st)}</span></button>
+                        <button type="button" class="icon-btn edit" data-id="${playlist.id}" title="${this.escapeHtml(et)}">${icons.edit}<span class="sr-only">${this.escapeHtml(et)}</span></button>
+                        <button type="button" class="icon-btn danger delete" data-id="${playlist.id}" title="${this.escapeHtml(dt)}">${icons.del}<span class="sr-only">${this.escapeHtml(dt)}</span></button>
                     </div>
                 </div>
             </article>
             `;
         }).join('');
+
+        try {
+            this.applyPlaybackStatusFromServer(state.playbackStatus, playlistsArray);
+        } catch (e) {
+            console.warn('Failed to apply playback status to cards:', e);
+        }
     },
 
     refreshLanguageUI() {
@@ -654,10 +638,7 @@ const ui = {
         } catch (e) {
             console.warn(e);
         }
-        this.syncMpvPreviewDisplay({
-            playlists: state.playlists,
-            playbackStatus: state.playbackStatus,
-        });
+        this.updatePreviewImage({ updateTimestamp: false });
     },
 
     escapeHtml(unsafe) {
@@ -678,8 +659,8 @@ const ui = {
         const card = document.querySelector(`.playlist-card[data-id="${playlistId}"]`);
         if (!card) return;
 
-        const playBtn = card.querySelector('.btn.play');
-        const stopBtn = card.querySelector('.btn.stop');
+        const playBtn = card.querySelector('button.play');
+        const stopBtn = card.querySelector('button.stop');
         const badge = card.querySelector('.card-status');
         if (!playBtn || !stopBtn || !badge) return;
 
@@ -729,16 +710,8 @@ const ui = {
             }
         });
 
-        const lang = getUiLang();
-        const activePlaylist = pid ? list.find((item) => String(item.id) === pid) : null;
-        const broadcastRaw = st === 'playing'
-            ? (activePlaylist?.name || `Playlist #${pid ?? ''}`.trim() || 'Playlist')
-            : t('broadcast_logo', lang);
-        this.updateNowOnScreen(broadcastRaw);
-        this.syncMpvPreviewDisplay({ playlists: list, playbackStatus: statusPayload });
-        if (st === 'playing') {
-            this.updatePreviewImage({ updateTimestamp: false });
-        }
+        this.updateNowOnScreen(this._nowScreenTitle(statusPayload, list));
+        this.updatePreviewImage({ updateTimestamp: false });
     },
 
     updateLogo(logoPath) {
@@ -781,12 +754,6 @@ const ui = {
 
     updatePreviewImage(options = {}) {
         if (!elements.previewImage) return;
-
-        const playbackState = String(state.playbackStatus?.status || '').toLowerCase();
-        if (playbackState !== 'playing') {
-            this.showNowScreenIdleLogo(options);
-            return;
-        }
 
         const { updateTimestamp = true } = options || {};
         const placeholder = elements.mpvPreviewPlaceholder;
@@ -924,11 +891,7 @@ const handlers = {
             ui.updateLogo(settings.display?.logo);
             // Initial paint: if Auto preview is enabled, show that preview is refreshing.
             // Otherwise keep the timestamp unchanged to avoid implying background capture.
-            if (String(state.playbackStatus?.status || '').toLowerCase() === 'playing') {
-                ui.updatePreviewImage({ updateTimestamp: true });
-            } else {
-                ui.showNowScreenIdleLogo();
-            }
+            ui.updatePreviewImage({ updateTimestamp: true });
 
             this.setupEventListeners();
             document.addEventListener('dsign:language-changed', () => {
@@ -1023,9 +986,7 @@ const handlers = {
                 state.logoLoadAttempts = 0;
 
                 ui.updateLogo(result.filename);
-                if (String(state.playbackStatus?.status || '').toLowerCase() !== 'playing') {
-                    ui.showNowScreenIdleLogo({ updateTimestamp: true });
-                }
+                ui.updatePreviewImage({ updateTimestamp: true });
                 showAlert('Logo updated successfully', 'success');
 
                 const settings = await api.getSettings();
@@ -1049,12 +1010,6 @@ const handlers = {
         // Refresh preview button
         elements.refreshPreviewBtn?.addEventListener('click', async () => {
             if (state.isPreviewRefreshing) return;
-
-            const playbackState = String(state.playbackStatus?.status || '').toLowerCase();
-            if (playbackState !== 'playing') {
-                ui.showNowScreenIdleLogo({ updateTimestamp: true });
-                return;
-            }
 
             try {
                 elements.refreshPreviewBtn.disabled = true;
@@ -1328,7 +1283,6 @@ const handlers = {
 
         const intervalMs = Math.max(15000, intervalSec * 1000);
         state.previewRefreshId = setInterval(() => {
-            if (String(state.playbackStatus?.status || '').toLowerCase() !== 'playing') return;
             if (Date.now() < (state.previewCaptureCooldownUntil || 0)) return;
             ui.updatePreviewImage({ updateTimestamp: true });
         }, intervalMs);

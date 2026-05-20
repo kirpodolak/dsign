@@ -60,9 +60,8 @@
                 <form id="logo-upload-form" enctype="multipart/form-data">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="file" id="logo-upload" class="logo-upload-input" name="logo" accept="image/jpeg,image/png" required>
-                    <button type="button" id="logo-replace-btn" class="btn-sm logo-btn--replace">
-                        <span aria-hidden="true">🖼</span>
-                        <span data-i18n="replace_logo">Replace logo</span>
+                    <button type="button" id="logo-replace-btn" class="btn primary home-btn--replace-logo">
+                        <span data-i18n="replace_logo">Replace</span>
                         <span class="loading-spinner" style="display:none;"></span>
                     </button>
                 </form>
