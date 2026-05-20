@@ -147,11 +147,20 @@ class Playlist(db.Model):
     
     created_at = db.Column(db.Integer, default=lambda: int(time.time()))
     last_modified = db.Column(db.Integer, default=lambda: int(time.time()))
+    sort_order = db.Column(db.Integer, default=0, nullable=False, server_default='0')
     
     @property
     def files_count(self):
         """Количество файлов в плейлисте"""
         return len(self.files) if self.files else 0
+
+    @property
+    def preview_filename(self) -> Optional[str]:
+        """First playlist item filename for dashboard thumbnail."""
+        if not self.files:
+            return None
+        first = sorted(self.files, key=lambda f: f.order_or_id)[0]
+        return first.file_name if first else None
     
     @property
     def created_dt(self):
@@ -176,7 +185,9 @@ class Playlist(db.Model):
             'customer': self.customer,
             'created_at': safe_timestamp(self.created_at),
             'last_modified': safe_timestamp(self.last_modified),
-            'files_count': self.files_count
+            'files_count': self.files_count,
+            'preview_filename': self.preview_filename,
+            'sort_order': int(self.sort_order or 0),
         }
         
         if include_files:
