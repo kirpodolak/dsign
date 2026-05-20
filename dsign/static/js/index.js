@@ -76,6 +76,20 @@ const elements = Object.fromEntries(
         .map(([key, selector]) => [key, document.querySelector(selector)])
 );
 
+function sortPlaylistsByOrder(playlists) {
+    return [...(playlists || [])].sort((a, b) => {
+        const ao = Number(a.sort_order ?? 0);
+        const bo = Number(b.sort_order ?? 0);
+        if (ao !== bo) return ao - bo;
+        return Number(a.id) - Number(b.id);
+    });
+}
+
+function playlistsFromDomOrder(orderIds, playlists) {
+    const byId = new Map((playlists || []).map((p) => [Number(p.id), p]));
+    return orderIds.map((id) => byId.get(id)).filter(Boolean);
+}
+
 // Application state
 const state = {
     playlists: [],
@@ -184,10 +198,17 @@ const api = {
         const response = await this.request(CONFIG.api.endpoints.playlists);
         const playlists = Array.isArray(response) ? response : (response.playlists || []);
         // Ensure customer is always a string (even empty)
-        return playlists.map(playlist => ({
+        return sortPlaylistsByOrder(playlists.map(playlist => ({
             ...playlist,
             customer: playlist.customer || ''
-        }));
+        })));
+    },
+
+    async reorderPlaylists(order) {
+        return this.request(`${CONFIG.api.endpoints.playlists}/reorder`, {
+            method: 'POST',
+            body: JSON.stringify({ order })
+        });
     },
 
     async createPlaylist(data) {
@@ -594,7 +615,7 @@ const ui = {
             const meta = this.escapeHtml(this.formatCardMeta(playlist.customer, playlist.files_count, lang));
 
             return `
-            <article class="playlist-card" data-id="${playlist.id}" role="listitem">
+            <article class="playlist-card" data-id="${playlist.id}" role="listitem" draggable="true">
                 <div class="card-thumb-wrap">
                     ${hasPreview ? `<img class="card-thumb" src="${thumbSrc}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none';this.nextElementSibling.hidden=false;">` : ''}
                     <div class="card-thumb-placeholder" ${hasPreview ? 'hidden' : ''}>
@@ -958,12 +979,13 @@ const handlers = {
                     customer: formData.get('customer') || ''
                 });
 
-                state.playlists = [...state.playlists, {
+                state.playlists = sortPlaylistsByOrder([...state.playlists, {
                     id: response.playlist_id,
                     name: formData.get('name'),
                     customer: formData.get('customer') || '',
-                    files_count: 0
-                }];
+                    files_count: 0,
+                    sort_order: state.playlists.length,
+                }]);
                 
                 ui.renderPlaylists(state.playlists);
                 ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
@@ -1027,13 +1049,14 @@ const handlers = {
             }
         });
 
+        this.setupPlaylistDragDrop();
+
         // Refresh preview button
         elements.refreshPreviewBtn?.addEventListener('click', async () => {
             if (state.isPreviewRefreshing) return;
 
             try {
                 elements.refreshPreviewBtn.disabled = true;
-                setBtnIconText(elements.refreshPreviewBtn, '⟳');
 
                 const r = await api.refreshPreview();
                 const now = Date.now();
@@ -1054,7 +1077,6 @@ const handlers = {
                 showError('Failed to refresh preview');
             } finally {
                 elements.refreshPreviewBtn.disabled = false;
-                setBtnIconText(elements.refreshPreviewBtn, '⟳');
             }
         });
 
@@ -1142,6 +1164,92 @@ const handlers = {
                 showError(error.status === 403 ? 
                     'Permission denied' : 'Action failed: ' + error.message);
             }
+        });
+    },
+
+    setupPlaylistDragDrop() {
+        const grid = elements.playlistCards;
+        if (!grid || grid.dataset.dndBound === '1') return;
+        grid.dataset.dndBound = '1';
+
+        let draggedId = null;
+        let dragOverCard = null;
+
+        const blockDragTarget = (el) => el?.closest?.('button, a, input, textarea, select, label');
+
+        grid.addEventListener('dragstart', (e) => {
+            const card = e.target.closest('.playlist-card');
+            if (!card || blockDragTarget(e.target)) {
+                e.preventDefault();
+                return;
+            }
+            draggedId = card.dataset.id;
+            card.classList.add('is-dragging');
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', draggedId);
+        });
+
+        grid.addEventListener('dragend', () => {
+            grid.querySelectorAll('.playlist-card.is-dragging').forEach((c) => c.classList.remove('is-dragging'));
+            dragOverCard?.classList.remove('is-drag-over');
+            dragOverCard = null;
+            draggedId = null;
+        });
+
+        grid.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            const card = e.target.closest('.playlist-card');
+            const dragging = grid.querySelector('.playlist-card.is-dragging');
+            if (!card || !dragging || card === dragging) return;
+            e.dataTransfer.dropEffect = 'move';
+            if (dragOverCard && dragOverCard !== card) {
+                dragOverCard.classList.remove('is-drag-over');
+            }
+            dragOverCard = card;
+            card.classList.add('is-drag-over');
+            const rect = card.getBoundingClientRect();
+            const after = e.clientY - rect.top > rect.height / 2;
+            if (after) {
+                card.after(dragging);
+            } else {
+                card.before(dragging);
+            }
+        });
+
+        grid.addEventListener('dragleave', (e) => {
+            const card = e.target.closest('.playlist-card');
+            if (card && card === dragOverCard && !card.contains(e.relatedTarget)) {
+                card.classList.remove('is-drag-over');
+                if (dragOverCard === card) dragOverCard = null;
+            }
+        });
+
+        grid.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            dragOverCard?.classList.remove('is-drag-over');
+            dragOverCard = null;
+            grid.querySelectorAll('.playlist-card.is-dragging').forEach((c) => c.classList.remove('is-dragging'));
+
+            if (!draggedId) return;
+
+            const orderIds = [...grid.querySelectorAll('.playlist-card')].map((c) => Number(c.dataset.id));
+            const prevPlaylists = state.playlists.map((p) => ({ ...p }));
+            state.playlists = playlistsFromDomOrder(orderIds, state.playlists);
+
+            try {
+                const result = await api.reorderPlaylists(orderIds);
+                if (!result?.success) {
+                    throw new Error(result?.error || 'Reorder failed');
+                }
+                state.playlists = state.playlists.map((p, idx) => ({ ...p, sort_order: idx }));
+            } catch (err) {
+                console.warn('Playlist reorder failed:', err);
+                state.playlists = prevPlaylists;
+                ui.renderPlaylists(state.playlists);
+                ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
+                showError('Failed to save playlist order');
+            }
+            draggedId = null;
         });
     },
 

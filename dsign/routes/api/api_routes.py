@@ -1905,7 +1905,11 @@ def init_api_routes(api_bp, services):
     @login_required
     def get_playlists():
         try:
-            playlists = db.session.query(Playlist).all()
+            playlists = (
+                db.session.query(Playlist)
+                .order_by(Playlist.sort_order.asc(), Playlist.id.asc())
+                .all()
+            )
             assignments = {a.playlist_id: a.profile_id 
                           for a in db.session.query(PlaylistProfileAssignment).all()}
         
@@ -2017,6 +2021,32 @@ def init_api_routes(api_bp, services):
             return jsonify(result)
         except Exception as e:
             current_app.logger.error(f"Error deleting playlist {playlist_id}: {str(e)}", exc_info=True)
+            return jsonify({
+                "success": False,
+                "error": str(e)
+            }), 500
+
+    @api_bp.route('/playlists/reorder', methods=['POST'])
+    @login_required
+    def reorder_playlists():
+        try:
+            data = request.get_json() or {}
+            order = data.get('order') or data.get('playlist_ids')
+            if not order or not isinstance(order, list):
+                return jsonify({
+                    "success": False,
+                    "error": "Missing order array"
+                }), 400
+
+            result = playlist_service.reorder_playlists(order)
+            return jsonify(result)
+        except ValueError as e:
+            return jsonify({
+                "success": False,
+                "error": str(e)
+            }), 400
+        except Exception as e:
+            current_app.logger.error(f"Error reordering playlists: {str(e)}", exc_info=True)
             return jsonify({
                 "success": False,
                 "error": str(e)

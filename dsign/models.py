@@ -147,6 +147,7 @@ class Playlist(db.Model):
     
     created_at = db.Column(db.Integer, default=lambda: int(time.time()))
     last_modified = db.Column(db.Integer, default=lambda: int(time.time()))
+    sort_order = db.Column(db.Integer, default=0, nullable=False, server_default='0')
     
     @property
     def files_count(self):
@@ -186,6 +187,7 @@ class Playlist(db.Model):
             'last_modified': safe_timestamp(self.last_modified),
             'files_count': self.files_count,
             'preview_filename': self.preview_filename,
+            'sort_order': int(self.sort_order or 0),
         }
         
         if include_files:

@@ -38,6 +38,12 @@ body.page-home .app-main {
     gap: 20px;
     overflow-y: auto;
     max-height: calc(100vh - var(--app-header-h, 3.5rem));
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+
+.home-sidebar::-webkit-scrollbar {
+    display: none;
 }
 
 .sidebar-section__title {
@@ -120,23 +126,119 @@ body.page-home .app-main {
     color: rgba(255, 255, 255, 0.75);
 }
 
-.live-refresh {
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    border: none;
-    background: rgba(255, 255, 255, 0.15);
-    color: #fff;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 14px;
+/* Preview refresh — same control as settings service restart (~32px, ~15% over old 28px) */
+.live-preview-refresh.svc-action-btn {
+    width: 32px;
+    height: 32px;
     flex-shrink: 0;
 }
 
-.live-refresh:hover {
-    background: rgba(255, 255, 255, 0.25);
+.live-preview-refresh .svc-action-btn__svg {
+    width: 15px;
+    height: 15px;
+}
+
+.live-overlay .svc-action-btn {
+    --svc-btn-a: #6b8cff;
+    --svc-btn-b: #4a6bff;
+    --svc-btn-c: #91aeff;
+    --svc-btn-shadow: rgba(74, 107, 255, 0.42);
+    --svc-btn-shadow-soft: rgba(74, 107, 255, 0.22);
+    position: relative;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    overflow: visible;
+    display: grid;
+    place-items: center;
+    isolation: isolate;
+    background: transparent;
+    transition: transform 0.35s ease, box-shadow 0.35s ease;
+}
+
+.live-overlay .svc-action-btn::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--svc-btn-a) 0%, var(--svc-btn-b) 100%);
+    z-index: 0;
+    box-shadow: 0 2px 8px var(--svc-btn-shadow-soft);
+    transition: transform 0.45s ease;
+}
+
+.live-overlay .svc-action-btn::after {
+    content: '';
+    position: absolute;
+    top: -3px;
+    left: -3px;
+    right: -3px;
+    bottom: -3px;
+    border-radius: 50%;
+    background: linear-gradient(
+        135deg,
+        var(--svc-btn-a),
+        var(--svc-btn-b),
+        var(--svc-btn-c),
+        var(--svc-btn-a)
+    );
+    background-size: 300% 300%;
+    z-index: -1;
+    opacity: 0;
+    transition: opacity 0.35s ease;
+    animation: svc-action-glow-shift 3s ease infinite;
+    pointer-events: none;
+}
+
+@keyframes svc-action-glow-shift {
+    0%,
+    100% {
+        background-position: 0% 50%;
+    }
+    50% {
+        background-position: 100% 50%;
+    }
+}
+
+.live-overlay .svc-action-btn__svg {
+    position: relative;
+    z-index: 1;
+    color: #fff;
+    display: block;
+    pointer-events: none;
+    transition: transform 0.55s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.live-overlay .svc-action-btn:not(:disabled):hover {
+    transform: translateY(-2px) scale(1.05);
+    box-shadow:
+        0 8px 26px var(--svc-btn-shadow),
+        0 0 36px var(--svc-btn-shadow-soft);
+}
+
+.live-overlay .svc-action-btn:not(:disabled):hover::after {
+    opacity: 1;
+}
+
+.live-overlay .svc-action-btn:not(:disabled):hover .svc-action-btn__svg {
+    transform: rotate(360deg);
+}
+
+.live-overlay .svc-action-btn:active:not(:disabled) {
+    transform: translateY(0) scale(0.96);
+    transition: transform 0.1s ease;
+}
+
+.live-overlay .svc-action-btn:disabled {
+    opacity: 0.48;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+.live-overlay .svc-action-btn:disabled::after {
+    opacity: 0;
 }
 
 /* System metrics — icons on white, no mini boxes */
@@ -335,7 +437,22 @@ body.page-home .home-btn--replace-logo:disabled {
     display: flex;
     flex-direction: column;
     border: 1px solid var(--home-border);
-    transition: box-shadow 0.2s, transform 0.2s;
+    transition: box-shadow 0.2s, transform 0.2s, opacity 0.2s;
+    cursor: grab;
+}
+
+.playlist-card.is-dragging {
+    opacity: 0.55;
+    cursor: grabbing;
+    box-shadow: var(--home-shadow-lg);
+}
+
+.playlist-card.is-drag-over {
+    box-shadow: 0 0 0 2px var(--home-accent), var(--home-shadow-lg);
+}
+
+.playlist-card .icon-btn {
+    cursor: pointer;
 }
 
 .playlist-card:hover {
