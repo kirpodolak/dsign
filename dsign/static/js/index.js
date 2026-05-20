@@ -38,8 +38,7 @@ const CONFIG = {
         }
     },
     selectors: {
-        playlistTable: '#playlist-table',
-        playlistTableBody: '#playlist-table-body',
+        playlistCards: '#playlist-cards',
         createPlaylistBtn: '#create-playlist-btn',
         modal: '#create-playlist-modal',
         modalClose: '.modal .close',
@@ -51,8 +50,7 @@ const CONFIG = {
         logoImage: '#idle-logo',
         previewImage: '#mpv-preview-image',
         mpvPreviewPlaceholder: '#mpv-preview-placeholder',
-        dashboardBroadcastValue: '#dashboard-broadcast-value',
-        dashboardBroadcastBadge: '#dashboard-broadcast-badge',
+        nowScreenTitle: '#now-screen-title',
         currentSettings: '#current-settings',
         loadingIndicator: '#loading-indicator',
         logoFileInput: '#logo-upload',
@@ -405,24 +403,23 @@ const ui = {
         return `/api/media/thumbnail/${encodeURIComponent(filename)}`;
     },
 
-    updateDashboardHero(broadcastRaw, playbackState) {
-        const lang = getUiLang();
-        const st = String(playbackState || 'idle').toLowerCase();
-        const valueEl = elements.dashboardBroadcastValue;
-        const badgeEl = elements.dashboardBroadcastBadge;
-        if (valueEl) {
-            valueEl.textContent = this._truncateText(broadcastRaw, 48) || '—';
+    updateNowOnScreen(broadcastRaw) {
+        const titleEl = elements.nowScreenTitle;
+        if (titleEl) {
+            titleEl.textContent = this._truncateText(broadcastRaw, 64) || '—';
         }
-        if (badgeEl) {
-            badgeEl.dataset.state = st === 'playing' ? 'playing' : (st === 'stopped' ? 'stopped' : 'idle');
-            if (st === 'playing') {
-                badgeEl.textContent = t('status_playing', lang);
-            } else if (st === 'stopped') {
-                badgeEl.textContent = t('status_stopped', lang);
-            } else {
-                badgeEl.textContent = t('status_idle', lang);
-            }
+    },
+
+    formatFilesCount(count, lang) {
+        const n = Number(count) || 0;
+        if (lang === 'ru') {
+            const mod10 = n % 10;
+            const mod100 = n % 100;
+            if (mod10 === 1 && mod100 !== 11) return `${n} файл`;
+            if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${n} файла`;
+            return `${n} файлов`;
         }
+        return n === 1 ? `${n} file` : `${n} files`;
     },
 
     _activePlaylist(runtime = {}) {
@@ -531,7 +528,7 @@ const ui = {
         const broadcastRaw = playbackState === 'playing'
             ? (activePlaylist?.name || `Playlist #${activePlaylistId ?? ''}`.trim() || 'Playlist')
             : t('broadcast_logo', lang);
-        this.updateDashboardHero(broadcastRaw, playbackState);
+        this.updateNowOnScreen(broadcastRaw);
 
         const storageData = systemStatus?.storage?.media || systemStatus?.storage?.root || null;
         const storagePercent = this._clampPercent(storageData?.used_percent);
@@ -541,8 +538,6 @@ const ui = {
 
         const cpuTempRaw = Number(systemStatus?.cpu?.temp_c);
         const cpuTemp = Number.isFinite(cpuTempRaw) ? cpuTempRaw : null;
-        const cpuTempPercent =
-            cpuTemp === null ? null : Math.max(0, Math.min(100, (cpuTemp / 85) * 100));
         const cpuTempValue = cpuTemp === null ? t('value_na', lang) : `${cpuTemp.toFixed(1)}°C`;
 
         const cpuLoadRaw = Number(systemStatus?.cpu?.usage_percent ?? systemStatus?.cpu?.load_percent);
@@ -555,42 +550,34 @@ const ui = {
 
         const ipValue = networkStatus?.primary_ip || t('value_na', lang);
 
+        const cpuCombined = cpuTemp === null && cpuLoad === null
+            ? t('value_na', lang)
+            : `${cpuTempValue}${cpuLoad === null ? '' : ` (${t('metric_cpu_load', lang)} ${cpuLoadValue})`}`;
+
         const html = `
-            <div class="settings-section">
-                <h3>${this.escapeHtml(t('metric_ops_title', lang))}</h3>
-                <div class="metrics-grid">
-                    <div class="metric-item">
-                        <div class="metric-label">${this.escapeHtml(t('metric_screen', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(screenResolution)}</div>
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">${this.escapeHtml(t('metric_volume', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(volumeValue)}</div>
-                    </div>
-                    <div class="metric-item metric-item--full">
-                        <div class="metric-label">${this.escapeHtml(t('metric_storage', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(storageValue)}</div>
-                        ${this._renderMetricBar(storagePercent)}
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">${this.escapeHtml(t('metric_cpu_temp', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(cpuTempValue)}</div>
-                        ${this._renderMetricBar(cpuTempPercent)}
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">${this.escapeHtml(t('metric_cpu_load', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(cpuLoadValue)}</div>
-                        ${this._renderMetricBar(cpuLoad)}
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">${this.escapeHtml(t('metric_transcode', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(transcodeValue)}</div>
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">${this.escapeHtml(t('metric_ip', lang))}</div>
-                        <div class="metric-value">${this.escapeHtml(ipValue)}</div>
-                    </div>
-                </div>
+            <div class="system-metric">
+                <div class="system-metric__label">${this.escapeHtml(t('metric_screen', lang))}</div>
+                <div class="system-metric__value">${this.escapeHtml(screenResolution)}</div>
+            </div>
+            <div class="system-metric">
+                <div class="system-metric__label">${this.escapeHtml(t('metric_volume', lang))}</div>
+                <div class="system-metric__value">${this.escapeHtml(volumeValue)}</div>
+            </div>
+            <div class="system-metric system-metric--wide">
+                <div class="system-metric__label">${this.escapeHtml(t('metric_storage', lang))}</div>
+                <div class="system-metric__value">${this.escapeHtml(storageValue)}</div>
+            </div>
+            <div class="system-metric">
+                <div class="system-metric__label">${this.escapeHtml(t('metric_cpu_temp', lang))}</div>
+                <div class="system-metric__value">${this.escapeHtml(cpuCombined)}</div>
+            </div>
+            <div class="system-metric">
+                <div class="system-metric__label">${this.escapeHtml(t('metric_transcode', lang))}</div>
+                <div class="system-metric__value">${this.escapeHtml(transcodeValue)}</div>
+            </div>
+            <div class="system-metric">
+                <div class="system-metric__label">${this.escapeHtml(t('metric_ip', lang))}</div>
+                <div class="system-metric__value">${this.escapeHtml(ipValue)}</div>
             </div>
         `;
         elements.settingsPanel.innerHTML = html;
@@ -599,28 +586,13 @@ const ui = {
     },
 
     renderPlaylists(playlists) {
-        let tableBody = document.querySelector('#playlist-table-body');
-        if (!tableBody) {
-            const table = document.querySelector('#playlist-table');
-            if (table) {
-                tableBody = document.createElement('tbody');
-                tableBody.id = 'playlist-table-body';
-                table.appendChild(tableBody);
-            } else {
-                console.error('Playlist table not found');
-                return;
-            }
+        const grid = elements.playlistCards;
+        if (!grid) {
+            console.error('Playlist cards container not found');
+            return;
         }
 
         const playlistsArray = Array.isArray(playlists) ? playlists : [];
-    
-        console.log('Rendering playlists with customer data:', playlistsArray.map(p => ({
-            id: p.id,
-            name: p.name,
-            customer: p.customer,
-            files_count: p.files_count
-        })));
-
         const lang = getUiLang();
         const un = t('unnamed', lang);
         const pt = t('play_title', lang);
@@ -628,58 +600,49 @@ const ui = {
         const et = t('edit_title', lang);
         const dt = t('delete_title', lang);
         const noPreview = t('no_preview', lang);
-        const icons = {
-            play: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 5v14l12-7-12-7z" fill="currentColor"/></svg>',
-            stop: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 7h10v10H7z" fill="currentColor"/></svg>',
-            edit: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 17.25V21h3.75L17.8 9.94l-3.75-3.75L3 17.25z" fill="currentColor"/><path d="M20.7 7.04a1 1 0 0 0 0-1.41L18.37 3.3a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.82-1.84z" fill="currentColor"/></svg>',
-            del: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 7h12l-1 14H7L6 7z" fill="currentColor"/><path d="M9 4h6l1 2H8l1-2z" fill="currentColor"/></svg>',
-        };
-        tableBody.innerHTML = playlistsArray.map(playlist => {
+
+        grid.innerHTML = playlistsArray.map((playlist) => {
             const previewFile = playlist.preview_filename;
             const hasPreview = Number(playlist.files_count || 0) > 0 && previewFile;
-            const thumbHtml = hasPreview
-                ? `<div class="playlist-thumb-wrap"><img class="playlist-thumb-img" src="${this.escapeHtml(this.thumbnailUrl(previewFile))}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none';this.nextElementSibling?.classList.add('is-visible')"><span class="playlist-thumb-placeholder">${this.escapeHtml(noPreview)}</span></div>`
-                : `<div class="playlist-thumb-wrap"><span class="playlist-thumb-placeholder is-visible">${this.escapeHtml(noPreview)}</span></div>`;
+            const thumbSrc = hasPreview ? this.escapeHtml(this.thumbnailUrl(previewFile)) : '';
+            const filesLabel = this.escapeHtml(this.formatFilesCount(playlist.files_count, lang));
+
             return `
-            <tr data-id="${playlist.id}">
-                <td class="playlist-thumb-cell">${thumbHtml}</td>
-                <td class="playlist-td-name">${this.escapeHtml(playlist.name || un)}</td>
-                <td class="playlist-td-customer">${this.escapeHtml(playlist.customer)}</td>
-                <td class="playlist-td-files">${playlist.files_count || 0}</td>
-                <td class="playlist-td-status">
-                    <div class="playlist-td-inner">
-                        <span class="status-badge"></span>
+            <article class="playlist-card" data-id="${playlist.id}" role="listitem">
+                <span class="playlist-card__badge playlist-card__badge--idle"></span>
+                <div class="playlist-card__preview">
+                    ${hasPreview ? `<img src="${thumbSrc}" alt="" loading="lazy" decoding="async" onerror="this.hidden=true;this.nextElementSibling.hidden=false">` : ''}
+                    <div class="playlist-card__preview-empty" ${hasPreview ? 'hidden' : ''}>
+                        <span class="playlist-card__preview-icon" aria-hidden="true">📷</span>
+                        <span>${this.escapeHtml(noPreview)}</span>
                     </div>
-                </td>
-                <td class="playlist-td-actions">
-                    <div class="playlist-td-inner">
-                        <div class="actions">
-                        <button class="btn play" data-id="${playlist.id}" title="${this.escapeHtml(pt)}">
-                            <span class="btn-icon" aria-hidden="true">${icons.play}</span>
-                            <span class="sr-only">${this.escapeHtml(pt)}</span>
-                        </button>
-                        <button class="btn stop" data-id="${playlist.id}" title="${this.escapeHtml(st)}" disabled>
-                            <span class="btn-icon" aria-hidden="true">${icons.stop}</span>
-                            <span class="sr-only">${this.escapeHtml(st)}</span>
-                        </button>
-                        <button class="btn edit" data-id="${playlist.id}" title="${this.escapeHtml(et)}">
-                            <span class="btn-icon" aria-hidden="true">${icons.edit}</span>
-                            <span class="sr-only">${this.escapeHtml(et)}</span>
-                        </button>
-                        <button class="btn delete" data-id="${playlist.id}" title="${this.escapeHtml(dt)}">
-                            <span class="btn-icon" aria-hidden="true">${icons.del}</span>
-                            <span class="sr-only">${this.escapeHtml(dt)}</span>
-                        </button>
-                        </div>
-                    </div>
-                </td>
-            </tr>
-        `;
+                </div>
+                <div class="playlist-card__body">
+                    <h3 class="playlist-card__name">${this.escapeHtml(playlist.name || un)}</h3>
+                    <p class="playlist-card__customer">${this.escapeHtml(playlist.customer || '')}</p>
+                    <p class="playlist-card__files">${filesLabel}</p>
+                </div>
+                <div class="playlist-card__actions">
+                    <button type="button" class="btn play" data-id="${playlist.id}" title="${this.escapeHtml(pt)}">
+                        <span class="btn-label">${this.escapeHtml(pt)}</span>
+                    </button>
+                    <button type="button" class="btn stop" data-id="${playlist.id}" title="${this.escapeHtml(st)}" disabled>
+                        <span class="btn-label">${this.escapeHtml(st)}</span>
+                    </button>
+                    <button type="button" class="btn edit" data-id="${playlist.id}" title="${this.escapeHtml(et)}">
+                        <span class="btn-label">${this.escapeHtml(et)}</span>
+                    </button>
+                    <button type="button" class="btn delete" data-id="${playlist.id}" title="${this.escapeHtml(dt)}">
+                        <span class="btn-label">${this.escapeHtml(dt)}</span>
+                    </button>
+                </div>
+            </article>
+            `;
         }).join('');
     },
 
     refreshLanguageUI() {
-        if (!elements.settingsPanel && !document.querySelector('#playlist-table-body')) return;
+        if (!elements.settingsPanel && !elements.playlistCards) return;
         this.renderSettings(state.currentSettings, {
             playlists: state.playlists,
             playbackStatus: state.playbackStatus,
@@ -713,34 +676,34 @@ const ui = {
      * @param {string|number} playlistId
      * @param {'playing'|'stopped'|'idle'} mode
      */
-    setPlaybackRowState(playlistId, mode) {
-        const rows = document.querySelectorAll(`tr[data-id="${playlistId}"]`);
-        if (!rows.length) return;
+    setPlaybackCardState(playlistId, mode) {
+        const card = document.querySelector(`.playlist-card[data-id="${playlistId}"]`);
+        if (!card) return;
 
-        rows.forEach((row) => {
-            const playBtn = row.querySelector('.play');
-            const stopBtn = row.querySelector('.stop');
-            const statusBadge = row.querySelector('.status-badge');
-            if (!playBtn || !stopBtn || !statusBadge) return;
+        const playBtn = card.querySelector('.btn.play');
+        const stopBtn = card.querySelector('.btn.stop');
+        const badge = card.querySelector('.playlist-card__badge');
+        if (!playBtn || !stopBtn || !badge) return;
 
-            const lang = getUiLang();
-            if (mode === 'playing') {
-                playBtn.disabled = true;
-                stopBtn.disabled = false;
-                statusBadge.textContent = t('status_playing', lang);
-                statusBadge.className = 'status-badge active playing';
-            } else if (mode === 'stopped') {
-                playBtn.disabled = false;
-                stopBtn.disabled = true;
-                statusBadge.textContent = t('status_stopped', lang);
-                statusBadge.className = 'status-badge stopped';
-            } else {
-                playBtn.disabled = false;
-                stopBtn.disabled = true;
-                statusBadge.textContent = t('status_idle', lang);
-                statusBadge.className = 'status-badge idle';
-            }
-        });
+        const lang = getUiLang();
+        card.classList.toggle('is-playing', mode === 'playing');
+
+        if (mode === 'playing') {
+            playBtn.disabled = true;
+            stopBtn.disabled = false;
+            badge.textContent = `▶ ${t('status_playing', lang)}`;
+            badge.className = 'playlist-card__badge playlist-card__badge--playing';
+        } else if (mode === 'stopped') {
+            playBtn.disabled = false;
+            stopBtn.disabled = true;
+            badge.textContent = `■ ${t('status_stopped', lang)}`;
+            badge.className = 'playlist-card__badge playlist-card__badge--stopped';
+        } else {
+            playBtn.disabled = false;
+            stopBtn.disabled = true;
+            badge.textContent = `○ ${t('status_idle', lang)}`;
+            badge.className = 'playlist-card__badge playlist-card__badge--idle';
+        }
     },
 
     /**
@@ -760,11 +723,11 @@ const ui = {
 
         ids.forEach((id) => {
             if (pid === id && st === 'playing') {
-                this.setPlaybackRowState(id, 'playing');
+                this.setPlaybackCardState(id, 'playing');
             } else if (pid === id && st === 'stopped') {
-                this.setPlaybackRowState(id, 'stopped');
+                this.setPlaybackCardState(id, 'stopped');
             } else {
-                this.setPlaybackRowState(id, 'idle');
+                this.setPlaybackCardState(id, 'idle');
             }
         });
 
@@ -773,7 +736,7 @@ const ui = {
         const broadcastRaw = st === 'playing'
             ? (activePlaylist?.name || `Playlist #${pid ?? ''}`.trim() || 'Playlist')
             : t('broadcast_logo', lang);
-        this.updateDashboardHero(broadcastRaw, st);
+        this.updateNowOnScreen(broadcastRaw);
         this.syncMpvPreviewDisplay({ playlists: list, playbackStatus: statusPayload });
         if (st === 'playing') {
             this.updatePreviewImage({ updateTimestamp: false });
@@ -905,9 +868,6 @@ const handlers = {
         try {
             console.log('Initializing application...');
             
-            await this.ensureTableBodyExists();
-            console.log('Playlist table element found:', elements.playlistTableBody);
-
             const [settings, playlists, playbackStatusResp, systemStatusResp, networkStatusResp] = await Promise.all([
                 api.getSettings(),
                 api.getPlaylists(),
@@ -988,28 +948,6 @@ const handlers = {
             console.error('Initialization failed:', error);
             showError('Failed to initialize application');
         }
-    },
-
-    async ensureTableBodyExists() {
-        return new Promise((resolve) => {
-            const checkTableBody = () => {
-                if (elements.playlistTableBody) {
-                    resolve();
-                } else {
-                    const table = document.querySelector('#playlist-table');
-                    if (table) {
-                        const tableBody = document.createElement('tbody');
-                        tableBody.id = 'playlist-table-body';
-                        table.appendChild(tableBody);
-                        elements.playlistTableBody = tableBody;
-                        resolve();
-                    } else {
-                        setTimeout(checkTableBody, 100);
-                    }
-                }
-            };
-            checkTableBody();
-        });
     },
 
     setupEventListeners() {
@@ -1140,7 +1078,7 @@ const handlers = {
         });
 
         // Playlist actions
-        elements.playlistTable?.addEventListener('click', async (e) => {
+        elements.playlistCards?.addEventListener('click', async (e) => {
             const btn = e.target.closest('button');
             if (!btn || !btn.dataset.id) return;
 
@@ -1193,9 +1131,9 @@ const handlers = {
                             }
                             
                             // Remove the playlist row immediately
-                            const row = document.querySelector(`tr[data-id="${playlistId}"]`);
-                            if (row) {
-                                row.remove();
+                            const card = document.querySelector(`.playlist-card[data-id="${playlistId}"]`);
+                            if (card) {
+                                card.remove();
                             }
                             
                             // Update state

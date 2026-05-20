@@ -8,29 +8,22 @@
 {% endblock %}
 
 {% block content %}
-<h1 class="page-title" data-i18n="page_home_title">Control Panel</h1>
-
-<section class="home-dashboard" aria-label="Dashboard">
-    <div class="dashboard-hero" id="dashboard-hero">
-        <div class="dashboard-hero__main">
-            <span class="dashboard-hero__label" data-i18n="metric_broadcast">Broadcast</span>
-            <span class="dashboard-hero__value" id="dashboard-broadcast-value">—</span>
-        </div>
-        <span class="dashboard-hero__badge" id="dashboard-broadcast-badge" data-state="idle"></span>
-    </div>
-
-    <div class="dashboard-grid">
-        <div id="settings-container" class="dashboard-card dashboard-card--metrics">
-            <!-- Metrics loaded via JS -->
-        </div>
-
-        <div class="dashboard-card dashboard-card--mpv">
-            <div class="dashboard-card__head">
-                <h3 class="dashboard-card__title" data-i18n="mpv_preview">MPV Player Preview</h3>
-                <button type="button" id="refresh-mpv-preview" class="mpv-refresh-btn" data-i18n-title="refresh_preview" title="Refresh preview">
-                    <span aria-hidden="true">⟳</span>
-                </button>
+<div class="home-layout">
+    <aside class="home-sidebar" aria-label="Dashboard sidebar">
+        <section class="now-screen" aria-labelledby="now-screen-heading">
+            <div class="now-screen__head">
+                <h2 id="now-screen-heading" class="panel-label" data-i18n="now_on_screen">Now on screen</h2>
+                <div class="now-screen__meta">
+                    <span class="now-screen__updated">
+                        <span data-i18n="last_updated_label">Updated</span>:
+                        <span id="mpv-last-update">—</span>
+                    </span>
+                    <button type="button" id="refresh-mpv-preview" class="now-screen__refresh" data-i18n-title="refresh_preview" title="Refresh preview">
+                        <span aria-hidden="true">⟳</span>
+                    </button>
+                </div>
             </div>
+            <p id="now-screen-title" class="now-screen__title">—</p>
             <div class="preview-frame preview-frame--16x9 mpv-preview-container">
                 <img id="mpv-preview-image"
                      src="{{ url_for('api.get_mpv_screenshot') }}"
@@ -39,15 +32,20 @@
                      style="display: none;">
                 <div id="mpv-preview-placeholder" class="preview-placeholder is-visible" data-i18n="no_preview">No preview</div>
             </div>
-            <div class="mpv-status">
-                <span data-i18n="last_updated_label">Last updated</span>: <span id="mpv-last-update">—</span>
-                <span id="mpv-auto-refresh-status" class="mpv-auto-refresh-status"></span>
-            </div>
-        </div>
+            <div id="mpv-auto-refresh-status" class="mpv-auto-refresh-status"></div>
+        </section>
 
-        <div class="dashboard-card dashboard-card--logo">
-            <h3 class="dashboard-card__title" data-i18n="current_logo">Current Logo</h3>
-            <div class="preview-frame preview-frame--logo">
+        <section class="system-panel" aria-labelledby="system-panel-heading">
+            <h2 id="system-panel-heading" class="panel-label" data-i18n="system_panel">System</h2>
+            <div id="settings-container" class="system-metrics">
+                <!-- Metrics loaded via JS -->
+            </div>
+        </section>
+
+        <section class="waiting-screen" aria-labelledby="waiting-screen-heading">
+            <h2 id="waiting-screen-heading" class="panel-label" data-i18n="waiting_screen">Waiting screen</h2>
+            <p class="waiting-screen__hint" data-i18n="waiting_screen_hint">Shown when idle</p>
+            <div class="preview-frame preview-frame--logo waiting-screen__logo">
                 <img id="idle-logo"
                      src="{{ url_for('api.serve_media', filename='idle_logo.jpg') }}"
                      alt=""
@@ -59,50 +57,25 @@
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="file" id="logo-upload" class="logo-upload-input" name="logo" accept="image/jpeg,image/png" required>
                 <button type="button" id="logo-replace-btn" class="logo-btn logo-btn--replace">
-                    <span aria-hidden="true">📷</span>
                     <span data-i18n="replace_logo">Replace logo</span>
                     <span class="loading-spinner" style="display:none;"></span>
                 </button>
             </form>
+        </section>
+    </aside>
+
+    <main class="home-playlists" aria-labelledby="playlists-heading">
+        <div class="home-playlists__head">
+            <h1 id="playlists-heading" class="home-playlists__title" data-i18n="playlists_heading">Playlists</h1>
+            <button id="create-playlist-btn" class="btn primary" type="button">
+                <span aria-hidden="true">＋</span>
+                <span data-i18n="btn_new_playlist">New Playlist</span>
+            </button>
         </div>
-    </div>
-</section>
 
-<div class="playlist-section">
-    <div class="section-header">
-        <h2 data-i18n="playlists_heading">Playlists</h2>
-        <button id="create-playlist-btn" class="btn primary" type="button">
-            <span aria-hidden="true">＋</span> <span data-i18n="btn_new_playlist">New Playlist</span>
-        </button>
-    </div>
-
-    <div id="playlist-status"></div>
-
-    <div class="playlist-table-wrap">
-        <table class="playlist-table" id="playlist-table">
-            <colgroup>
-                <col class="playlist-col-preview">
-                <col class="playlist-col-name">
-                <col class="playlist-col-customer">
-                <col class="playlist-col-files">
-                <col class="playlist-col-status">
-                <col class="playlist-col-actions">
-            </colgroup>
-            <thead>
-                <tr>
-                    <th scope="col" data-i18n="playlist_col_preview">Preview</th>
-                    <th scope="col" data-i18n="playlist_col_name">Name</th>
-                    <th scope="col" data-i18n="playlist_col_customer">Customer</th>
-                    <th scope="col" data-i18n="playlist_col_files">Files</th>
-                    <th scope="col" data-i18n="playlist_col_status">Status</th>
-                    <th scope="col" data-i18n="playlist_col_actions">Actions</th>
-                </tr>
-            </thead>
-            <tbody id="playlist-table-body">
-                <!-- Filled by JavaScript -->
-            </tbody>
-        </table>
-    </div>
+        <div id="playlist-status"></div>
+        <div id="playlist-cards" class="playlist-cards" role="list"></div>
+    </main>
 </div>
 
 <div id="create-playlist-modal" class="modal" style="display:none;">
