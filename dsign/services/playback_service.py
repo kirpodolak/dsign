@@ -186,7 +186,6 @@ class PlaybackService:
             return False
 
     def _resume_playback_after_boot(self) -> None:
-        """Restore last active playlist after reboot without waiting for the web UI."""
         from ..models import PlaybackStatus
         try:
             row = self.db_session.query(PlaybackStatus).get(1)
@@ -194,12 +193,11 @@ class PlaybackService:
                 return
             if str(row.status or "").lower() != "playing":
                 return
-            playlist_id = int(row.playlist_id)
             time.sleep(0.5)
-            self.play(playlist_id)
+            self.play(int(row.playlist_id))
             self._log_info(
                 "Resumed playlist after boot",
-                extra={"playlist_id": playlist_id, "action": "boot_resume"},
+                extra={"playlist_id": int(row.playlist_id), "action": "boot_resume"},
             )
         except Exception as e:
             self._log_warning(
