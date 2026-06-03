@@ -205,7 +205,6 @@ chown "$DSIGN_USER:$DSIGN_USER" /var/lib/dsign/config
 [Unit]
 Description=Digital Signage Network Assistant (OSD)
 After=network.target
-Before=digital-signage.service dsign-mpv.service
 Wants=network.target
 
 [Service]
