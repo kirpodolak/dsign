@@ -1,18 +1,42 @@
 #!/usr/bin/env bash
+# Best-effort MPV OSD for boot IP. Must NOT block mpv/digital-signage startup.
 set -u
 
 STARTUP_IP_FILE="${DSIGN_STARTUP_IP_FILE:-/tmp/dsign-startup-ip.txt}"
 MPV_SOCKET="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
 SHOW_DURATION_MS="${DSIGN_STARTUP_IP_DURATION_MS:-60000}"
-WAIT_TIMEOUT_SEC="${DSIGN_STARTUP_IP_WAIT_SEC:-15}"
+# Short wait at boot — playlist/content must start first; IP overlays when mpv is ready.
+SOCKET_WAIT_SEC="${DSIGN_STARTUP_IP_SOCKET_WAIT_SEC:-3}"
+BG_RETRY_SEC="${DSIGN_STARTUP_IP_BG_RETRY_SEC:-45}"
 
 log() {
   logger -t dsign-show-startup-ip "$*"
 }
 
+read_ip_from_file() {
+  [ -r "$STARTUP_IP_FILE" ] || return 1
+  tr -d '\r\n' < "$STARTUP_IP_FILE" 2>/dev/null || true
+}
+
+primary_ip() {
+  ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}'
+}
+
+resolve_ip() {
+  local ip
+  ip="$(read_ip_from_file || true)"
+  if [ -z "$ip" ]; then
+    allow_live="${DSIGN_STARTUP_IP_ALLOW_LIVE_LOOKUP:-0}"
+    case "$allow_live" in
+      1|true|yes|on|TRUE|YES|ON) ip="$(primary_ip || true)" ;;
+    esac
+  fi
+  printf '%s' "$ip"
+}
+
 wait_for_socket() {
   local deadline now
-  deadline=$(( $(date +%s) + WAIT_TIMEOUT_SEC ))
+  deadline=$(( $(date +%s) + SOCKET_WAIT_SEC ))
   while true; do
     if [ -S "$MPV_SOCKET" ]; then
       return 0
@@ -21,114 +45,99 @@ wait_for_socket() {
     if [ "$now" -ge "$deadline" ]; then
       return 1
     fi
-    sleep 0.2
+    sleep 0.15
   done
 }
 
-if ! wait_for_socket; then
-  log "Skip: MPV socket missing (timeout=${WAIT_TIMEOUT_SEC}s)"
-  exit 0
-fi
-
-primary_ip() {
-  ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}'
-}
-
-read_ip_from_file() {
-  [ -r "$STARTUP_IP_FILE" ] || return 1
-  tr -d '\r\n' < "$STARTUP_IP_FILE" 2>/dev/null || true
-}
-
-ip_addr="$(read_ip_from_file || true)"
-if [ -z "$ip_addr" ]; then
-  ip_addr="$(primary_ip || true)"
-fi
-
-if [ -z "$ip_addr" ]; then
-  # Nothing to show (don't delete startup file if it may be produced later).
-  log "Skip: startup IP is empty/unavailable"
-  exit 0
-fi
-
-attempt_send_ip() {
-  # Returns 0 if MPV accepted and replied with error=success, else non-zero.
-  python3 - "$ip_addr" "$SHOW_DURATION_MS" "$MPV_SOCKET" <<'PY'
-import json, socket, sys, time
+# Fire-and-forget: do not block on mpv JSON reply (ytdl/HLS can make IPC slow).
+send_ip_osd_once() {
+  local ip_addr="$1"
+  if [ -z "$ip_addr" ]; then
+    return 1
+  fi
+  if ! [ -S "$MPV_SOCKET" ]; then
+    return 1
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$ip_addr" "$SHOW_DURATION_MS" "$MPV_SOCKET" <<'PY' || return 1
+import json, socket, sys
 
 ip = sys.argv[1]
 duration_ms = int(sys.argv[2]) if len(sys.argv) > 2 else 60000
 sock_path = sys.argv[3]
-
-rid = int(time.time() * 1_000_000) & 0x7fffffff
 payload = {
     "command": ["show-text", f"IP: {ip}", duration_ms],
-    "request_id": rid,
+    "request_id": 1,
 }
-
-def send_once():
+try:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(1.5)
+    s.settimeout(0.8)
     s.connect(sock_path)
     s.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-    data = b""
-    # Read until newline (MPV replies line-delimited JSON)
-    while True:
-        chunk = s.recv(4096)
-        if not chunk:
-            break
-        data += chunk
-        if b"\n" in data:
-            break
     s.close()
-    line = data.split(b"\n", 1)[0].strip()
-    if not line:
-        return None
-    try:
-        obj = json.loads(line.decode("utf-8", errors="replace"))
-    except Exception:
-        return None
-    if not isinstance(obj, dict):
-        return None
-    if obj.get("request_id") != rid:
-        return None
-    return obj
-
-obj = None
-try:
-    obj = send_once()
 except Exception:
-    obj = None
-
-if obj and obj.get("error") == "success":
-    sys.exit(0)
-sys.exit(1)
+    sys.exit(1)
+sys.exit(0)
 PY
+    return $?
+  fi
+  if command -v socat >/dev/null 2>&1; then
+    printf '%s\n' "{\"command\":[\"show-text\",\"IP: ${ip_addr}\",${SHOW_DURATION_MS}]}" \
+      | socat - "$MPV_SOCKET" >/dev/null 2>&1 || return 1
+    return 0
+  fi
+  return 1
 }
 
-deadline=$(( $(date +%s) + WAIT_TIMEOUT_SEC ))
-ok=1
-if command -v python3 >/dev/null 2>&1; then
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    attempt_send_ip && ok=0 && break || true
-    sleep 0.3
-  done
-else
-  # Fallback: no python => just best-effort fire-and-forget.
-  if command -v socat >/dev/null 2>&1; then
-    printf '%s\n' "$(printf '%s' "{\"command\":[\"show-text\",\"IP: ${ip_addr}\",${SHOW_DURATION_MS}]}")" | socat - "$MPV_SOCKET" >/dev/null 2>&1 || true
-    ok=0
-  else
-    ok=1
+try_show_ip() {
+  local ip_addr
+  ip_addr="$(resolve_ip)"
+  if [ -z "$ip_addr" ]; then
+    log "Skip: no startup IP file (not a boot OSD run)"
+    return 0
   fi
+  if ! wait_for_socket; then
+    return 1
+  fi
+  if send_ip_osd_once "$ip_addr"; then
+    log "OSD sent (fire-and-forget): IP=$ip_addr duration_ms=$SHOW_DURATION_MS"
+    if [ -r "$STARTUP_IP_FILE" ]; then
+      rm -f "$STARTUP_IP_FILE" 2>/dev/null || true
+    fi
+    return 0
+  fi
+  return 1
+}
+
+background_retry() {
+  local ip_addr deadline now
+  ip_addr="$(resolve_ip)"
+  [ -n "$ip_addr" ] || return 0
+  deadline=$(( $(date +%s) + BG_RETRY_SEC ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if send_ip_osd_once "$ip_addr"; then
+      log "OSD sent from background retry: IP=$ip_addr"
+      if [ -r "$STARTUP_IP_FILE" ]; then
+        rm -f "$STARTUP_IP_FILE" 2>/dev/null || true
+      fi
+      return 0
+    fi
+    sleep 0.5
+  done
+  log "Background retry finished without OSD (IP=$ip_addr)"
+  return 0
+}
+
+if try_show_ip; then
+  exit 0
 fi
 
-if [ "$ok" -eq 0 ]; then
-  log "OSD shown: IP=$ip_addr"
-else
-  log "OSD not shown (MPV did not reply in time): IP=$ip_addr"
+# Socket not ready yet — retry in background so systemd oneshot exits immediately.
+if [ "${DSIGN_STARTUP_IP_BACKGROUND_RETRY:-1}" != "0" ]; then
+  (
+    background_retry
+  ) >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  log "Spawned background IP OSD retry (${BG_RETRY_SEC}s)"
 fi
-
-# Remove it only if we consumed it from file; if it didn't exist or was empty, keep state.
-if [ -r "$STARTUP_IP_FILE" ]; then
-  rm -f "$STARTUP_IP_FILE" 2>/dev/null || true
-fi
+exit 0

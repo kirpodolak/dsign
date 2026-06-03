@@ -173,6 +173,40 @@ class PlaybackService:
                 }
             )
 
+    def _should_resume_playback_after_boot(self) -> bool:
+        try:
+            from ..models import PlaybackStatus
+            row = self.db_session.query(PlaybackStatus).get(1)
+            return bool(
+                row
+                and row.playlist_id
+                and str(row.status or "").lower() == "playing"
+            )
+        except Exception:
+            return False
+
+    def _resume_playback_after_boot(self) -> None:
+        """Restore last active playlist after reboot without waiting for the web UI."""
+        from ..models import PlaybackStatus
+        try:
+            row = self.db_session.query(PlaybackStatus).get(1)
+            if not row or not row.playlist_id:
+                return
+            if str(row.status or "").lower() != "playing":
+                return
+            playlist_id = int(row.playlist_id)
+            time.sleep(0.5)
+            self.play(playlist_id)
+            self._log_info(
+                "Resumed playlist after boot",
+                extra={"playlist_id": playlist_id, "action": "boot_resume"},
+            )
+        except Exception as e:
+            self._log_warning(
+                "Boot playback resume failed",
+                extra={"error": str(e), "type": type(e).__name__, "action": "boot_resume"},
+            )
+
     def _transition_to_idle(self):
         """Transition to idle state with logo"""
         max_attempts = 5
