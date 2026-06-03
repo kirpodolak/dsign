@@ -55,7 +55,6 @@ class MPVManager:
         self._current_settings = {}
         self._mpv_ready = False
         self._managed_by_systemd = True
-        self._playback_session_active = False
 
         # Логирование инициализации
         self.logger.info(
@@ -102,44 +101,6 @@ class MPVManager:
             f"{operation} - {status}",
             extra=log_data
         )
-
-    def set_playback_session_active(self, active: bool) -> None:
-        """Playlist thread sets this to reduce MPV systemd restarts during stream transitions."""
-        self._playback_session_active = bool(active)
-
-    def _restart_during_playback_allowed(self) -> bool:
-        v = os.getenv("DSIGN_MPV_RESTART_DURING_PLAYBACK", "0").strip().lower()
-        return v in ("1", "true", "yes", "on")
-
-    def _socket_recover_wait_sec(self) -> float:
-        try:
-            sec = float((os.getenv("DSIGN_MPV_SOCKET_RECOVER_SEC") or "12").strip())
-        except ValueError:
-            sec = 12.0
-        return max(2.0, min(60.0, sec))
-
-    def _try_recover_socket_without_restart(self) -> bool:
-        """Wait for IPC socket while mpv is busy (ytdl/HLS) without restarting systemd."""
-        deadline = time.time() + self._socket_recover_wait_sec()
-        while time.time() < deadline:
-            if self._check_mpv_socket(timeout=0.5):
-                return True
-            time.sleep(0.25)
-        return False
-
-    def _should_restart_mpv_service(self) -> bool:
-        if self._playback_session_active and not self._restart_during_playback_allowed():
-            return False
-        return True
-
-    def _restart_systemd_service_if_needed(self) -> bool:
-        if not self._should_restart_mpv_service():
-            self.logger.warning(
-                "Skipping MPV systemd restart during active playlist playback",
-                extra={"operation": "SystemdServiceRestart"},
-            )
-            return self._try_recover_socket_without_restart()
-        return self._restart_systemd_service()
 
     def _check_systemd_service(self) -> bool:
         """Проверка статуса systemd сервиса"""
@@ -413,7 +374,7 @@ class MPVManager:
                     + ("..." if len(ordered) > 12 else ""),
                 },
             )
-            ok = self._restart_systemd_service_if_needed() and self._wait_for_socket(timeout=12.0)
+            ok = self._restart_systemd_service() and self._wait_for_socket(timeout=12.0)
             if ok:
                 self._reset_ipc_session()
             if not ok:
@@ -458,15 +419,10 @@ class MPVManager:
                     },
                 )
                 try:
-                    recovered = self._try_recover_socket_without_restart()
-                    if not recovered:
-                        if not self._restart_systemd_service_if_needed() or not self._wait_for_socket():
-                            _retry_sleep_after_failure(
-                                ConnectionRefusedError("socket"), attempt
-                            )
-                            continue
-                    elif not self._check_mpv_socket(timeout=1.0):
-                        _retry_sleep_after_failure(ConnectionRefusedError("socket"), attempt)
+                    if not self._restart_systemd_service() or not self._wait_for_socket():
+                        _retry_sleep_after_failure(
+                            ConnectionRefusedError("socket"), attempt
+                        )
                         continue
                     self._reset_ipc_session()
                 except Exception:
@@ -569,7 +525,7 @@ class MPVManager:
                     "reason": reason,
                 },
             )
-            ok = self._restart_systemd_service_if_needed() and self._wait_for_socket(timeout=12.0)
+            ok = self._restart_systemd_service() and self._wait_for_socket(timeout=12.0)
             if ok:
                 self._reset_ipc_session()
             if not ok:
@@ -679,23 +635,17 @@ class MPVManager:
 
             except (ConnectionRefusedError, FileNotFoundError):
                 self.logger.warning(
-                    "MPV socket not available, attempting recovery...",
+                    "MPV socket not available, restarting service...",
                     extra={
                         "operation": "MPVCommand",
                         "command": command_name,
                         "attempt": attempt + 1,
                         "request_id": ipc_request_id,
-                        "playback_session": self._playback_session_active,
                     },
                 )
                 # Lock released: restart + wait without blocking other threads on the lock for minutes.
                 try:
-                    recovered = self._try_recover_socket_without_restart()
-                    if not recovered:
-                        if not self._restart_systemd_service_if_needed() or not self._wait_for_socket():
-                            _retry_sleep_after_failure(ConnectionRefusedError("socket"), attempt)
-                            continue
-                    elif not self._check_mpv_socket(timeout=1.0):
+                    if not self._restart_systemd_service() or not self._wait_for_socket():
                         _retry_sleep_after_failure(ConnectionRefusedError("socket"), attempt)
                         continue
                     self._reset_ipc_session()
@@ -748,9 +698,8 @@ class MPVManager:
             start_time = time.time()
             
             if not self._check_mpv_socket():
-                if not self._try_recover_socket_without_restart():
-                    if not self._restart_systemd_service_if_needed() or not self._wait_for_socket():
-                        raise ConnectionError("MPV socket not available")
+                if not self._restart_systemd_service() or not self._wait_for_socket():
+                    raise ConnectionError("MPV socket not available")
 
             resp = None
             for ping_try in range(8):
