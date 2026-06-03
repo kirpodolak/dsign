@@ -1,4 +1,3 @@
 #!/usr/bin/env bash
-# Deprecated duplicate of dsign-show-startup-ip (kept for older units).
-# dsign-mpv.service should only trigger dsign-show-startup-ip.service once.
+# Deprecated: use dsign-show-startup-ip.service only (dsign-mpv ExecStartPost).
 exec /usr/local/bin/dsign-show-startup-ip "$@"

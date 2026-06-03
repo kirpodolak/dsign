@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Best-effort MPV OSD for boot IP. Must NOT block mpv/digital-signage startup.
+# Best-effort MPV OSD for startup IP. Must NOT block mpv/digital-signage.
 set -u
 
 STARTUP_IP_FILE="${DSIGN_STARTUP_IP_FILE:-/tmp/dsign-startup-ip.txt}"
 MPV_SOCKET="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
 SHOW_DURATION_MS="${DSIGN_STARTUP_IP_DURATION_MS:-60000}"
-# Short wait at boot — playlist/content must start first; IP overlays when mpv is ready.
 SOCKET_WAIT_SEC="${DSIGN_STARTUP_IP_SOCKET_WAIT_SEC:-3}"
-BG_RETRY_SEC="${DSIGN_STARTUP_IP_BG_RETRY_SEC:-45}"
+BG_RETRY_SEC="${DSIGN_STARTUP_IP_BG_RETRY_SEC:-60}"
 
 log() {
   logger -t dsign-show-startup-ip "$*"
@@ -23,15 +22,23 @@ primary_ip() {
 }
 
 resolve_ip() {
-  local ip
-  ip="$(read_ip_from_file || true)"
-  if [ -z "$ip" ]; then
-    allow_live="${DSIGN_STARTUP_IP_ALLOW_LIVE_LOOKUP:-0}"
-    case "$allow_live" in
-      1|true|yes|on|TRUE|YES|ON) ip="$(primary_ip || true)" ;;
-    esac
+  local ip from_file
+  from_file="$(read_ip_from_file || true)"
+  if [ -n "$from_file" ]; then
+        printf '%s' "$from_file"
+        return 0
   fi
-  printf '%s' "$ip"
+  allow_live="${DSIGN_STARTUP_IP_ALLOW_LIVE_LOOKUP:-1}"
+  case "$allow_live" in
+    1|true|yes|on|TRUE|YES|ON)
+      ip="$(primary_ip || true)"
+      if [ -n "$ip" ]; then
+        printf '%s' "$ip"
+        return 0
+      fi
+      ;;
+  esac
+  return 1
 }
 
 wait_for_socket() {
@@ -49,15 +56,10 @@ wait_for_socket() {
   done
 }
 
-# Fire-and-forget: do not block on mpv JSON reply (ytdl/HLS can make IPC slow).
 send_ip_osd_once() {
   local ip_addr="$1"
-  if [ -z "$ip_addr" ]; then
-    return 1
-  fi
-  if ! [ -S "$MPV_SOCKET" ]; then
-    return 1
-  fi
+  [ -n "$ip_addr" ] || return 1
+  [ -S "$MPV_SOCKET" ] || return 1
   if command -v python3 >/dev/null 2>&1; then
     python3 - "$ip_addr" "$SHOW_DURATION_MS" "$MPV_SOCKET" <<'PY' || return 1
 import json, socket, sys
@@ -91,16 +93,16 @@ PY
 
 try_show_ip() {
   local ip_addr
-  ip_addr="$(resolve_ip)"
+  ip_addr="$(resolve_ip || true)"
   if [ -z "$ip_addr" ]; then
-    log "Skip: no startup IP file (not a boot OSD run)"
-    return 0
+    log "Skip: no startup IP yet (file or live lookup)"
+    return 1
   fi
   if ! wait_for_socket; then
     return 1
   fi
   if send_ip_osd_once "$ip_addr"; then
-    log "OSD sent (fire-and-forget): IP=$ip_addr duration_ms=$SHOW_DURATION_MS"
+    log "OSD sent: IP=$ip_addr duration_ms=$SHOW_DURATION_MS"
     if [ -r "$STARTUP_IP_FILE" ]; then
       rm -f "$STARTUP_IP_FILE" 2>/dev/null || true
     fi
@@ -110,13 +112,12 @@ try_show_ip() {
 }
 
 background_retry() {
-  local ip_addr deadline now
-  ip_addr="$(resolve_ip)"
-  [ -n "$ip_addr" ] || return 0
+  local ip_addr deadline
   deadline=$(( $(date +%s) + BG_RETRY_SEC ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    if send_ip_osd_once "$ip_addr"; then
-      log "OSD sent from background retry: IP=$ip_addr"
+    ip_addr="$(resolve_ip || true)"
+    if [ -n "$ip_addr" ] && send_ip_osd_once "$ip_addr"; then
+      log "OSD sent (background): IP=$ip_addr"
       if [ -r "$STARTUP_IP_FILE" ]; then
         rm -f "$STARTUP_IP_FILE" 2>/dev/null || true
       fi
@@ -124,7 +125,7 @@ background_retry() {
     fi
     sleep 0.5
   done
-  log "Background retry finished without OSD (IP=$ip_addr)"
+  log "Background retry ended without OSD"
   return 0
 }
 
@@ -132,11 +133,8 @@ if try_show_ip; then
   exit 0
 fi
 
-# Socket not ready yet — retry in background so systemd oneshot exits immediately.
 if [ "${DSIGN_STARTUP_IP_BACKGROUND_RETRY:-1}" != "0" ]; then
-  (
-    background_retry
-  ) >/dev/null 2>&1 &
+  ( background_retry ) >/dev/null 2>&1 &
   disown 2>/dev/null || true
   log "Spawned background IP OSD retry (${BG_RETRY_SEC}s)"
 fi

@@ -61,7 +61,8 @@ run_nmtui_once() {
 }
 
 main() {
-  rm -f "$STARTUP_IP_FILE"
+  # Do not delete startup IP at entry — dsign-show-startup-ip may run in parallel with mpv;
+  # we overwrite the file when IP is known.
 
   # Non-interactive default: just persist IP (if any) and exit.
   # This helper must never block boot or the web UI.

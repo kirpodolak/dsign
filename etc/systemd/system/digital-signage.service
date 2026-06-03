@@ -2,7 +2,7 @@
 Description=Digital Signage Controller
 After=network.target dsign-mpv.service
 Wants=dsign-mpv.service
-# Do not After= dsign-network-assistant: interactive nmtui on tty1 can block signage for DSIGN_NETWORK_PROMPT_TIMEOUT_SEC.
+# Do not After= dsign-network-assistant (interactive nmtui on tty1 can block up to 120s).
 StartLimitIntervalSec=60
 StartLimitBurst=5
 # After repeated failures systemd stops auto-restarts (inactive dead, no new journal lines until):

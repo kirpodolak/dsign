@@ -12,42 +12,26 @@ Group=video
 SupplementaryGroups=tty audio
 PermissionsStartOnly=true
 Environment="TERM=linux"
-# Профиль: signboard | intel-balanced | intel-balanced-vulkan | intel-high-quality (см. dsign-mpv-launch)
 Environment="DSIGN_MPV_PROFILE=signboard"
 WorkingDirectory=/home/dsign
 
-# Attach to tty1 so DRM can switch to graphics mode
 StandardInput=tty
 TTYPath=/dev/tty1
-# Be conservative with TTY flags:
-# - TTYVHangup/TTYVTDisallocate can deliver SIGHUP / tear down the VT in ways that
-#   make mpv exit immediately, causing restart loops and start-limit-hit.
-# - Keep only the minimum needed for DRM/KMS.
 TTYReset=no
 TTYVHangup=no
 TTYVTDisallocate=no
 
-# Подготовка директории и прав
-# chvt once per boot — repeated chvt on MPV restart flashes the login console.
-ExecStartPre=-/bin/bash -c '[ -f /run/dsign/mpv-display-ready ] || { /bin/chvt 1; /bin/touch /run/dsign/mpv-display-ready; }'
+# Root-only: chvt once per boot (see dsign-mpv-pre-display)
+ExecStartPre=/usr/local/bin/dsign-mpv-pre-display
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
 ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 
-# Основная команда запуска (dsign-mpv-launch читает DSIGN_MPV_PROFILE и общие пути).
-# Для Raspberry Pi в install_dsign.sh задаётся DSIGN_MPV_SIGNBOARD_VARIANT=pi.
-# Intel: например Environment=DSIGN_MPV_PROFILE=intel-balanced в drop-in.
 ExecStart=/usr/local/bin/dsign-mpv-launch
-# Startup IP OSD is best-effort; never fail MPV startup if helper is unavailable.
-ExecStartPost=-/bin/systemctl --no-block restart dsign-show-startup-ip.service
-# Run via bash to avoid execute-bit / noexec issues.
-ExecStartPost=-/bin/bash /usr/local/bin/dsign-mpv-post-start
-# Copy log before mpv truncates it on next start. Pipe through tr so CRLF deployments
-# (Windows editor / core.autocrlf) do not break bash; same pattern as sed in install_dsign.sh.
+ExecStartPost=-/bin/systemctl --no-block start dsign-show-startup-ip.service
 ExecStopPost=-/bin/bash -c "tr -d '\\r' < /usr/local/bin/dsign-mpv-archive-log | bash"
 
-# Настройки перезапуска
 Restart=always
 RestartSec=5s
 StartLimitInterval=60s
