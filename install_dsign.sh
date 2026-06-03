@@ -202,11 +202,9 @@ chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show
 
 mkdir -p /var/lib/dsign/config
 chown "$DSIGN_USER:$DSIGN_USER" /var/lib/dsign/config
-cat > /etc/systemd/system/dsign-network-assistant.service <<EOL
 [Unit]
 Description=Digital Signage Network Assistant (OSD)
 After=network.target
-Before=digital-signage.service dsign-mpv.service
 Wants=network.target
 
 [Service]

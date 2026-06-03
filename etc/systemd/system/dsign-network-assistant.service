@@ -1,7 +1,8 @@
 [Unit]
 Description=Digital Signage Network Assistant (screen mode)
 After=network.target
-Before=dsign-mpv.service digital-signage.service
+# Run early but do not block mpv/signage start (parallel boot).
+Before=
 Wants=network.target
 
 [Service]

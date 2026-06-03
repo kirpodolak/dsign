@@ -1,9 +1,16 @@
 [Unit]
 Description=Digital Signage Startup IP OSD helper
-After=dsign-mpv.service dsign-network-assistant.service
+After=dsign-mpv.service
+# Do not block digital-signage or mpv; this unit must finish in seconds.
+Before=
 
 [Service]
 Type=oneshot
+RemainAfterExit=no
+TimeoutStartSec=10
 User=dsign
 Group=dsign
 ExecStart=/usr/local/bin/dsign-show-startup-ip
+
+[Install]
+WantedBy=multi-user.target

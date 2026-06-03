@@ -87,18 +87,13 @@ Web UI: `http://localhost:5000`
 
 Если система уже развернута, обычно достаточно точечного обновления файлов + `systemctl daemon-reload` + restart сервисов.
 
-### Потоковое видео (RuTube / VK) — переходы и мерцание
+### Boot: IP OSD поверх контента (не блокировать плейлист)
 
-Переменные окружения для `digital-signage.service` (и при необходимости `dsign-mpv.service`):
+- `dsign-show-startup-ip` завершается за секунды (fire-and-forget `show-text`, фоновые повторы до 45 с).
+- `digital-signage` **не ждёт** `dsign-network-assistant` (интерактивный Wi‑Fi на tty1 может занять до 120 с).
+- Плейлист со статусом `playing` в БД возобновляется при старте `digital-signage`.
 
-| Переменная | По умолчанию | Назначение |
-|------------|--------------|------------|
-| `DSIGN_PLAYLIST_TRANSITION` | `logo` | Между сетевыми роликами: `logo` (idle_logo), `black` (lavfi), `none` |
-| `DSIGN_MPV_RESTART_DURING_PLAYBACK` | `0` | `1` — разрешить `systemctl restart dsign-mpv` во время плейлиста |
-| `DSIGN_MPV_SOCKET_RECOVER_SEC` | `12` | Ждать IPC-сокет mpv перед рестартом (ytdl/HLS) |
-| `DSIGN_STARTUP_IP_ALLOW_LIVE_LOOKUP` | `0` | `1` — показывать IP с `ip addr`, если нет startup-файла |
-
-После правок unit-файлов: `sudo systemctl daemon-reload && sudo systemctl restart dsign-mpv digital-signage`.
+Переменные: `DSIGN_STARTUP_IP_SOCKET_WAIT_SEC` (по умолчанию 3), `DSIGN_STARTUP_IP_BG_RETRY_SEC` (45), `DSIGN_STARTUP_IP_ALLOW_LIVE_LOOKUP` (0).
 
 ---
 
