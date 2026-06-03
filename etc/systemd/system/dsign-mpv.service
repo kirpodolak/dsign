@@ -28,7 +28,8 @@ TTYVHangup=no
 TTYVTDisallocate=no
 
 # Подготовка директории и прав
-ExecStartPre=/bin/chvt 1
+# chvt once per boot — repeated chvt on MPV restart flashes the login console.
+ExecStartPre=-/bin/bash -c '[ -f /run/dsign/mpv-display-ready ] || { /bin/chvt 1; /bin/touch /run/dsign/mpv-display-ready; }'
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
 ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
