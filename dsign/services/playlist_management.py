@@ -1232,6 +1232,10 @@ class PlaylistManager:
         self._play_thread = None
         self._stop_event.clear()
         self._active_playlist_id = None
+        try:
+            self._mpv_manager.set_playback_session_active(False)
+        except Exception:
+            pass
 
     def _manual_slideshow_loop(
         self,
