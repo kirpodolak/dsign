@@ -35,21 +35,52 @@ class LogoManager:
             except Exception as e:
                 self.logger.error(f"Failed to initialize default logo: {str(e)}")
 
-    def display_idle_logo(self) -> bool:
-        logo_path = self._validate_logo_file()
-        if not logo_path:
-            return False
+    def _transition_mode(self) -> str:
+        mode = (os.getenv("DSIGN_PLAYLIST_TRANSITION") or "logo").strip().lower()
+        if mode not in ("logo", "black", "none"):
+            return "logo"
+        return mode
 
-        # Не трогаем vo: он задан в systemd (например --vo=gpu --gpu-context=drm).
-        # Принудительный vo=drm здесь ломал согласованность с unit и мог реинициализировать вывод.
+    def display_playlist_transition(self) -> bool:
+        """
+        Short placeholder between playlist items (streams): idle logo or black frame.
+        Avoids visible TTY/console flash when the next loadfile is still opening.
+        """
+        mode = self._transition_mode()
+        if mode == "none":
+            return True
+        if mode == "black":
+            return self._load_transition_black()
+        return self._load_transition_logo(loop=False)
+
+    def _load_transition_black(self) -> bool:
+        black_src = (os.getenv("DSIGN_TRANSITION_BLACK_SRC") or "").strip()
+        if not black_src:
+            black_src = "lavfi://color=c=black:s=1920x1080:r=24"
         commands = [
-            ["loadfile", str(logo_path), "replace"],
-            ["set_property", "loop-file", "inf"],
+            ["loadfile", black_src, "replace"],
+            ["set_property", "loop-file", "no"],
             ["set_property", "pause", "no"],
         ]
-
         for cmd in commands:
-            response = self._mpv_manager._send_command({"command": cmd})
+            response = self._mpv_manager._send_command({"command": cmd}, timeout=8.0)
+            if not response or response.get("error") != "success":
+                self.logger.debug(f"Transition black command failed: {' '.join(map(str, cmd))}")
+                return False
+        return True
+
+    def _load_transition_logo(self, *, loop: bool) -> bool:
+        logo_path = self._validate_logo_file()
+        if not logo_path:
+            return self._load_transition_black()
+
+        commands = [
+            ["loadfile", str(logo_path), "replace"],
+            ["set_property", "loop-file", "inf" if loop else "no"],
+            ["set_property", "pause", "no"],
+        ]
+        for cmd in commands:
+            response = self._mpv_manager._send_command({"command": cmd}, timeout=8.0)
             if not response or response.get("error") != "success":
                 self.logger.warning(f"Failed command: {' '.join(map(str, cmd))}")
                 return False
@@ -59,6 +90,9 @@ class LogoManager:
             timeout=2.0,
         )
         return True
+
+    def display_idle_logo(self) -> bool:
+        return self._load_transition_logo(loop=True)
 
     def _validate_logo_file(self) -> Path:
         """Проверка доступности файла логотипа"""
