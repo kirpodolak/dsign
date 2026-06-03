@@ -22,7 +22,8 @@ TTYVHangup=no
 TTYVTDisallocate=no
 
 # Root-only: chvt once per boot. '-' = ignore errors; bash fallback avoids 203/EXEC if script missing.
-ExecStartPre=-/bin/bash -c 'if [ -x /usr/local/bin/dsign-mpv-pre-display ]; then exec /usr/local/bin/dsign-mpv-pre-display; else mkdir -p /run/dsign 2>/dev/null; /bin/chvt 1 2>/dev/null || true; fi'
+# Never exec /usr/local/bin/* directly (noexec or missing +x → 203/EXEC Permission denied).
+ExecStartPre=-/bin/bash -c 'if [ -f /usr/local/bin/dsign-mpv-pre-display ]; then /bin/bash /usr/local/bin/dsign-mpv-pre-display; else mkdir -p /run/dsign 2>/dev/null; /bin/chvt 1 2>/dev/null || true; fi'
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
 ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv

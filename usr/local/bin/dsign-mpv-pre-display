@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Run as root from dsign-mpv.service ExecStartPre (PermissionsStartOnly=yes).
+# Invoked via /bin/bash (not exec) so noexec on /usr/local does not break startup.
 # Switch to tty1 once per boot for DRM; avoid repeated chvt on mpv restart.
 set -u
 
