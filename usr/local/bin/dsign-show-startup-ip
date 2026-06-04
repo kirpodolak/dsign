@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Best-effort MPV OSD for startup IP. Must NOT block mpv/digital-signage.
+# Best-effort MPV OSD for startup IP. Must NOT block mpv/digital-signage or playlist.
 set -u
 
 STARTUP_IP_FILE="${DSIGN_STARTUP_IP_FILE:-/tmp/dsign-startup-ip.txt}"
 MPV_SOCKET="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
-SHOW_DURATION_MS="${DSIGN_STARTUP_IP_DURATION_MS:-60000}"
+# Short overlay: long durations block the screen and slow perceived mpv/signage restarts.
+SHOW_DURATION_MS="${DSIGN_STARTUP_IP_DURATION_MS:-8000}"
 SOCKET_WAIT_SEC="${DSIGN_STARTUP_IP_SOCKET_WAIT_SEC:-3}"
-BG_RETRY_SEC="${DSIGN_STARTUP_IP_BG_RETRY_SEC:-60}"
+BG_RETRY_SEC="${DSIGN_STARTUP_IP_BG_RETRY_SEC:-15}"
 
 log() {
   logger -t dsign-show-startup-ip "$*"
 }
-
 
 boot_id=""
 if [ -r /proc/sys/kernel/random/boot_id ]; then
@@ -41,8 +41,8 @@ resolve_ip() {
   local ip from_file
   from_file="$(read_ip_from_file || true)"
   if [ -n "$from_file" ]; then
-        printf '%s' "$from_file"
-        return 0
+    printf '%s' "$from_file"
+    return 0
   fi
   allow_live="${DSIGN_STARTUP_IP_ALLOW_LIVE_LOOKUP:-1}"
   case "$allow_live" in
@@ -81,7 +81,7 @@ send_ip_osd_once() {
 import json, socket, sys
 
 ip = sys.argv[1]
-duration_ms = int(sys.argv[2]) if len(sys.argv) > 2 else 60000
+duration_ms = int(sys.argv[2]) if len(sys.argv) > 2 else 8000
 sock_path = sys.argv[3]
 payload = {
     "command": ["show-text", f"IP: {ip}", duration_ms],
@@ -109,7 +109,7 @@ PY
 
 try_show_ip() {
   if startup_ip_already_shown_this_boot; then
-    log "Skip: startup IP already shown this boot"
+    log "Skip: startup IP already shown this boot (mpv service restart ignored)"
     return 0
   fi
   local ip_addr
@@ -133,6 +133,9 @@ try_show_ip() {
 }
 
 background_retry() {
+  if startup_ip_already_shown_this_boot; then
+    return 0
+  fi
   local ip_addr deadline
   deadline=$(( $(date +%s) + BG_RETRY_SEC ))
   while [ "$(date +%s)" -lt "$deadline" ]; do

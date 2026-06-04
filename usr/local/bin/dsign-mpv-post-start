@@ -1,3 +1,5 @@
 #!/usr/bin/env bash
-# Deprecated: use dsign-show-startup-ip.service only (dsign-mpv ExecStartPost).
-exec /usr/local/bin/dsign-show-startup-ip "$@"
+# Deprecated: IP OSD is handled by dsign-show-startup-ip.service (boot-once, non-blocking).
+# Kept for older dsign-mpv.service units that still reference this path — must exit immediately.
+logger -t dsign-mpv-post-start "noop (use dsign-show-startup-ip.service; remove this ExecStartPost from dsign-mpv.service)"
+exit 0

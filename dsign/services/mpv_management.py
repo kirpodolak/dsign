@@ -1020,9 +1020,9 @@ class MPVManager:
         PlaybackService init fails and Flask never binds :5000.
         """
         try:
-            attempts = int((os.getenv("DSIGN_MPV_SOCKET_WAIT_ATTEMPTS") or "45").strip())
+            attempts = int((os.getenv("DSIGN_MPV_SOCKET_WAIT_ATTEMPTS") or "20").strip())
         except ValueError:
-            attempts = 45
+            attempts = 20
         try:
             interval = float((os.getenv("DSIGN_MPV_SOCKET_WAIT_INTERVAL_SEC") or "1").strip())
         except ValueError:

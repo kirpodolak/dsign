@@ -23,8 +23,9 @@ ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp /var/log/dsign
 # Avoid a long ExecStartPre loop here: it blocks `systemctl start` (looks hung; users Ctrl-C before ExecStart runs).
 Environment="TMPDIR=/var/lib/dsign/media/tmp"
 Environment=DSIGN_LOG_LEVEL=WARNING
-# Between playlist items: black frame instead of TTY flash (logo|black|none).
-Environment=DSIGN_PLAYLIST_TRANSITION=black
+# Faster boot when mpv socket is already up (PlaybackService wait_for_ipc_socket_at_startup).
+Environment=DSIGN_MPV_SOCKET_WAIT_ATTEMPTS=20
+Environment=DSIGN_MPV_SOCKET_WAIT_INTERVAL_SEC=0.5
 Environment=SOCKETIO_ASYNC_MODE=threading
 Environment=DSIGN_AUTO_TRANSCODE_VIDEOS=true
 Environment=DSIGN_TRANSCODE_TARGET_RESOLUTION=1920x1080
