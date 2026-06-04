@@ -1,4 +1,4 @@
-from threading import Lock
+from threading import Lock, Thread
 import os
 import shutil
 import subprocess
@@ -499,11 +499,7 @@ def init_api_routes(api_bp, services):
                 return dict(cached)
 
         try:
-            snap = mgr.get_properties_snapshot(
-                ["volume", "mute"],
-                timeout=1.5,
-                lock_wait=1.0,
-            )
+            snap = mgr.get_properties_snapshot(["volume", "mute"], timeout=2.0)
         except Exception:
             return None
         if not snap:
