@@ -1035,11 +1035,17 @@ class MPVManager:
         interval = max(0.2, min(5.0, interval))
         restart_after = max(2, min(attempts - 1, restart_after))
 
+        allow_restart = os.getenv("DSIGN_MPV_STARTUP_RESTART_MPV", "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         did_restart = False
         for i in range(attempts):
             if self._check_mpv_socket(timeout=0.5):
                 return True
-            if i >= restart_after and not did_restart:
+            if allow_restart and i >= restart_after and not did_restart:
                 did_restart = True
                 self.logger.warning(
                     "MPV IPC socket missing during startup; restarting dsign-mpv",
