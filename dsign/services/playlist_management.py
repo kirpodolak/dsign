@@ -1116,11 +1116,27 @@ class PlaylistManager:
         nw_grace = max(3.0, min(120.0, nw_grace))
         grace_until = time.monotonic() + (nw_grace if is_network else 0.3)
         consecutive_idle = 0
+        if is_network:
+            try:
+                poll_sec = float(
+                    (os.getenv("DSIGN_MPV_NETWORK_EOF_POLL_SEC") or "2.0").strip()
+                )
+            except ValueError:
+                poll_sec = 2.0
+            poll_sec = max(1.0, min(10.0, poll_sec))
 
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
             if time.time() - start > 6 * 3600:
                 break
 
+            snap_timeout = 5.0 if is_network else 3.0
+            try:
+                snap_timeout = float(
+                    (os.getenv("DSIGN_MPV_EOF_SNAPSHOT_TIMEOUT_SEC") or snap_timeout).strip()
+                )
+            except ValueError:
+                pass
+            snap_timeout = max(2.0, min(15.0, snap_timeout))
             snap = self._mpv_snapshot(
                 [
                     "eof-reached",
@@ -1129,7 +1145,7 @@ class PlaylistManager:
                     "idle-active",
                     "core-idle",
                 ],
-                timeout=3.0,
+                timeout=snap_timeout,
             )
             eof = self._snap_bool(snap, "eof-reached")
             if eof is True:

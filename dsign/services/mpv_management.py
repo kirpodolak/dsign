@@ -574,6 +574,7 @@ class MPVManager:
                             "type": type(e).__name__,
                         },
                     )
+                self._note_playback_ipc_failure(e)
                 if self._ipc_failure_should_systemd_restart(e):
                     _maybe_restart_mpv_batch(
                         reason=str(e),
