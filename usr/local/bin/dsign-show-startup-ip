@@ -12,6 +12,22 @@ log() {
   logger -t dsign-show-startup-ip "$*"
 }
 
+
+boot_id=""
+if [ -r /proc/sys/kernel/random/boot_id ]; then
+  boot_id="$(tr -d '\n-' < /proc/sys/kernel/random/boot_id)"
+fi
+startup_ip_mark_boot_shown() {
+  [ -n "$boot_id" ] || return 0
+  mkdir -p /run/dsign 2>/dev/null || return 0
+  printf '%s' "$boot_id" > /run/dsign/startup-ip-shown 2>/dev/null || true
+}
+startup_ip_already_shown_this_boot() {
+  [ -n "$boot_id" ] || return 1
+  [ -f /run/dsign/startup-ip-shown ] || return 1
+  [ "$(tr -d '\n' </run/dsign/startup-ip-shown 2>/dev/null || true)" = "$boot_id" ]
+}
+
 read_ip_from_file() {
   [ -r "$STARTUP_IP_FILE" ] || return 1
   tr -d '\r\n' < "$STARTUP_IP_FILE" 2>/dev/null || true
@@ -92,6 +108,10 @@ PY
 }
 
 try_show_ip() {
+  if startup_ip_already_shown_this_boot; then
+    log "Skip: startup IP already shown this boot"
+    return 0
+  fi
   local ip_addr
   ip_addr="$(resolve_ip || true)"
   if [ -z "$ip_addr" ]; then
@@ -103,6 +123,7 @@ try_show_ip() {
   fi
   if send_ip_osd_once "$ip_addr"; then
     log "OSD sent: IP=$ip_addr duration_ms=$SHOW_DURATION_MS"
+    startup_ip_mark_boot_shown
     if [ -r "$STARTUP_IP_FILE" ]; then
       rm -f "$STARTUP_IP_FILE" 2>/dev/null || true
     fi
@@ -118,6 +139,7 @@ background_retry() {
     ip_addr="$(resolve_ip || true)"
     if [ -n "$ip_addr" ] && send_ip_osd_once "$ip_addr"; then
       log "OSD sent (background): IP=$ip_addr"
+      startup_ip_mark_boot_shown
       if [ -r "$STARTUP_IP_FILE" ]; then
         rm -f "$STARTUP_IP_FILE" 2>/dev/null || true
       fi
