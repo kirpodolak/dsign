@@ -1116,11 +1116,27 @@ class PlaylistManager:
         nw_grace = max(3.0, min(120.0, nw_grace))
         grace_until = time.monotonic() + (nw_grace if is_network else 0.3)
         consecutive_idle = 0
+        if is_network:
+            try:
+                poll_sec = float(
+                    (os.getenv("DSIGN_MPV_NETWORK_EOF_POLL_SEC") or "2.0").strip()
+                )
+            except ValueError:
+                poll_sec = 2.0
+            poll_sec = max(1.0, min(10.0, poll_sec))
 
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
             if time.time() - start > 6 * 3600:
                 break
 
+            snap_timeout = 5.0 if is_network else 3.0
+            try:
+                snap_timeout = float(
+                    (os.getenv("DSIGN_MPV_EOF_SNAPSHOT_TIMEOUT_SEC") or snap_timeout).strip()
+                )
+            except ValueError:
+                pass
+            snap_timeout = max(2.0, min(15.0, snap_timeout))
             snap = self._mpv_snapshot(
                 [
                     "eof-reached",
@@ -1129,7 +1145,7 @@ class PlaylistManager:
                     "idle-active",
                     "core-idle",
                 ],
-                timeout=3.0,
+                timeout=snap_timeout,
             )
             eof = self._snap_bool(snap, "eof-reached")
             if eof is True:
@@ -1257,255 +1273,263 @@ class PlaylistManager:
 
         if not items:
             return
+        self._mpv_manager.set_playback_session_active(True)
+        try:
 
-        start_index = int(start_index or 0)
-        if start_index < 0 or start_index >= len(items):
-            start_index = 0
+            start_index = int(start_index or 0)
+            if start_index < 0 or start_index >= len(items):
+                start_index = 0
 
-        default_duration = 10
-        # Single-item playlists: first `loadfile` is done in play(); skip only that one iteration.
-        # Without this flag, skip_load stays true forever and the file never reloads for cycle 2+.
-        did_skip_first_preload = False
-        while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
-            # Iterate cyclically starting from start_index.
-            for offset in range(len(items)):
-                item = items[(start_index + offset) % len(items)]
-                if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
-                    break
-
-                path = item["path"]
-                is_video = item["is_video"]
-                media_key = str(item.get("key") or path)
-                raw_duration = item.get("duration")
-                # Only images use duration. Treat 0/None as "missing" for images.
-                duration = raw_duration if (raw_duration is not None and int(raw_duration) >= 1) else default_duration
-                muted = self._effective_playback_muted(
-                    item_muted=bool(item.get("muted", False)),
-                    profile_muted=profile_muted,
-                )
-
-                # Apply per-item settings (best-effort, longer timeout to avoid IPC churn on Pi 3B+).
-                # NOTE: if MPV is under load, short timeouts cause broken pipes and retry storms.
-                try:
-                    self._mpv_manager._send_command(
-                        # Do NOT loop files. We control the loop at application level,
-                        # and looping still images can cause visible "blink" on some builds.
-                        {"command": ["set_property", "loop-file", "no"]},
-                        timeout=5.0,
-                    )
-                except Exception:
-                    pass
-
-                # Still images use keep-open=yes to avoid close/reopen flicker. If we then load a
-                # video, that sticky property can prevent a clean EOF/idle transition and the
-                # playlist thread never advances. Reset before every video load.
-                if is_video:
-                    try:
-                        self._mpv_manager._send_command(
-                            {"command": ["set_property", "keep-open", "no"]},
-                            timeout=3.0,
-                        )
-                    except Exception:
-                        pass
-
-                # Load next media file
-                load_started = time.monotonic()
-                # Respect per-media backoff to avoid tight loops on failing streams.
-                try:
-                    b = self._media_backoff.get(media_key) or {}
-                    next_try = float(b.get("next_try_monotonic") or 0.0)
-                except Exception:
-                    next_try = 0.0
-                if next_try and time.monotonic() < next_try:
-                    wait_sec = max(0.0, next_try - time.monotonic())
-                    self.logger.debug(
-                        "Backoff active for media",
-                        extra={"media_key": media_key, "wait_sec": round(wait_sec, 2)},
-                    )
-                    self._stop_event.wait(timeout=min(30.0, wait_sec))
+            default_duration = 10
+            # Single-item playlists: first `loadfile` is done in play(); skip only that one iteration.
+            # Without this flag, skip_load stays true forever and the file never reloads for cycle 2+.
+            did_skip_first_preload = False
+            while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
+                # Iterate cyclically starting from start_index.
+                for offset in range(len(items)):
+                    item = items[(start_index + offset) % len(items)]
                     if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                         break
-                skip_load = bool(
-                    first_item_preloaded
-                    and start_index == 0
-                    and offset == 0
-                    and not did_skip_first_preload
-                )
-                if skip_load:
-                    did_skip_first_preload = True
-                normalized_headers: Dict[str, str] = {}
-                mpv_per_file_opts: Dict[str, Any] = {}
-                if not skip_load:
-                    # External streams: Referer/UA must be set before loadfile (and cleared between items).
-                    normalized_headers, mpv_per_file_opts = self._apply_mpv_http_headers(item, stream_url=str(path))
-                    self._apply_mpv_ytdl_options(item, stream_url=str(path))
-                    load_cmd = self._mpv_loadfile_command(
-                        str(path),
-                        "replace",
-                        per_file_opts=mpv_per_file_opts,
+
+                    path = item["path"]
+                    is_video = item["is_video"]
+                    media_key = str(item.get("key") or path)
+                    raw_duration = item.get("duration")
+                    # Only images use duration. Treat 0/None as "missing" for images.
+                    duration = raw_duration if (raw_duration is not None and int(raw_duration) >= 1) else default_duration
+                    muted = self._effective_playback_muted(
+                        item_muted=bool(item.get("muted", False)),
+                        profile_muted=profile_muted,
                     )
-                    load_resp = self._mpv_manager._send_command({"command": load_cmd}, timeout=20.0)
-                    self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
-                    self._sync_settings_audio_to_mpv()
-                    # Apply after loadfile: mpv may reset mute/volume on a new file.
+
+                    # Apply per-item settings (best-effort, longer timeout to avoid IPC churn on Pi 3B+).
+                    # NOTE: if MPV is under load, short timeouts cause broken pipes and retry storms.
                     try:
                         self._mpv_manager._send_command(
-                            {"command": ["set_property", "mute", "yes" if muted else "no"]},
+                            # Do NOT loop files. We control the loop at application level,
+                            # and looping still images can cause visible "blink" on some builds.
+                            {"command": ["set_property", "loop-file", "no"]},
                             timeout=5.0,
                         )
                     except Exception:
                         pass
-                    if not load_resp or load_resp.get("error") != "success":
-                        self.logger.warning(
-                            "MPV loadfile failed",
-                            extra={"path": path, "mpv_response": load_resp},
-                        )
-                        # Skip to next item; avoid getting stuck on a bad file.
-                        continue
 
-                if is_video:
-                    # Network streams: mpv stays idle-active until open; do not treat idle as EOF.
-                    is_network = isinstance(path, str) and (
-                        path.startswith("http://")
-                        or path.startswith("https://")
-                        or path.startswith("ytdl://")
-                    )
-                    stream_ready = False
-                    if is_network:
-                        # For ytdl:// sources, ytdl_hook can overwrite lavf options with cookies.
-                        # Re-apply/merge UA+Referer+headers after ytdl_hook writes cookies, before ffmpeg opens EDL parts.
-                        if isinstance(path, str) and path.startswith("ytdl://"):
-                            try:
-                                self._apply_mpv_lavf_headers_after_ytdl_hook(
-                                    normalized_headers=normalized_headers or {},
-                                    stream_url=str(path),
-                                    provider=str(item.get("provider") or "") if item.get("provider") else None,
-                                    timeout_sec=8.0,
-                                )
-                            except Exception:
-                                pass
-                        if not self._wait_mpv_leave_idle(timeout_sec=60.0):
-                            self.logger.warning(
-                                "MPV stayed idle after loadfile (stream failed or blocked)",
-                                extra={"media_key": media_key, "path_preview": str(path)[:120]},
-                            )
-                            self._register_media_failure(media_key, reason="stayed_idle")
-                            continue
-                        # Resolved http(s) URLs (e.g. Rutube HLS after resolver): once idle-active is false,
-                        # mpv has opened the stream — extra _wait_mpv_stream_ready often times out because
-                        # time-pos/duration/cache IPC differs per build.
-                        # ytdl://: treat like plain network — leave-idle + demuxer wait is enough; stream-ready
-                        # IPC is inconsistent across mpv builds and caused false not_ready for Rutube/VK.
-                        path_s = str(path)
-                        strict_https = os.getenv("DSIGN_MPV_STREAM_READY_HTTPS", "").strip().lower() in (
-                            "1",
-                            "true",
-                            "yes",
-                            "on",
-                        )
-                        needs_ready_wait = path_s.startswith("edl://")
-                        if needs_ready_wait or (
-                            strict_https
-                            and (path_s.startswith("http://") or path_s.startswith("https://"))
-                        ):
-                            stream_ready = self._wait_mpv_stream_ready(path_s)
-                            if not stream_ready:
-                                self.logger.warning(
-                                    "MPV stream did not become ready (no time-pos/duration/path match)",
-                                    extra={"media_key": media_key, "path_preview": path_s[:120]},
-                                )
-                                self._register_media_failure(media_key, reason="not_ready")
-                                continue
-                        else:
-                            stream_ready = True
-                        # HLS can leave idle before demuxer/path is populated; give time to open or fail clearly.
+                    # Still images use keep-open=yes to avoid close/reopen flicker. If we then load a
+                    # video, that sticky property can prevent a clean EOF/idle transition and the
+                    # playlist thread never advances. Reset before every video load.
+                    if is_video:
                         try:
-                            dem_to = float((os.getenv("DSIGN_MPV_DEMUXER_WAIT_SEC") or "45").strip())
-                        except ValueError:
-                            dem_to = 45.0
-                        dem_to = max(5.0, min(120.0, dem_to))
-                        if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to):
-                            self.logger.warning(
-                                "MPV network stream never opened demuxer (idle or EOF before HLS attach)",
-                                extra={"media_key": media_key, "path_preview": str(path)[:160]},
+                            self._mpv_manager._send_command(
+                                {"command": ["set_property", "keep-open", "no"]},
+                                timeout=3.0,
                             )
-                            self._log_mpv_network_debug_snapshot(media_key=media_key, url=str(path))
-                            self._register_media_failure(media_key, reason="demuxer_timeout")
-                            continue
-                        # Detect "instant EOF" right after we considered it ready; avoid VK loops.
-                        if self._detect_mpv_instant_eof(window_sec=2.5):
-                            self.logger.warning(
-                                "MPV stream ended immediately after start (instant EOF)",
-                                extra={"media_key": media_key, "path_preview": str(path)[:160]},
-                            )
-                            self._log_mpv_network_debug_snapshot(media_key=media_key, url=str(path))
-                            self._register_media_failure(media_key, reason="instant_eof")
-                            continue
-                        self._reset_media_backoff(media_key)
-                    self._wait_mpv_video_end(
-                        playlist_id,
-                        is_network=is_network,
-                        stream_ready=stream_ready,
-                        poll_sec=1.0,
-                    )
-                else:
-                    # For still images, keep the frame open to avoid quick close/reopen churn.
-                    # (Videos should not be kept open; they are EOF-driven here.)
+                        except Exception:
+                            pass
+
+                    # Load next media file
+                    load_started = time.monotonic()
+                    # Respect per-media backoff to avoid tight loops on failing streams.
                     try:
-                        self._mpv_manager._send_command(
-                            {"command": ["set_property", "keep-open", "yes"]},
-                            timeout=2.0,
-                        )
+                        b = self._media_backoff.get(media_key) or {}
+                        next_try = float(b.get("next_try_monotonic") or 0.0)
                     except Exception:
-                        pass
-
-                    # Deterministic image timer:
-                    # wait until MPV loaded the file *and* VO is configured, then schedule switch.
-                    #
-                    # IMPORTANT:
-                    # Historically we started the countdown after mpv confirmed the file was loaded.
-                    # That makes the *perceived* duration more stable when IO/decoding is slow, but
-                    # it also creates a constant drift vs the DB duration (duration + load time).
-                    # Default behavior here is to match DB duration from the moment we initiate loadfile.
-                    # Use DSIGN_IMAGE_TIMER_MODE=from_ready to restore the old behavior.
-                    loaded = self._wait_for_mpv_loaded_path(path, timeout=15.0)
-                    vo_ready = self._wait_for_mpv_vo_configured(timeout=5.0)
-                    ready_at = time.monotonic()
-                    load_wait_sec = round(ready_at - load_started, 3)
-
-                    dur_sec = max(1, int(duration))
-                    timer_mode = os.getenv("DSIGN_IMAGE_TIMER_MODE", "from_load").strip().lower()
-                    if timer_mode not in ("from_load", "from_ready"):
-                        timer_mode = "from_load"
-                    base_t = load_started if timer_mode == "from_load" else ready_at
-                    switch_at = base_t + dur_sec
-                    self.logger.debug(
-                        "Image timer scheduled",
-                        extra={
-                            "path": path,
-                            "duration_sec": dur_sec,
-                            "timer_mode": timer_mode,
-                            "loaded_confirmed": loaded,
-                            "vo_configured": vo_ready,
-                            "load_wait_sec": load_wait_sec,
-                        },
-                    )
-                    reached = self._sleep_until(switch_at, step=0.2)
-                    if reached:
-                        fired_at = time.monotonic()
-                        drift_sec = round(fired_at - (base_t + dur_sec), 3)
-                        # Positive drift means we switched later than scheduled (thread wake / load spikes).
+                        next_try = 0.0
+                    if next_try and time.monotonic() < next_try:
+                        wait_sec = max(0.0, next_try - time.monotonic())
                         self.logger.debug(
-                            "Image timer fired",
+                            "Backoff active for media",
+                            extra={"media_key": media_key, "wait_sec": round(wait_sec, 2)},
+                        )
+                        self._stop_event.wait(timeout=min(30.0, wait_sec))
+                        if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
+                            break
+                    skip_load = bool(
+                        first_item_preloaded
+                        and start_index == 0
+                        and offset == 0
+                        and not did_skip_first_preload
+                    )
+                    if skip_load:
+                        did_skip_first_preload = True
+                    normalized_headers: Dict[str, str] = {}
+                    mpv_per_file_opts: Dict[str, Any] = {}
+                    if not skip_load:
+                        try:
+                            self._logo_manager.display_playlist_transition()
+                        except Exception:
+                            pass
+                        # External streams: Referer/UA must be set before loadfile (and cleared between items).
+                        normalized_headers, mpv_per_file_opts = self._apply_mpv_http_headers(item, stream_url=str(path))
+                        self._apply_mpv_ytdl_options(item, stream_url=str(path))
+                        load_cmd = self._mpv_loadfile_command(
+                            str(path),
+                            "replace",
+                            per_file_opts=mpv_per_file_opts,
+                        )
+                        load_resp = self._mpv_manager._send_command({"command": load_cmd}, timeout=20.0)
+                        self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
+                        self._sync_settings_audio_to_mpv()
+                        # Apply after loadfile: mpv may reset mute/volume on a new file.
+                        try:
+                            self._mpv_manager._send_command(
+                                {"command": ["set_property", "mute", "yes" if muted else "no"]},
+                                timeout=5.0,
+                            )
+                        except Exception:
+                            pass
+                        if not load_resp or load_resp.get("error") != "success":
+                            self.logger.warning(
+                                "MPV loadfile failed",
+                                extra={"path": path, "mpv_response": load_resp},
+                            )
+                            # Skip to next item; avoid getting stuck on a bad file.
+                            continue
+
+                    if is_video:
+                        # Network streams: mpv stays idle-active until open; do not treat idle as EOF.
+                        is_network = isinstance(path, str) and (
+                            path.startswith("http://")
+                            or path.startswith("https://")
+                            or path.startswith("ytdl://")
+                        )
+                        stream_ready = False
+                        if is_network:
+                            # For ytdl:// sources, ytdl_hook can overwrite lavf options with cookies.
+                            # Re-apply/merge UA+Referer+headers after ytdl_hook writes cookies, before ffmpeg opens EDL parts.
+                            if isinstance(path, str) and path.startswith("ytdl://"):
+                                try:
+                                    self._apply_mpv_lavf_headers_after_ytdl_hook(
+                                        normalized_headers=normalized_headers or {},
+                                        stream_url=str(path),
+                                        provider=str(item.get("provider") or "") if item.get("provider") else None,
+                                        timeout_sec=8.0,
+                                    )
+                                except Exception:
+                                    pass
+                            if not self._wait_mpv_leave_idle(timeout_sec=60.0):
+                                self.logger.warning(
+                                    "MPV stayed idle after loadfile (stream failed or blocked)",
+                                    extra={"media_key": media_key, "path_preview": str(path)[:120]},
+                                )
+                                self._register_media_failure(media_key, reason="stayed_idle")
+                                continue
+                            # Resolved http(s) URLs (e.g. Rutube HLS after resolver): once idle-active is false,
+                            # mpv has opened the stream — extra _wait_mpv_stream_ready often times out because
+                            # time-pos/duration/cache IPC differs per build.
+                            # ytdl://: treat like plain network — leave-idle + demuxer wait is enough; stream-ready
+                            # IPC is inconsistent across mpv builds and caused false not_ready for Rutube/VK.
+                            path_s = str(path)
+                            strict_https = os.getenv("DSIGN_MPV_STREAM_READY_HTTPS", "").strip().lower() in (
+                                "1",
+                                "true",
+                                "yes",
+                                "on",
+                            )
+                            needs_ready_wait = path_s.startswith("edl://")
+                            if needs_ready_wait or (
+                                strict_https
+                                and (path_s.startswith("http://") or path_s.startswith("https://"))
+                            ):
+                                stream_ready = self._wait_mpv_stream_ready(path_s)
+                                if not stream_ready:
+                                    self.logger.warning(
+                                        "MPV stream did not become ready (no time-pos/duration/path match)",
+                                        extra={"media_key": media_key, "path_preview": path_s[:120]},
+                                    )
+                                    self._register_media_failure(media_key, reason="not_ready")
+                                    continue
+                            else:
+                                stream_ready = True
+                            # HLS can leave idle before demuxer/path is populated; give time to open or fail clearly.
+                            try:
+                                dem_to = float((os.getenv("DSIGN_MPV_DEMUXER_WAIT_SEC") or "45").strip())
+                            except ValueError:
+                                dem_to = 45.0
+                            dem_to = max(5.0, min(120.0, dem_to))
+                            if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to):
+                                self.logger.warning(
+                                    "MPV network stream never opened demuxer (idle or EOF before HLS attach)",
+                                    extra={"media_key": media_key, "path_preview": str(path)[:160]},
+                                )
+                                self._log_mpv_network_debug_snapshot(media_key=media_key, url=str(path))
+                                self._register_media_failure(media_key, reason="demuxer_timeout")
+                                continue
+                            # Detect "instant EOF" right after we considered it ready; avoid VK loops.
+                            if self._detect_mpv_instant_eof(window_sec=2.5):
+                                self.logger.warning(
+                                    "MPV stream ended immediately after start (instant EOF)",
+                                    extra={"media_key": media_key, "path_preview": str(path)[:160]},
+                                )
+                                self._log_mpv_network_debug_snapshot(media_key=media_key, url=str(path))
+                                self._register_media_failure(media_key, reason="instant_eof")
+                                continue
+                            self._reset_media_backoff(media_key)
+                        self._wait_mpv_video_end(
+                            playlist_id,
+                            is_network=is_network,
+                            stream_ready=stream_ready,
+                            poll_sec=1.0,
+                        )
+                    else:
+                        # For still images, keep the frame open to avoid quick close/reopen churn.
+                        # (Videos should not be kept open; they are EOF-driven here.)
+                        try:
+                            self._mpv_manager._send_command(
+                                {"command": ["set_property", "keep-open", "yes"]},
+                                timeout=2.0,
+                            )
+                        except Exception:
+                            pass
+
+                        # Deterministic image timer:
+                        # wait until MPV loaded the file *and* VO is configured, then schedule switch.
+                        #
+                        # IMPORTANT:
+                        # Historically we started the countdown after mpv confirmed the file was loaded.
+                        # That makes the *perceived* duration more stable when IO/decoding is slow, but
+                        # it also creates a constant drift vs the DB duration (duration + load time).
+                        # Default behavior here is to match DB duration from the moment we initiate loadfile.
+                        # Use DSIGN_IMAGE_TIMER_MODE=from_ready to restore the old behavior.
+                        loaded = self._wait_for_mpv_loaded_path(path, timeout=15.0)
+                        vo_ready = self._wait_for_mpv_vo_configured(timeout=5.0)
+                        ready_at = time.monotonic()
+                        load_wait_sec = round(ready_at - load_started, 3)
+
+                        dur_sec = max(1, int(duration))
+                        timer_mode = os.getenv("DSIGN_IMAGE_TIMER_MODE", "from_load").strip().lower()
+                        if timer_mode not in ("from_load", "from_ready"):
+                            timer_mode = "from_load"
+                        base_t = load_started if timer_mode == "from_load" else ready_at
+                        switch_at = base_t + dur_sec
+                        self.logger.debug(
+                            "Image timer scheduled",
                             extra={
                                 "path": path,
                                 "duration_sec": dur_sec,
                                 "timer_mode": timer_mode,
-                                "drift_sec": drift_sec,
+                                "loaded_confirmed": loaded,
+                                "vo_configured": vo_ready,
                                 "load_wait_sec": load_wait_sec,
                             },
                         )
+                        reached = self._sleep_until(switch_at, step=0.2)
+                        if reached:
+                            fired_at = time.monotonic()
+                            drift_sec = round(fired_at - (base_t + dur_sec), 3)
+                            # Positive drift means we switched later than scheduled (thread wake / load spikes).
+                            self.logger.debug(
+                                "Image timer fired",
+                                extra={
+                                    "path": path,
+                                    "duration_sec": dur_sec,
+                                    "timer_mode": timer_mode,
+                                    "drift_sec": drift_sec,
+                                    "load_wait_sec": load_wait_sec,
+                                },
+                            )
 
+        finally:
+            self._mpv_manager.set_playback_session_active(False)
     def _register_media_failure(self, media_key: str, reason: str = "unknown") -> None:
         """Exponential backoff for media that fails to start/open."""
         if not media_key:
