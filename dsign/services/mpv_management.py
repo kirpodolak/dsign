@@ -56,6 +56,8 @@ class MPVManager:
         self._mpv_ready = False
         self._managed_by_systemd = True
         self._playback_session_active = False
+        self._playback_ipc_fail_streak = 0
+        self._playback_ipc_fail_lock = Lock()
 
         # Логирование инициализации
         self.logger.info(
@@ -106,6 +108,67 @@ class MPVManager:
     def set_playback_session_active(self, active: bool) -> None:
         """Playlist thread sets this to reduce MPV systemd restarts during stream transitions."""
         self._playback_session_active = bool(active)
+        if not active:
+            self._reset_playback_ipc_fail_streak()
+
+
+    def _ipc_lock_timeout_sec(self, lock_wait: Optional[float] = None) -> float:
+        if lock_wait is not None:
+            return max(0.1, min(60.0, float(lock_wait)))
+        try:
+            sec = float((os.getenv("DSIGN_MPV_IPC_LOCK_TIMEOUT_SEC") or "6").strip())
+        except ValueError:
+            sec = 6.0
+        return max(0.5, min(30.0, sec))
+
+    def _acquire_ipc_lock(self, *, lock_wait: Optional[float] = None) -> bool:
+        return self._ipc_lock.acquire(timeout=self._ipc_lock_timeout_sec(lock_wait))
+
+    def _release_ipc_lock(self) -> None:
+        try:
+            self._ipc_lock.release()
+        except RuntimeError:
+            pass
+
+    def _reset_playback_ipc_fail_streak(self) -> None:
+        with self._playback_ipc_fail_lock:
+            self._playback_ipc_fail_streak = 0
+
+    def _playback_hung_restart_threshold(self) -> int:
+        try:
+            n = int((os.getenv("DSIGN_MPV_PLAYBACK_HUNG_RESTART_AFTER") or "12").strip())
+        except ValueError:
+            n = 12
+        return max(4, min(60, n))
+
+    def _note_playback_ipc_failure(self, exc: BaseException) -> None:
+        if not self._playback_session_active:
+            return
+        if not (
+            isinstance(exc, MPVIPCTimeoutError)
+            or isinstance(exc, MPVIPCClosedError)
+            or _is_ipc_transport_error(exc)
+        ):
+            return
+        with self._playback_ipc_fail_lock:
+            self._playback_ipc_fail_streak += 1
+            streak = self._playback_ipc_fail_streak
+        if streak < self._playback_hung_restart_threshold():
+            return
+        self.logger.error(
+            "MPV appears hung during playlist (IPC failures); forcing systemd restart",
+            extra={
+                "operation": "PlaybackHungRecovery",
+                "streak": streak,
+                "error": str(exc),
+                "type": type(exc).__name__,
+            },
+        )
+        with self._playback_ipc_fail_lock:
+            self._playback_ipc_fail_streak = 0
+        if self._restart_systemd_service():
+            self._wait_for_socket(timeout=15.0)
+            self._reset_ipc_session()
 
     def _restart_during_playback_allowed(self) -> bool:
         v = os.getenv("DSIGN_MPV_RESTART_DURING_PLAYBACK", "0").strip().lower()
@@ -363,6 +426,7 @@ class MPVManager:
         names: List[str],
         *,
         timeout: float = 3.0,
+        lock_wait: Optional[float] = None,
     ) -> Dict[str, Optional[Any]]:
         """
         Multiple get_property in one IPC round-trip (ordered, de-duplicated keys).
@@ -445,9 +509,17 @@ class MPVManager:
                 items.append((ipc_request_id, {"command": ["get_property", pname]}))
             first_rid = ids[0] if ids else 0
             try:
-                with self._ipc_lock:
+                if not self._acquire_ipc_lock(lock_wait=lock_wait):
+                    self.logger.debug(
+                        "IPC lock busy; batch snapshot skipped",
+                        extra={"operation": "MPVCommandBatch"},
+                    )
+                    raise MPVIPCTimeoutError("IPC lock busy (batch)")
+                try:
                     sess = self._get_ipc_session()
                     raw_results = sess.commands_batch(items, timeout=float(timeout))
+                finally:
+                    self._release_ipc_lock()
 
                 out: Dict[str, Optional[Any]] = {}
                 for pname, ipc_request_id, raw in zip(ordered, ids, raw_results):
@@ -605,15 +677,24 @@ class MPVManager:
                     },
                 )
             try:
-                with self._ipc_lock:
+                if not self._acquire_ipc_lock():
+                    self.logger.debug(
+                        "IPC lock busy; command skipped",
+                        extra={"operation": "MPVCommand", "command": command_name},
+                    )
+                    return None
+                try:
                     sess = self._get_ipc_session()
                     result = sess.command(
                         dict(command),
                         timeout=timeout,
                         request_id=ipc_request_id,
                     )
+                finally:
+                    self._release_ipc_lock()
 
                 duration_sec = round(time.time() - start_time, 3)
+                self._reset_playback_ipc_fail_streak()
                 err = result.get("error")
                 if err == "success":
                     duration_ms = int(duration_sec * 1000)
@@ -731,6 +812,7 @@ class MPVManager:
                     },
                 )
                 self._reset_ipc_session()
+                self._note_playback_ipc_failure(e)
                 if self._ipc_failure_should_systemd_restart(e):
                     _maybe_restart_mpv_for_transport(
                         reason=str(e), attempt_num=attempt + 1
