@@ -1,5 +1,6 @@
 dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart digital-signage.service
 dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart dsign-mpv.service
+dsign ALL=(root) NOPASSWD: /usr/bin/systemctl start dsign-show-startup-ip.service
 dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart screenshot.service
 dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart dsign-network-assistant.service
 dsign ALL=(root) NOPASSWD: /sbin/reboot, /usr/bin/systemctl reboot
