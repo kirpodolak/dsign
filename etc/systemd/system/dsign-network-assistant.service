@@ -1,6 +1,7 @@
 [Unit]
 Description=Digital Signage Network Assistant (screen mode)
 After=network.target
+Before=dsign-mpv.service digital-signage.service
 Wants=network.target
 
 [Service]
@@ -9,8 +10,11 @@ RemainAfterExit=yes
 User=root
 Group=root
 ExecStart=/usr/local/bin/dsign-network-assistant
+# Optional per-device config (written by Settings UI). Must be safe to ignore.
 EnvironmentFile=-/var/lib/dsign/config/network-assistant.env
+# Interactive nmtui on tty1 only when DSIGN_NETWORK_ASSISTANT_INTERACTIVE=1 (Settings).
 Environment=DSIGN_NETWORK_PROMPT_TIMEOUT_SEC=120
+Environment=DSIGN_NETWORK_ASSISTANT_INTERACTIVE=0
 Environment=DSIGN_STARTUP_IP_FILE=/tmp/dsign-startup-ip.txt
 
 [Install]
