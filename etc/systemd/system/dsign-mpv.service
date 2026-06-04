@@ -21,8 +21,7 @@ TTYReset=no
 TTYVHangup=no
 TTYVTDisallocate=no
 
-# Root-only: chvt once per boot. '-' = ignore errors; bash fallback avoids 203/EXEC if script missing.
-# Never exec /usr/local/bin/* directly (noexec or missing +x → 203/EXEC Permission denied).
+# chvt once per boot (dsign-mpv-pre-display). Never exec scripts under /usr/local directly.
 ExecStartPre=-/bin/bash -c 'if [ -f /usr/local/bin/dsign-mpv-pre-display ]; then /bin/bash /usr/local/bin/dsign-mpv-pre-display; else mkdir -p /run/dsign 2>/dev/null; /bin/chvt 1 2>/dev/null || true; fi'
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
 ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
@@ -30,6 +29,7 @@ ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 
 ExecStart=/usr/local/bin/dsign-mpv-launch
+# Boot-only IP OSD (script skips if already shown this boot). No duplicate post-start hook.
 ExecStartPost=-/bin/systemctl --no-block start dsign-show-startup-ip.service
 ExecStopPost=-/bin/bash -c "tr -d '\\r' < /usr/local/bin/dsign-mpv-archive-log | bash"
 

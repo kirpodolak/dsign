@@ -121,7 +121,10 @@ class PlaybackService:
                 if not self._mpv_manager.initialize():
                     raise RuntimeError("MPV initialization failed")
                 
-                Thread(target=self._preload_resources).start()
+                if self._should_resume_playback_after_boot():
+                    Thread(target=self._resume_playback_after_boot, daemon=True).start()
+                else:
+                    Thread(target=self._preload_resources).start()
                 return
                     
             except Exception as e:

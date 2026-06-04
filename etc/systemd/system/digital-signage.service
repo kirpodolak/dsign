@@ -1,8 +1,8 @@
 [Unit]
 Description=Digital Signage Controller
-After=network.target dsign-mpv.service
+After=network.target dsign-mpv.service dsign-network-assistant.service
 Wants=dsign-mpv.service
-# Do not After= dsign-network-assistant (interactive nmtui on tty1 can block up to 120s).
+# Do not Wants= network-assistant here: it is Type=oneshot (can block ~120s). MPV unit already Wants it before signage.
 StartLimitIntervalSec=60
 StartLimitBurst=5
 # After repeated failures systemd stops auto-restarts (inactive dead, no new journal lines until):
@@ -23,6 +23,8 @@ ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp /var/log/dsign
 # Avoid a long ExecStartPre loop here: it blocks `systemctl start` (looks hung; users Ctrl-C before ExecStart runs).
 Environment="TMPDIR=/var/lib/dsign/media/tmp"
 Environment=DSIGN_LOG_LEVEL=WARNING
+# Between playlist items: black frame instead of TTY flash (logo|black|none).
+Environment=DSIGN_PLAYLIST_TRANSITION=black
 Environment=SOCKETIO_ASYNC_MODE=threading
 Environment=DSIGN_AUTO_TRANSCODE_VIDEOS=true
 Environment=DSIGN_TRANSCODE_TARGET_RESOLUTION=1920x1080

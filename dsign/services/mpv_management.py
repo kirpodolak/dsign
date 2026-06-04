@@ -141,6 +141,13 @@ class MPVManager:
             return self._try_recover_socket_without_restart()
         return self._restart_systemd_service()
 
+    def _ipc_failure_should_systemd_restart(self, exc: BaseException) -> bool:
+        """During playlist playback avoid systemd restart on slow IPC (mpv busy opening streams)."""
+        if self._playback_session_active and not self._restart_during_playback_allowed():
+            if isinstance(exc, MPVIPCTimeoutError) or _is_ipc_transport_error(exc):
+                return False
+        return _ipc_error_should_restart_mpv(exc)
+
     def _check_systemd_service(self) -> bool:
         """Проверка статуса systemd сервиса"""
         try:
@@ -279,13 +286,14 @@ class MPVManager:
             {"timeout": timeout, "socket_path": self.mpv_socket}
         )
         
-        if not self._check_systemd_service():
-            self.logger.warning(
-                "MPV service inactive, attempting restart",
-                extra={"operation": "SocketWait"}
-            )
-            if not self._restart_systemd_service_if_needed():
-                return False
+        if not self._check_mpv_socket(timeout=1.0):
+            if not self._check_systemd_service():
+                self.logger.warning(
+                    "MPV service inactive, attempting restart",
+                    extra={"operation": "SocketWait"},
+                )
+                if not self._restart_systemd_service_if_needed():
+                    return False
 
         start_time = time.time()
         last_status_time = start_time
@@ -494,7 +502,7 @@ class MPVManager:
                             "type": type(e).__name__,
                         },
                     )
-                if _ipc_error_should_restart_mpv(e):
+                if self._ipc_failure_should_systemd_restart(e):
                     _maybe_restart_mpv_batch(
                         reason=str(e),
                         attempt_num=attempt + 1,
@@ -723,7 +731,7 @@ class MPVManager:
                     },
                 )
                 self._reset_ipc_session()
-                if _ipc_error_should_restart_mpv(e):
+                if self._ipc_failure_should_systemd_restart(e):
                     _maybe_restart_mpv_for_transport(
                         reason=str(e), attempt_num=attempt + 1
                     )
