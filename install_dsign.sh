@@ -146,43 +146,98 @@ chmod 775 "$DB_DIR/mpv-minimal"
 chmod 664 "$DB_DIR/mpv-minimal/mpv.conf" 2>/dev/null || true
 
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-launch" /usr/local/bin/dsign-mpv-launch
-install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-pre-display" /usr/local/bin/dsign-mpv-pre-display
-install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-post-start" /usr/local/bin/dsign-mpv-post-start
-for _bin in dsign-mpv-launch dsign-mpv-pre-display dsign-mpv-post-start; do
-    sed -i 's/\r$//' "/usr/local/bin/$_bin"
-done
-chown root:root /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-pre-display /usr/local/bin/dsign-mpv-post-start
+sed -i 's/\r$//' /usr/local/bin/dsign-mpv-launch
+chown root:root /usr/local/bin/dsign-mpv-launch
 
-if [ -f "$PROJECT_DIR/etc/tmpfiles.d/dsign.conf" ]; then
-    install -m 0644 "$PROJECT_DIR/etc/tmpfiles.d/dsign.conf" /etc/tmpfiles.d/dsign.conf
-    systemd-tmpfiles --create /etc/tmpfiles.d/dsign.conf 2>/dev/null || true
-fi
+# MPV Player Service
+cat > /etc/systemd/system/dsign-mpv.service <<EOL
+[Unit]
+Description=Digital Signage MPV Player
+After=network.target getty@tty1.service
+Conflicts=getty@tty1.service
 
-# MPV / network / startup-ip units — from repo templates (avoid drift vs embedded heredocs)
-for _unit in dsign-mpv.service dsign-network-assistant.service dsign-show-startup-ip.service; do
-    if [ -f "$PROJECT_DIR/etc/systemd/system/$_unit" ]; then
-        install -m 0644 "$PROJECT_DIR/etc/systemd/system/$_unit" "/etc/systemd/system/$_unit"
-    fi
-done
-# Pi signboard profile drop-in for install-time mpv unit
-if grep -q 'DSIGN_MPV_PROFILE=signboard' /etc/systemd/system/dsign-mpv.service 2>/dev/null; then
-    grep -q 'DSIGN_MPV_SIGNBOARD_VARIANT' /etc/systemd/system/dsign-mpv.service 2>/dev/null || \
-        sed -i '/^Environment="DSIGN_MPV_PROFILE=signboard"/a Environment="DSIGN_MPV_SIGNBOARD_VARIANT=pi"' \
-            /etc/systemd/system/dsign-mpv.service
-fi
+[Service]
+User=$DSIGN_USER
+Group=video
+Type=simple
+SupplementaryGroups=tty audio
+PermissionsStartOnly=true
+Environment="TERM=linux"
+Environment="DSIGN_MPV_PROFILE=signboard"
+Environment="DSIGN_MPV_SIGNBOARD_VARIANT=pi"
+WorkingDirectory=/home/dsign
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+UMask=0002
+ExecStartPre=/bin/chvt 1
+ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv/archive /var/lib/dsign/mpv-minimal
+ExecStartPre=/bin/chown -R dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
+ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
+ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
+ExecStart=/usr/local/bin/dsign-mpv-launch
+# Startup IP OSD helper should run on every MPV (re)start.
+# Use systemd oneshot unit so it doesn't get stuck active(exited).
+ExecStartPost=-/bin/systemctl --no-block restart dsign-show-startup-ip.service
+ExecStopPost=-/bin/bash -c "tr -d '\\r' < /usr/local/bin/dsign-mpv-archive-log | bash"
+Restart=always
+RestartSec=5s
+StartLimitInterval=60s
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
+EOL
 
 # Network assistant helper (OSD on content screen via MPV IPC)
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/bin/dsign-network-assistant
+sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-post-start" /usr/local/bin/dsign-mpv-post-start
+sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-mpv-post-start
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-archive-log" /usr/local/bin/dsign-mpv-archive-log
-for _bin in dsign-network-assistant dsign-show-startup-ip dsign-mpv-archive-log; do
-    sed -i 's/\r$//' "/usr/local/bin/$_bin"
-done
-chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip \
-    /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
+sed -i 's/\r$//' /usr/local/bin/dsign-mpv-archive-log
+chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
 
 mkdir -p /var/lib/dsign/config
 chown "$DSIGN_USER:$DSIGN_USER" /var/lib/dsign/config
+[Unit]
+Description=Digital Signage Network Assistant (OSD)
+After=network.target
+Before=digital-signage.service dsign-mpv.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=root
+ExecStart=/usr/local/bin/dsign-network-assistant
+EnvironmentFile=-/var/lib/dsign/config/network-assistant.env
+Environment=DSIGN_NETWORK_PROMPT_TIMEOUT_SEC=120
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+cat > /etc/systemd/system/dsign-show-startup-ip.service <<EOL
+[Unit]
+Description=Digital Signage Startup IP OSD helper
+After=dsign-mpv.service dsign-network-assistant.service
+Wants=dsign-network-assistant.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+User=$DSIGN_USER
+Group=$DSIGN_USER
+ExecStart=/usr/local/bin/dsign-show-startup-ip
+
+[Install]
+WantedBy=multi-user.target
+EOL
 
 # Настройка прав на DRI устройства
 cat > /etc/udev/rules.d/99-dsign.rules <<EOL
