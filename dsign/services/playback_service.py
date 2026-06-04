@@ -113,9 +113,15 @@ class PlaybackService:
             try:
                 delay = min(initial_delay * (2 ** attempt), 30)
                 
-                # Socket/systemd readiness — do not require `responsive` here; first IPC ping can race after mpv restart.
+                if not self._mpv_manager.wait_for_ipc_socket_at_startup():
+                    raise RuntimeError(
+                        "MPV IPC socket not available after startup wait "
+                        f"(socket={self._mpv_manager.mpv_socket!r})"
+                    )
+
+                # Socket readiness — do not require `responsive` here; first IPC ping can race after mpv restart.
                 health = self._mpv_manager.check_health()
-                if not (health.get("socket_available") or health.get("service_active")):
+                if not health.get("socket_available"):
                     raise RuntimeError(f"MPV health check failed (no IPC socket): {health}")
 
                 if not self._mpv_manager.initialize():

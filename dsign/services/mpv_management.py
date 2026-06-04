@@ -1012,6 +1012,44 @@ class MPVManager:
         )
         return False
 
+    def wait_for_ipc_socket_at_startup(self) -> bool:
+        """
+        Block until the MPV JSON IPC socket exists (boot / after systemd restart).
+
+        digital-signage may start before dsign-mpv creates the socket; without this wait
+        PlaybackService init fails and Flask never binds :5000.
+        """
+        try:
+            attempts = int((os.getenv("DSIGN_MPV_SOCKET_WAIT_ATTEMPTS") or "45").strip())
+        except ValueError:
+            attempts = 45
+        try:
+            interval = float((os.getenv("DSIGN_MPV_SOCKET_WAIT_INTERVAL_SEC") or "1").strip())
+        except ValueError:
+            interval = 1.0
+        try:
+            restart_after = int((os.getenv("DSIGN_MPV_SOCKET_WAIT_RESTART_AFTER") or "8").strip())
+        except ValueError:
+            restart_after = 8
+        attempts = max(5, min(120, attempts))
+        interval = max(0.2, min(5.0, interval))
+        restart_after = max(2, min(attempts - 1, restart_after))
+
+        did_restart = False
+        for i in range(attempts):
+            if self._check_mpv_socket(timeout=0.5):
+                return True
+            if i >= restart_after and not did_restart:
+                did_restart = True
+                self.logger.warning(
+                    "MPV IPC socket missing during startup; restarting dsign-mpv",
+                    extra={"operation": "StartupSocketWait", "attempt": i + 1},
+                )
+                if self._restart_systemd_service():
+                    self._wait_for_socket(timeout=20.0)
+            time.sleep(interval)
+        return self._check_mpv_socket(timeout=1.0)
+
     def check_health(self) -> Dict[str, bool]:
         """Комплексная проверка состояния MPV"""
         socket_ok = self._check_mpv_socket()
@@ -1019,7 +1057,9 @@ class MPVManager:
         # digital-signage.service runs as user `dsign` — `systemctl is-active` often fails (dbus/policy)
         # while mpv is running and the IPC socket exists. Do not treat that as unhealthy.
         service_ok = systemd_ok or socket_ok
-        responsive = self._send_command({"command": ["get_property", "mpv-version"]}) is not None
+        responsive = False
+        if socket_ok:
+            responsive = self._send_command({"command": ["get_property", "mpv-version"]}) is not None
         return {
             "service_active": service_ok,
             "socket_available": socket_ok,
