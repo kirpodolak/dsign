@@ -166,7 +166,7 @@ class MPVManager:
         )
         with self._playback_ipc_fail_lock:
             self._playback_ipc_fail_streak = 0
-        if self._restart_systemd_service():
+        if self._restart_systemd_service_if_needed():
             self._wait_for_socket(timeout=15.0)
             self._reset_ipc_session()
 

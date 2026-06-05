@@ -908,6 +908,41 @@ class PlaylistManager:
             self._stop_event.wait(timeout=0.15)
         return False
 
+    def _wait_mpv_network_idle_between_items(self, timeout_sec: float = 15.0) -> bool:
+        """After network EOF, wait until mpv reports idle before the next loadfile."""
+        deadline = time.monotonic() + max(0.5, float(timeout_sec))
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            snap = self._mpv_snapshot(["idle-active"], timeout=2.0)
+            if self._snap_bool(snap, "idle-active") is True:
+                return True
+            self._stop_event.wait(timeout=0.2)
+        return False
+
+    def _prepare_mpv_network_reload(self) -> None:
+        """Clear sticky HTTP/ytdl state and settle mpv after a network item ended."""
+        self._clear_mpv_http_options()
+        self._wait_mpv_network_idle_between_items(timeout_sec=12.0)
+        try:
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "keep-open", "no"]},
+                timeout=2.0,
+            )
+        except Exception:
+            pass
+
+    def _set_playback_active_marker(self, active: bool) -> None:
+        marker = Path("/run/dsign/playback-active")
+        try:
+            if active:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("1", encoding="utf-8")
+            elif marker.is_file():
+                marker.unlink()
+        except Exception:
+            pass
+
     def _wait_mpv_network_demuxer_ready(self, *, timeout_sec: float = 45.0, poll_sec: float = 0.25) -> bool:
         """
         After leave-idle, mpv can briefly report idle-active=false while HLS demuxer has not opened yet.
@@ -1180,16 +1215,14 @@ class PlaylistManager:
             snap = self._mpv_snapshot(prop_keys, timeout=snap_timeout)
 
             socket_missing = not os.path.exists(PlaybackConstants.SOCKET_PATH)
-            snap_all_none = bool(snap) and all(snap.get(k) is None for k in prop_keys)
-            if socket_missing or snap_all_none:
+            if socket_missing:
                 consecutive_ipc_stall += 1
                 if consecutive_ipc_stall >= stall_limit:
                     self.logger.warning(
-                        "playlist_eof_stall: MPV IPC unresponsive during EOF wait",
+                        "playlist_eof_stall: MPV socket missing during EOF wait",
                         extra={
                             "playlist_id": playlist_id,
                             "is_network": is_network,
-                            "socket_missing": socket_missing,
                             "stall_polls": consecutive_ipc_stall,
                         },
                     )
@@ -1298,6 +1331,7 @@ class PlaylistManager:
         self._play_thread = None
         self._stop_event.clear()
         self._active_playlist_id = None
+        self._set_playback_active_marker(False)
         try:
             self._mpv_manager.set_playback_session_active(False)
         except Exception:
@@ -1334,7 +1368,13 @@ class PlaylistManager:
             # Single-item playlists: first `loadfile` is done in play(); skip only that one iteration.
             # Without this flag, skip_load stays true forever and the file never reloads for cycle 2+.
             did_skip_first_preload = False
+            loop_cycle = 0
             while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
+                loop_cycle += 1
+                self.logger.info(
+                    "Playlist loop cycle",
+                    extra={"playlist_id": playlist_id, "cycle": loop_cycle, "items": len(items)},
+                )
                 # Iterate cyclically starting from start_index.
                 for offset in range(len(items)):
                     item = items[(start_index + offset) % len(items)]
@@ -1411,10 +1451,19 @@ class PlaylistManager:
                     normalized_headers: Dict[str, str] = {}
                     mpv_per_file_opts: Dict[str, Any] = {}
                     if not skip_load:
-                        try:
-                            self._logo_manager.display_playlist_transition()
-                        except Exception:
-                            pass
+                        is_network_reload = is_video and isinstance(path, str) and (
+                            path.startswith("http://")
+                            or path.startswith("https://")
+                            or path.startswith("ytdl://")
+                        )
+                        if is_network_reload:
+                            self._prepare_mpv_network_reload()
+                        # Cycle 2+: skip placeholder — go straight to refreshed stream loadfile.
+                        if not (is_network_reload and loop_cycle > 1):
+                            try:
+                                self._logo_manager.display_playlist_transition()
+                            except Exception:
+                                pass
                         # External streams: Referer/UA must be set before loadfile (and cleared between items).
                         normalized_headers, mpv_per_file_opts = self._apply_mpv_http_headers(item, stream_url=str(path))
                         self._apply_mpv_ytdl_options(item, stream_url=str(path))
@@ -1696,6 +1745,7 @@ class PlaylistManager:
                 )
 
             self._active_playlist_id = playlist_id
+            self._set_playback_active_marker(True)
 
             # Show first item immediately for responsiveness
             first = items[0]
@@ -1801,7 +1851,7 @@ class PlaylistManager:
             self._logo_manager.display_idle_logo()
             raise RuntimeError(f"Failed to start playback: {str(e)}")
 
-    def stop(self) -> bool:
+    def stop(self, *, show_idle_logo: bool = True, update_status: bool = True) -> bool:
         """Stop playback and persist stopped state so UI/API match MPV (idle logo)."""
         from ..models import PlaybackStatus
 
@@ -1810,25 +1860,29 @@ class PlaylistManager:
             last_playlist_id = playback.playlist_id
 
             self._stop_play_thread()
-            ok = self._logo_manager.display_idle_logo()
+            self._set_playback_active_marker(False)
+            ok = True
+            if show_idle_logo:
+                ok = self._logo_manager.display_idle_logo()
 
-            playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
-            playback.status = "stopped"
-            playback.playlist_id = last_playlist_id
-            self.db_session.add(playback)
-            self.db_session.commit()
+            if update_status:
+                playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
+                playback.status = "stopped"
+                playback.playlist_id = last_playlist_id
+                self.db_session.add(playback)
+                self.db_session.commit()
 
-            try:
-                if self.socketio:
-                    self.socketio.emit(
-                        'playback_update',
-                        {
-                            'status': 'stopped',
-                            'playlist_id': last_playlist_id,
-                        },
-                    )
-            except Exception:
-                pass
+                try:
+                    if self.socketio:
+                        self.socketio.emit(
+                            'playback_update',
+                            {
+                                'status': 'stopped',
+                                'playlist_id': last_playlist_id,
+                            },
+                        )
+                except Exception:
+                    pass
             return ok
         except Exception as e:
             self.logger.error(
