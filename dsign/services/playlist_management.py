@@ -35,6 +35,7 @@ class PlaylistManager:
         # key -> {failures:int, next_try_monotonic:float}
         self._media_backoff: Dict[str, Dict[str, Any]] = {}
         self._app = None
+        self._preloaded_stream_ready = False
 
     def set_app(self, app) -> None:
         """Attach Flask app so background playback threads can use db.session safely."""
@@ -157,6 +158,75 @@ class PlaylistManager:
                 "Refreshed external media URL for playlist loop",
                 extra={"media_key": str(key), "path_preview": new_path[:120]},
             )
+        return True
+
+
+    def _ensure_network_stream_started(
+        self,
+        item: Dict[str, Any],
+        stream_url: str,
+        *,
+        normalized_headers: Optional[Dict[str, str]] = None,
+    ) -> bool:
+        """Wait until mpv opens a network stream (call from play() before loop thread)."""
+        path_s = str(stream_url or "")
+        media_key = str(item.get("key") or path_s)
+        if not path_s.startswith(("http://", "https://", "ytdl://")):
+            return True
+
+        headers = normalized_headers
+        if not headers:
+            headers = self._sanitize_headers_for_mpv(
+                item.get("http_headers") or {},
+                page_url=item.get("page_url"),
+                stream_url=path_s,
+                provider=item.get("provider"),
+            )
+
+        if path_s.startswith("ytdl://"):
+            try:
+                self._apply_mpv_lavf_headers_after_ytdl_hook(
+                    normalized_headers=headers or {},
+                    stream_url=path_s,
+                    provider=str(item.get("provider") or "") if item.get("provider") else None,
+                    timeout_sec=12.0,
+                )
+            except Exception:
+                pass
+
+        leave_to = 120.0 if path_s.startswith("ytdl://") else 90.0
+        if not self._wait_mpv_leave_idle(timeout_sec=leave_to):
+            self.logger.warning(
+                "Network stream did not leave idle after play() loadfile",
+                extra={"media_key": media_key, "path_preview": path_s[:120]},
+            )
+            return False
+
+        try:
+            dem_to = float((os.getenv("DSIGN_MPV_DEMUXER_WAIT_SEC") or "45").strip())
+        except ValueError:
+            dem_to = 45.0
+        dem_to = max(5.0, min(120.0, dem_to))
+        if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to):
+            self.logger.warning(
+                "Network stream demuxer not ready after play() loadfile",
+                extra={"media_key": media_key, "path_preview": path_s[:120]},
+            )
+            self._log_mpv_network_debug_snapshot(media_key=media_key, url=path_s)
+            return False
+
+        if self._detect_mpv_instant_eof(window_sec=2.5):
+            self.logger.warning(
+                "Network stream instant EOF after play() loadfile",
+                extra={"media_key": media_key, "path_preview": path_s[:120]},
+            )
+            return False
+
+        self.logger.info(
+            "Network stream ready after play() loadfile",
+            extra={"media_key": media_key, "path_preview": path_s[:120]},
+        )
+        self._reset_media_backoff(media_key)
         return True
 
     def _wait_for_mpv_loaded_path(self, expected_path: str, timeout: float = 10.0) -> bool:
@@ -1243,24 +1313,15 @@ class PlaylistManager:
             if eof is True:
                 break
 
-            dur = self._snap_number(snap, "duration")
-            tp = self._snap_number(snap, "time-pos")
-            if (
-                dur is not None
-                and dur > 0.5
-                and tp is not None
-                and (tp + (1.0 if is_network else 0.2)) >= dur
-            ):
-                if not is_network:
-                    break
-                try:
-                    min_pos = float(
-                        (os.getenv("DSIGN_MPV_NETWORK_DURATION_EOF_MIN_POS") or "5").strip()
-                    )
-                except ValueError:
-                    min_pos = 5.0
-                min_pos = max(1.0, min(120.0, min_pos))
-                if tp >= min_pos:
+            if not is_network:
+                dur = self._snap_number(snap, "duration")
+                tp = self._snap_number(snap, "time-pos")
+                if (
+                    dur is not None
+                    and dur > 0.5
+                    and tp is not None
+                    and (tp + 0.2) >= dur
+                ):
                     break
 
             idle = self._snap_bool(snap, "idle-active")
@@ -1349,6 +1410,7 @@ class PlaylistManager:
         self._play_thread = None
         self._stop_event.clear()
         self._active_playlist_id = None
+        self._preloaded_stream_ready = False
         self._set_playback_active_marker(False)
         try:
             self._mpv_manager.set_playback_session_active(False)
@@ -1414,7 +1476,7 @@ class PlaylistManager:
                 )
                 # Iterate cyclically starting from start_index.
                 for offset in range(len(items)):
-                    item = items[offset]
+                    item = items[(start_index + offset) % len(items)]
                     if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                         break
 
@@ -1472,6 +1534,7 @@ class PlaylistManager:
                             break
                     skip_load = bool(
                         first_item_preloaded
+                        and start_index == 0
                         and offset == 0
                         and not did_skip_first_preload
                     )
@@ -1558,80 +1621,18 @@ class PlaylistManager:
                         )
                         stream_ready = False
                         if is_network:
-                            # For ytdl:// sources, ytdl_hook can overwrite lavf options with cookies.
-                            # Re-apply/merge UA+Referer+headers after ytdl_hook writes cookies, before ffmpeg opens EDL parts.
-                            if isinstance(path, str) and path.startswith("ytdl://"):
-                                try:
-                                    self._apply_mpv_lavf_headers_after_ytdl_hook(
-                                        normalized_headers=normalized_headers or {},
-                                        stream_url=str(path),
-                                        provider=str(item.get("provider") or "") if item.get("provider") else None,
-                                        timeout_sec=8.0,
-                                    )
-                                except Exception:
-                                    pass
-                            leave_to = 90.0 if skip_load else 60.0
-                            path_s_pre = str(path)
-                            if path_s_pre.startswith("ytdl://"):
-                                leave_to = max(leave_to, 120.0)
-                            if not self._wait_mpv_leave_idle(timeout_sec=leave_to):
-                                self.logger.warning(
-                                    "MPV stayed idle after loadfile (stream failed or blocked)",
-                                    extra={"media_key": media_key, "path_preview": str(path)[:120], "skip_load": skip_load},
-                                )
-                                self._register_media_failure(media_key, reason="stayed_idle")
-                                continue
-                            # Resolved http(s) URLs (e.g. Rutube HLS after resolver): once idle-active is false,
-                            # mpv has opened the stream — extra _wait_mpv_stream_ready often times out because
-                            # time-pos/duration/cache IPC differs per build.
-                            # ytdl://: treat like plain network — leave-idle + demuxer wait is enough; stream-ready
-                            # IPC is inconsistent across mpv builds and caused false not_ready for Rutube/VK.
-                            path_s = str(path)
-                            strict_https = os.getenv("DSIGN_MPV_STREAM_READY_HTTPS", "").strip().lower() in (
-                                "1",
-                                "true",
-                                "yes",
-                                "on",
-                            )
-                            needs_ready_wait = path_s.startswith("edl://")
-                            if needs_ready_wait or (
-                                strict_https
-                                and (path_s.startswith("http://") or path_s.startswith("https://"))
-                            ):
-                                stream_ready = self._wait_mpv_stream_ready(path_s)
-                                if not stream_ready:
-                                    self.logger.warning(
-                                        "MPV stream did not become ready (no time-pos/duration/path match)",
-                                        extra={"media_key": media_key, "path_preview": path_s[:120]},
-                                    )
-                                    self._register_media_failure(media_key, reason="not_ready")
-                                    continue
-                            else:
+                            if skip_load and self._preloaded_stream_ready:
                                 stream_ready = True
-                            # HLS can leave idle before demuxer/path is populated; give time to open or fail clearly.
-                            try:
-                                dem_to = float((os.getenv("DSIGN_MPV_DEMUXER_WAIT_SEC") or "45").strip())
-                            except ValueError:
-                                dem_to = 45.0
-                            dem_to = max(5.0, min(120.0, dem_to))
-                            if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to):
-                                self.logger.warning(
-                                    "MPV network stream never opened demuxer (idle or EOF before HLS attach)",
-                                    extra={"media_key": media_key, "path_preview": str(path)[:160]},
-                                )
-                                self._log_mpv_network_debug_snapshot(media_key=media_key, url=str(path))
-                                self._register_media_failure(media_key, reason="demuxer_timeout")
-                                continue
-                            # Detect "instant EOF" right after we considered it ready; avoid VK loops.
-                            if self._detect_mpv_instant_eof(window_sec=2.5):
-                                self.logger.warning(
-                                    "MPV stream ended immediately after start (instant EOF)",
-                                    extra={"media_key": media_key, "path_preview": str(path)[:160]},
-                                )
-                                self._log_mpv_network_debug_snapshot(media_key=media_key, url=str(path))
-                                self._register_media_failure(media_key, reason="instant_eof")
-                                continue
-                            self._reset_media_backoff(media_key)
+                                self._preloaded_stream_ready = False
+                            else:
+                                if not self._ensure_network_stream_started(
+                                    item,
+                                    str(path),
+                                    normalized_headers=normalized_headers or None,
+                                ):
+                                    self._register_media_failure(media_key, reason="open_failed")
+                                    continue
+                                stream_ready = True
                         self._wait_mpv_video_end(
                             playlist_id,
                             is_network=is_network,
@@ -1829,7 +1830,9 @@ class PlaylistManager:
             )
             first_is_network = first_path.startswith(("http://", "https://", "ytdl://"))
             first_load_timeout = 45.0 if first_is_network else 10.0
-            self._mpv_manager._send_command({"command": first_load_cmd}, timeout=first_load_timeout)
+            first_load_resp = self._mpv_manager._send_command(
+                {"command": first_load_cmd}, timeout=first_load_timeout
+            )
             self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
             self._sync_settings_audio_to_mpv()
             try:
@@ -1844,6 +1847,18 @@ class PlaylistManager:
             except Exception:
                 pass
 
+            self._preloaded_stream_ready = False
+            if (
+                first_is_network
+                and bool(first.get("is_video"))
+                and first_load_resp
+                and first_load_resp.get("error") == "success"
+            ):
+                self._preloaded_stream_ready = self._ensure_network_stream_started(
+                    first,
+                    first_path,
+                )
+
             # Update playback status (single-row table; keep id=1 stable)
             playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
             playback.playlist_id = playlist_id
@@ -1852,12 +1867,12 @@ class PlaylistManager:
             self.db_session.commit()
 
             # Start background loop to enforce durations and EOF waits.
-            # play() always loadfile'd items[0]; loop walks 0..n-1 and skips reload on first offset once.
+            loop_start = 1 if len(items) > 1 else 0
             self._play_thread = Thread(
                 target=self._run_manual_slideshow_loop,
-                args=(playlist_id, items, 0),
+                args=(playlist_id, items, loop_start),
                 kwargs={
-                    "first_item_preloaded": True,
+                    "first_item_preloaded": len(items) == 1,
                     "profile_muted": profile_muted,
                 },
                 daemon=True,
