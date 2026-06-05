@@ -195,7 +195,9 @@ EOL
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/bin/dsign-network-assistant
 sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-wifi-on-display" /usr/local/bin/dsign-wifi-on-display
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
+sed -i 's/\r$//' /usr/local/bin/dsign-wifi-on-display
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-archive-log" /usr/local/bin/dsign-mpv-archive-log
 sed -i 's/\r$//' /usr/local/bin/dsign-mpv-archive-log
 chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
