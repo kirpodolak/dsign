@@ -1497,6 +1497,16 @@ class PlaylistManager:
                     )
                     normalized_headers: Dict[str, str] = {}
                     mpv_per_file_opts: Dict[str, Any] = {}
+                    # play() already loadfile'd preloaded items; still need header dict for ytdl lavf reapply.
+                    if skip_load and is_video and isinstance(path, str) and path.startswith(
+                        ("http://", "https://", "ytdl://")
+                    ):
+                        normalized_headers = self._sanitize_headers_for_mpv(
+                            item.get("http_headers") or {},
+                            page_url=item.get("page_url"),
+                            stream_url=str(path),
+                            provider=item.get("provider"),
+                        )
                     if not skip_load:
                         is_network_reload = is_video and isinstance(path, str) and (
                             path.startswith("http://")
@@ -1519,7 +1529,7 @@ class PlaylistManager:
                             "replace",
                             per_file_opts=mpv_per_file_opts,
                         )
-                        load_timeout = 30.0 if is_network_reload else 20.0
+                        load_timeout = 45.0 if is_network_reload else 20.0
                         load_resp = self._mpv_manager._send_command({"command": load_cmd}, timeout=load_timeout)
                         self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
                         self._sync_settings_audio_to_mpv()
@@ -1547,37 +1557,7 @@ class PlaylistManager:
                             or path.startswith("ytdl://")
                         )
                         stream_ready = False
-                        if is_network and skip_load:
-                            # play() already issued loadfile for items[0].
-                            preload_snap = self._mpv_snapshot(["idle-active"], timeout=2.0)
-                            already_playing = self._snap_bool(preload_snap, "idle-active") is False
-                            if already_playing:
-                                stream_ready = True
-                            elif self._wait_mpv_leave_idle(timeout_sec=60.0):
-                                stream_ready = True
-                            else:
-                                self.logger.warning(
-                                    "Preloaded stream never left idle",
-                                    extra={"media_key": media_key, "path_preview": str(path)[:120]},
-                                )
-                                self._register_media_failure(media_key, reason="preloaded_stayed_idle")
-                                continue
-                            if stream_ready:
-                                try:
-                                    dem_to = float((os.getenv("DSIGN_MPV_DEMUXER_WAIT_SEC") or "45").strip())
-                                except ValueError:
-                                    dem_to = 45.0
-                                dem_to = max(5.0, min(120.0, dem_to))
-                                if already_playing:
-                                    dem_to = min(dem_to, 15.0)
-                                if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to):
-                                    self.logger.warning(
-                                        "Preloaded stream demuxer not ready",
-                                        extra={"media_key": media_key, "path_preview": str(path)[:120]},
-                                    )
-                                    self._register_media_failure(media_key, reason="preloaded_demuxer")
-                                    continue
-                        elif is_network:
+                        if is_network:
                             # For ytdl:// sources, ytdl_hook can overwrite lavf options with cookies.
                             # Re-apply/merge UA+Referer+headers after ytdl_hook writes cookies, before ffmpeg opens EDL parts.
                             if isinstance(path, str) and path.startswith("ytdl://"):
@@ -1590,10 +1570,14 @@ class PlaylistManager:
                                     )
                                 except Exception:
                                     pass
-                            if not self._wait_mpv_leave_idle(timeout_sec=60.0):
+                            leave_to = 90.0 if skip_load else 60.0
+                            path_s_pre = str(path)
+                            if path_s_pre.startswith("ytdl://"):
+                                leave_to = max(leave_to, 120.0)
+                            if not self._wait_mpv_leave_idle(timeout_sec=leave_to):
                                 self.logger.warning(
                                     "MPV stayed idle after loadfile (stream failed or blocked)",
-                                    extra={"media_key": media_key, "path_preview": str(path)[:120]},
+                                    extra={"media_key": media_key, "path_preview": str(path)[:120], "skip_load": skip_load},
                                 )
                                 self._register_media_failure(media_key, reason="stayed_idle")
                                 continue
@@ -1837,12 +1821,15 @@ class PlaylistManager:
                 pass
             _, first_mpv_opts = self._apply_mpv_http_headers(first, stream_url=str(first.get("path") or ""))
             self._apply_mpv_ytdl_options(first, stream_url=str(first.get("path") or ""))
+            first_path = str(first.get("path") or "")
             first_load_cmd = self._mpv_loadfile_command(
-                str(first.get("path") or ""),
+                first_path,
                 "replace",
                 per_file_opts=first_mpv_opts,
             )
-            self._mpv_manager._send_command({"command": first_load_cmd}, timeout=10.0)
+            first_is_network = first_path.startswith(("http://", "https://", "ytdl://"))
+            first_load_timeout = 45.0 if first_is_network else 10.0
+            self._mpv_manager._send_command({"command": first_load_cmd}, timeout=first_load_timeout)
             self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
             self._sync_settings_audio_to_mpv()
             try:
