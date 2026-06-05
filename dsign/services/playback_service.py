@@ -250,7 +250,7 @@ class PlaybackService:
                 except Exception:
                     playlist_id = None
             try:
-                self._playlist_manager.stop()
+                self._playlist_manager.stop(show_idle_logo=False, update_status=False)
             except Exception:
                 pass
             self._mpv_manager._reset_ipc_session()
