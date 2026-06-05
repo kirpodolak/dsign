@@ -1,4 +1,4 @@
-from threading import Lock, Thread
+from threading import Lock
 import os
 import shutil
 import subprocess
@@ -105,12 +105,13 @@ def init_api_routes(api_bp, services):
 
     _netassist_env_path = Path("/var/lib/dsign/config/network-assistant.env")
 
-    def _read_network_assistant_flags() -> tuple[bool, bool]:
+    def _read_network_assistant_flags() -> tuple[bool, bool, bool]:
         interactive = False
         force_prompt = False
+        debug = False
         try:
             if not _netassist_env_path.is_file():
-                return interactive, force_prompt
+                return interactive, force_prompt, debug
             for raw in _netassist_env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
                 line = raw.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -122,23 +123,35 @@ def init_api_routes(api_bp, services):
                     interactive = val in ("1", "true", "yes", "on")
                 elif key == "DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT":
                     force_prompt = val in ("1", "true", "yes", "on")
+                elif key == "DSIGN_NETWORK_ASSISTANT_DEBUG":
+                    debug = val in ("1", "true", "yes", "on")
         except Exception:
             pass
-        return interactive, force_prompt
+        return interactive, force_prompt, debug
 
-    def _network_assistant_boot_mode(interactive: bool, force_prompt: bool) -> str:
+    def _network_assistant_boot_mode(interactive: bool, force_prompt: bool, debug: bool) -> str:
+        if debug and interactive:
+            return "debug"
         if not interactive:
             return "off"
         if force_prompt:
             return "force"
         return "auto"
 
-    def _write_network_assistant_env(interactive: bool, force_prompt: bool) -> None:
+    def _write_network_assistant_env(
+        interactive: bool,
+        force_prompt: bool,
+        *,
+        debug: bool = False,
+        status_display_sec: int = 10,
+    ) -> None:
         _netassist_env_path.parent.mkdir(parents=True, exist_ok=True)
         body = (
             "# Written by Digital Signage Settings\n"
             f"DSIGN_NETWORK_ASSISTANT_INTERACTIVE={'1' if interactive else '0'}\n"
             f"DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT={'1' if force_prompt else '0'}\n"
+            f"DSIGN_NETWORK_ASSISTANT_DEBUG={'1' if debug else '0'}\n"
+            f"DSIGN_NETWORK_STATUS_DISPLAY_SEC={max(3, min(120, int(status_display_sec or 10)))}\n"
         )
         _netassist_env_path.write_text(body, encoding="utf-8")
         try:
@@ -1033,6 +1046,9 @@ def init_api_routes(api_bp, services):
             payload = {
                 "success": True,
                 "network": _collect_network_status(),
+                "assistant": {
+                    "boot_mode": _network_assistant_boot_mode(*_read_network_assistant_flags()),
+                },
             }
             with _network_status_cache_lock:
                 _network_status_cache["payload"] = payload
@@ -1078,13 +1094,14 @@ def init_api_routes(api_bp, services):
     @login_required
     def get_network_assistant_settings():
         try:
-            interactive, force_prompt = _read_network_assistant_flags()
-            boot_mode = _network_assistant_boot_mode(interactive, force_prompt)
+            interactive, force_prompt, debug = _read_network_assistant_flags()
+            boot_mode = _network_assistant_boot_mode(interactive, force_prompt, debug)
             return jsonify({
                 "success": True,
                 "boot_mode": boot_mode,
                 "interactive_on_boot": interactive,
                 "force_prompt_on_boot": force_prompt,
+                "debug_on_boot": debug,
                 "env_file": str(_netassist_env_path),
             })
         except Exception as e:
@@ -1099,11 +1116,18 @@ def init_api_routes(api_bp, services):
                 return jsonify({"success": False, "error": "Unauthorized"}), 403
             data = request.get_json(silent=True) or {}
             boot_mode = str(data.get("boot_mode", "")).strip().lower()
-            if boot_mode not in ("off", "auto", "force"):
-                return jsonify({"success": False, "error": "boot_mode must be off, auto, or force"}), 400
-            interactive = boot_mode in ("auto", "force")
+            if boot_mode not in ("off", "auto", "force", "debug"):
+                return jsonify({"success": False, "error": "boot_mode must be off, auto, force, or debug"}), 400
+            interactive = boot_mode in ("auto", "force", "debug")
             force_prompt = boot_mode == "force"
-            _write_network_assistant_env(interactive, force_prompt)
+            debug = boot_mode == "debug"
+            status_display_sec = int(data.get("status_display_sec") or 10)
+            _write_network_assistant_env(
+                interactive,
+                force_prompt,
+                debug=debug,
+                status_display_sec=status_display_sec,
+            )
 
             systemctl = shutil.which("systemctl") or "/bin/systemctl"
             for cmd in (
@@ -1136,6 +1160,7 @@ def init_api_routes(api_bp, services):
                 "boot_mode": boot_mode,
                 "interactive_on_boot": interactive,
                 "force_prompt_on_boot": force_prompt,
+                "debug_on_boot": debug,
             })
         except Exception as e:
             current_app.logger.error(f"Error saving network assistant settings: {str(e)}", exc_info=True)

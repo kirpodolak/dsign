@@ -18,16 +18,28 @@ export class StartupNetworkAssistant {
 
     async init() {
         if (this.isAuthPage) return;
-        const status = await this.getNetworkStatus();
-        if (!status) return;
+        const data = await this.requestJson('/api/system/network/status', { method: 'GET' });
+        if (!data?.success || !data.network) return;
 
-        if (status.primary_ip && !this.hasSessionFlag(this.storageKeys.ipBadgeShown)) {
-            this.showStartupIpBadge(status.primary_ip);
+        const network = data.network;
+        const bootMode = data.assistant?.boot_mode || 'off';
+        const debugMode = bootMode === 'debug';
+
+        if (network.primary_ip && !debugMode && !this.hasSessionFlag(this.storageKeys.ipBadgeShown)) {
+            this.showStartupIpBadge(network.primary_ip);
         }
 
-        if (!status.internet_online && !this.hasSessionFlag(this.storageKeys.overlayShown)) {
+        const offline = !network.internet_online;
+        const shouldShowOverlay = debugMode || (offline && !this.hasSessionFlag(this.storageKeys.overlayShown));
+        if (!shouldShowOverlay) return;
+
+        if (!debugMode) {
             this.setSessionFlag(this.storageKeys.overlayShown);
-            await this.showNetworkOverlay();
+        }
+
+        const autoHideMs = debugMode ? 10000 : this.promptAutoHideMs;
+        await this.showNetworkOverlay(network, { debugMode, autoHideMs });
+        if (offline || debugMode) {
             await this.refreshWifiList();
         }
     }
@@ -76,13 +88,28 @@ export class StartupNetworkAssistant {
         }
     }
 
-    async getNetworkStatus() {
-        const data = await this.requestJson('/api/system/network/status', { method: 'GET' });
-        if (!data?.success || !data.network) return null;
-        return data.network;
+    formatNetworkStatusMessage(network, debugMode) {
+        const online = Boolean(network?.internet_online);
+        const ssid = network?.wifi_connected_ssid || '';
+        const ip = network?.primary_ip || '—';
+        const lines = [];
+        if (debugMode) {
+            lines.push('Режим отладки: экран сети при старте');
+        }
+        lines.push(online ? 'Интернет: подключён' : 'Интернет: нет соединения');
+        if (ssid) {
+            lines.push(`Wi-Fi: ${ssid}`);
+        }
+        lines.push(`IP: ${ip}`);
+        if (debugMode) {
+            lines.push('Автозакрытие через 10 сек');
+        } else if (!online) {
+            lines.push('Выберите Wi-Fi и подключитесь');
+        }
+        return lines.join('\n');
     }
 
-    async showNetworkOverlay() {
+    async showNetworkOverlay(network, { debugMode = false, autoHideMs = null } = {}) {
         const root = this.getElement('startup-network-overlay');
         if (!root) return;
         root.hidden = false;
@@ -98,18 +125,28 @@ export class StartupNetworkAssistant {
         const ssidManualInput = this.getElement('startup-network-manual-ssid');
         const status = this.getElement('startup-network-status');
         const passwordInput = this.getElement('startup-network-password');
+        const controls = this.getElement('startup-network-controls');
+        const title = this.getElement('startup-network-title');
 
+        if (title) {
+            title.textContent = debugMode ? 'Сеть (отладка)' : 'Подключение к сети';
+        }
         if (status) {
-            status.textContent = 'No internet connection. Select Wi-Fi and connect.';
+            status.textContent = this.formatNetworkStatusMessage(network, debugMode);
+            status.style.whiteSpace = 'pre-line';
+        }
+        if (controls) {
+            controls.hidden = Boolean(debugMode && network?.internet_online);
         }
 
         if (retryBtn) {
             retryBtn.onclick = async () => {
-                const network = await this.getNetworkStatus();
-                if (network?.internet_online) {
-                    this.onInternetConnected(network);
+                const latest = await this.requestJson('/api/system/network/status', { method: 'GET' });
+                const latestNetwork = latest?.network;
+                if (latestNetwork?.internet_online) {
+                    this.onInternetConnected(latestNetwork);
                 } else if (status) {
-                    status.textContent = 'Still offline. Check Wi-Fi and retry.';
+                    status.textContent = this.formatNetworkStatusMessage(latestNetwork, debugMode);
                 }
             };
         }
@@ -169,11 +206,11 @@ export class StartupNetworkAssistant {
                     return;
                 }
 
-                const network = response.network || (await this.getNetworkStatus());
-                if (network?.internet_online) {
-                    this.onInternetConnected(network);
+                const latestNetwork = response.network || (await this.requestJson('/api/system/network/status', { method: 'GET' }))?.network;
+                if (latestNetwork?.internet_online) {
+                    this.onInternetConnected(latestNetwork);
                 } else if (status) {
-                    status.textContent = 'Connected to Wi-Fi, but internet is not available yet.';
+                    status.textContent = this.formatNetworkStatusMessage(latestNetwork, debugMode);
                 }
                 this.connecting = false;
                 connectBtn.disabled = false;
@@ -186,11 +223,12 @@ export class StartupNetworkAssistant {
             };
         }
 
+        const hideMs = Math.max(5000, Number(autoHideMs) || this.promptAutoHideMs);
         this.hideTimerId = window.setTimeout(() => {
             if (this.overlayVisible) {
                 this.hideNetworkOverlay();
             }
-        }, this.promptAutoHideMs);
+        }, hideMs);
     }
 
     hideNetworkOverlay() {
@@ -217,11 +255,15 @@ export class StartupNetworkAssistant {
         if (!select) return;
         select.disabled = true;
         select.innerHTML = '';
-        if (status) status.textContent = 'Scanning Wi-Fi networks...';
+        if (status && !this.overlayVisible) {
+            status.textContent = 'Scanning Wi-Fi networks...';
+        }
 
         const data = await this.requestJson('/api/system/network/wifi/scan', { method: 'GET' });
         if (!data?.success) {
-            if (status) status.textContent = data?.error || 'Failed to scan Wi-Fi networks.';
+            if (status && !String(status.textContent || '').includes('Интернет:')) {
+                status.textContent = data?.error || 'Failed to scan Wi-Fi networks.';
+            }
             select.disabled = false;
             return;
         }
@@ -232,7 +274,6 @@ export class StartupNetworkAssistant {
             option.value = '';
             option.textContent = 'No Wi-Fi networks found';
             select.appendChild(option);
-            if (status) status.textContent = 'No networks found. You can connect to a hidden network.';
             select.disabled = false;
             return;
         }
@@ -253,7 +294,6 @@ export class StartupNetworkAssistant {
             select.selectedIndex = 0;
         }
         select.disabled = false;
-        if (status) status.textContent = 'Select Wi-Fi and enter password.';
     }
 
     showStartupIpBadge(ip) {

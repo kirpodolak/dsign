@@ -382,3 +382,87 @@ body.page-login .app-main {
     padding: 0.5rem 0.7rem;
   }
 }
+
+.startup-network-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10050;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(8, 12, 20, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.startup-network-overlay[hidden] {
+  display: none !important;
+}
+
+.startup-network-overlay__panel {
+  width: min(520px, 100%);
+  max-height: min(90vh, 720px);
+  overflow: auto;
+  padding: 1.25rem 1.35rem 1.35rem;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(180deg, rgba(24, 30, 42, 0.98), rgba(16, 20, 28, 0.98));
+  color: #f3f6fb;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+}
+
+.startup-network-overlay__title {
+  margin: 0 0 0.75rem;
+  font-size: 1.25rem;
+}
+
+.startup-network-overlay__status {
+  margin: 0 0 1rem;
+  line-height: 1.45;
+  color: #d7deea;
+}
+
+.startup-network-overlay__controls {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.startup-network-overlay__label {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.92rem;
+}
+
+.startup-network-overlay__select,
+.startup-network-overlay__input {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+}
+
+.startup-network-overlay__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.startup-ip-badge {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 10040;
+  padding: 0.55rem 0.85rem;
+  border-radius: 999px;
+  background: rgba(10, 14, 22, 0.88);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  font-size: 0.95rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.startup-ip-badge[hidden] {
+  display: none !important;
+}

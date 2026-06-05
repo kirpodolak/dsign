@@ -79,6 +79,35 @@
             {% block content %}{% endblock %}
         </main>
     </div>
+
+    <div id="startup-network-overlay" class="startup-network-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="startup-network-title">
+        <div class="startup-network-overlay__panel">
+            <h2 id="startup-network-title" class="startup-network-overlay__title">Подключение к сети</h2>
+            <p id="startup-network-status" class="startup-network-overlay__status"></p>
+            <div id="startup-network-controls" class="startup-network-overlay__controls">
+                <label class="startup-network-overlay__label" for="startup-network-ssid">Wi-Fi</label>
+                <select id="startup-network-ssid" class="startup-network-overlay__select"></select>
+                <label class="startup-network-overlay__label">
+                    <input type="checkbox" id="startup-network-hidden-toggle"> Скрытая сеть
+                </label>
+                <div id="startup-network-manual-wrap" class="startup-network-overlay__manual" hidden>
+                    <input type="text" id="startup-network-manual-ssid" class="startup-network-overlay__input" placeholder="SSID">
+                </div>
+                <input type="password" id="startup-network-password" class="startup-network-overlay__input" placeholder="Пароль Wi-Fi">
+                <div class="startup-network-overlay__actions">
+                    <button type="button" id="startup-network-scan" class="btn secondary">Сканировать</button>
+                    <button type="button" id="startup-network-connect" class="btn primary">Подключить</button>
+                    <button type="button" id="startup-network-retry" class="btn secondary">Проверить</button>
+                    <button type="button" id="startup-network-close" class="btn secondary">Продолжить</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="startup-ip-badge" class="startup-ip-badge" hidden aria-live="polite">
+        IP: <span id="startup-ip-value"></span>
+    </div>
+
+    <script type="module" src="{{ url_for('static', filename='js/network-assistant-boot.js') }}?v={{ timestamp }}"></script>
     <script type="module" src="{{ url_for('static', filename='js/i18n.js') }}?v={{ timestamp }}"></script>
     {% block scripts %}{% endblock %}
 </body>
