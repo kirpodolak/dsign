@@ -1783,8 +1783,12 @@ class PlaylistManager:
 
     def play(self, playlist_id: int) -> bool:
         """Play playlist with profile support"""
+        with self._app_context():
+            return self._play_impl(playlist_id)
+
+    def _play_impl(self, playlist_id: int) -> bool:
         from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
-    
+
         try:
             # Stop any previous manual playback loop
             self._stop_play_thread()
