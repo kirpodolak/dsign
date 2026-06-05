@@ -195,3 +195,8 @@ fi
 if [ -r "$STARTUP_IP_FILE" ]; then
   rm -f "$STARTUP_IP_FILE" 2>/dev/null || true
 fi
+
+# Wi-Fi picker on content display (part of network-assistant flow, no separate systemd unit).
+if command -v sudo >/dev/null 2>&1 && [ -x /usr/local/bin/dsign-wifi-on-display ]; then
+  sudo -n /usr/local/bin/dsign-wifi-on-display 2>/dev/null || true
+fi

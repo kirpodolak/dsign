@@ -301,26 +301,9 @@ class PlaybackService:
         except ValueError:
             max_wait = 90.0
         max_wait = max(15.0, min(300.0, max_wait))
-        systemctl = shutil.which("systemctl") or "/bin/systemctl"
         deadline = time.monotonic() + max_wait
-        seen_active = False
         while time.monotonic() < deadline:
-            try:
-                res = subprocess.run(
-                    [systemctl, "is-active", "dsign-wifi-on-display.service"],
-                    capture_output=True,
-                    text=True,
-                    timeout=3.0,
-                    check=False,
-                )
-                state = (res.stdout or "").strip()
-            except Exception:
-                state = ""
-            if state in ("activating", "active"):
-                seen_active = True
-            elif seen_active and state in ("inactive", "failed", "dead", "unknown"):
-                return
-            elif Path("/run/dsign/wifi-on-display-done").is_file():
+            if Path("/run/dsign/wifi-on-display-done").is_file():
                 return
             time.sleep(0.5)
 

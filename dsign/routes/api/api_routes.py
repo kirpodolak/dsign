@@ -1270,25 +1270,14 @@ def init_api_routes(api_bp, services):
                 marker.write_text("1", encoding="utf-8")
             except Exception as e:
                 return jsonify({"success": False, "error": f"Cannot create force marker: {e}"}), 500
-            systemctl = shutil.which("systemctl") or "/bin/systemctl"
             try:
-                subprocess.run(
-                    ["sudo", "-n", systemctl, "start", "dsign-wifi-on-display.service"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=10.0,
+                subprocess.Popen(
+                    ["sudo", "-n", "/usr/local/bin/dsign-wifi-on-display"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
-            except subprocess.CalledProcessError as e:
-                msg = (e.stderr or e.stdout or "").strip() or f"Command failed: {e.returncode}"
-                msg_l = msg.lower()
-                if (
-                    "a terminal is required" in msg_l
-                    or "password is required" in msg_l
-                    or "interactive authentication is required" in msg_l
-                ):
-                    msg = "sudoers not configured (NOPASSWD) for: sudo systemctl start dsign-wifi-on-display.service"
-                return jsonify({"success": False, "error": msg}), 403
+            except Exception as e:
+                return jsonify({"success": False, "error": str(e)}), 500
             return jsonify({"success": True, "message": "Wi-Fi setup started on display"})
         except Exception as e:
             current_app.logger.error(f"Error starting Wi-Fi on display: {str(e)}", exc_info=True)

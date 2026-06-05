@@ -202,10 +202,6 @@ chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show
 
 mkdir -p /var/lib/dsign/config
 chown "$DSIGN_USER:$DSIGN_USER" /var/lib/dsign/config
-if [ -f "$PROJECT_DIR/etc/tmpfiles.d/dsign.conf" ]; then
-    install -m 0644 "$PROJECT_DIR/etc/tmpfiles.d/dsign.conf" /etc/tmpfiles.d/dsign.conf
-    systemd-tmpfiles --create /etc/tmpfiles.d/dsign.conf 2>/dev/null || true
-fi
 
 cat > /etc/systemd/system/dsign-network-assistant.service <<EOL
 [Unit]
@@ -225,15 +221,10 @@ Environment=DSIGN_NETWORK_PROMPT_TIMEOUT_SEC=120
 Environment=DSIGN_NETWORK_STATUS_DISPLAY_SEC=10
 Environment=DSIGN_STARTUP_IP_FILE=/tmp/dsign-startup-ip.txt
 Environment=DSIGN_NETWORK_STATUS_FILE=/run/dsign/network-status.env
-Environment=DSIGN_NETWORK_ASSISTANT_DONE_MARKER=/run/dsign/network-assistant-done
 
 [Install]
 WantedBy=multi-user.target
 EOL
-
-if [ -f "$PROJECT_DIR/etc/systemd/system/dsign-wifi-on-display.service" ]; then
-    install -m 0644 "$PROJECT_DIR/etc/systemd/system/dsign-wifi-on-display.service" /etc/systemd/system/dsign-wifi-on-display.service
-fi
 
 cat > /etc/systemd/system/dsign-show-startup-ip.service <<EOL
 [Unit]
