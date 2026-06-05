@@ -1,7 +1,9 @@
 dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart digital-signage.service
 dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart dsign-mpv.service
-dsign ALL=(root) NOPASSWD: /usr/bin/systemctl start dsign-show-startup-ip.service
 dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart screenshot.service
 dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart dsign-network-assistant.service
+dsign ALL=(root) NOPASSWD: /usr/local/bin/dsign-wifi-on-display
+dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart dsign-show-startup-ip.service
+dsign ALL=(root) NOPASSWD: /usr/local/bin/dsign-nmtui-tty
 dsign ALL=(root) NOPASSWD: /sbin/reboot, /usr/bin/systemctl reboot
 dsign ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
