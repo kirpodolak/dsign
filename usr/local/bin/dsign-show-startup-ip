@@ -235,4 +235,8 @@ run_wifi_on_display() {
     return 0
   }
 }
-run_wifi_on_display
+if [ ! -f /run/dsign/playback-active ]; then
+  run_wifi_on_display
+else
+  log "Wi-Fi on-display skip: playback-active"
+fi
