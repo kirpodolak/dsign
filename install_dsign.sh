@@ -213,6 +213,11 @@ if [ -d "$SUDOERS_SRC" ]; then
   for _sf in dsign-systemctl dsign-mpv-restart dsign-screenshot; do
     if [ -f "$SUDOERS_SRC/$_sf" ]; then
       install -m 0440 "$SUDOERS_SRC/$_sf" "/etc/sudoers.d/$_sf"
+      sed -i 's/\r$//' "/etc/sudoers.d/$_sf"
+      # visudo requires a trailing newline on the last line.
+      if [ "$(tail -c1 "/etc/sudoers.d/$_sf" | wc -l)" -eq 0 ]; then
+        printf '\n' >>"/etc/sudoers.d/$_sf"
+      fi
       visudo -cf "/etc/sudoers.d/$_sf" || {
         echo "ERROR: invalid sudoers file: $_sf" >&2
         exit 1

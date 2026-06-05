@@ -170,6 +170,14 @@ sudo sed -i 's/\r$//' /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-
 sudo cp etc/sudoers.d/dsign-systemctl /etc/sudoers.d/
 sudo visudo -cf /etc/sudoers.d/dsign-systemctl
 
+Если `visudo` пишет `missing line terminator at end of file` — в конце файла нет перевода строки:
+
+```bash
+sudo sed -i 's/\r$//' /etc/sudoers.d/dsign-systemctl
+[ "$(tail -c1 /etc/sudoers.d/dsign-systemctl | wc -l)" -eq 0 ] && printf '\n' | sudo tee -a /etc/sudoers.d/dsign-systemctl >/dev/null
+sudo visudo -cf /etc/sudoers.d/dsign-systemctl
+```
+
 # Проверка от имени dsign (должно отработать без запроса пароля):
 sudo -u dsign sudo -n /usr/local/bin/dsign-wifi-on-display
 journalctl -t dsign-show-startup-ip -t dsign-wifi-on-display -b --no-pager -n 50
