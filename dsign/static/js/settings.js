@@ -467,7 +467,10 @@ export class SettingsManager {
                     'X-CSRFToken': getCSRFToken(),
                 },
                 credentials: 'include',
-                body: JSON.stringify({ boot_mode: mode }),
+                body: JSON.stringify({
+                    boot_mode: mode,
+                    status_display_sec: mode === 'debug' ? 10 : 120,
+                }),
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
