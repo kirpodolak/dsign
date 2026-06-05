@@ -119,6 +119,15 @@ def init_routes(app, services: Dict[str, Any]) -> None:
             logger.error(f"Failed to initialize socket service: {str(e)}", exc_info=True)
             raise RuntimeError(f"Socket service initialization failed: {str(e)}")
 
+    # Background threads (playlist loop, MPV socket watch, boot resume) need app context for DB.
+    try:
+        playback_service = services.get('playback_service')
+        if playback_service is not None and hasattr(playback_service, 'set_app'):
+            playback_service.set_app(app)
+            logger.info("Flask app wired into PlaybackService")
+    except Exception as e:
+        logger.warning(f"Failed wiring Flask app into PlaybackService: {e}")
+
     # Загрузка маршрутов
     _lazy_load_routes()
 
