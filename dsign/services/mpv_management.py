@@ -166,7 +166,7 @@ class MPVManager:
         )
         with self._playback_ipc_fail_lock:
             self._playback_ipc_fail_streak = 0
-        if self._restart_systemd_service():
+        if self._restart_systemd_service_if_needed():
             self._wait_for_socket(timeout=15.0)
             self._reset_ipc_session()
 
@@ -1020,9 +1020,9 @@ class MPVManager:
         PlaybackService init fails and Flask never binds :5000.
         """
         try:
-            attempts = int((os.getenv("DSIGN_MPV_SOCKET_WAIT_ATTEMPTS") or "45").strip())
+            attempts = int((os.getenv("DSIGN_MPV_SOCKET_WAIT_ATTEMPTS") or "20").strip())
         except ValueError:
-            attempts = 45
+            attempts = 20
         try:
             interval = float((os.getenv("DSIGN_MPV_SOCKET_WAIT_INTERVAL_SEC") or "1").strip())
         except ValueError:
@@ -1035,11 +1035,17 @@ class MPVManager:
         interval = max(0.2, min(5.0, interval))
         restart_after = max(2, min(attempts - 1, restart_after))
 
+        allow_restart = os.getenv("DSIGN_MPV_STARTUP_RESTART_MPV", "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         did_restart = False
         for i in range(attempts):
             if self._check_mpv_socket(timeout=0.5):
                 return True
-            if i >= restart_after and not did_restart:
+            if allow_restart and i >= restart_after and not did_restart:
                 did_restart = True
                 self.logger.warning(
                     "MPV IPC socket missing during startup; restarting dsign-mpv",
