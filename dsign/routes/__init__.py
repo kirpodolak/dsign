@@ -119,6 +119,17 @@ def init_routes(app, services: Dict[str, Any]) -> None:
             logger.error(f"Failed to initialize socket service: {str(e)}", exc_info=True)
             raise RuntimeError(f"Socket service initialization failed: {str(e)}")
 
+    # Playlist loop runs in a background thread; Flask-SQLAlchemy needs app context for ext-* refresh.
+    try:
+        playback_service = services.get('playback_service')
+        if playback_service:
+            pm = getattr(playback_service, '_playlist_manager', None)
+            if pm is not None and hasattr(pm, 'set_app'):
+                pm.set_app(app)
+                logger.info("Flask app wired into PlaylistManager")
+    except Exception as e:
+        logger.warning(f"Failed wiring Flask app into PlaylistManager: {e}")
+
     # Загрузка маршрутов
     _lazy_load_routes()
 

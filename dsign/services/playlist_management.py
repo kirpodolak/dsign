@@ -3,6 +3,7 @@ import re
 import subprocess
 import traceback
 import time
+from contextlib import nullcontext
 from threading import Event, Thread
 from typing import Dict, List, Optional, Any
 from pathlib import Path
@@ -33,6 +34,11 @@ class PlaylistManager:
         # Backoff per media key for unstable/blocked streams to avoid busy looping loadfile.
         # key -> {failures:int, next_try_monotonic:float}
         self._media_backoff: Dict[str, Dict[str, Any]] = {}
+        self._app = None
+
+    def set_app(self, app) -> None:
+        """Attach Flask app so background playback threads can use db.session safely."""
+        self._app = app
 
     def set_external_media_service(self, service) -> None:
         """Attach external media resolver service (optional)."""
@@ -1242,7 +1248,17 @@ class PlaylistManager:
                 and tp is not None
                 and (tp + (1.0 if is_network else 0.2)) >= dur
             ):
-                break
+                if not is_network:
+                    break
+                try:
+                    min_pos = float(
+                        (os.getenv("DSIGN_MPV_NETWORK_DURATION_EOF_MIN_POS") or "5").strip()
+                    )
+                except ValueError:
+                    min_pos = 5.0
+                min_pos = max(1.0, min(120.0, min_pos))
+                if tp >= min_pos:
+                    break
 
             idle = self._snap_bool(snap, "idle-active")
             if idle is True and time.monotonic() >= grace_until:
@@ -1336,6 +1352,26 @@ class PlaylistManager:
         except Exception:
             pass
 
+    def _run_manual_slideshow_loop(
+        self,
+        playlist_id: int,
+        items: List[Dict[str, Any]],
+        start_index: int = 0,
+        *,
+        first_item_preloaded: bool = False,
+        profile_muted: bool = False,
+    ) -> None:
+        """Thread entry: push Flask app context before DB-backed external media refresh."""
+        ctx = self._app.app_context() if self._app is not None else nullcontext()
+        with ctx:
+            self._manual_slideshow_loop(
+                playlist_id,
+                items,
+                start_index,
+                first_item_preloaded=first_item_preloaded,
+                profile_muted=profile_muted,
+            )
+
     def _manual_slideshow_loop(
         self,
         playlist_id: int,
@@ -1370,7 +1406,7 @@ class PlaylistManager:
             loop_cycle = 0
             while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
                 loop_cycle += 1
-                self.logger.info(
+                self.logger.debug(
                     "Playlist loop cycle",
                     extra={"playlist_id": playlist_id, "cycle": loop_cycle, "items": len(items)},
                 )
@@ -1379,13 +1415,6 @@ class PlaylistManager:
                     item = items[offset]
                     if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                         break
-
-                    if not self._refresh_item_playback_path(item):
-                        self.logger.warning(
-                            "Failed to refresh external media for playlist loop",
-                            extra={"media_key": str(item.get("key") or ""), "playlist_id": playlist_id},
-                        )
-                        continue
 
                     path = item["path"]
                     is_video = item["is_video"]
@@ -1446,7 +1475,15 @@ class PlaylistManager:
                     )
                     if skip_load:
                         did_skip_first_preload = True
-                    self.logger.info(
+                    if not skip_load:
+                        if not self._refresh_item_playback_path(item):
+                            self.logger.warning(
+                                "Failed to refresh external media for playlist loop",
+                                extra={"media_key": str(item.get("key") or ""), "playlist_id": playlist_id},
+                            )
+                            continue
+                        path = item["path"]
+                    self.logger.debug(
                         "Playlist item",
                         extra={
                             "playlist_id": playlist_id,
@@ -1480,7 +1517,7 @@ class PlaylistManager:
                             "replace",
                             per_file_opts=mpv_per_file_opts,
                         )
-                        load_timeout = 45.0 if is_network_reload else 20.0
+                        load_timeout = 30.0 if is_network_reload else 20.0
                         load_resp = self._mpv_manager._send_command({"command": load_cmd}, timeout=load_timeout)
                         self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
                         self._sync_settings_audio_to_mpv()
@@ -1509,21 +1546,13 @@ class PlaylistManager:
                         )
                         stream_ready = False
                         if is_network and skip_load:
-                            # play() already issued loadfile for items[0]; wait until it actually opens.
-                            if self._wait_mpv_leave_idle(timeout_sec=90.0):
+                            # play() already issued loadfile for items[0].
+                            preload_snap = self._mpv_snapshot(["idle-active"], timeout=2.0)
+                            already_playing = self._snap_bool(preload_snap, "idle-active") is False
+                            if already_playing:
                                 stream_ready = True
-                                try:
-                                    dem_to = float((os.getenv("DSIGN_MPV_DEMUXER_WAIT_SEC") or "45").strip())
-                                except ValueError:
-                                    dem_to = 45.0
-                                dem_to = max(5.0, min(120.0, dem_to))
-                                if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to):
-                                    self.logger.warning(
-                                        "Preloaded stream demuxer not ready",
-                                        extra={"media_key": media_key, "path_preview": str(path)[:120]},
-                                    )
-                                    self._register_media_failure(media_key, reason="preloaded_demuxer")
-                                    continue
+                            elif self._wait_mpv_leave_idle(timeout_sec=60.0):
+                                stream_ready = True
                             else:
                                 self.logger.warning(
                                     "Preloaded stream never left idle",
@@ -1531,6 +1560,21 @@ class PlaylistManager:
                                 )
                                 self._register_media_failure(media_key, reason="preloaded_stayed_idle")
                                 continue
+                            if stream_ready:
+                                try:
+                                    dem_to = float((os.getenv("DSIGN_MPV_DEMUXER_WAIT_SEC") or "45").strip())
+                                except ValueError:
+                                    dem_to = 45.0
+                                dem_to = max(5.0, min(120.0, dem_to))
+                                if already_playing:
+                                    dem_to = min(dem_to, 15.0)
+                                if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to):
+                                    self.logger.warning(
+                                        "Preloaded stream demuxer not ready",
+                                        extra={"media_key": media_key, "path_preview": str(path)[:120]},
+                                    )
+                                    self._register_media_failure(media_key, reason="preloaded_demuxer")
+                                    continue
                         elif is_network:
                             # For ytdl:// sources, ytdl_hook can overwrite lavf options with cookies.
                             # Re-apply/merge UA+Referer+headers after ytdl_hook writes cookies, before ffmpeg opens EDL parts.
@@ -1821,7 +1865,7 @@ class PlaylistManager:
             # Start background loop to enforce durations and EOF waits.
             # play() always loadfile'd items[0]; loop walks 0..n-1 and skips reload on first offset once.
             self._play_thread = Thread(
-                target=self._manual_slideshow_loop,
+                target=self._run_manual_slideshow_loop,
                 args=(playlist_id, items, 0),
                 kwargs={
                     "first_item_preloaded": True,
