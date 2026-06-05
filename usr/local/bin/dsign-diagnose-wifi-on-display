@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -u
+
+echo "=== dsign-wifi-on-display diagnostics ==="
+echo
+
+echo "--- scripts ---"
+for f in /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-nmtui-tty; do
+  if [ -e "$f" ]; then
+    ls -l "$f"
+    file "$f" || true
+    head -1 "$f" | od -An -tc | head -1 || true
+  else
+    echo "MISSING: $f"
+  fi
+done
+echo
+
+echo "--- sudoers (NOPASSWD) ---"
+sudo grep -H dsign-wifi /etc/sudoers.d/* 2>/dev/null || echo "(no dsign-wifi rule in /etc/sudoers.d/)"
+echo
+
+echo "--- network assistant env ---"
+if [ -r /var/lib/dsign/config/network-assistant.env ]; then
+  cat /var/lib/dsign/config/network-assistant.env
+else
+  echo "(missing /var/lib/dsign/config/network-assistant.env)"
+fi
+echo
+
+echo "--- network status (boot) ---"
+if [ -r /run/dsign/network-status.env ]; then
+  cat /run/dsign/network-status.env
+else
+  echo "(missing /run/dsign/network-status.env)"
+fi
+echo
+
+echo "--- mpv / tty ---"
+ps -o pid,user,tty,cmd -C mpv 2>/dev/null || echo "(mpv not running)"
+command -v openvt >/dev/null 2>&1 && echo "openvt: OK" || echo "openvt: MISSING (apt install util-linux)"
+command -v nmtui-connect >/dev/null 2>&1 && echo "nmtui-connect: OK" || echo "nmtui-connect: MISSING (apt install network-manager)"
+echo
+
+echo "--- sudo test as dsign (must not ask password) ---"
+if id dsign >/dev/null 2>&1; then
+  sudo -u dsign sudo -n /usr/local/bin/dsign-wifi-on-display 2>&1 | head -20 || true
+else
+  echo "(user dsign not found)"
+fi
+echo
+
+echo "--- recent journal ---"
+journalctl -t dsign-wifi-on-display -t dsign-show-startup-ip -t dsign-nmtui-tty -b --no-pager -n 30 2>/dev/null || true
