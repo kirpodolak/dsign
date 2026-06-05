@@ -1271,10 +1271,30 @@ def init_api_routes(api_bp, services):
             except Exception as e:
                 return jsonify({"success": False, "error": f"Cannot create force marker: {e}"}), 500
             try:
+                probe = subprocess.run(
+                    ["sudo", "-n", "/usr/local/bin/dsign-wifi-on-display", "--preflight"],
+                    capture_output=True,
+                    text=True,
+                    timeout=8.0,
+                )
+            except FileNotFoundError:
+                return jsonify({"success": False, "error": "sudo not found"}), 500
+            except subprocess.TimeoutExpired:
+                return jsonify({"success": False, "error": "preflight timed out"}), 504
+            except Exception as e:
+                return jsonify({"success": False, "error": str(e)}), 500
+            if probe.returncode != 0:
+                msg = (probe.stderr or probe.stdout or "").strip() or f"exit {probe.returncode}"
+                msg_l = msg.lower()
+                if "password is required" in msg_l or "interactive authentication" in msg_l:
+                    msg = "sudoers not configured (NOPASSWD) for /usr/local/bin/dsign-wifi-on-display"
+                return jsonify({"success": False, "error": msg}), 403
+            try:
                 subprocess.Popen(
                     ["sudo", "-n", "/usr/local/bin/dsign-wifi-on-display"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    start_new_session=True,
                 )
             except Exception as e:
                 return jsonify({"success": False, "error": str(e)}), 500

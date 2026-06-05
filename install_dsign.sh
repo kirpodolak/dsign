@@ -196,11 +196,15 @@ install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/
 sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-wifi-on-display" /usr/local/bin/dsign-wifi-on-display
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-nmtui-tty" /usr/local/bin/dsign-nmtui-tty
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-diagnose-wifi-on-display" /usr/local/bin/dsign-diagnose-wifi-on-display
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
 sed -i 's/\r$//' /usr/local/bin/dsign-wifi-on-display
+sed -i 's/\r$//' /usr/local/bin/dsign-nmtui-tty
+sed -i 's/\r$//' /usr/local/bin/dsign-diagnose-wifi-on-display
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-archive-log" /usr/local/bin/dsign-mpv-archive-log
 sed -i 's/\r$//' /usr/local/bin/dsign-mpv-archive-log
-chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
+chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-diagnose-wifi-on-display /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
 
 # Sudoers: allow user dsign to run helpers without a password (wifi-on-display, systemctl, etc.)
 SUDOERS_SRC="$PROJECT_DIR/etc/sudoers.d"
@@ -251,6 +255,7 @@ Wants=dsign-network-assistant.service
 
 [Service]
 Type=oneshot
+TimeoutStartSec=300
 RemainAfterExit=no
 User=$DSIGN_USER
 Group=$DSIGN_USER

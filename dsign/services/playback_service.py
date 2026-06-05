@@ -316,7 +316,7 @@ class PlaybackService:
         max_wait = max(3.0, min(90.0, max_wait))
         try:
             subprocess.run(
-                ["sudo", "-n", "/usr/bin/systemctl", "start", "dsign-show-startup-ip.service"],
+                ["sudo", "-n", "/usr/bin/systemctl", "restart", "dsign-show-startup-ip.service"],
                 timeout=8.0,
                 check=False,
                 capture_output=True,

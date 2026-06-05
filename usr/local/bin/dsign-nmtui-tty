@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -u
+
+# Run nmtui with a real controlling TTY so keyboard navigation works.
+# MPV (or getty) may own tty1 — use an alternate VT via openvt by default.
+
+DSIGN_NMTUI_VT="${DSIGN_NMTUI_VT:-2}"
+DSIGN_NMTUI_RETURN_VT="${DSIGN_NMTUI_RETURN_VT:-1}"
+DSIGN_NMTUI_CMD="${DSIGN_NMTUI_CMD:-nmtui-connect}"
+TIMEOUT_SEC="${1:-120}"
+
+log() {
+  logger -t dsign-nmtui-tty "$*"
+}
+
+if ! command -v "$DSIGN_NMTUI_CMD" >/dev/null 2>&1; then
+  log "command missing: ${DSIGN_NMTUI_CMD}"
+  exit 1
+fi
+
+if ! [[ "$TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [ "$TIMEOUT_SEC" -lt 1 ]; then
+  TIMEOUT_SEC=120
+fi
+
+run_with_openvt() {
+  local vt="$1"
+  timeout --foreground "$TIMEOUT_SEC" \
+    openvt -c "$vt" -s -w -f -- \
+    env TERM=linux LANG="${LANG:-C.UTF-8}" "$DSIGN_NMTUI_CMD"
+}
+
+run_with_exec_tty() {
+  local vt_dev="/dev/tty${1}"
+  timeout --foreground "$TIMEOUT_SEC" \
+    env TERM=linux LANG="${LANG:-C.UTF-8}" \
+    bash -c "exec 0<>'${vt_dev}' 1>&'${vt_dev}' 2>&'${vt_dev}'; stty sane 2>/dev/null || true; ${DSIGN_NMTUI_CMD}"
+}
+
+main() {
+  local vt="$DSIGN_NMTUI_VT"
+
+  chvt "$vt" 2>/dev/null || true
+
+  if command -v openvt >/dev/null 2>&1; then
+    log "Starting ${DSIGN_NMTUI_CMD} on vt${vt} (openvt, timeout=${TIMEOUT_SEC}s)"
+    run_with_openvt "$vt" || true
+  else
+    log "openvt missing; fallback exec on tty${vt} (keyboard may not work — install util-linux)"
+    run_with_exec_tty "$vt" || true
+  fi
+
+  chvt "$DSIGN_NMTUI_RETURN_VT" 2>/dev/null || true
+}
+
+main "$@"

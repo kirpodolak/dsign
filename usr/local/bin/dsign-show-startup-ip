@@ -77,9 +77,10 @@ elif [ "$debug_flag" = "1" ]; then
   SHOW_DURATION_MS=10000
 fi
 
+osd_skip=0
 if [ -z "$ip_addr" ] && [ -z "$connection" ] && [ -z "$ssid" ]; then
-  log "Skip: startup IP/network status unavailable"
-  exit 0
+  log "Skip OSD: startup IP/network status unavailable (Wi-Fi on-display may still run)"
+  osd_skip=1
 fi
 
 build_osd_text() {
@@ -116,6 +117,11 @@ build_osd_text() {
 }
 
 osd_text="$(build_osd_text)"
+
+mark_startup_ip_shown() {
+  mkdir -p /run/dsign 2>/dev/null || true
+  : >/run/dsign/startup-ip-shown 2>/dev/null || true
+}
 
 attempt_send_osd() {
   python3 - "$osd_text" "$SHOW_DURATION_MS" "$MPV_SOCKET" <<'PY'
@@ -170,27 +176,32 @@ sys.exit(1)
 PY
 }
 
-deadline=$(( $(date +%s) + WAIT_TIMEOUT_SEC ))
 ok=1
-if command -v python3 >/dev/null 2>&1; then
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    attempt_send_osd && ok=0 && break || true
-    sleep 0.3
-  done
-else
-  if command -v socat >/dev/null 2>&1; then
-    printf '%s\n' "$(printf '%s' "{\"command\":[\"show-text\",\"${osd_text}\",${SHOW_DURATION_MS},0,3]}")" | socat - "$MPV_SOCKET" >/dev/null 2>&1 || true
-    ok=0
+if [ "$osd_skip" -eq 0 ]; then
+  deadline=$(( $(date +%s) + WAIT_TIMEOUT_SEC ))
+  if command -v python3 >/dev/null 2>&1; then
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      attempt_send_osd && ok=0 && break || true
+      sleep 0.3
+    done
   else
-    ok=1
+    if command -v socat >/dev/null 2>&1; then
+      printf '%s\n' "$(printf '%s' "{\"command\":[\"show-text\",\"${osd_text}\",${SHOW_DURATION_MS},0,3]}")" | socat - "$MPV_SOCKET" >/dev/null 2>&1 || true
+      ok=0
+    else
+      ok=1
+    fi
   fi
-fi
 
-if [ "$ok" -eq 0 ]; then
-  log "OSD shown: ${osd_text}"
+  if [ "$ok" -eq 0 ]; then
+    log "OSD shown: ${osd_text}"
+  else
+    log "OSD not shown (MPV did not reply in time): ${osd_text}"
+  fi
 else
-  log "OSD not shown (MPV did not reply in time): ${osd_text}"
+  log "OSD skipped (no network status payload)"
 fi
+mark_startup_ip_shown
 
 if [ -r "$STARTUP_IP_FILE" ]; then
   rm -f "$STARTUP_IP_FILE" 2>/dev/null || true

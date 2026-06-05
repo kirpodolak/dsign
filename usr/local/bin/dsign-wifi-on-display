@@ -138,15 +138,31 @@ mpv_restore_display() {
 
 run_nmtui() {
   local remaining="$1"
-  if ! command -v nmtui-connect >/dev/null 2>&1; then
-    log "nmtui-connect missing"
+  local helper="/usr/local/bin/dsign-nmtui-tty"
+  if [ ! -x "$helper" ]; then
+    log "dsign-nmtui-tty missing or not executable"
     return 1
   fi
-  chvt 1 >/dev/null 2>&1 || true
-  printf '\033c' >"$TTY_DEVICE" 2>/dev/null || true
-  printf '%s\r\n' "Digital Signage: выбор Wi-Fi" >"$TTY_DEVICE" 2>/dev/null || true
-  printf '%s\r\n' "Enter — выбрать сеть, Esc — пропустить" >"$TTY_DEVICE" 2>/dev/null || true
-  timeout --foreground "${remaining}" nmtui-connect <"$TTY_DEVICE" >"$TTY_DEVICE" 2>"$TTY_DEVICE" || true
+  DSIGN_NMTUI_RETURN_VT=1 DSIGN_NMTUI_VT="${DSIGN_NMTUI_VT:-2}" "$helper" "$remaining" || true
+}
+
+
+preflight() {
+  local missing=0
+  for f in /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-wifi-on-display; do
+    if [ ! -x "$f" ]; then
+      log "preflight: not executable: $f"
+      missing=1
+    fi
+  done
+  if ! command -v nmtui-connect >/dev/null 2>&1; then
+    log "preflight: nmtui-connect missing"
+    missing=1
+  fi
+  if ! command -v openvt >/dev/null 2>&1; then
+    log "preflight: openvt missing (install util-linux; keyboard may not work)"
+  fi
+  return "$missing"
 }
 
 main() {
@@ -211,5 +227,10 @@ main() {
   mkdir -p /run/dsign 2>/dev/null || true
   : >/run/dsign/wifi-on-display-done 2>/dev/null || true
 }
+
+if [ "${1:-}" = "--preflight" ]; then
+  preflight
+  exit $?
+fi
 
 main "$@"

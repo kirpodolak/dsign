@@ -131,6 +131,28 @@ sudo sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant /usr/local/bin/dsig
 sudo chmod 755 /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display
 ```
 
+
+### Кнопки в nmtui неактивны (сети видны, но Enter/стрелки не работают)
+
+Причина: `nmtui` запускался с перенаправлением на `/dev/tty1`, но без **controlling TTY**. MPV держит tty1, клавиатура не доходит до nmtui.
+
+Фикс (ветка с `dsign-nmtui-tty`): Wi-Fi UI открывается на **vt2** через `openvt`.
+
+Проверка на устройстве:
+
+```bash
+sudo dsign-diagnose-wifi-on-display
+command -v openvt   # должен быть (пакет util-linux)
+```
+
+После деплоя:
+
+```bash
+sudo cp usr/local/bin/dsign-nmtui-tty /usr/local/bin/
+sudo chmod 755 /usr/local/bin/dsign-nmtui-tty
+sudo systemctl restart dsign-mpv.service
+```
+
 ### `dsign-wifi-on-display` не запускается
 
 Скрипт вызывается из `dsign-show-startup-ip` от пользователя `dsign` через `sudo -n` (без пароля). Нужны **файл**, **chmod** и **sudoers**.
