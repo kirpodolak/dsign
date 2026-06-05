@@ -1205,9 +1205,9 @@ class PlaylistManager:
 
             snap_timeout = 5.0 if is_network else 3.0
             try:
-                snap_timeout = float(
-                    (os.getenv("DSIGN_MPV_EOF_SNAPSHOT_TIMEOUT_SEC") or snap_timeout).strip()
-                )
+                raw_to = (os.getenv("DSIGN_MPV_EOF_SNAPSHOT_TIMEOUT_SEC") or "").strip()
+                if raw_to:
+                    snap_timeout = float(raw_to)
             except ValueError:
                 pass
             snap_timeout = max(2.0, min(15.0, snap_timeout))
