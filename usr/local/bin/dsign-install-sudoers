@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Run as root: sudo $0" >&2
+  exit 1
+fi
+
+TARGET="/etc/sudoers.d/dsign-systemctl"
+
+install -d -m 0750 /etc/sudoers.d
+
+# tee + heredoc always ends with a newline (visudo requirement).
+tee "$TARGET" >/dev/null <<'EOF'
+dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart digital-signage.service
+dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart dsign-mpv.service
+dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart screenshot.service
+dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart dsign-network-assistant.service
+dsign ALL=(root) NOPASSWD: /usr/bin/systemctl restart dsign-show-startup-ip.service
+dsign ALL=(root) NOPASSWD: /usr/local/bin/dsign-wifi-on-display
+dsign ALL=(root) NOPASSWD: /usr/local/bin/dsign-nmtui-tty
+dsign ALL=(root) NOPASSWD: /sbin/reboot, /usr/bin/systemctl reboot
+dsign ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
+EOF
+
+chmod 0440 "$TARGET"
+visudo -cf "$TARGET"
+echo "OK: $TARGET"

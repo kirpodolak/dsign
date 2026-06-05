@@ -207,10 +207,13 @@ sed -i 's/\r$//' /usr/local/bin/dsign-mpv-archive-log
 chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-diagnose-wifi-on-display /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
 
 # Sudoers: allow user dsign to run helpers without a password (wifi-on-display, systemctl, etc.)
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-install-sudoers" /usr/local/bin/dsign-install-sudoers
+sed -i 's/\r$//' /usr/local/bin/dsign-install-sudoers
+/usr/local/bin/dsign-install-sudoers
 SUDOERS_SRC="$PROJECT_DIR/etc/sudoers.d"
 if [ -d "$SUDOERS_SRC" ]; then
   install -d -m 0750 /etc/sudoers.d
-  for _sf in dsign-systemctl dsign-mpv-restart dsign-screenshot; do
+  for _sf in dsign-mpv-restart dsign-screenshot; do
     if [ -f "$SUDOERS_SRC/$_sf" ]; then
       install -m 0440 "$SUDOERS_SRC/$_sf" "/etc/sudoers.d/$_sf"
       sed -i 's/\r$//' "/etc/sudoers.d/$_sf"

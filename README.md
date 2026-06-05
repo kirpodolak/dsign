@@ -167,8 +167,9 @@ sudo cp usr/local/bin/dsign-show-startup-ip /usr/local/bin/
 sudo chmod 755 /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-show-startup-ip
 sudo sed -i 's/\r$//' /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-show-startup-ip
 
-sudo cp etc/sudoers.d/dsign-systemctl /etc/sudoers.d/
-sudo visudo -cf /etc/sudoers.d/dsign-systemctl
+sudo cp usr/local/bin/dsign-install-sudoers /usr/local/bin/
+sudo chmod 755 /usr/local/bin/dsign-install-sudoers
+sudo /usr/local/bin/dsign-install-sudoers
 
 Если `visudo` пишет `missing line terminator at end of file` — в конце файла нет перевода строки:
 
