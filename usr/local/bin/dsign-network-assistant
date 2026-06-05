@@ -3,9 +3,13 @@ set -u
 
 TTY_DEVICE="/dev/tty1"
 STARTUP_IP_FILE="${DSIGN_STARTUP_IP_FILE:-/tmp/dsign-startup-ip.txt}"
+NETWORK_STATUS_FILE="${DSIGN_NETWORK_STATUS_FILE:-/run/dsign/network-status.env}"
+NETWORK_DONE_MARKER="${DSIGN_NETWORK_ASSISTANT_DONE_MARKER:-/run/dsign/network-assistant-done}"
 PROMPT_TIMEOUT_SEC="${DSIGN_NETWORK_PROMPT_TIMEOUT_SEC:-120}"
+STATUS_DISPLAY_SEC="${DSIGN_NETWORK_STATUS_DISPLAY_SEC:-10}"
 INTERACTIVE="${DSIGN_NETWORK_ASSISTANT_INTERACTIVE:-0}"
 FORCE_PROMPT="${DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT:-0}"
+DEBUG="${DSIGN_NETWORK_ASSISTANT_DEBUG:-0}"
 
 log() {
   logger -t dsign-network-assistant "$*"
@@ -31,18 +35,78 @@ primary_ip() {
   ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}'
 }
 
+primary_iface() {
+  ip -4 -o addr show scope global 2>/dev/null | awk '{print $2; exit}'
+}
+
+wifi_ssid() {
+  if ! command -v nmcli >/dev/null 2>&1; then
+    return 1
+  fi
+  local ssid
+  ssid="$(nmcli -t -f ACTIVE,SSID dev wifi 2>/dev/null | awk -F: '$1=="yes" && $2!=""{print $2; exit}')"
+  if [ -n "$ssid" ]; then
+    printf '%s' "$ssid"
+    return 0
+  fi
+  ssid="$(nmcli -t -f NAME,TYPE con show --active 2>/dev/null | awk -F: '$2=="802-11-wireless" && $1!=""{print $1; exit}')"
+  if [ -n "$ssid" ] && [ "$ssid" != "--" ]; then
+    printf '%s' "$ssid"
+    return 0
+  fi
+  return 1
+}
+
+connection_label() {
+  local ssid iface
+  ssid="$(wifi_ssid || true)"
+  if [ -n "$ssid" ]; then
+    printf 'Wi-Fi: %s' "$ssid"
+    return 0
+  fi
+  iface="$(primary_iface || true)"
+  if [ -n "$iface" ]; then
+    printf 'Интерфейс: %s' "$iface"
+    return 0
+  fi
+  printf 'Не подключено'
+}
+
 persist_startup_ip() {
   local ip_addr
   ip_addr="$(primary_ip || true)"
   if [ -n "$ip_addr" ]; then
     printf '%s\n' "$ip_addr" >"$STARTUP_IP_FILE" 2>/dev/null || true
-    # ExecStartPost helper runs as dsign user; keep file removable by that user.
     chown dsign:dsign "$STARTUP_IP_FILE" 2>/dev/null || true
     chmod 664 "$STARTUP_IP_FILE" 2>/dev/null || true
     log "Saved startup IP: $ip_addr"
   else
     rm -f "$STARTUP_IP_FILE"
   fi
+}
+
+write_network_status_file() {
+  local internet_flag="$1"
+  local ip_addr="$2"
+  local ssid="$3"
+  local debug_flag="$4"
+  local display_sec="$5"
+  mkdir -p "$(dirname "$NETWORK_STATUS_FILE")" 2>/dev/null || true
+  {
+    printf 'INTERNET=%s\n' "$internet_flag"
+    printf 'IP=%s\n' "${ip_addr:-}"
+    printf 'SSID=%s\n' "${ssid:-}"
+    printf 'CONNECTION=%s\n' "$(connection_label)"
+    printf 'DEBUG=%s\n' "$debug_flag"
+    printf 'DISPLAY_SEC=%s\n' "$display_sec"
+  } >"$NETWORK_STATUS_FILE" 2>/dev/null || true
+  chmod 644 "$NETWORK_STATUS_FILE" 2>/dev/null || true
+}
+
+mark_done() {
+  mkdir -p "$(dirname "$NETWORK_DONE_MARKER")" 2>/dev/null || true
+  : >"$NETWORK_DONE_MARKER" 2>/dev/null || true
+  chmod 644 "$NETWORK_DONE_MARKER" 2>/dev/null || true
 }
 
 has_internet() {
@@ -55,38 +119,152 @@ has_ip_link() {
   [ -n "$(primary_ip || true)" ]
 }
 
+truthy() {
+  case "${1:-}" in
+    1|true|yes|on|TRUE|YES|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 run_nmtui_once() {
   local remaining="$1"
-  timeout --foreground "${remaining}" nmtui-connect <"$TTY_DEVICE" >"$TTY_DEVICE" 2>"$TTY_DEVICE" || true
+  local helper="/usr/local/bin/dsign-nmtui-tty"
+  if [ ! -x "$helper" ]; then
+    log "dsign-nmtui-tty missing or not executable"
+    return 1
+  fi
+  DSIGN_NMTUI_RETURN_VT=1 DSIGN_NMTUI_VT="${DSIGN_NMTUI_VT:-2}" "$helper" "$remaining" || true
+}
+
+show_status_screen() {
+  local internet_online="$1"
+  local remaining="$2"
+  local ip_addr conn
+  ip_addr="$(primary_ip || true)"
+  conn="$(connection_label)"
+
+  clear_tty
+  tty_write "========================================"
+  tty_write "  Digital Signage — сеть"
+  tty_write "========================================"
+  if [ "$internet_online" = "1" ]; then
+    tty_write "  Интернет:     подключён"
+  else
+    tty_write "  Интернет:     нет соединения"
+  fi
+  tty_write "  Подключение:  ${conn}"
+  if [ -n "$ip_addr" ]; then
+    tty_write "  IP:           ${ip_addr}"
+  else
+    tty_write "  IP:           —"
+  fi
+  tty_write "========================================"
+  if truthy "$DEBUG"; then
+    tty_write "  Режим отладки: экран всегда при старте"
+  fi
+  if [ "$remaining" -gt 0 ]; then
+    tty_write "  Автозапуск через ${remaining} сек..."
+  fi
+  tty_write "========================================"
+}
+
+countdown_status_display() {
+  local total="$1"
+  local start_ts now elapsed remaining internet_flag
+  start_ts="$(date +%s)"
+  total="${total:-10}"
+  if ! [[ "$total" =~ ^[0-9]+$ ]]; then
+    total=10
+  fi
+  if [ "$total" -lt 1 ]; then
+    total=1
+  fi
+
+  while true; do
+    now="$(date +%s)"
+    elapsed=$((now - start_ts))
+    remaining=$((total - elapsed))
+    if [ "$remaining" -le 0 ]; then
+      break
+    fi
+    if has_internet; then
+      internet_flag=1
+    else
+      internet_flag=0
+    fi
+    show_status_screen "$internet_flag" "$remaining"
+    sleep 1
+  done
 }
 
 main() {
-  rm -f "$STARTUP_IP_FILE"
+  rm -f "$STARTUP_IP_FILE" "$NETWORK_STATUS_FILE" "$NETWORK_DONE_MARKER"
 
-  # Non-interactive default: just persist IP (if any) and exit.
-  # This helper must never block boot or the web UI.
-  if [ "${INTERACTIVE}" != "1" ] && [ "${INTERACTIVE}" != "true" ] && [ "${INTERACTIVE}" != "yes" ]; then
-    persist_startup_ip
-    return 0
+  debug_on="0"
+  if truthy "$DEBUG"; then
+    debug_on="1"
   fi
 
   force_on="0"
-  if [ "${FORCE_PROMPT}" = "1" ] || [ "${FORCE_PROMPT}" = "true" ] || [ "${FORCE_PROMPT}" = "yes" ]; then
+  if truthy "$FORCE_PROMPT"; then
     force_on="1"
   fi
 
-  if [ "${force_on}" != "1" ]; then
-    if has_internet; then
-      log "Internet already available at startup"
+  interactive_on="0"
+  if truthy "$INTERACTIVE"; then
+    interactive_on="1"
+  fi
+
+  if ! [[ "$STATUS_DISPLAY_SEC" =~ ^[0-9]+$ ]]; then
+    STATUS_DISPLAY_SEC=10
+  fi
+  if [ "$STATUS_DISPLAY_SEC" -lt 3 ]; then
+    STATUS_DISPLAY_SEC=3
+  fi
+  if [ "$STATUS_DISPLAY_SEC" -gt 120 ]; then
+    STATUS_DISPLAY_SEC=120
+  fi
+
+  if [ "$interactive_on" != "1" ]; then
+    persist_startup_ip
+    mark_done
+    return 0
+  fi
+
+  online="0"
+  if has_internet; then
+    online="1"
+  fi
+
+  ip_ok="0"
+  if has_ip_link; then
+    ip_ok="1"
+  fi
+
+  ssid="$(wifi_ssid || true)"
+  write_network_status_file "$online" "$(primary_ip || true)" "$ssid" "$debug_on" "$STATUS_DISPLAY_SEC"
+
+  if [ "$debug_on" = "1" ]; then
+    log "DEBUG mode: showing network status for ${STATUS_DISPLAY_SEC}s on tty1"
+    chvt 1 >/dev/null 2>&1 || true
+    if [ "$online" = "1" ]; then
+      countdown_status_display "$STATUS_DISPLAY_SEC"
       persist_startup_ip
+      mark_done
       return 0
     fi
-
-    # Some networks block outbound DNS probes (1.1.1.1/8.8.8.8) but still provide
-    # local connectivity and valid IP. In that case skip interactive Wi-Fi prompt.
-    if has_ip_link; then
+    countdown_status_display "$STATUS_DISPLAY_SEC"
+  elif [ "$force_on" != "1" ]; then
+    if [ "$online" = "1" ]; then
+      log "Internet already available at startup"
+      persist_startup_ip
+      mark_done
+      return 0
+    fi
+    if [ "$ip_ok" = "1" ]; then
       log "IP link is already up (external internet probe failed), skipping Wi-Fi setup"
       persist_startup_ip
+      mark_done
       return 0
     fi
   fi
@@ -94,22 +272,25 @@ main() {
   if ! command -v nmcli >/dev/null 2>&1; then
     log "nmcli is unavailable, cannot run network assistant"
     persist_startup_ip
+    mark_done
     return 0
   fi
 
   if ! command -v nmtui-connect >/dev/null 2>&1; then
     log "nmtui-connect is unavailable, cannot run interactive setup"
     persist_startup_ip
+    mark_done
     return 0
   fi
 
   if ! tty_ready; then
     log "tty1 is unavailable, skipping interactive setup"
     persist_startup_ip
+    mark_done
     return 0
   fi
 
-  if [ "${force_on}" = "1" ]; then
+  if [ "$force_on" = "1" ]; then
     log "FORCE_PROMPT: opening interactive Wi-Fi setup on tty1"
   else
     log "Internet is offline, opening interactive Wi-Fi setup on tty1"
@@ -140,11 +321,19 @@ main() {
     sleep 1
   done
 
+  online="0"
+  if has_internet; then
+    online="1"
+  fi
+  ssid="$(wifi_ssid || true)"
+  write_network_status_file "$online" "$(primary_ip || true)" "$ssid" "$debug_on" "$STATUS_DISPLAY_SEC"
+
   if has_internet || has_ip_link; then
     persist_startup_ip
     tty_write ""
     tty_write "Network connected. Starting content..."
     sleep 1
+    mark_done
     return 0
   fi
 
@@ -153,6 +342,7 @@ main() {
   tty_write ""
   tty_write "No internet connection. Starting content mode."
   sleep 1
+  mark_done
   return 0
 }
 
