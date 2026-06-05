@@ -124,6 +124,32 @@ class PlaylistManager:
         is_video = ext in (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
         return {"path": str(file_path), "is_video": is_video}
 
+    def _refresh_item_playback_path(self, item: Dict[str, Any]) -> bool:
+        """
+        Re-resolve external media before each loop iteration.
+
+        ``play()`` builds ``items[]`` once; VK/Rutube CDN signatures and ytdl state must be
+        refreshed on every cycle, not only on the first ``play()`` call.
+        """
+        key = item.get("key")
+        if not key or not str(key).startswith("ext-"):
+            return True
+        resolved = self._resolve_playlist_item_path(str(key))
+        if not resolved or not resolved.get("path"):
+            return False
+        prev = str(item.get("path") or "")
+        item["path"] = resolved["path"]
+        item["http_headers"] = resolved.get("http_headers") or {}
+        item["page_url"] = resolved.get("page_url")
+        item["provider"] = resolved.get("provider")
+        new_path = str(item.get("path") or "")
+        if new_path != prev:
+            self.logger.debug(
+                "Refreshed external media URL for playlist loop",
+                extra={"media_key": str(key), "path_preview": new_path[:120]},
+            )
+        return True
+
     def _wait_for_mpv_loaded_path(self, expected_path: str, timeout: float = 10.0) -> bool:
         """
         Wait until MPV reports the expected `path` as loaded.
@@ -1125,6 +1151,13 @@ class PlaylistManager:
                 poll_sec = 2.0
             poll_sec = max(1.0, min(10.0, poll_sec))
 
+        consecutive_ipc_stall = 0
+        try:
+            stall_limit = int((os.getenv("DSIGN_MPV_EOF_IPC_STALL_POLLS") or "15").strip())
+        except ValueError:
+            stall_limit = 15
+        stall_limit = max(3, min(120, stall_limit))
+
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
             if time.time() - start > 6 * 3600:
                 break
@@ -1137,16 +1170,33 @@ class PlaylistManager:
             except ValueError:
                 pass
             snap_timeout = max(2.0, min(15.0, snap_timeout))
-            snap = self._mpv_snapshot(
-                [
-                    "eof-reached",
-                    "duration",
-                    "time-pos",
-                    "idle-active",
-                    "core-idle",
-                ],
-                timeout=snap_timeout,
-            )
+            prop_keys = [
+                "eof-reached",
+                "duration",
+                "time-pos",
+                "idle-active",
+                "core-idle",
+            ]
+            snap = self._mpv_snapshot(prop_keys, timeout=snap_timeout)
+
+            socket_missing = not os.path.exists(PlaybackConstants.SOCKET_PATH)
+            snap_all_none = bool(snap) and all(snap.get(k) is None for k in prop_keys)
+            if socket_missing or snap_all_none:
+                consecutive_ipc_stall += 1
+                if consecutive_ipc_stall >= stall_limit:
+                    self.logger.warning(
+                        "playlist_eof_stall: MPV IPC unresponsive during EOF wait",
+                        extra={
+                            "playlist_id": playlist_id,
+                            "is_network": is_network,
+                            "socket_missing": socket_missing,
+                            "stall_polls": consecutive_ipc_stall,
+                        },
+                    )
+                    break
+            else:
+                consecutive_ipc_stall = 0
+
             eof = self._snap_bool(snap, "eof-reached")
             if eof is True:
                 break
@@ -1290,6 +1340,13 @@ class PlaylistManager:
                     item = items[(start_index + offset) % len(items)]
                     if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                         break
+
+                    if not self._refresh_item_playback_path(item):
+                        self.logger.warning(
+                            "Failed to refresh external media for playlist loop",
+                            extra={"media_key": str(item.get("key") or ""), "playlist_id": playlist_id},
+                        )
+                        continue
 
                     path = item["path"]
                     is_video = item["is_video"]
