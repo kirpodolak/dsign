@@ -191,8 +191,25 @@ class MPVManager:
             sec = 12.0
         return max(2.0, min(60.0, sec))
 
+    def _mpv_socket_file_exists(self) -> bool:
+        return os.path.exists(self.mpv_socket)
+
+    def _mpv_socket_missing(self) -> bool:
+        """True when the IPC socket file is gone or mpv is not accepting connections."""
+        if not self._mpv_socket_file_exists():
+            return True
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(0.3)
+                s.connect(self.mpv_socket)
+            return False
+        except (ConnectionRefusedError, FileNotFoundError, OSError):
+            return True
+
     def _try_recover_socket_without_restart(self) -> bool:
         """Wait for IPC socket while mpv is busy (ytdl/HLS) without restarting systemd."""
+        if not self._mpv_socket_file_exists():
+            return False
         deadline = time.time() + self._socket_recover_wait_sec()
         while time.time() < deadline:
             if self._check_mpv_socket(timeout=0.5):
@@ -201,6 +218,8 @@ class MPVManager:
         return False
 
     def _should_restart_mpv_service(self) -> bool:
+        if self._mpv_socket_missing():
+            return True
         if self._playback_session_active and not self._restart_during_playback_allowed():
             return False
         return True
@@ -212,6 +231,23 @@ class MPVManager:
                 extra={"operation": "SystemdServiceRestart"},
             )
             return self._try_recover_socket_without_restart()
+
+        window = float(os.getenv("DSIGN_MPV_RESTART_COALESCE_SEC", "8") or 8)
+        if window < 0:
+            window = 0.0
+        now = time.time()
+        with self._mpv_restart_coalesce_lock:
+            if window > 0 and (now - self._last_mpv_restart_attempt_ts) < window:
+                return self._check_mpv_socket(timeout=min(window, 6.0))
+            self._last_mpv_restart_attempt_ts = now
+
+        if self._playback_session_active and self._mpv_socket_missing():
+            self.logger.warning(
+                "MPV socket missing during playlist; forcing systemd restart",
+                extra={"operation": "SystemdServiceRestart"},
+            )
+            self._playback_stream_opening = False
+
         return self._restart_systemd_service()
 
     def _ipc_failure_should_systemd_restart(self, exc: BaseException) -> bool:
@@ -463,7 +499,10 @@ class MPVManager:
         def _retry_sleep_after_failure(exc: BaseException, attempt_idx: int) -> None:
             if attempt_idx >= PlaybackConstants.MAX_RETRIES - 1:
                 return
-            if _ipc_error_should_restart_mpv(exc):
+            if (
+                _ipc_error_should_restart_mpv(exc)
+                or isinstance(exc, (ConnectionRefusedError, FileNotFoundError))
+            ):
                 i = min(attempt_idx, len(delays_transport) - 1)
                 try:
                     d = float(delays_transport[i])
@@ -548,7 +587,9 @@ class MPVManager:
                     },
                 )
                 try:
-                    recovered = self._try_recover_socket_without_restart()
+                    recovered = False
+                    if self._mpv_socket_file_exists():
+                        recovered = self._try_recover_socket_without_restart()
                     if not recovered:
                         if not self._restart_systemd_service_if_needed() or not self._wait_for_socket():
                             _retry_sleep_after_failure(
@@ -628,7 +669,10 @@ class MPVManager:
         def _retry_sleep_after_failure(exc: BaseException, attempt_idx: int) -> None:
             if attempt_idx >= PlaybackConstants.MAX_RETRIES - 1:
                 return
-            if _ipc_error_should_restart_mpv(exc):
+            if (
+                _ipc_error_should_restart_mpv(exc)
+                or isinstance(exc, (ConnectionRefusedError, FileNotFoundError))
+            ):
                 i = min(attempt_idx, len(delays_transport) - 1)
                 try:
                     d = float(delays_transport[i])
@@ -790,7 +834,9 @@ class MPVManager:
                 )
                 # Lock released: restart + wait without blocking other threads on the lock for minutes.
                 try:
-                    recovered = self._try_recover_socket_without_restart()
+                    recovered = False
+                    if self._mpv_socket_file_exists():
+                        recovered = self._try_recover_socket_without_restart()
                     if not recovered:
                         if not self._restart_systemd_service_if_needed() or not self._wait_for_socket():
                             _retry_sleep_after_failure(ConnectionRefusedError("socket"), attempt)

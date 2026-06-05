@@ -1646,11 +1646,21 @@ class PlaylistManager:
                         except Exception:
                             pass
                         if not load_resp or load_resp.get("error") != "success":
+                            socket_missing = not os.path.exists(PlaybackConstants.SOCKET_PATH)
                             self.logger.warning(
                                 "MPV loadfile failed",
-                                extra={"path": path, "mpv_response": load_resp},
+                                extra={
+                                    "path": path,
+                                    "mpv_response": load_resp,
+                                    "socket_missing": socket_missing,
+                                },
                             )
-                            # Skip to next item; avoid getting stuck on a bad file.
+                            self._register_media_failure(
+                                media_key,
+                                reason="socket_missing" if socket_missing else "loadfile_failed",
+                            )
+                            if socket_missing:
+                                self._stop_event.wait(timeout=5.0)
                             continue
 
                     if is_video:
