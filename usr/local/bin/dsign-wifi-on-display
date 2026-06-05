@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+set -u
+
+TTY_DEVICE="/dev/tty1"
+MPV_SOCKET="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
+NETWORK_STATUS_FILE="${DSIGN_NETWORK_STATUS_FILE:-/run/dsign/network-status.env}"
+NETASSIST_ENV="${DSIGN_NETWORK_ASSISTANT_ENV:-/var/lib/dsign/config/network-assistant.env}"
+FORCE_MARKER="${DSIGN_WIFI_ON_DISPLAY_FORCE_MARKER:-/run/dsign/wifi-on-display-force}"
+WIFI_PROMPT_SEC="${DSIGN_NETWORK_WIFI_PROMPT_SEC:-60}"
+WAIT_SOCKET_SEC="${DSIGN_WIFI_WAIT_SOCKET_SEC:-30}"
+PRE_OSD_SEC="${DSIGN_WIFI_PRE_OSD_SEC:-2}"
+
+log() {
+  logger -t dsign-wifi-on-display "$*"
+}
+
+truthy() {
+  case "${1:-}" in
+    1|true|yes|on|TRUE|YES|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+load_env_value() {
+  local file="$1" key="$2" default="${3:-}"
+  [ -r "$file" ] || { printf '%s' "$default"; return 0; }
+  local line val
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "${key}="*)
+        val="${line#*=}"
+        printf '%s' "$val"
+        return 0
+        ;;
+    esac
+  done < "$file"
+  printf '%s' "$default"
+}
+
+should_run() {
+  if [ -f "$FORCE_MARKER" ]; then
+    return 0
+  fi
+  local interactive debug force wifi_on_display internet
+  interactive="$(load_env_value "$NETASSIST_ENV" DSIGN_NETWORK_ASSISTANT_INTERACTIVE 0)"
+  debug="$(load_env_value "$NETASSIST_ENV" DSIGN_NETWORK_ASSISTANT_DEBUG 0)"
+  force="$(load_env_value "$NETASSIST_ENV" DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT 0)"
+  wifi_on_display="$(load_env_value "$NETASSIST_ENV" DSIGN_NETWORK_WIFI_ON_DISPLAY 0)"
+  if ! truthy "$interactive"; then
+    return 1
+  fi
+  if truthy "$debug" || truthy "$force" || truthy "$wifi_on_display"; then
+    return 0
+  fi
+  internet="$(load_env_value "$NETWORK_STATUS_FILE" INTERNET 1)"
+  if [ "$internet" = "0" ]; then
+    return 0
+  fi
+  return 1
+}
+
+wait_for_socket() {
+  local deadline now
+  deadline=$(( $(date +%s) + WAIT_SOCKET_SEC ))
+  while true; do
+    if [ -S "$MPV_SOCKET" ]; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if [ "$now" -ge "$deadline" ]; then
+      return 1
+    fi
+    sleep 0.25
+  done
+}
+
+mpv_ipc() {
+  local payload="$1"
+  python3 - "$payload" "$MPV_SOCKET" <<'PY'
+import json, socket, sys, time
+
+payload = json.loads(sys.argv[1])
+sock_path = sys.argv[2]
+rid = int(time.time() * 1_000_000) & 0x7fffffff
+payload["request_id"] = rid
+
+def send_once():
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2.5)
+    s.connect(sock_path)
+    s.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+    data = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+        if b"\n" in data:
+            break
+    s.close()
+    line = data.split(b"\n", 1)[0].strip()
+    if not line:
+        return None
+    try:
+        return json.loads(line.decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+
+try:
+    obj = send_once()
+except Exception:
+    sys.exit(1)
+if isinstance(obj, dict) and obj.get("error") == "success":
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
+mpv_show_text() {
+  local text="$1"
+  local ms="${2:-8000}"
+  local escaped
+  escaped="$(printf '%s' "$text" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+  mpv_ipc "{\"command\":[\"show-text\",${escaped},${ms},0,3]}" || true
+}
+
+mpv_release_display() {
+  mpv_ipc '{"command":["set_property","pause","yes"]}' || true
+  mpv_ipc '{"command":["set_property","vo","null"]}' || true
+}
+
+mpv_restore_display() {
+  local vo="${DSIGN_MPV_RESTORE_VO:-drm}"
+  mpv_ipc "{\"command\":[\"set_property\",\"vo\",\"${vo}\"]}" || true
+  sleep 0.4
+  mpv_ipc '{"command":["set_property","pause","no"]}' || true
+}
+
+run_nmtui() {
+  local remaining="$1"
+  if ! command -v nmtui-connect >/dev/null 2>&1; then
+    log "nmtui-connect missing"
+    return 1
+  fi
+  chvt 1 >/dev/null 2>&1 || true
+  printf '\033c' >"$TTY_DEVICE" 2>/dev/null || true
+  printf '%s\r\n' "Digital Signage: выбор Wi-Fi" >"$TTY_DEVICE" 2>/dev/null || true
+  printf '%s\r\n' "Enter — выбрать сеть, Esc — пропустить" >"$TTY_DEVICE" 2>/dev/null || true
+  timeout --foreground "${remaining}" nmtui-connect <"$TTY_DEVICE" >"$TTY_DEVICE" 2>"$TTY_DEVICE" || true
+}
+
+main() {
+  if ! should_run; then
+    log "Skip: Wi-Fi on-display not enabled for this boot"
+    exit 0
+  fi
+
+  local forced="0"
+  if [ -f "$FORCE_MARKER" ]; then
+    forced="1"
+    rm -f "$FORCE_MARKER" 2>/dev/null || true
+  fi
+
+  if ! wait_for_socket; then
+    log "Skip: MPV socket unavailable"
+    exit 0
+  fi
+
+  local osd_wait display_sec
+  display_sec="$(load_env_value "$NETWORK_STATUS_FILE" DISPLAY_SEC 0)"
+  osd_wait="$PRE_OSD_SEC"
+  if [ -n "$display_sec" ] && [ "$display_sec" -gt 0 ] 2>/dev/null; then
+    osd_wait=$((display_sec + PRE_OSD_SEC))
+  fi
+  sleep "$osd_wait"
+
+  if ! command -v nmcli >/dev/null 2>&1; then
+    log "nmcli missing"
+    exit 0
+  fi
+
+  log "Starting Wi-Fi picker on content display (forced=${forced})"
+  mpv_show_text "Настройка Wi-Fi…" 4000
+  sleep 1
+  mpv_release_display
+  sleep 0.6
+
+  local prompt_sec="$WIFI_PROMPT_SEC"
+  if ! [[ "$prompt_sec" =~ ^[0-9]+$ ]]; then
+    prompt_sec=60
+  fi
+  if [ "$prompt_sec" -lt 15 ]; then
+    prompt_sec=15
+  fi
+  if [ "$prompt_sec" -gt 300 ]; then
+    prompt_sec=300
+  fi
+
+  run_nmtui "$prompt_sec"
+
+  mpv_restore_display
+  mpv_show_text "Wi-Fi: готово" 3000
+
+  local ip_addr
+  ip_addr="$(ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')"
+  if [ -n "$ip_addr" ]; then
+    log "Wi-Fi on-display finished, IP=${ip_addr}"
+  else
+    log "Wi-Fi on-display finished without global IPv4"
+  fi
+  mkdir -p /run/dsign 2>/dev/null || true
+  : >/run/dsign/wifi-on-display-done 2>/dev/null || true
+}
+
+main "$@"

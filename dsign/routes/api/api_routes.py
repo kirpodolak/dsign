@@ -146,12 +146,15 @@ def init_api_routes(api_bp, services):
         status_display_sec: int = 10,
     ) -> None:
         _netassist_env_path.parent.mkdir(parents=True, exist_ok=True)
+        wifi_on_display = interactive and (debug or force_prompt)
         body = (
             "# Written by Digital Signage Settings\n"
             f"DSIGN_NETWORK_ASSISTANT_INTERACTIVE={'1' if interactive else '0'}\n"
             f"DSIGN_NETWORK_ASSISTANT_FORCE_PROMPT={'1' if force_prompt else '0'}\n"
             f"DSIGN_NETWORK_ASSISTANT_DEBUG={'1' if debug else '0'}\n"
+            f"DSIGN_NETWORK_WIFI_ON_DISPLAY={'1' if wifi_on_display else '0'}\n"
             f"DSIGN_NETWORK_STATUS_DISPLAY_SEC={max(3, min(120, int(status_display_sec or 10)))}\n"
+            f"DSIGN_NETWORK_WIFI_PROMPT_SEC={60 if wifi_on_display else 0}\n"
         )
         _netassist_env_path.write_text(body, encoding="utf-8")
         try:
@@ -1252,6 +1255,43 @@ def init_api_routes(api_bp, services):
             })
         except Exception as e:
             current_app.logger.error(f"Error scanning Wi-Fi networks: {str(e)}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/system/network/wifi/setup-on-display', methods=['POST'])
+    @login_required
+    def wifi_setup_on_display():
+        """Release MPV DRM and open nmtui on the HDMI display (same screen as content)."""
+        try:
+            if not _is_admin_user():
+                return jsonify({"success": False, "error": "Unauthorized"}), 403
+            marker = Path("/run/dsign/wifi-on-display-force")
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("1", encoding="utf-8")
+            except Exception as e:
+                return jsonify({"success": False, "error": f"Cannot create force marker: {e}"}), 500
+            systemctl = shutil.which("systemctl") or "/bin/systemctl"
+            try:
+                subprocess.run(
+                    ["sudo", "-n", systemctl, "start", "dsign-wifi-on-display.service"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10.0,
+                )
+            except subprocess.CalledProcessError as e:
+                msg = (e.stderr or e.stdout or "").strip() or f"Command failed: {e.returncode}"
+                msg_l = msg.lower()
+                if (
+                    "a terminal is required" in msg_l
+                    or "password is required" in msg_l
+                    or "interactive authentication is required" in msg_l
+                ):
+                    msg = "sudoers not configured (NOPASSWD) for: sudo systemctl start dsign-wifi-on-display.service"
+                return jsonify({"success": False, "error": msg}), 403
+            return jsonify({"success": True, "message": "Wi-Fi setup started on display"})
+        except Exception as e:
+            current_app.logger.error(f"Error starting Wi-Fi on display: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/system/network/wifi/connect', methods=['POST'])

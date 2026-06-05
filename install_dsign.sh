@@ -198,7 +198,7 @@ install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bi
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-archive-log" /usr/local/bin/dsign-mpv-archive-log
 sed -i 's/\r$//' /usr/local/bin/dsign-mpv-archive-log
-chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
+chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
 
 mkdir -p /var/lib/dsign/config
 chown "$DSIGN_USER:$DSIGN_USER" /var/lib/dsign/config
@@ -230,6 +230,10 @@ Environment=DSIGN_NETWORK_ASSISTANT_DONE_MARKER=/run/dsign/network-assistant-don
 [Install]
 WantedBy=multi-user.target
 EOL
+
+if [ -f "$PROJECT_DIR/etc/systemd/system/dsign-wifi-on-display.service" ]; then
+    install -m 0644 "$PROJECT_DIR/etc/systemd/system/dsign-wifi-on-display.service" /etc/systemd/system/dsign-wifi-on-display.service
+fi
 
 cat > /etc/systemd/system/dsign-show-startup-ip.service <<EOL
 [Unit]

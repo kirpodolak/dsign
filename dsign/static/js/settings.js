@@ -441,7 +441,7 @@ export class SettingsManager {
     }
 
     _networkAssistCycle(mode) {
-        const order = ['off', 'auto', 'force'];
+        const order = ['off', 'auto', 'force', 'debug'];
         const i = Math.max(0, order.indexOf(String(mode || 'auto')));
         return order[(i + 1) % order.length];
     }
@@ -450,7 +450,35 @@ export class SettingsManager {
         const m = String(mode || 'auto');
         if (m === 'off') return t('network_assist_toggle_off', lang);
         if (m === 'force') return t('network_assist_toggle_force', lang);
+        if (m === 'debug') return t('network_assist_toggle_debug', lang);
         return t('network_assist_toggle_auto', lang);
+    }
+
+    async _startWifiOnDisplay(btnEl) {
+        const lang = getUiLang();
+        if (this.state.wifiOnDisplaySaving) return;
+        this.state.wifiOnDisplaySaving = true;
+        if (btnEl) btnEl.disabled = true;
+        try {
+            const resp = await fetch('/api/system/network/wifi/setup-on-display', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCSRFToken(),
+                },
+                credentials: 'include',
+                body: JSON.stringify({}),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
+            showAlert(t('wifi_on_display_started', lang), 'success');
+        } catch (e) {
+            console.error(e);
+            showAlert(e.message || t('wifi_on_display_failed', lang), 'error');
+        } finally {
+            this.state.wifiOnDisplaySaving = false;
+            if (btnEl) btnEl.disabled = false;
+        }
     }
 
     async _setNetworkAssistBootMode(nextMode, btnEl) {
@@ -467,10 +495,7 @@ export class SettingsManager {
                     'X-CSRFToken': getCSRFToken(),
                 },
                 credentials: 'include',
-                body: JSON.stringify({
-                    boot_mode: mode,
-                    status_display_sec: mode === 'debug' ? 10 : 120,
-                }),
+                body: JSON.stringify({ boot_mode: mode }),
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
@@ -554,7 +579,13 @@ export class SettingsManager {
                         data-next-mode="${nextNa}"
                         data-i18n-title="network_assistant_boot_tooltip"
                         title="${t('network_assistant_boot_tooltip', lang)}"
-                        aria-label="${t('network_assistant_boot_tooltip', lang)}"><span class="svc-mini-toggle__text">${this._networkAssistToggleLabel(bootMode, lang)}</span></button>`
+                        aria-label="${t('network_assistant_boot_tooltip', lang)}"><span class="svc-mini-toggle__text">${this._networkAssistToggleLabel(bootMode, lang)}</span></button>
+                   <button type="button"
+                        class="svc-mini-toggle svc-mini-toggle--wifi"
+                        data-action="wifi-on-display"
+                        data-i18n-title="wifi_on_display_tooltip"
+                        title="${t('wifi_on_display_tooltip', lang)}"
+                        aria-label="${t('wifi_on_display_tooltip', lang)}"><span class="svc-mini-toggle__text">${t('wifi_on_display_short', lang)}</span></button>`
                 : '';
             return `
                 <div class="svc-tile ${accent}" data-svc="${e.key}">

@@ -5,6 +5,7 @@ from typing import Dict, Optional, List, Union, Any
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread, Lock
 import subprocess
+import shutil
 import logging
 
 from .mpv_management import MPVManager
@@ -276,6 +277,53 @@ class PlaybackService:
                 Thread(target=self._preload_resources, daemon=True).start()
             return True
 
+
+    def _network_assistant_interactive_enabled(self) -> bool:
+        env_path = Path("/var/lib/dsign/config/network-assistant.env")
+        try:
+            if not env_path.is_file():
+                return False
+            for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw.strip()
+                if line.startswith("DSIGN_NETWORK_ASSISTANT_INTERACTIVE="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    return val in ("1", "true", "yes", "on")
+        except Exception:
+            pass
+        return False
+
+    def _wait_for_wifi_on_display(self) -> None:
+        """After IP OSD, wait for optional Wi-Fi picker on the content display."""
+        if not self._network_assistant_interactive_enabled():
+            return
+        try:
+            max_wait = float((os.getenv("DSIGN_BOOT_WIFI_PROMPT_WAIT_SEC") or "90").strip())
+        except ValueError:
+            max_wait = 90.0
+        max_wait = max(15.0, min(300.0, max_wait))
+        systemctl = shutil.which("systemctl") or "/bin/systemctl"
+        deadline = time.monotonic() + max_wait
+        seen_active = False
+        while time.monotonic() < deadline:
+            try:
+                res = subprocess.run(
+                    [systemctl, "is-active", "dsign-wifi-on-display.service"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                    check=False,
+                )
+                state = (res.stdout or "").strip()
+            except Exception:
+                state = ""
+            if state in ("activating", "active"):
+                seen_active = True
+            elif seen_active and state in ("inactive", "failed", "dead", "unknown"):
+                return
+            elif Path("/run/dsign/wifi-on-display-done").is_file():
+                return
+            time.sleep(0.5)
+
     def _wait_before_boot_playlist(self) -> None:
         """Let startup IP OSD finish before loadfile covers the screen."""
         try:
@@ -304,6 +352,7 @@ class PlaybackService:
                 return
             time.sleep(0.25)
         time.sleep(2.0)
+        self._wait_for_wifi_on_display()
 
     def _should_resume_playback_after_boot(self) -> bool:
         try:
