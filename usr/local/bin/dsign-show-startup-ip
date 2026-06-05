@@ -197,6 +197,31 @@ if [ -r "$STARTUP_IP_FILE" ]; then
 fi
 
 # Wi-Fi picker on content display (part of network-assistant flow, no separate systemd unit).
-if command -v sudo >/dev/null 2>&1 && [ -x /usr/local/bin/dsign-wifi-on-display ]; then
-  sudo -n /usr/local/bin/dsign-wifi-on-display 2>/dev/null || true
-fi
+run_wifi_on_display() {
+  local wifi_script="/usr/local/bin/dsign-wifi-on-display"
+
+  if ! command -v sudo >/dev/null 2>&1; then
+    log "Wi-Fi on-display skip: sudo not available"
+    return 0
+  fi
+  if [ ! -f "$wifi_script" ]; then
+    log "Wi-Fi on-display skip: ${wifi_script} missing (deploy from repo + chmod 755)"
+    return 0
+  fi
+  if [ ! -x "$wifi_script" ]; then
+    log "Wi-Fi on-display skip: ${wifi_script} not executable (sudo chmod 755 ${wifi_script})"
+    return 0
+  fi
+
+  local err rc
+  err="$(sudo -n "$wifi_script" 2>&1)" || {
+    rc=$?
+    if [ -n "$err" ]; then
+      log "Wi-Fi on-display failed (rc=${rc}): ${err}"
+    else
+      log "Wi-Fi on-display failed (rc=${rc}): check /etc/sudoers.d/dsign-systemctl NOPASSWD for ${wifi_script}"
+    fi
+    return 0
+  }
+}
+run_wifi_on_display

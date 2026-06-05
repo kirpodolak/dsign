@@ -87,14 +87,6 @@ Web UI: `http://localhost:5000`
 
 Если система уже развернута, обычно достаточно точечного обновления файлов + `systemctl daemon-reload` + restart сервисов.
 
-### Boot: IP OSD поверх контента (не блокировать плейлист)
-
-- `dsign-show-startup-ip` завершается за секунды (fire-and-forget `show-text`, фоновые повторы до 45 с).
-- `digital-signage` **не ждёт** `dsign-network-assistant` (интерактивный Wi‑Fi на tty1 может занять до 120 с).
-- Плейлист со статусом `playing` в БД возобновляется при старте `digital-signage`.
-
-Переменные: `DSIGN_STARTUP_IP_SOCKET_WAIT_SEC` (по умолчанию 3), `DSIGN_STARTUP_IP_BG_RETRY_SEC` (45), `DSIGN_STARTUP_IP_ALLOW_LIVE_LOOKUP` (0).
-
 ---
 
 ## Полезные команды диагностики
@@ -135,9 +127,39 @@ systemctl cat dsign-network-assistant.service
 Фикс:
 
 ```bash
-sudo sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip
-sudo chmod 755 /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip
+sudo sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display
+sudo chmod 755 /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display
 ```
+
+### `dsign-wifi-on-display` не запускается
+
+Скрипт вызывается из `dsign-show-startup-ip` от пользователя `dsign` через `sudo -n` (без пароля). Нужны **файл**, **chmod** и **sudoers**.
+
+На устройстве после `git pull`:
+
+```bash
+cd /home/dsign/dsign
+
+sudo cp usr/local/bin/dsign-wifi-on-display /usr/local/bin/
+sudo cp usr/local/bin/dsign-show-startup-ip /usr/local/bin/
+sudo chmod 755 /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-show-startup-ip
+sudo sed -i 's/\r$//' /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-show-startup-ip
+
+sudo cp etc/sudoers.d/dsign-systemctl /etc/sudoers.d/
+sudo visudo -cf /etc/sudoers.d/dsign-systemctl
+
+# Проверка от имени dsign (должно отработать без запроса пароля):
+sudo -u dsign sudo -n /usr/local/bin/dsign-wifi-on-display
+journalctl -t dsign-show-startup-ip -t dsign-wifi-on-display -b --no-pager -n 50
+```
+
+В `/etc/sudoers.d/dsign-systemctl` должна быть строка:
+
+```
+dsign ALL=(root) NOPASSWD: /usr/local/bin/dsign-wifi-on-display
+```
+
+Отдельный `dsign-wifi-on-display.service` не используется — не создавайте его вручную.
 
 ### MPV стартует, но IP OSD не появляется
 

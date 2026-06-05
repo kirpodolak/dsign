@@ -202,6 +202,21 @@ install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-archive-log" /usr/local/bi
 sed -i 's/\r$//' /usr/local/bin/dsign-mpv-archive-log
 chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
 
+# Sudoers: allow user dsign to run helpers without a password (wifi-on-display, systemctl, etc.)
+SUDOERS_SRC="$PROJECT_DIR/etc/sudoers.d"
+if [ -d "$SUDOERS_SRC" ]; then
+  install -d -m 0750 /etc/sudoers.d
+  for _sf in dsign-systemctl dsign-mpv-restart dsign-screenshot; do
+    if [ -f "$SUDOERS_SRC/$_sf" ]; then
+      install -m 0440 "$SUDOERS_SRC/$_sf" "/etc/sudoers.d/$_sf"
+      visudo -cf "/etc/sudoers.d/$_sf" || {
+        echo "ERROR: invalid sudoers file: $_sf" >&2
+        exit 1
+      }
+    fi
+  done
+fi
+
 mkdir -p /var/lib/dsign/config
 chown "$DSIGN_USER:$DSIGN_USER" /var/lib/dsign/config
 
