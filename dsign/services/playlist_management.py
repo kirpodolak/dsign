@@ -1491,29 +1491,38 @@ class PlaylistManager:
                         profile_muted=profile_muted,
                     )
 
-                    # Apply per-item settings (best-effort, longer timeout to avoid IPC churn on Pi 3B+).
-                    # NOTE: if MPV is under load, short timeouts cause broken pipes and retry storms.
-                    try:
-                        self._mpv_manager._send_command(
-                            # Do NOT loop files. We control the loop at application level,
-                            # and looping still images can cause visible "blink" on some builds.
-                            {"command": ["set_property", "loop-file", "no"]},
-                            timeout=5.0,
-                        )
-                    except Exception:
-                        pass
+                    skip_load = bool(
+                        first_item_preloaded
+                        and offset == 0
+                        and not did_skip_first_preload
+                    )
+                    if skip_load:
+                        did_skip_first_preload = True
 
-                    # Still images use keep-open=yes to avoid close/reopen flicker. If we then load a
-                    # video, that sticky property can prevent a clean EOF/idle transition and the
-                    # playlist thread never advances. Reset before every video load.
-                    if is_video:
+                    is_preloaded_network = bool(
+                        skip_load
+                        and is_video
+                        and isinstance(path, str)
+                        and path.startswith(("http://", "https://", "ytdl://"))
+                    )
+
+                    # Do not spam IPC while play()-issued loadfile is still opening (ytdl/HLS).
+                    if not is_preloaded_network:
                         try:
                             self._mpv_manager._send_command(
-                                {"command": ["set_property", "keep-open", "no"]},
-                                timeout=3.0,
+                                {"command": ["set_property", "loop-file", "no"]},
+                                timeout=5.0,
                             )
                         except Exception:
                             pass
+                        if is_video:
+                            try:
+                                self._mpv_manager._send_command(
+                                    {"command": ["set_property", "keep-open", "no"]},
+                                    timeout=3.0,
+                                )
+                            except Exception:
+                                pass
 
                     # Load next media file
                     load_started = time.monotonic()
@@ -1532,14 +1541,6 @@ class PlaylistManager:
                         self._stop_event.wait(timeout=min(30.0, wait_sec))
                         if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                             break
-                    skip_load = bool(
-                        first_item_preloaded
-                        and start_index == 0
-                        and offset == 0
-                        and not did_skip_first_preload
-                    )
-                    if skip_load:
-                        did_skip_first_preload = True
                     if not skip_load:
                         if not self._refresh_item_playback_path(item):
                             self.logger.warning(
@@ -1621,18 +1622,14 @@ class PlaylistManager:
                         )
                         stream_ready = False
                         if is_network:
-                            if skip_load and self._preloaded_stream_ready:
-                                stream_ready = True
-                                self._preloaded_stream_ready = False
-                            else:
-                                if not self._ensure_network_stream_started(
-                                    item,
-                                    str(path),
-                                    normalized_headers=normalized_headers or None,
-                                ):
-                                    self._register_media_failure(media_key, reason="open_failed")
-                                    continue
-                                stream_ready = True
+                            if not self._ensure_network_stream_started(
+                                item,
+                                str(path),
+                                normalized_headers=normalized_headers or None,
+                            ):
+                                self._register_media_failure(media_key, reason="open_failed")
+                                continue
+                            stream_ready = True
                         self._wait_mpv_video_end(
                             playlist_id,
                             is_network=is_network,
@@ -1848,15 +1845,15 @@ class PlaylistManager:
                 pass
 
             self._preloaded_stream_ready = False
-            if (
-                first_is_network
-                and bool(first.get("is_video"))
-                and first_load_resp
-                and first_load_resp.get("error") == "success"
-            ):
-                self._preloaded_stream_ready = self._ensure_network_stream_started(
-                    first,
-                    first_path,
+            if first_is_network and bool(first.get("is_video")):
+                self.logger.info(
+                    "Playback play: network loadfile issued",
+                    extra={
+                        "playlist_id": playlist_id,
+                        "media_key": str(first.get("key") or first_path),
+                        "load_ok": bool(first_load_resp and first_load_resp.get("error") == "success"),
+                        "path_preview": first_path[:120],
+                    },
                 )
 
             # Update playback status (single-row table; keep id=1 stable)
@@ -1867,12 +1864,12 @@ class PlaylistManager:
             self.db_session.commit()
 
             # Start background loop to enforce durations and EOF waits.
-            loop_start = 1 if len(items) > 1 else 0
+            # play() always loadfile'd items[0]; loop walks 0..n-1, skips reload on first offset once.
             self._play_thread = Thread(
                 target=self._run_manual_slideshow_loop,
-                args=(playlist_id, items, loop_start),
+                args=(playlist_id, items, 0),
                 kwargs={
-                    "first_item_preloaded": len(items) == 1,
+                    "first_item_preloaded": True,
                     "profile_muted": profile_muted,
                 },
                 daemon=True,
