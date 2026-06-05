@@ -1,5 +1,6 @@
 import os
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Optional, List, Union, Any
 from concurrent.futures import ThreadPoolExecutor
@@ -61,10 +62,21 @@ class PlaybackService:
         
         self._recover_lock = Lock()
         self._last_socket_identity: Optional[tuple] = None
+        self._app = None
 
         # Initialize with retry
         self._init_with_retry()
         self._start_mpv_socket_watch()
+
+    def set_app(self, app) -> None:
+        """Attach Flask app for DB access from background threads (socket watch, boot resume)."""
+        self._app = app
+        pm = getattr(self, "_playlist_manager", None)
+        if pm is not None and hasattr(pm, "set_app"):
+            pm.set_app(app)
+
+    def _app_context(self):
+        return self._app.app_context() if self._app is not None else nullcontext()
 
     def display_idle_logo(self):
         return self.logo_manager.display_idle_logo()
@@ -237,6 +249,10 @@ class PlaybackService:
 
     def recover_after_mpv_systemd_restart(self, *, restart_playlist: Optional[bool] = None) -> bool:
         """Re-bind IPC after `systemctl restart dsign-mpv` without restarting digital-signage."""
+        with self._app_context():
+            return self._recover_after_mpv_systemd_restart_impl(restart_playlist=restart_playlist)
+
+    def _recover_after_mpv_systemd_restart_impl(self, *, restart_playlist: Optional[bool] = None) -> bool:
         with self._recover_lock:
             if restart_playlist is None:
                 restart_playlist = self._should_resume_playback_after_boot()
@@ -338,18 +354,23 @@ class PlaybackService:
         self._wait_for_wifi_on_display()
 
     def _should_resume_playback_after_boot(self) -> bool:
-        try:
-            from ..models import PlaybackStatus
-            row = self.db_session.query(PlaybackStatus).get(1)
-            return bool(
-                row
-                and row.playlist_id
-                and str(row.status or "").lower() == "playing"
-            )
-        except Exception:
-            return False
+        with self._app_context():
+            try:
+                from ..models import PlaybackStatus
+                row = self.db_session.query(PlaybackStatus).get(1)
+                return bool(
+                    row
+                    and row.playlist_id
+                    and str(row.status or "").lower() == "playing"
+                )
+            except Exception:
+                return False
 
     def _resume_playback_after_boot(self) -> None:
+        with self._app_context():
+            self._resume_playback_after_boot_impl()
+
+    def _resume_playback_after_boot_impl(self) -> None:
         from ..models import PlaybackStatus
         try:
             row = self.db_session.query(PlaybackStatus).get(1)

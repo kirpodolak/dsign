@@ -40,6 +40,9 @@ class PlaylistManager:
         """Attach Flask app so background playback threads can use db.session safely."""
         self._app = app
 
+    def _app_context(self):
+        return self._app.app_context() if self._app is not None else nullcontext()
+
     def set_external_media_service(self, service) -> None:
         """Attach external media resolver service (optional)."""
         self._external_media_service = service
@@ -1362,8 +1365,7 @@ class PlaylistManager:
         profile_muted: bool = False,
     ) -> None:
         """Thread entry: push Flask app context before DB-backed external media refresh."""
-        ctx = self._app.app_context() if self._app is not None else nullcontext()
-        with ctx:
+        with self._app_context():
             self._manual_slideshow_loop(
                 playlist_id,
                 items,
@@ -1927,6 +1929,10 @@ class PlaylistManager:
 
     def stop(self, *, show_idle_logo: bool = True, update_status: bool = True) -> bool:
         """Stop playback and persist stopped state so UI/API match MPV (idle logo)."""
+        with self._app_context():
+            return self._stop_impl(show_idle_logo=show_idle_logo, update_status=update_status)
+
+    def _stop_impl(self, *, show_idle_logo: bool = True, update_status: bool = True) -> bool:
         from ..models import PlaybackStatus
 
         try:
