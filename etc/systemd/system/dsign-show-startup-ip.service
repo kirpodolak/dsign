@@ -4,14 +4,7 @@ After=dsign-mpv.service dsign-network-assistant.service
 
 [Service]
 Type=oneshot
-RemainAfterExit=no
-TimeoutStartSec=10
+TimeoutStartSec=300
 User=dsign
 Group=dsign
-Environment=DSIGN_STARTUP_IP_ALLOW_LIVE_LOOKUP=1
-Environment=DSIGN_STARTUP_IP_SOCKET_WAIT_SEC=3
-Environment=DSIGN_STARTUP_IP_BG_RETRY_SEC=60
-ExecStart=-/bin/bash /usr/local/bin/dsign-show-startup-ip
-
-[Install]
-WantedBy=multi-user.target
+ExecStart=/usr/local/bin/dsign-show-startup-ip
