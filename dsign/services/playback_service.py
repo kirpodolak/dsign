@@ -254,17 +254,9 @@ class PlaybackService:
 
     def _recover_after_mpv_systemd_restart_impl(self, *, restart_playlist: Optional[bool] = None) -> bool:
         with self._recover_lock:
-            if restart_playlist is None:
-                restart_playlist = self._should_resume_playback_after_boot()
             playlist_id: Optional[int] = None
-            if restart_playlist:
-                try:
-                    from ..models import PlaybackStatus
-                    row = self.db_session.query(PlaybackStatus).get(1)
-                    if row and row.playlist_id:
-                        playlist_id = int(row.playlist_id)
-                except Exception:
-                    playlist_id = None
+            if restart_playlist is not False:
+                playlist_id = self._resolve_playlist_id_for_recovery()
             try:
                 self._playlist_manager.stop(show_idle_logo=False, update_status=False)
             except Exception:
@@ -282,15 +274,45 @@ class PlaybackService:
                     extra={"action": "mpv_recover"},
                 )
                 return False
+            self._wait_after_mpv_recover()
             self._last_socket_identity = self._mpv_socket_identity()
             if playlist_id is not None:
-                self.play(playlist_id)
-                self._log_info(
-                    "Resumed playlist after MPV service restart",
+                ok = False
+                for attempt in range(2):
+                    try:
+                        ok = bool(self.play(playlist_id))
+                    except Exception as e:
+                        ok = False
+                        self._log_warning(
+                            "MPV recover: play() raised",
+                            extra={
+                                "playlist_id": playlist_id,
+                                "attempt": attempt + 1,
+                                "error": str(e),
+                                "type": type(e).__name__,
+                                "action": "mpv_recover",
+                            },
+                        )
+                    if ok:
+                        self._log_info(
+                            "Resumed playlist after MPV service restart",
+                            extra={"playlist_id": playlist_id, "action": "mpv_recover"},
+                        )
+                        return True
+                    if attempt == 0:
+                        time.sleep(2.0)
+                self._log_warning(
+                    "MPV recover: play() failed after mpv restart",
                     extra={"playlist_id": playlist_id, "action": "mpv_recover"},
                 )
-            else:
+                return False
+            if not self._playback_active_marker_exists() and not self._playlist_manager_has_active_playback():
                 Thread(target=self._preload_resources, daemon=True).start()
+            else:
+                self._log_warning(
+                    "MPV recover: playback looked active but no playlist_id to resume",
+                    extra={"action": "mpv_recover"},
+                )
             return True
 
 
@@ -353,37 +375,84 @@ class PlaybackService:
         time.sleep(2.0)
         self._wait_for_wifi_on_display()
 
-    def _should_resume_playback_after_boot(self) -> bool:
+    def _playback_active_marker_exists(self) -> bool:
+        try:
+            return Path("/run/dsign/playback-active").is_file()
+        except Exception:
+            return False
+
+    def _playlist_manager_has_active_playback(self) -> bool:
+        pm = getattr(self, "_playlist_manager", None)
+        if pm is None:
+            return False
+        try:
+            if getattr(pm, "_active_playlist_id", None):
+                return True
+            th = getattr(pm, "_play_thread", None)
+            return bool(th is not None and th.is_alive())
+        except Exception:
+            return False
+
+    def _resolve_playlist_id_for_recovery(self) -> Optional[int]:
+        """Pick playlist to resume after mpv-only systemd restart."""
         with self._app_context():
             try:
                 from ..models import PlaybackStatus
-                row = self.db_session.query(PlaybackStatus).get(1)
-                return bool(
-                    row
-                    and row.playlist_id
-                    and str(row.status or "").lower() == "playing"
+                session = getattr(self.db_session, "session", self.db_session)
+                row = session.query(PlaybackStatus).get(1)
+                if not row or not row.playlist_id:
+                    pass
+                else:
+                    status = str(row.status or "").lower()
+                    if status == "playing":
+                        return int(row.playlist_id)
+                    if self._playback_active_marker_exists() or self._playlist_manager_has_active_playback():
+                        return int(row.playlist_id)
+            except Exception as e:
+                self._log_warning(
+                    "MPV recover: could not read PlaybackStatus",
+                    extra={"error": str(e), "type": type(e).__name__, "action": "mpv_recover"},
                 )
+            try:
+                pm = self._playlist_manager
+                pid = getattr(pm, "_active_playlist_id", None)
+                if pid:
+                    return int(pid)
             except Exception:
-                return False
+                pass
+        return None
+
+    def _should_resume_playback_after_boot(self) -> bool:
+        return self._resolve_playlist_id_for_recovery() is not None
+
+    def _wait_after_mpv_recover(self) -> None:
+        """Brief settle after mpv systemd restart before loadfile (VO/DRM/ytdl hook)."""
+        try:
+            delay = float((os.getenv("DSIGN_MPV_RECOVER_PLAY_DELAY_SEC") or "2.5").strip())
+        except ValueError:
+            delay = 2.5
+        time.sleep(max(0.5, min(15.0, delay)))
 
     def _resume_playback_after_boot(self) -> None:
         with self._app_context():
             self._resume_playback_after_boot_impl()
 
     def _resume_playback_after_boot_impl(self) -> None:
-        from ..models import PlaybackStatus
         try:
-            row = self.db_session.query(PlaybackStatus).get(1)
-            if not row or not row.playlist_id:
-                return
-            if str(row.status or "").lower() != "playing":
+            playlist_id = self._resolve_playlist_id_for_recovery()
+            if playlist_id is None:
                 return
             self._wait_before_boot_playlist()
-            self.play(int(row.playlist_id))
-            self._log_info(
-                "Resumed playlist after boot",
-                extra={"playlist_id": int(row.playlist_id), "action": "boot_resume"},
-            )
+            if self.play(playlist_id):
+                self._log_info(
+                    "Resumed playlist after boot",
+                    extra={"playlist_id": playlist_id, "action": "boot_resume"},
+                )
+            else:
+                self._log_warning(
+                    "Boot playback resume: play() returned false",
+                    extra={"playlist_id": playlist_id, "action": "boot_resume"},
+                )
         except Exception as e:
             self._log_warning(
                 "Boot playback resume failed",
