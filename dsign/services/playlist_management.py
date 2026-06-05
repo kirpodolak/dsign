@@ -1234,16 +1234,15 @@ class PlaylistManager:
             if eof is True:
                 break
 
-            if not is_network:
-                dur = self._snap_number(snap, "duration")
-                tp = self._snap_number(snap, "time-pos")
-                if (
-                    dur is not None
-                    and dur > 0.5
-                    and tp is not None
-                    and (tp + 0.2) >= dur
-                ):
-                    break
+            dur = self._snap_number(snap, "duration")
+            tp = self._snap_number(snap, "time-pos")
+            if (
+                dur is not None
+                and dur > 0.5
+                and tp is not None
+                and (tp + (1.0 if is_network else 0.2)) >= dur
+            ):
+                break
 
             idle = self._snap_bool(snap, "idle-active")
             if idle is True and time.monotonic() >= grace_until:
@@ -1377,7 +1376,7 @@ class PlaylistManager:
                 )
                 # Iterate cyclically starting from start_index.
                 for offset in range(len(items)):
-                    item = items[(start_index + offset) % len(items)]
+                    item = items[offset]
                     if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                         break
 
@@ -1442,12 +1441,21 @@ class PlaylistManager:
                             break
                     skip_load = bool(
                         first_item_preloaded
-                        and start_index == 0
                         and offset == 0
                         and not did_skip_first_preload
                     )
                     if skip_load:
                         did_skip_first_preload = True
+                    self.logger.info(
+                        "Playlist item",
+                        extra={
+                            "playlist_id": playlist_id,
+                            "cycle": loop_cycle,
+                            "offset": offset,
+                            "media_key": media_key,
+                            "skip_load": skip_load,
+                        },
+                    )
                     normalized_headers: Dict[str, str] = {}
                     mpv_per_file_opts: Dict[str, Any] = {}
                     if not skip_load:
@@ -1458,8 +1466,8 @@ class PlaylistManager:
                         )
                         if is_network_reload:
                             self._prepare_mpv_network_reload()
-                        # Cycle 2+: skip placeholder — go straight to refreshed stream loadfile.
-                        if not (is_network_reload and loop_cycle > 1):
+                        # Network streams: skip logo placeholder (breaks ytdl/HLS reload).
+                        if not is_network_reload:
                             try:
                                 self._logo_manager.display_playlist_transition()
                             except Exception:
@@ -1472,7 +1480,8 @@ class PlaylistManager:
                             "replace",
                             per_file_opts=mpv_per_file_opts,
                         )
-                        load_resp = self._mpv_manager._send_command({"command": load_cmd}, timeout=20.0)
+                        load_timeout = 45.0 if is_network_reload else 20.0
+                        load_resp = self._mpv_manager._send_command({"command": load_cmd}, timeout=load_timeout)
                         self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=10.0)
                         self._sync_settings_audio_to_mpv()
                         # Apply after loadfile: mpv may reset mute/volume on a new file.
@@ -1499,7 +1508,30 @@ class PlaylistManager:
                             or path.startswith("ytdl://")
                         )
                         stream_ready = False
-                        if is_network:
+                        if is_network and skip_load:
+                            # play() already issued loadfile for items[0]; wait until it actually opens.
+                            if self._wait_mpv_leave_idle(timeout_sec=90.0):
+                                stream_ready = True
+                                try:
+                                    dem_to = float((os.getenv("DSIGN_MPV_DEMUXER_WAIT_SEC") or "45").strip())
+                                except ValueError:
+                                    dem_to = 45.0
+                                dem_to = max(5.0, min(120.0, dem_to))
+                                if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to):
+                                    self.logger.warning(
+                                        "Preloaded stream demuxer not ready",
+                                        extra={"media_key": media_key, "path_preview": str(path)[:120]},
+                                    )
+                                    self._register_media_failure(media_key, reason="preloaded_demuxer")
+                                    continue
+                            else:
+                                self.logger.warning(
+                                    "Preloaded stream never left idle",
+                                    extra={"media_key": media_key, "path_preview": str(path)[:120]},
+                                )
+                                self._register_media_failure(media_key, reason="preloaded_stayed_idle")
+                                continue
+                        elif is_network:
                             # For ytdl:// sources, ytdl_hook can overwrite lavf options with cookies.
                             # Re-apply/merge UA+Referer+headers after ytdl_hook writes cookies, before ffmpeg opens EDL parts.
                             if isinstance(path, str) and path.startswith("ytdl://"):
@@ -1787,14 +1819,12 @@ class PlaylistManager:
             self.db_session.commit()
 
             # Start background loop to enforce durations and EOF waits.
-            # Multi-item: start from index 1 because we already loadfile'd items[0] above.
-            # Single-item: start at 0 and skip the redundant loadfile in the loop (same URL/headers).
-            loop_start = 1 if len(items) > 1 else 0
+            # play() always loadfile'd items[0]; loop walks 0..n-1 and skips reload on first offset once.
             self._play_thread = Thread(
                 target=self._manual_slideshow_loop,
-                args=(playlist_id, items, loop_start),
+                args=(playlist_id, items, 0),
                 kwargs={
-                    "first_item_preloaded": len(items) == 1,
+                    "first_item_preloaded": True,
                     "profile_muted": profile_muted,
                 },
                 daemon=True,
