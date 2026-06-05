@@ -56,6 +56,7 @@ class MPVManager:
         self._mpv_ready = False
         self._managed_by_systemd = True
         self._playback_session_active = False
+        self._playback_stream_opening = False
         self._playback_ipc_fail_streak = 0
         self._playback_ipc_fail_lock = Lock()
 
@@ -109,6 +110,13 @@ class MPVManager:
         """Playlist thread sets this to reduce MPV systemd restarts during stream transitions."""
         self._playback_session_active = bool(active)
         if not active:
+            self._playback_stream_opening = False
+            self._reset_playback_ipc_fail_streak()
+
+    def set_playback_stream_opening(self, active: bool) -> None:
+        """ytdl/HLS open can legitimately stall IPC replies for minutes — do not treat as hung."""
+        self._playback_stream_opening = bool(active)
+        if active:
             self._reset_playback_ipc_fail_streak()
 
 
@@ -136,13 +144,15 @@ class MPVManager:
 
     def _playback_hung_restart_threshold(self) -> int:
         try:
-            n = int((os.getenv("DSIGN_MPV_PLAYBACK_HUNG_RESTART_AFTER") or "12").strip())
+            n = int((os.getenv("DSIGN_MPV_PLAYBACK_HUNG_RESTART_AFTER") or "36").strip())
         except ValueError:
-            n = 12
-        return max(4, min(60, n))
+            n = 36
+        return max(8, min(120, n))
 
     def _note_playback_ipc_failure(self, exc: BaseException) -> None:
         if not self._playback_session_active:
+            return
+        if self._playback_stream_opening:
             return
         if not (
             isinstance(exc, MPVIPCTimeoutError)

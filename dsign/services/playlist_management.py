@@ -168,7 +168,7 @@ class PlaylistManager:
         *,
         normalized_headers: Optional[Dict[str, str]] = None,
     ) -> bool:
-        """Wait until mpv opens a network stream (call from play() before loop thread)."""
+        """Wait until mpv opens a network stream (background thread only)."""
         path_s = str(stream_url or "")
         media_key = str(item.get("key") or path_s)
         if not path_s.startswith(("http://", "https://", "ytdl://")):
@@ -183,6 +183,28 @@ class PlaylistManager:
                 provider=item.get("provider"),
             )
 
+        try:
+            self._mpv_manager.set_playback_stream_opening(True)
+        except Exception:
+            pass
+        try:
+            return self._ensure_network_stream_started_impl(
+                item, path_s, media_key, headers=headers
+            )
+        finally:
+            try:
+                self._mpv_manager.set_playback_stream_opening(False)
+            except Exception:
+                pass
+
+    def _ensure_network_stream_started_impl(
+        self,
+        item: Dict[str, Any],
+        path_s: str,
+        media_key: str,
+        *,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> bool:
         if path_s.startswith("ytdl://"):
             try:
                 self._apply_mpv_lavf_headers_after_ytdl_hook(
@@ -194,8 +216,13 @@ class PlaylistManager:
             except Exception:
                 pass
 
-        leave_to = 120.0 if path_s.startswith("ytdl://") else 90.0
-        if not self._wait_mpv_leave_idle(timeout_sec=leave_to):
+        is_ytdl = path_s.startswith("ytdl://")
+        leave_to = 120.0 if is_ytdl else 90.0
+        poll_sec = 1.0 if is_ytdl else 0.6
+        snap_to = 12.0 if is_ytdl else 8.0
+        if not self._wait_mpv_leave_idle(
+            timeout_sec=leave_to, poll_sec=poll_sec, snap_timeout=snap_to
+        ):
             self.logger.warning(
                 "Network stream did not leave idle after play() loadfile",
                 extra={"media_key": media_key, "path_preview": path_s[:120]},
@@ -207,7 +234,8 @@ class PlaylistManager:
         except ValueError:
             dem_to = 45.0
         dem_to = max(5.0, min(120.0, dem_to))
-        if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to):
+        dem_poll = 0.75 if is_ytdl else 0.4
+        if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to, poll_sec=dem_poll):
             self.logger.warning(
                 "Network stream demuxer not ready after play() loadfile",
                 extra={"media_key": media_key, "path_preview": path_s[:120]},
@@ -227,6 +255,10 @@ class PlaylistManager:
             extra={"media_key": media_key, "path_preview": path_s[:120]},
         )
         self._reset_media_backoff(media_key)
+        try:
+            self._mpv_manager._reset_playback_ipc_fail_streak()
+        except Exception:
+            pass
         return True
 
     def _wait_for_mpv_loaded_path(self, expected_path: str, timeout: float = 10.0) -> bool:
@@ -971,20 +1003,28 @@ class PlaylistManager:
             return ["loadfile", url, mode]
         return ["loadfile", url, mode, -1, opts]
 
-    def _wait_mpv_leave_idle(self, timeout_sec: float = 45.0) -> bool:
+    def _wait_mpv_leave_idle(
+        self,
+        timeout_sec: float = 45.0,
+        *,
+        poll_sec: float = 0.5,
+        snap_timeout: float = 8.0,
+    ) -> bool:
         """
         After loadfile, mpv often reports idle-active=true until the demuxer opens.
         Our old loop treated idle as EOF and skipped network streams in ~1 tick.
         """
         deadline = time.monotonic() + max(0.5, float(timeout_sec))
+        poll_sec = max(0.25, float(poll_sec))
+        snap_timeout = max(3.0, min(20.0, float(snap_timeout)))
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
-            snap = self._mpv_snapshot(["idle-active"], timeout=3.0)
+            snap = self._mpv_snapshot(["idle-active"], timeout=snap_timeout)
             idle = self._snap_bool(snap, "idle-active")
             if idle is False:
                 return True
-            self._stop_event.wait(timeout=0.15)
+            self._stop_event.wait(timeout=poll_sec)
         return False
 
     def _wait_mpv_network_idle_between_items(self, timeout_sec: float = 15.0) -> bool:
@@ -1259,7 +1299,7 @@ class PlaylistManager:
         if is_network:
             try:
                 poll_sec = float(
-                    (os.getenv("DSIGN_MPV_NETWORK_EOF_POLL_SEC") or "2.0").strip()
+                    (os.getenv("DSIGN_MPV_NETWORK_EOF_POLL_SEC") or "3.0").strip()
                 )
             except ValueError:
                 poll_sec = 2.0
