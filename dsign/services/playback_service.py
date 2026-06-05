@@ -3,7 +3,9 @@ import time
 from pathlib import Path
 from typing import Dict, Optional, List, Union, Any
 from concurrent.futures import ThreadPoolExecutor
-from threading import Thread
+from threading import Thread, Lock
+import subprocess
+import shutil
 import logging
 
 from .mpv_management import MPVManager
@@ -57,8 +59,12 @@ class PlaybackService:
             mpv_manager=self._mpv_manager
         )
         
+        self._recover_lock = Lock()
+        self._last_socket_identity: Optional[tuple] = None
+
         # Initialize with retry
         self._init_with_retry()
+        self._start_mpv_socket_watch()
 
     def display_idle_logo(self):
         return self.logo_manager.display_idle_logo()
@@ -182,6 +188,155 @@ class PlaybackService:
                 }
             )
 
+    def _mpv_socket_identity(self) -> Optional[tuple]:
+        sock = getattr(self._mpv_manager, "mpv_socket", None)
+        if not sock:
+            return None
+        try:
+            st = os.stat(sock)
+            mtime = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+            return (int(st.st_ino), int(mtime))
+        except OSError:
+            return None
+
+    def _start_mpv_socket_watch(self) -> None:
+        if os.getenv("DSIGN_MPV_SOCKET_WATCH", "1").strip().lower() in ("0", "false", "no", "off"):
+            return
+        self._last_socket_identity = self._mpv_socket_identity()
+        Thread(target=self._mpv_socket_watch_loop, name="mpv-socket-watch", daemon=True).start()
+
+    def _mpv_socket_watch_loop(self) -> None:
+        interval = 3.0
+        try:
+            interval = float((os.getenv("DSIGN_MPV_SOCKET_WATCH_SEC") or "3").strip())
+        except ValueError:
+            pass
+        interval = max(1.0, min(30.0, interval))
+        while True:
+            time.sleep(interval)
+            ident = self._mpv_socket_identity()
+            if ident is None:
+                continue
+            if self._last_socket_identity is None:
+                self._last_socket_identity = ident
+                continue
+            if ident == self._last_socket_identity:
+                continue
+            self._last_socket_identity = ident
+            self._log_warning(
+                "MPV IPC socket recreated (systemd restart?); recovering playback",
+                extra={"action": "mpv_socket_watch"},
+            )
+            try:
+                self.recover_after_mpv_systemd_restart()
+            except Exception as e:
+                self._log_warning(
+                    "MPV socket watch recovery failed",
+                    extra={"error": str(e), "type": type(e).__name__, "action": "mpv_socket_watch"},
+                )
+
+    def recover_after_mpv_systemd_restart(self, *, restart_playlist: Optional[bool] = None) -> bool:
+        """Re-bind IPC after `systemctl restart dsign-mpv` without restarting digital-signage."""
+        with self._recover_lock:
+            if restart_playlist is None:
+                restart_playlist = self._should_resume_playback_after_boot()
+            playlist_id: Optional[int] = None
+            if restart_playlist:
+                try:
+                    from ..models import PlaybackStatus
+                    row = self.db_session.query(PlaybackStatus).get(1)
+                    if row and row.playlist_id:
+                        playlist_id = int(row.playlist_id)
+                except Exception:
+                    playlist_id = None
+            try:
+                self._playlist_manager.stop()
+            except Exception:
+                pass
+            self._mpv_manager._reset_ipc_session()
+            if not self._mpv_manager.wait_for_ipc_socket_at_startup():
+                self._log_warning(
+                    "MPV recover: socket not available",
+                    extra={"action": "mpv_recover"},
+                )
+                return False
+            if not self._mpv_manager.initialize():
+                self._log_warning(
+                    "MPV recover: initialize failed",
+                    extra={"action": "mpv_recover"},
+                )
+                return False
+            self._last_socket_identity = self._mpv_socket_identity()
+            if playlist_id is not None:
+                self.play(playlist_id)
+                self._log_info(
+                    "Resumed playlist after MPV service restart",
+                    extra={"playlist_id": playlist_id, "action": "mpv_recover"},
+                )
+            else:
+                Thread(target=self._preload_resources, daemon=True).start()
+            return True
+
+
+    def _network_assistant_interactive_enabled(self) -> bool:
+        env_path = Path("/var/lib/dsign/config/network-assistant.env")
+        try:
+            if not env_path.is_file():
+                return False
+            for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw.strip()
+                if line.startswith("DSIGN_NETWORK_ASSISTANT_INTERACTIVE="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    return val in ("1", "true", "yes", "on")
+        except Exception:
+            pass
+        return False
+
+    def _wait_for_wifi_on_display(self) -> None:
+        """After IP OSD, wait for optional Wi-Fi picker on the content display."""
+        if not self._network_assistant_interactive_enabled():
+            return
+        try:
+            max_wait = float((os.getenv("DSIGN_BOOT_WIFI_PROMPT_WAIT_SEC") or "90").strip())
+        except ValueError:
+            max_wait = 90.0
+        max_wait = max(15.0, min(300.0, max_wait))
+        deadline = time.monotonic() + max_wait
+        while time.monotonic() < deadline:
+            if Path("/run/dsign/wifi-on-display-done").is_file():
+                return
+            time.sleep(0.5)
+
+    def _wait_before_boot_playlist(self) -> None:
+        """Let startup IP OSD finish before loadfile covers the screen."""
+        try:
+            max_wait = float((os.getenv("DSIGN_BOOT_PLAYLIST_DELAY_SEC") or "12").strip())
+        except ValueError:
+            max_wait = 12.0
+        max_wait = max(3.0, min(90.0, max_wait))
+        try:
+            subprocess.run(
+                ["sudo", "-n", "/usr/bin/systemctl", "restart", "dsign-show-startup-ip.service"],
+                timeout=8.0,
+                check=False,
+                capture_output=True,
+            )
+        except Exception:
+            pass
+        marker = Path("/run/dsign/startup-ip-shown")
+        deadline = time.monotonic() + max_wait
+        while time.monotonic() < deadline:
+            if marker.is_file():
+                try:
+                    grace = float((os.getenv("DSIGN_BOOT_IP_POST_MARKER_SEC") or "3").strip())
+                except ValueError:
+                    grace = 3.0
+                time.sleep(max(0.0, min(15.0, grace)))
+                return
+            time.sleep(0.25)
+        time.sleep(2.0)
+        self._wait_for_wifi_on_display()
+
     def _should_resume_playback_after_boot(self) -> bool:
         try:
             from ..models import PlaybackStatus
@@ -202,7 +357,7 @@ class PlaybackService:
                 return
             if str(row.status or "").lower() != "playing":
                 return
-            time.sleep(0.5)
+            self._wait_before_boot_playlist()
             self.play(int(row.playlist_id))
             self._log_info(
                 "Resumed playlist after boot",
