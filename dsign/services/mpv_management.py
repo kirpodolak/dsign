@@ -144,10 +144,10 @@ class MPVManager:
 
     def _playback_hung_restart_threshold(self) -> int:
         try:
-            n = int((os.getenv("DSIGN_MPV_PLAYBACK_HUNG_RESTART_AFTER") or "36").strip())
+            n = int((os.getenv("DSIGN_MPV_PLAYBACK_HUNG_RESTART_AFTER") or "18").strip())
         except ValueError:
-            n = 36
-        return max(8, min(120, n))
+            n = 18
+        return max(6, min(120, n))
 
     def _note_playback_ipc_failure(self, exc: BaseException) -> None:
         if not self._playback_session_active:
@@ -176,9 +176,28 @@ class MPVManager:
         )
         with self._playback_ipc_fail_lock:
             self._playback_ipc_fail_streak = 0
-        if self._restart_systemd_service_if_needed():
+        self._force_restart_mpv_for_hung_recovery()
+
+    def _force_restart_mpv_for_hung_recovery(self) -> bool:
+        """
+        Restart mpv when a streak of IPC failures proves the player is hung.
+
+        Unlike `_restart_systemd_service_if_needed`, this bypasses the active-playlist
+        guard: a responsive socket with no command replies is exactly the failure mode
+        we are recovering from.
+        """
+        self._playback_stream_opening = False
+        with self._mpv_restart_coalesce_lock:
+            self._last_mpv_restart_attempt_ts = time.time()
+        self.logger.warning(
+            "MPV hung during playlist; forcing systemd restart",
+            extra={"operation": "PlaybackHungRecovery"},
+        )
+        ok = self._restart_systemd_service()
+        if ok:
             self._wait_for_socket(timeout=15.0)
             self._reset_ipc_session()
+        return ok
 
     def _restart_during_playback_allowed(self) -> bool:
         v = os.getenv("DSIGN_MPV_RESTART_DURING_PLAYBACK", "0").strip().lower()

@@ -1334,15 +1334,19 @@ class PlaylistManager:
             snap = self._mpv_snapshot(prop_keys, timeout=snap_timeout)
 
             socket_missing = not os.path.exists(PlaybackConstants.SOCKET_PATH)
-            if socket_missing:
+            ipc_unresponsive = not socket_missing and all(
+                snap.get(k) is None for k in prop_keys
+            )
+            if socket_missing or ipc_unresponsive:
                 consecutive_ipc_stall += 1
                 if consecutive_ipc_stall >= stall_limit:
                     self.logger.warning(
-                        "playlist_eof_stall: MPV socket missing during EOF wait",
+                        "playlist_eof_stall: MPV IPC unresponsive during EOF wait",
                         extra={
                             "playlist_id": playlist_id,
                             "is_network": is_network,
                             "stall_polls": consecutive_ipc_stall,
+                            "socket_missing": socket_missing,
                         },
                     )
                     break
