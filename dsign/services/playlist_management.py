@@ -38,6 +38,9 @@ class PlaylistManager:
         self._preloaded_stream_ready = False
         self._current_media_label: Optional[str] = None
         self._current_media_lock = Lock()
+        self._loop_item_index: Optional[int] = None
+        self._loop_items_count: int = 0
+        self._loop_position_lock = Lock()
 
     def set_app(self, app) -> None:
         """Attach Flask app so background playback threads can use db.session safely."""
@@ -154,6 +157,27 @@ class PlaylistManager:
                 )
         except Exception:
             pass
+
+    def _set_loop_position(self, index: int, items_count: int) -> None:
+        with self._loop_position_lock:
+            self._loop_item_index = int(index)
+            self._loop_items_count = max(0, int(items_count))
+
+    def _clear_loop_position(self) -> None:
+        with self._loop_position_lock:
+            self._loop_item_index = None
+            self._loop_items_count = 0
+
+    def get_resume_start_index(self, *, advance: bool = True) -> int:
+        """Index to start/resume playlist loop; advance=True skips the interrupted item."""
+        with self._loop_position_lock:
+            idx = self._loop_item_index
+            count = self._loop_items_count
+        if idx is None or count <= 0:
+            return 0
+        if advance:
+            return (int(idx) + 1) % count
+        return int(idx)
 
     def _clear_current_media_label(self, *, emit: bool = True, playlist_id: Optional[int] = None) -> None:
         with self._current_media_lock:
@@ -1382,6 +1406,16 @@ class PlaylistManager:
             stall_limit = 15
         stall_limit = max(3, min(120, stall_limit))
 
+        try:
+            stagnation_sec = float(
+                (os.getenv("DSIGN_MPV_PLAYBACK_STAGNATION_SEC") or "90").strip()
+            )
+        except ValueError:
+            stagnation_sec = 90.0
+        stagnation_sec = max(20.0, min(600.0, stagnation_sec))
+        last_time_pos: Optional[float] = None
+        last_time_pos_change = time.monotonic()
+
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
             if time.time() - start > 6 * 3600:
                 break
@@ -1427,9 +1461,9 @@ class PlaylistManager:
             if eof is True:
                 break
 
+            dur = self._snap_number(snap, "duration")
+            tp = self._snap_number(snap, "time-pos")
             if not is_network:
-                dur = self._snap_number(snap, "duration")
-                tp = self._snap_number(snap, "time-pos")
                 if (
                     dur is not None
                     and dur > 0.5
@@ -1437,6 +1471,27 @@ class PlaylistManager:
                     and (tp + 0.2) >= dur
                 ):
                     break
+
+            if tp is not None and time.monotonic() >= grace_until:
+                if last_time_pos is None or abs(tp - last_time_pos) > 0.05:
+                    last_time_pos = tp
+                    last_time_pos_change = time.monotonic()
+                elif time.monotonic() - last_time_pos_change >= stagnation_sec:
+                    near_end = dur is not None and dur > 0.5 and tp + 2.0 >= dur
+                    if not near_end:
+                        self.logger.warning(
+                            "playlist_eof_stall: playback time-pos frozen; treating as end",
+                            extra={
+                                "playlist_id": playlist_id,
+                                "is_network": is_network,
+                                "time_pos": tp,
+                                "duration": dur,
+                                "stagnation_sec": round(
+                                    time.monotonic() - last_time_pos_change, 1
+                                ),
+                            },
+                        )
+                        break
 
             idle = self._snap_bool(snap, "idle-active")
             if idle is True and time.monotonic() >= grace_until:
@@ -1526,6 +1581,7 @@ class PlaylistManager:
         self._active_playlist_id = None
         self._preloaded_stream_ready = False
         self._clear_current_media_label(emit=False)
+        self._clear_loop_position()
         self._set_playback_active_marker(False)
         try:
             self._mpv_manager.set_playback_session_active(False)
@@ -1591,7 +1647,9 @@ class PlaylistManager:
                 )
                 # Iterate cyclically starting from start_index.
                 for offset in range(len(items)):
-                    item = items[(start_index + offset) % len(items)]
+                    item_index = (start_index + offset) % len(items)
+                    item = items[item_index]
+                    self._set_loop_position(item_index, len(items))
                     if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                         break
 
@@ -1857,12 +1915,12 @@ class PlaylistManager:
             except Exception:
                 self._media_backoff.pop(media_key, None)
 
-    def play(self, playlist_id: int) -> bool:
+    def play(self, playlist_id: int, *, start_index: int = 0) -> bool:
         """Play playlist with profile support"""
         with self._app_context():
-            return self._play_impl(playlist_id)
+            return self._play_impl(playlist_id, start_index=start_index)
 
-    def _play_impl(self, playlist_id: int) -> bool:
+    def _play_impl(self, playlist_id: int, *, start_index: int = 0) -> bool:
         from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
 
         try:
@@ -1936,12 +1994,17 @@ class PlaylistManager:
                     + (" ..." if len(missing) > 10 else "")
                 )
 
+            start_index = int(start_index or 0)
+            if start_index < 0 or start_index >= len(items):
+                start_index = 0
+
             self._active_playlist_id = playlist_id
             self._set_playback_active_marker(True)
-            self._set_current_media_label(self._item_media_label(items[0]))
+            self._set_loop_position(start_index, len(items))
+            first = items[start_index]
+            self._set_current_media_label(self._item_media_label(first))
 
             # Show first item immediately for responsiveness
-            first = items[0]
             try:
                 # Do NOT loop the file at MPV level; the app controls looping.
                 self._mpv_manager._send_command(
@@ -1997,10 +2060,10 @@ class PlaylistManager:
             self.db_session.commit()
 
             # Start background loop to enforce durations and EOF waits.
-            # play() always loadfile'd items[0]; loop walks 0..n-1, skips reload on first offset once.
+            # play() loadfile'd items[start_index]; loop walks from there, skips reload on first offset once.
             self._play_thread = Thread(
                 target=self._run_manual_slideshow_loop,
-                args=(playlist_id, items, 0),
+                args=(playlist_id, items, start_index),
                 kwargs={
                     "first_item_preloaded": True,
                     "profile_muted": profile_muted,

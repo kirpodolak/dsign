@@ -255,8 +255,14 @@ class PlaybackService:
     def _recover_after_mpv_systemd_restart_impl(self, *, restart_playlist: Optional[bool] = None) -> bool:
         with self._recover_lock:
             playlist_id: Optional[int] = None
+            resume_index = 0
             if restart_playlist is not False:
                 playlist_id = self._resolve_playlist_id_for_recovery()
+                if playlist_id is not None:
+                    try:
+                        resume_index = self._playlist_manager.get_resume_start_index(advance=True)
+                    except Exception:
+                        resume_index = 0
             try:
                 self._playlist_manager.stop(show_idle_logo=False, update_status=False)
             except Exception:
@@ -280,7 +286,7 @@ class PlaybackService:
                 ok = False
                 for attempt in range(2):
                     try:
-                        ok = bool(self.play(playlist_id))
+                        ok = bool(self.play(playlist_id, start_index=resume_index))
                     except Exception as e:
                         ok = False
                         self._log_warning(
@@ -296,7 +302,11 @@ class PlaybackService:
                     if ok:
                         self._log_info(
                             "Resumed playlist after MPV service restart",
-                            extra={"playlist_id": playlist_id, "action": "mpv_recover"},
+                            extra={
+                                "playlist_id": playlist_id,
+                                "start_index": resume_index,
+                                "action": "mpv_recover",
+                            },
                         )
                         return True
                     if attempt == 0:
@@ -507,15 +517,16 @@ class PlaybackService:
         raise RuntimeError("Could not establish idle state")
 
     # Делегированные методы
-    def play(self, playlist_id: int) -> bool:
+    def play(self, playlist_id: int, *, start_index: int = 0) -> bool:
         """Play specified playlist"""
         try:
             start_time = time.time()
-            result = self._playlist_manager.play(playlist_id)
+            result = self._playlist_manager.play(playlist_id, start_index=start_index)
             self._log_info(
                 "Playing playlist", 
                 extra={
-                    'playlist_id': playlist_id, 
+                    'playlist_id': playlist_id,
+                    'start_index': start_index,
                     'action': 'play',
                     'duration_sec': round(time.time() - start_time, 3),
                     'success': result

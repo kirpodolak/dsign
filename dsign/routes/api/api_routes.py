@@ -514,6 +514,10 @@ def init_api_routes(api_bp, services):
             if cached is not None and (now - ts) < ttl:
                 return dict(cached)
 
+        # Playlist EOF polling already hammers MPV IPC; avoid extra snapshots from dashboard status.
+        if getattr(mgr, "_playback_session_active", False):
+            return dict(cached) if cached is not None else None
+
         try:
             snap = mgr.get_properties_snapshot(["volume", "mute"], timeout=2.0)
         except Exception:

@@ -154,6 +154,8 @@ class MPVManager:
             return
         if self._playback_stream_opening:
             return
+        if isinstance(exc, MPVIPCTimeoutError) and "IPC lock busy" in str(exc):
+            return
         if not (
             isinstance(exc, MPVIPCTimeoutError)
             or isinstance(exc, MPVIPCClosedError)
@@ -644,7 +646,8 @@ class MPVManager:
                             "type": type(e).__name__,
                         },
                     )
-                self._note_playback_ipc_failure(e)
+                if attempt == PlaybackConstants.MAX_RETRIES - 1:
+                    self._note_playback_ipc_failure(e)
                 if self._ipc_failure_should_systemd_restart(e):
                     _maybe_restart_mpv_batch(
                         reason=str(e),
@@ -888,7 +891,8 @@ class MPVManager:
                     },
                 )
                 self._reset_ipc_session()
-                self._note_playback_ipc_failure(e)
+                if attempt == PlaybackConstants.MAX_RETRIES - 1:
+                    self._note_playback_ipc_failure(e)
                 if self._ipc_failure_should_systemd_restart(e):
                     _maybe_restart_mpv_for_transport(
                         reason=str(e), attempt_num=attempt + 1
