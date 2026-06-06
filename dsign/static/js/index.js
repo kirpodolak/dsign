@@ -673,8 +673,9 @@ const ui = {
     /**
      * @param {string|number} playlistId
      * @param {'playing'|'stopped'|'idle'} mode
+     * @param {string|null|undefined} [currentMedia]
      */
-    setPlaybackCardState(playlistId, mode) {
+    setPlaybackCardState(playlistId, mode, currentMedia) {
         const card = document.querySelector(`.playlist-card[data-id="${playlistId}"]`);
         if (!card) return;
 
@@ -689,7 +690,11 @@ const ui = {
         if (mode === 'playing') {
             playBtn.disabled = true;
             stopBtn.disabled = false;
-            badge.textContent = `▶ ${t('status_playing', lang)}`;
+            const media = String(currentMedia || '').trim();
+            const mediaHtml = media
+                ? `<span class="card-status__media">${this.escapeHtml(this._truncateText(media, 48))}</span>`
+                : '';
+            badge.innerHTML = `<span class="card-status__main">▶ ${this.escapeHtml(t('status_playing', lang))}</span>${mediaHtml}`;
             badge.className = 'card-status status-live';
         } else if (mode === 'stopped') {
             playBtn.disabled = false;
@@ -719,9 +724,10 @@ const ui = {
             rawPid != null && rawPid !== '' ? String(rawPid) : '';
         const st = String(statusPayload?.status || '').toLowerCase();
 
+        const currentMedia = statusPayload?.current_media;
         ids.forEach((id) => {
             if (pid === id && st === 'playing') {
-                this.setPlaybackCardState(id, 'playing');
+                this.setPlaybackCardState(id, 'playing', currentMedia);
             } else if (pid === id && st === 'stopped') {
                 this.setPlaybackCardState(id, 'stopped');
             } else {

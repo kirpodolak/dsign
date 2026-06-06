@@ -4,7 +4,7 @@ import subprocess
 import traceback
 import time
 from contextlib import nullcontext
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
@@ -36,6 +36,8 @@ class PlaylistManager:
         self._media_backoff: Dict[str, Dict[str, Any]] = {}
         self._app = None
         self._preloaded_stream_ready = False
+        self._current_media_label: Optional[str] = None
+        self._current_media_lock = Lock()
 
     def set_app(self, app) -> None:
         """Attach Flask app so background playback threads can use db.session safely."""
@@ -97,6 +99,74 @@ class PlaylistManager:
         except Exception:
             pass
         return g or bool(profile_muted) or bool(item_muted)
+
+    def _media_label_for_file_name(self, file_name: str) -> str:
+        """Human-readable label for a playlist file entry (local name or external title)."""
+        name = str(file_name or "").strip()
+        if not name:
+            return ""
+        if name.startswith("ext-"):
+            svc = self._external_media_service
+            if svc:
+                row = svc.get_by_key(name)
+                title = str(getattr(row, "title", "") or "").strip() if row else ""
+                if title:
+                    return title
+            return name
+        return os.path.basename(name)
+
+    def _item_media_label(self, item: Dict[str, Any]) -> str:
+        label = str(item.get("label") or "").strip()
+        if label:
+            return label
+        key = str(item.get("key") or "").strip()
+        if key:
+            return self._media_label_for_file_name(key)
+        path = str(item.get("path") or "").strip()
+        if path:
+            return os.path.basename(path)
+        return ""
+
+    def _set_current_media_label(self, label: Optional[str]) -> None:
+        cleaned = str(label or "").strip() or None
+        with self._current_media_lock:
+            self._current_media_label = cleaned
+
+    def _get_current_media_label(self) -> Optional[str]:
+        with self._current_media_lock:
+            return self._current_media_label
+
+    def _publish_current_media(self, playlist_id: int, item: Dict[str, Any]) -> None:
+        label = self._item_media_label(item)
+        with self._current_media_lock:
+            if label == (self._current_media_label or ""):
+                return
+            self._current_media_label = label or None
+        try:
+            if self.socketio:
+                self.socketio.emit(
+                    "playback_update",
+                    {
+                        "status": "playing",
+                        "playlist_id": playlist_id,
+                        "current_media": label or None,
+                    },
+                )
+        except Exception:
+            pass
+
+    def _clear_current_media_label(self, *, emit: bool = True, playlist_id: Optional[int] = None) -> None:
+        with self._current_media_lock:
+            self._current_media_label = None
+        if not emit or not self.socketio:
+            return
+        try:
+            payload: Dict[str, Any] = {"current_media": None}
+            if playlist_id is not None:
+                payload["playlist_id"] = playlist_id
+            self.socketio.emit("playback_update", payload)
+        except Exception:
+            pass
 
     def _resolve_playlist_item_path(self, file_name: str) -> Optional[Dict[str, Any]]:
         """
@@ -1455,6 +1525,7 @@ class PlaylistManager:
         self._stop_event.clear()
         self._active_playlist_id = None
         self._preloaded_stream_ready = False
+        self._clear_current_media_label(emit=False)
         self._set_playback_active_marker(False)
         try:
             self._mpv_manager.set_playback_session_active(False)
@@ -1527,6 +1598,7 @@ class PlaylistManager:
                     path = item["path"]
                     is_video = item["is_video"]
                     media_key = str(item.get("key") or path)
+                    self._publish_current_media(playlist_id, item)
                     raw_duration = item.get("duration")
                     # Only images use duration. Treat 0/None as "missing" for images.
                     duration = raw_duration if (raw_duration is not None and int(raw_duration) >= 1) else default_duration
@@ -1842,9 +1914,11 @@ class PlaylistManager:
                     continue
 
                 is_video = bool(resolved.get("is_video"))
+                file_name = str(getattr(pf, "file_name", "") or "")
                 items.append(
                     {
-                        "key": resolved.get("key"),
+                        "key": resolved.get("key") or file_name,
+                        "label": self._media_label_for_file_name(file_name),
                         "path": resolved["path"],
                         "duration": int(getattr(pf, "duration", 0) or 0),
                         "is_video": is_video,
@@ -1864,6 +1938,7 @@ class PlaylistManager:
 
             self._active_playlist_id = playlist_id
             self._set_playback_active_marker(True)
+            self._set_current_media_label(self._item_media_label(items[0]))
 
             # Show first item immediately for responsiveness
             first = items[0]
@@ -1942,6 +2017,7 @@ class PlaylistManager:
                         {
                             'status': 'playing',
                             'playlist_id': playlist.id,
+                            'current_media': self._get_current_media_label(),
                             'playlist': {'id': playlist.id, 'name': playlist.name},
                             'settings': profile_settings,
                         },
@@ -2016,6 +2092,7 @@ class PlaylistManager:
                             {
                                 'status': 'stopped',
                                 'playlist_id': last_playlist_id,
+                                'current_media': None,
                             },
                         )
                 except Exception:
@@ -2040,6 +2117,7 @@ class PlaylistManager:
         return {
             'status': status.status if status else None,
             'playlist_id': status.playlist_id if status else None,
+            'current_media': self._get_current_media_label(),
             'settings': self._mpv_manager._current_settings
         }
 
