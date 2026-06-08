@@ -317,6 +317,8 @@ class PlaylistManager:
         if not self._wait_mpv_leave_idle(
             timeout_sec=leave_to, poll_sec=poll_sec, snap_timeout=snap_to
         ):
+            if self._stop_event.is_set():
+                return False
             self.logger.warning(
                 "Network stream did not leave idle after play() loadfile",
                 extra={"media_key": media_key, "path_preview": path_s[:120]},
@@ -330,6 +332,8 @@ class PlaylistManager:
         dem_to = max(5.0, min(120.0, dem_to))
         dem_poll = 0.75 if is_ytdl else 0.4
         if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to, poll_sec=dem_poll):
+            if self._stop_event.is_set():
+                return False
             self.logger.warning(
                 "Network stream demuxer not ready after play() loadfile",
                 extra={"media_key": media_key, "path_preview": path_s[:120]},
@@ -1392,6 +1396,11 @@ class PlaylistManager:
         consecutive_idle = 0
         if is_network:
             try:
+                self._mpv_manager.set_playback_network_active(True)
+            except Exception:
+                pass
+        if is_network:
+            try:
                 poll_sec = float(
                     (os.getenv("DSIGN_MPV_NETWORK_EOF_POLL_SEC") or "3.0").strip()
                 )
@@ -1514,6 +1523,11 @@ class PlaylistManager:
                 consecutive_idle = 0
 
             self._stop_event.wait(timeout=max(0.2, float(poll_sec)))
+        if is_network:
+            try:
+                self._mpv_manager.set_playback_network_active(False)
+            except Exception:
+                pass
 
     def _log_mpv_network_debug_snapshot(self, *, media_key: str, url: str) -> None:
         """
@@ -1748,6 +1762,11 @@ class PlaylistManager:
                             or path.startswith("ytdl://")
                         )
                         if is_network_reload:
+                            try:
+                                self._mpv_manager.set_playback_stream_opening(True)
+                            except Exception:
+                                pass
+                        if is_network_reload:
                             self._prepare_mpv_network_reload()
                         # Network streams: skip logo placeholder (breaks ytdl/HLS reload).
                         if not is_network_reload:
@@ -1807,6 +1826,8 @@ class PlaylistManager:
                                 str(path),
                                 normalized_headers=normalized_headers or None,
                             ):
+                                if self._stop_event.is_set():
+                                    break
                                 self._register_media_failure(media_key, reason="open_failed")
                                 continue
                             stream_ready = True
@@ -2000,41 +2021,56 @@ class PlaylistManager:
             first = items[start_index]
             self._set_current_media_label(self._item_media_label(first))
 
-            # Show first item immediately for responsiveness
-            try:
-                # Do NOT loop the file at MPV level; the app controls looping.
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "loop-file", "no"]},
-                    timeout=2.0,
-                )
-            except Exception:
-                pass
-            _, first_mpv_opts = self._apply_mpv_http_headers(first, stream_url=str(first.get("path") or ""))
-            self._apply_mpv_ytdl_options(first, stream_url=str(first.get("path") or ""))
             first_path = str(first.get("path") or "")
-            first_load_cmd = self._mpv_loadfile_command(
-                first_path,
-                "replace",
-                per_file_opts=first_mpv_opts,
-            )
             first_is_network = first_path.startswith(("http://", "https://", "ytdl://"))
-            first_load_timeout = 45.0 if first_is_network else 10.0
-            first_load_resp = self._mpv_manager._send_command(
-                {"command": first_load_cmd}, timeout=first_load_timeout
-            )
-            self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
-            self._sync_settings_audio_to_mpv()
+            if first_is_network:
+                try:
+                    self._mpv_manager.set_playback_stream_opening(True)
+                except Exception:
+                    pass
             try:
-                first_muted = self._effective_playback_muted(
-                    item_muted=bool(first.get("muted", False)),
-                    profile_muted=profile_muted,
+                # Show first item immediately for responsiveness
+                try:
+                    # Do NOT loop the file at MPV level; the app controls looping.
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "loop-file", "no"]},
+                        timeout=2.0,
+                    )
+                except Exception:
+                    pass
+                _, first_mpv_opts = self._apply_mpv_http_headers(first, stream_url=first_path)
+                self._apply_mpv_ytdl_options(first, stream_url=first_path)
+                first_load_cmd = self._mpv_loadfile_command(
+                    first_path,
+                    "replace",
+                    per_file_opts=first_mpv_opts,
                 )
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "mute", "yes" if first_muted else "no"]},
-                    timeout=3.0,
+                first_load_timeout = 120.0 if first_path.startswith("ytdl://") else (
+                    45.0 if first_is_network else 10.0
                 )
+                first_load_resp = self._mpv_manager._send_command(
+                    {"command": first_load_cmd}, timeout=first_load_timeout
+                )
+                self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
+                self._sync_settings_audio_to_mpv()
+                try:
+                    first_muted = self._effective_playback_muted(
+                        item_muted=bool(first.get("muted", False)),
+                        profile_muted=profile_muted,
+                    )
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "mute", "yes" if first_muted else "no"]},
+                        timeout=3.0,
+                    )
+                except Exception:
+                    pass
             except Exception:
-                pass
+                if first_is_network:
+                    try:
+                        self._mpv_manager.set_playback_stream_opening(False)
+                    except Exception:
+                        pass
+                raise
 
             self._preloaded_stream_ready = False
             if first_is_network and bool(first.get("is_video")):

@@ -64,6 +64,8 @@ class PlaybackService:
         self._last_socket_identity: Optional[tuple] = None
         self._app = None
 
+        self._mpv_manager.set_post_restart_callback(self._on_mpv_app_initiated_restart)
+
         # Initialize with retry
         self._init_with_retry()
         self._start_mpv_socket_watch()
@@ -235,6 +237,8 @@ class PlaybackService:
             if ident == self._last_socket_identity:
                 continue
             self._last_socket_identity = ident
+            if self._mpv_manager.was_recent_app_initiated_restart():
+                continue
             self._log_warning(
                 "MPV IPC socket recreated (systemd restart?); recovering playback",
                 extra={"action": "mpv_socket_watch"},
@@ -247,12 +251,44 @@ class PlaybackService:
                     extra={"error": str(e), "type": type(e).__name__, "action": "mpv_socket_watch"},
                 )
 
-    def recover_after_mpv_systemd_restart(self, *, restart_playlist: Optional[bool] = None) -> bool:
+    def _on_mpv_app_initiated_restart(self) -> None:
+        """Resume playlist after hung-recovery restart (avoid racing socket-watch recover)."""
+        Thread(
+            target=self._recover_after_app_mpv_restart,
+            name="mpv-post-restart-recover",
+            daemon=True,
+        ).start()
+
+    def _recover_after_app_mpv_restart(self) -> None:
+        try:
+            with self._app_context():
+                self._last_socket_identity = self._mpv_socket_identity()
+                self.recover_after_mpv_systemd_restart(resume_advance=False)
+        except Exception as e:
+            self._log_warning(
+                "Post-restart playback recovery failed",
+                extra={"error": str(e), "type": type(e).__name__, "action": "mpv_recover"},
+            )
+
+    def recover_after_mpv_systemd_restart(
+        self,
+        *,
+        restart_playlist: Optional[bool] = None,
+        resume_advance: bool = True,
+    ) -> bool:
         """Re-bind IPC after `systemctl restart dsign-mpv` without restarting digital-signage."""
         with self._app_context():
-            return self._recover_after_mpv_systemd_restart_impl(restart_playlist=restart_playlist)
+            return self._recover_after_mpv_systemd_restart_impl(
+                restart_playlist=restart_playlist,
+                resume_advance=resume_advance,
+            )
 
-    def _recover_after_mpv_systemd_restart_impl(self, *, restart_playlist: Optional[bool] = None) -> bool:
+    def _recover_after_mpv_systemd_restart_impl(
+        self,
+        *,
+        restart_playlist: Optional[bool] = None,
+        resume_advance: bool = True,
+    ) -> bool:
         with self._recover_lock:
             playlist_id: Optional[int] = None
             resume_index = 0
@@ -260,7 +296,9 @@ class PlaybackService:
                 playlist_id = self._resolve_playlist_id_for_recovery()
                 if playlist_id is not None:
                     try:
-                        resume_index = self._playlist_manager.get_resume_start_index(advance=True)
+                        resume_index = self._playlist_manager.get_resume_start_index(
+                            advance=resume_advance
+                        )
                     except Exception:
                         resume_index = 0
             try:

@@ -267,21 +267,6 @@ class MpvJsonIpcSession:
             self._sock = s
             self._buf = b""
             self._start_reader_unlocked()
-            self._suppress_unsolicited_events_unlocked()
-
-    def _suppress_unsolicited_events_unlocked(self) -> None:
-        """Cut IPC event noise so command replies are not delayed behind property-change floods."""
-        if self._sock is None:
-            return
-        try:
-            rid = 1
-            payload = json.dumps(
-                {"command": ["enable_event", "all", False], "request_id": rid},
-                ensure_ascii=False,
-            ) + "\n"
-            self._sock.sendall(payload.encode("utf-8"))
-        except OSError:
-            pass
 
     def _start_reader_unlocked(self) -> None:
         if self._reader_thread is not None and self._reader_thread.is_alive():

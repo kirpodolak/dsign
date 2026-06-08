@@ -3,8 +3,8 @@ import shutil
 import socket
 import time
 import subprocess
-from threading import Lock
-from typing import Dict, Optional, Any, List
+from threading import Lock, Thread
+from typing import Callable, Dict, Optional, Any, List
 from pathlib import Path
 
 from .playback_constants import PlaybackConstants
@@ -57,8 +57,13 @@ class MPVManager:
         self._managed_by_systemd = True
         self._playback_session_active = False
         self._playback_stream_opening = False
+        self._playback_network_active = False
         self._playback_ipc_fail_streak = 0
         self._playback_ipc_fail_lock = Lock()
+        self._hung_recovery_lock = Lock()
+        self._hung_recovery_running = False
+        self._app_initiated_restart_ts = 0.0
+        self._post_restart_callback: Optional[Callable[[], None]] = None
 
         # Логирование инициализации
         self.logger.info(
@@ -119,6 +124,21 @@ class MPVManager:
         if active:
             self._reset_playback_ipc_fail_streak()
 
+    def set_playback_network_active(self, active: bool) -> None:
+        """Network stream playing/buffering — mpv IPC can lag without being hung."""
+        self._playback_network_active = bool(active)
+        if active:
+            self._reset_playback_ipc_fail_streak()
+
+    def set_post_restart_callback(self, callback: Optional[Callable[[], None]]) -> None:
+        """PlaybackService registers to resume playlist after app-initiated mpv restart."""
+        self._post_restart_callback = callback
+
+    def was_recent_app_initiated_restart(self, within_sec: float = 25.0) -> bool:
+        if self._app_initiated_restart_ts <= 0:
+            return False
+        return (time.time() - self._app_initiated_restart_ts) < max(1.0, float(within_sec))
+
 
     def _ipc_lock_timeout_sec(self, lock_wait: Optional[float] = None) -> float:
         if lock_wait is not None:
@@ -144,23 +164,29 @@ class MPVManager:
 
     def _playback_hung_restart_threshold(self) -> int:
         try:
-            n = int((os.getenv("DSIGN_MPV_PLAYBACK_HUNG_RESTART_AFTER") or "18").strip())
+            n = int((os.getenv("DSIGN_MPV_PLAYBACK_HUNG_RESTART_AFTER") or "8").strip())
         except ValueError:
-            n = 18
-        return max(6, min(120, n))
+            n = 8
+        return max(3, min(120, n))
+
+    def _ipc_failure_counts_toward_hung(self, exc: BaseException) -> bool:
+        if self._playback_stream_opening or self._playback_network_active:
+            return False
+        if isinstance(exc, MPVIPCTimeoutError) and "IPC lock busy" in str(exc):
+            return False
+        # Slow IPC during ytdl/HLS open or network playback is common on Pi; hung recovery
+        # should react to dead sessions, not every get_property/set_property timeout.
+        if isinstance(exc, MPVIPCTimeoutError):
+            return False
+        return (
+            isinstance(exc, MPVIPCClosedError)
+            or _is_ipc_transport_error(exc)
+        )
 
     def _note_playback_ipc_failure(self, exc: BaseException) -> None:
         if not self._playback_session_active:
             return
-        if self._playback_stream_opening:
-            return
-        if isinstance(exc, MPVIPCTimeoutError) and "IPC lock busy" in str(exc):
-            return
-        if not (
-            isinstance(exc, MPVIPCTimeoutError)
-            or isinstance(exc, MPVIPCClosedError)
-            or _is_ipc_transport_error(exc)
-        ):
+        if not self._ipc_failure_counts_toward_hung(exc):
             return
         with self._playback_ipc_fail_lock:
             self._playback_ipc_fail_streak += 1
@@ -178,19 +204,37 @@ class MPVManager:
         )
         with self._playback_ipc_fail_lock:
             self._playback_ipc_fail_streak = 0
-        self._force_restart_mpv_for_hung_recovery()
+        self._schedule_hung_recovery()
+
+    def _schedule_hung_recovery(self) -> None:
+        with self._hung_recovery_lock:
+            if self._hung_recovery_running:
+                return
+            self._hung_recovery_running = True
+        Thread(
+            target=self._run_hung_recovery,
+            name="mpv-hung-recovery",
+            daemon=True,
+        ).start()
+
+    def _run_hung_recovery(self) -> None:
+        try:
+            self._force_restart_mpv_for_hung_recovery()
+        finally:
+            with self._hung_recovery_lock:
+                self._hung_recovery_running = False
 
     def _force_restart_mpv_for_hung_recovery(self) -> bool:
         """
-        Restart mpv when a streak of IPC failures proves the player is hung.
+        Restart mpv when a streak of IPC transport failures proves the player is hung.
 
         Unlike `_restart_systemd_service_if_needed`, this bypasses the active-playlist
-        guard: a responsive socket with no command replies is exactly the failure mode
-        we are recovering from.
+        guard: a dead IPC session during playback is exactly the failure mode we recover from.
         """
-        self._playback_stream_opening = False
+        now = time.time()
         with self._mpv_restart_coalesce_lock:
-            self._last_mpv_restart_attempt_ts = time.time()
+            self._last_mpv_restart_attempt_ts = now
+            self._app_initiated_restart_ts = now
         self.logger.warning(
             "MPV hung during playlist; forcing systemd restart",
             extra={"operation": "PlaybackHungRecovery"},
@@ -199,6 +243,19 @@ class MPVManager:
         if ok:
             self._wait_for_socket(timeout=15.0)
             self._reset_ipc_session()
+            cb = self._post_restart_callback
+            if cb is not None:
+                try:
+                    cb()
+                except Exception as e:
+                    self.logger.warning(
+                        "Post-restart playback callback failed",
+                        extra={
+                            "operation": "PlaybackHungRecovery",
+                            "error": str(e),
+                            "type": type(e).__name__,
+                        },
+                    )
         return ok
 
     def _restart_during_playback_allowed(self) -> bool:
@@ -942,8 +999,6 @@ class MPVManager:
             if not resp or resp.get("error") != "success":
                 raise RuntimeError("MPV not responding properly")
 
-            self._send_command({"command": ["enable_event", "all", False]}, timeout=3.0)
-            
             self._mpv_ready = True
             self.logger.info(
                 "MPV initialized successfully",
