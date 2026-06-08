@@ -4,7 +4,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Optional, List, Union, Any
 from concurrent.futures import ThreadPoolExecutor
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 import subprocess
 import shutil
 import logging
@@ -63,9 +63,21 @@ class PlaybackService:
         self._recover_lock = Lock()
         self._last_socket_identity: Optional[tuple] = None
         self._app = None
+        self._mpv_init_ready = Event()
 
-        # Initialize with retry
-        self._init_with_retry()
+        self._mpv_manager.set_post_restart_callback(self._on_mpv_app_initiated_restart)
+
+        self._log_info(
+            "PlaybackService constructed (non-blocking MPV init)",
+            extra={"action": "init", "mpv_init_mode": "background"},
+        )
+
+        # Do not block Flask bind on MPV IPC (ytdl can stall get_property for 15s+).
+        Thread(
+            target=self._init_background_loop,
+            name="playback-init",
+            daemon=True,
+        ).start()
         self._start_mpv_socket_watch()
 
     def set_app(self, app) -> None:
@@ -123,6 +135,27 @@ class PlaybackService:
         safe_extra = self._sanitize_extra_data(extra_data)
         self.logger.warning(message, extra=safe_extra)
 
+    def _init_background_loop(self) -> None:
+        """MPV init in background so digital-signage.service / Flask start immediately."""
+        delay = 2.0
+        while True:
+            try:
+                self._init_with_retry(max_attempts=1)
+                self._mpv_init_ready.set()
+                return
+            except Exception as e:
+                self._log_warning(
+                    "Background MPV init failed; retrying",
+                    extra={
+                        "action": "init",
+                        "error": str(e),
+                        "type": type(e).__name__,
+                        "retry_delay_sec": round(delay, 1),
+                    },
+                )
+                time.sleep(delay)
+                delay = min(30.0, delay * 1.5)
+
     def _init_with_retry(self, max_attempts: int = 3, initial_delay: float = 2.0):
         """Optimized initialization with parallel checks and backoff"""
         last_exception = None
@@ -153,25 +186,25 @@ class PlaybackService:
                     
             except Exception as e:
                 last_exception = e
-                self._log_error(
-                    f"Initialization attempt {attempt+1} failed", 
+                self._log_warning(
+                    f"Initialization attempt {attempt + 1} failed",
                     extra={
-                        'attempt': attempt+1, 
-                        'action': 'init',
-                        'error': str(e),
-                        'type': type(e).__name__
-                    }
+                        "attempt": attempt + 1,
+                        "action": "init",
+                        "error": str(e),
+                        "type": type(e).__name__,
+                    },
                 )
                 if attempt < max_attempts - 1:
                     time.sleep(delay)
-        
-        self._log_error(
-            "Initialization failed after all attempts", 
+
+        self._log_warning(
+            "Initialization failed after all attempts",
             extra={
-                'action': 'init', 
-                'status': 'failed',
-                'last_error': str(last_exception)
-            }
+                "action": "init",
+                "status": "failed",
+                "last_error": str(last_exception),
+            },
         )
         raise RuntimeError(f"Initialization failed: {str(last_exception)}")
 
@@ -235,6 +268,8 @@ class PlaybackService:
             if ident == self._last_socket_identity:
                 continue
             self._last_socket_identity = ident
+            if self._mpv_manager.was_recent_app_initiated_restart():
+                continue
             self._log_warning(
                 "MPV IPC socket recreated (systemd restart?); recovering playback",
                 extra={"action": "mpv_socket_watch"},
@@ -247,16 +282,56 @@ class PlaybackService:
                     extra={"error": str(e), "type": type(e).__name__, "action": "mpv_socket_watch"},
                 )
 
-    def recover_after_mpv_systemd_restart(self, *, restart_playlist: Optional[bool] = None) -> bool:
+    def _on_mpv_app_initiated_restart(self) -> None:
+        """Resume playlist after hung-recovery restart (avoid racing socket-watch recover)."""
+        Thread(
+            target=self._recover_after_app_mpv_restart,
+            name="mpv-post-restart-recover",
+            daemon=True,
+        ).start()
+
+    def _recover_after_app_mpv_restart(self) -> None:
+        try:
+            with self._app_context():
+                self._last_socket_identity = self._mpv_socket_identity()
+                self.recover_after_mpv_systemd_restart(resume_advance=False)
+        except Exception as e:
+            self._log_warning(
+                "Post-restart playback recovery failed",
+                extra={"error": str(e), "type": type(e).__name__, "action": "mpv_recover"},
+            )
+
+    def recover_after_mpv_systemd_restart(
+        self,
+        *,
+        restart_playlist: Optional[bool] = None,
+        resume_advance: bool = True,
+    ) -> bool:
         """Re-bind IPC after `systemctl restart dsign-mpv` without restarting digital-signage."""
         with self._app_context():
-            return self._recover_after_mpv_systemd_restart_impl(restart_playlist=restart_playlist)
+            return self._recover_after_mpv_systemd_restart_impl(
+                restart_playlist=restart_playlist,
+                resume_advance=resume_advance,
+            )
 
-    def _recover_after_mpv_systemd_restart_impl(self, *, restart_playlist: Optional[bool] = None) -> bool:
+    def _recover_after_mpv_systemd_restart_impl(
+        self,
+        *,
+        restart_playlist: Optional[bool] = None,
+        resume_advance: bool = True,
+    ) -> bool:
         with self._recover_lock:
             playlist_id: Optional[int] = None
+            resume_index = 0
             if restart_playlist is not False:
                 playlist_id = self._resolve_playlist_id_for_recovery()
+                if playlist_id is not None:
+                    try:
+                        resume_index = self._playlist_manager.get_resume_start_index(
+                            advance=resume_advance
+                        )
+                    except Exception:
+                        resume_index = 0
             try:
                 self._playlist_manager.stop(show_idle_logo=False, update_status=False)
             except Exception:
@@ -280,7 +355,7 @@ class PlaybackService:
                 ok = False
                 for attempt in range(2):
                     try:
-                        ok = bool(self.play(playlist_id))
+                        ok = bool(self.play(playlist_id, start_index=resume_index))
                     except Exception as e:
                         ok = False
                         self._log_warning(
@@ -296,7 +371,11 @@ class PlaybackService:
                     if ok:
                         self._log_info(
                             "Resumed playlist after MPV service restart",
-                            extra={"playlist_id": playlist_id, "action": "mpv_recover"},
+                            extra={
+                                "playlist_id": playlist_id,
+                                "start_index": resume_index,
+                                "action": "mpv_recover",
+                            },
                         )
                         return True
                     if attempt == 0:
@@ -507,15 +586,16 @@ class PlaybackService:
         raise RuntimeError("Could not establish idle state")
 
     # Делегированные методы
-    def play(self, playlist_id: int) -> bool:
+    def play(self, playlist_id: int, *, start_index: int = 0) -> bool:
         """Play specified playlist"""
         try:
             start_time = time.time()
-            result = self._playlist_manager.play(playlist_id)
+            result = self._playlist_manager.play(playlist_id, start_index=start_index)
             self._log_info(
                 "Playing playlist", 
                 extra={
-                    'playlist_id': playlist_id, 
+                    'playlist_id': playlist_id,
+                    'start_index': start_index,
                     'action': 'play',
                     'duration_sec': round(time.time() - start_time, 3),
                     'success': result
