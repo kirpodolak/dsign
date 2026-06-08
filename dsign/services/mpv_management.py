@@ -271,6 +271,14 @@ class MPVManager:
 
         return self._restart_systemd_service()
 
+    def _ipc_error_needs_session_reset(self, exc: BaseException) -> bool:
+        """Timeout alone is often mpv busy — keep the socket; reset only on transport/session loss."""
+        if isinstance(exc, MPVIPCTimeoutError):
+            return False
+        if isinstance(exc, MPVIPCClosedError):
+            return True
+        return _is_ipc_transport_error(exc)
+
     def _ipc_failure_should_systemd_restart(self, exc: BaseException) -> bool:
         """During playlist playback avoid systemd restart on slow IPC (mpv busy opening streams)."""
         if self._playback_session_active and not self._restart_during_playback_allowed():
@@ -626,7 +634,8 @@ class MPVManager:
                     continue
                 continue
             except Exception as e:
-                self._reset_ipc_session()
+                if self._ipc_error_needs_session_reset(e):
+                    self._reset_ipc_session()
                 if attempt == PlaybackConstants.MAX_RETRIES - 1:
                     self.logger.warning(
                         "MPV get_properties_snapshot failed",
@@ -656,6 +665,7 @@ class MPVManager:
                     )
                 _retry_sleep_after_failure(e, attempt)
 
+        self._reset_ipc_session()
         empty: Dict[str, Optional[Any]] = {p: None for p in ordered}
         return empty
 
@@ -890,7 +900,8 @@ class MPVManager:
                         "duration_sec": round(time.time() - start_time, 3),
                     },
                 )
-                self._reset_ipc_session()
+                if self._ipc_error_needs_session_reset(e):
+                    self._reset_ipc_session()
                 if attempt == PlaybackConstants.MAX_RETRIES - 1:
                     self._note_playback_ipc_failure(e)
                 if self._ipc_failure_should_systemd_restart(e):
@@ -930,6 +941,8 @@ class MPVManager:
                 time.sleep(0.25)
             if not resp or resp.get("error") != "success":
                 raise RuntimeError("MPV not responding properly")
+
+            self._send_command({"command": ["enable_event", "all", False]}, timeout=3.0)
             
             self._mpv_ready = True
             self.logger.info(

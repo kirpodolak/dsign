@@ -1428,13 +1428,19 @@ class PlaylistManager:
             except ValueError:
                 pass
             snap_timeout = max(2.0, min(15.0, snap_timeout))
-            prop_keys = [
-                "eof-reached",
-                "duration",
-                "time-pos",
-                "idle-active",
-                "core-idle",
-            ]
+            if is_network:
+                prop_keys = [
+                    "eof-reached",
+                    "duration",
+                    "time-pos",
+                    "idle-active",
+                ]
+            else:
+                prop_keys = [
+                    "duration",
+                    "time-pos",
+                    "idle-active",
+                ]
             snap = self._mpv_snapshot(prop_keys, timeout=snap_timeout)
 
             socket_missing = not os.path.exists(PlaybackConstants.SOCKET_PATH)
@@ -1506,16 +1512,6 @@ class PlaylistManager:
                         break
             else:
                 consecutive_idle = 0
-
-            core_idle = self._snap_bool(snap, "core-idle")
-            if (
-                eof is False
-                and core_idle is True
-                and idle is True
-                and time.monotonic() >= grace_until
-                and (stream_ready or not is_network)
-            ):
-                break
 
             self._stop_event.wait(timeout=max(0.2, float(poll_sec)))
 
