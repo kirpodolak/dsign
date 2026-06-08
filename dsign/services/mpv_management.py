@@ -726,6 +726,43 @@ class MPVManager:
         empty: Dict[str, Optional[Any]] = {p: None for p in ordered}
         return empty
 
+    def get_property_light(
+        self,
+        name: str,
+        *,
+        timeout: float = 8.0,
+        lock_wait: Optional[float] = None,
+    ) -> Optional[Any]:
+        """
+        One get_property, one attempt, no retries — for tight playback polling loops.
+
+        Avoids 3× batch retries (~60s) when mpv is busy decoding network streams.
+        """
+        prop = str(name or "").strip()
+        if not prop:
+            return None
+        wait = self._ipc_lock_timeout_sec(lock_wait) if lock_wait is not None else 0.75
+        try:
+            if not self._acquire_ipc_lock(lock_wait=wait):
+                return None
+            try:
+                ipc_request_id = max(1, int(time.time() * 1_000_000) & 0x7FFFFFFF)
+                sess = self._get_ipc_session()
+                raw = sess.command(
+                    {"command": ["get_property", prop]},
+                    timeout=float(timeout),
+                    request_id=ipc_request_id,
+                )
+            finally:
+                self._release_ipc_lock()
+            norm = self._normalize_get_property_batch_reply(raw, ipc_request_id)
+            if norm.get("error") != "success":
+                return None
+            self._reset_playback_ipc_fail_streak()
+            return norm.get("data")
+        except Exception:
+            return None
+
     def _send_command(self, command: Dict[str, Any], timeout: float = 5.0) -> Optional[Dict[str, Any]]:
         """Отправка команды в MPV. Успехи — только DEBUG (слайдшоу иначе забивает journal)."""
         command_arr = command.get("command", ["unknown"])

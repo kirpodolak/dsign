@@ -443,6 +443,24 @@ class PlaylistManager:
         except Exception:
             return {p: None for p in props}
 
+    def _mpv_get_light(self, prop: str, *, timeout: float = 8.0) -> Optional[Any]:
+        """Single-property IPC read for playback polling (no batch retries)."""
+        try:
+            return self._mpv_manager.get_property_light(prop, timeout=timeout)
+        except Exception:
+            return None
+
+    def _request_mpv_stall_restart(self, *, playlist_id: int, reason: str) -> None:
+        """mpv wedged during playback; restart service and let PlaybackService resume."""
+        self.logger.warning(
+            "playlist: requesting mpv restart after playback stall",
+            extra={"playlist_id": playlist_id, "reason": reason},
+        )
+        try:
+            self._mpv_manager._schedule_hung_recovery()
+        except Exception:
+            pass
+
     @staticmethod
     def _snap_bool(snap: Dict[str, Any], key: str) -> Optional[bool]:
         val = snap.get(key) if snap else None
@@ -1118,9 +1136,8 @@ class PlaylistManager:
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
-            snap = self._mpv_snapshot(["idle-active"], timeout=snap_timeout)
-            idle = self._snap_bool(snap, "idle-active")
-            if idle is False:
+            idle_raw = self._mpv_get_light("idle-active", timeout=snap_timeout)
+            if isinstance(idle_raw, bool) and idle_raw is False:
                 return True
             self._stop_event.wait(timeout=poll_sec)
         return False
@@ -1409,10 +1426,13 @@ class PlaylistManager:
             poll_sec = max(1.0, min(10.0, poll_sec))
 
         consecutive_ipc_stall = 0
+        default_stall = "5" if is_network else "15"
         try:
-            stall_limit = int((os.getenv("DSIGN_MPV_EOF_IPC_STALL_POLLS") or "15").strip())
+            stall_limit = int(
+                (os.getenv("DSIGN_MPV_EOF_IPC_STALL_POLLS") or default_stall).strip()
+            )
         except ValueError:
-            stall_limit = 15
+            stall_limit = int(default_stall)
         stall_limit = max(3, min(120, stall_limit))
 
         try:
@@ -1422,43 +1442,60 @@ class PlaylistManager:
         except ValueError:
             stagnation_sec = 90.0
         stagnation_sec = max(20.0, min(600.0, stagnation_sec))
+        try:
+            ipc_dead_sec = float(
+                (os.getenv("DSIGN_MPV_EOF_IPC_DEAD_SEC") or "45").strip()
+            )
+        except ValueError:
+            ipc_dead_sec = 45.0
+        ipc_dead_sec = max(15.0, min(300.0, ipc_dead_sec))
+
         last_time_pos: Optional[float] = None
         last_time_pos_change = time.monotonic()
+        last_ipc_ok = time.monotonic()
+        poll_tick = 0
 
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
             if time.time() - start > 6 * 3600:
                 break
 
-            snap_timeout = 5.0 if is_network else 3.0
+            snap_timeout = 10.0 if is_network else 4.0
             try:
                 raw_to = (os.getenv("DSIGN_MPV_EOF_SNAPSHOT_TIMEOUT_SEC") or "").strip()
                 if raw_to:
                     snap_timeout = float(raw_to)
             except ValueError:
                 pass
-            snap_timeout = max(2.0, min(15.0, snap_timeout))
-            if is_network:
-                prop_keys = [
-                    "eof-reached",
-                    "duration",
-                    "time-pos",
-                    "idle-active",
-                ]
-            else:
-                prop_keys = [
-                    "duration",
-                    "time-pos",
-                    "idle-active",
-                ]
-            snap = self._mpv_snapshot(prop_keys, timeout=snap_timeout)
+            snap_timeout = max(2.0, min(20.0, snap_timeout))
 
+            poll_tick += 1
+            tp_raw = self._mpv_get_light("time-pos", timeout=snap_timeout)
+            tp = self._snap_number({"time-pos": tp_raw}, "time-pos")
+
+            idle_raw: Optional[Any] = None
+            if is_network:
+                if poll_tick % 2 == 0:
+                    idle_raw = self._mpv_get_light("idle-active", timeout=snap_timeout)
+            else:
+                idle_raw = self._mpv_get_light("idle-active", timeout=snap_timeout)
+
+            dur: Optional[float] = None
+            if not is_network and poll_tick % 3 == 0:
+                dur_raw = self._mpv_get_light("duration", timeout=snap_timeout)
+                dur = self._snap_number({"duration": dur_raw}, "duration")
+
+            got_ipc = tp is not None or idle_raw is not None or dur is not None
             socket_missing = not os.path.exists(PlaybackConstants.SOCKET_PATH)
-            ipc_unresponsive = not socket_missing and all(
-                snap.get(k) is None for k in prop_keys
-            )
-            if socket_missing or ipc_unresponsive:
+            if got_ipc:
+                last_ipc_ok = time.monotonic()
+                consecutive_ipc_stall = 0
+            else:
                 consecutive_ipc_stall += 1
-                if consecutive_ipc_stall >= stall_limit:
+                ipc_dead = (
+                    consecutive_ipc_stall >= stall_limit
+                    or time.monotonic() - last_ipc_ok >= ipc_dead_sec
+                )
+                if ipc_dead:
                     self.logger.warning(
                         "playlist_eof_stall: MPV IPC unresponsive during EOF wait",
                         extra={
@@ -1466,18 +1503,15 @@ class PlaylistManager:
                             "is_network": is_network,
                             "stall_polls": consecutive_ipc_stall,
                             "socket_missing": socket_missing,
+                            "ipc_dead_sec": round(time.monotonic() - last_ipc_ok, 1),
                         },
                     )
-                    break
-            else:
-                consecutive_ipc_stall = 0
+                    self._request_mpv_stall_restart(
+                        playlist_id=playlist_id,
+                        reason="ipc_unresponsive_eof",
+                    )
+                    return
 
-            eof = self._snap_bool(snap, "eof-reached")
-            if eof is True:
-                break
-
-            dur = self._snap_number(snap, "duration")
-            tp = self._snap_number(snap, "time-pos")
             if not is_network:
                 if (
                     dur is not None
@@ -1508,7 +1542,7 @@ class PlaylistManager:
                         )
                         break
 
-            idle = self._snap_bool(snap, "idle-active")
+            idle = self._snap_bool({"idle-active": idle_raw}, "idle-active")
             if idle is True and time.monotonic() >= grace_until:
                 if is_network:
                     if stream_ready:
