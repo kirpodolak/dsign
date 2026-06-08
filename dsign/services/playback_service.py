@@ -4,7 +4,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Optional, List, Union, Any
 from concurrent.futures import ThreadPoolExecutor
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 import subprocess
 import shutil
 import logging
@@ -63,11 +63,16 @@ class PlaybackService:
         self._recover_lock = Lock()
         self._last_socket_identity: Optional[tuple] = None
         self._app = None
+        self._mpv_init_ready = Event()
 
         self._mpv_manager.set_post_restart_callback(self._on_mpv_app_initiated_restart)
 
-        # Initialize with retry
-        self._init_with_retry()
+        # Do not block Flask bind on MPV IPC (ytdl can stall get_property for 15s+).
+        Thread(
+            target=self._init_background_loop,
+            name="playback-init",
+            daemon=True,
+        ).start()
         self._start_mpv_socket_watch()
 
     def set_app(self, app) -> None:
@@ -124,6 +129,27 @@ class PlaybackService:
             extra_data.update(extra)
         safe_extra = self._sanitize_extra_data(extra_data)
         self.logger.warning(message, extra=safe_extra)
+
+    def _init_background_loop(self) -> None:
+        """MPV init in background so digital-signage.service / Flask start immediately."""
+        delay = 2.0
+        while True:
+            try:
+                self._init_with_retry(max_attempts=1)
+                self._mpv_init_ready.set()
+                return
+            except Exception as e:
+                self._log_warning(
+                    "Background MPV init failed; retrying",
+                    extra={
+                        "action": "init",
+                        "error": str(e),
+                        "type": type(e).__name__,
+                        "retry_delay_sec": round(delay, 1),
+                    },
+                )
+                time.sleep(delay)
+                delay = min(30.0, delay * 1.5)
 
     def _init_with_retry(self, max_attempts: int = 3, initial_delay: float = 2.0):
         """Optimized initialization with parallel checks and backoff"""

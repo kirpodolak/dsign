@@ -349,20 +349,16 @@ class MPVManager:
         return isinstance(exc, MPVIPCClosedError) or _is_ipc_transport_error(exc)
 
     def _send_command_max_retries(self, command_name: str, prop_name: Optional[str]) -> int:
-        """Playback polling must not triple-retry slow get_property (45s+ per call)."""
-        if command_name != "get_property":
-            return PlaybackConstants.MAX_RETRIES
-        if self._playback_stream_opening or self._playback_network_active:
+        """get_property: one attempt — mpv under load can block IPC for seconds; 3× retry freezes Flask."""
+        if command_name == "get_property":
             return 1
-        if self._playback_session_active and prop_name in (
-            "path",
-            "vo-configured",
-            "idle-active",
-            "time-pos",
-            "duration",
-            "eof-reached",
-            "demuxer",
-            "stream-open-filename",
+        if (
+            command_name == "set_property"
+            and (
+                self._playback_stream_opening
+                or self._playback_network_active
+                or self._playback_session_active
+            )
         ):
             return 1
         return PlaybackConstants.MAX_RETRIES
@@ -1056,13 +1052,13 @@ class MPVManager:
                     if not self._restart_systemd_service_if_needed() or not self._wait_for_socket():
                         raise ConnectionError("MPV socket not available")
 
-            resp = None
-            for ping_try in range(8):
-                resp = self._send_command({"command": ["get_property", "mpv-version"]})
-                if resp and resp.get("error") == "success":
+            version = None
+            for _ in range(5):
+                version = self.get_property_light("mpv-version", timeout=4.0)
+                if version is not None:
                     break
-                time.sleep(0.25)
-            if not resp or resp.get("error") != "success":
+                time.sleep(0.3)
+            if version is None:
                 raise RuntimeError("MPV not responding properly")
 
             self._mpv_ready = True
