@@ -69,6 +69,28 @@ class LogoManager:
                 return False
         return True
 
+    def show_between_items_frame(self) -> None:
+        """
+        Best-effort black frame between playlist items.
+
+        Must not block the slideshow loop: one short loadfile attempt only.
+        Never load idle_logo.jpg here — mpv busy with ytdl/decode often ignores
+        logo loadfile for ~24s (3× retry), stalling the next item.
+        """
+        black_src = (os.getenv("DSIGN_TRANSITION_BLACK_SRC") or "").strip()
+        if not black_src:
+            black_src = "lavfi://color=c=black:s=1920x1080:r=24"
+        try:
+            timeout = float((os.getenv("DSIGN_MPV_TRANSITION_TIMEOUT_SEC") or "2.5").strip())
+        except ValueError:
+            timeout = 2.5
+        timeout = max(1.0, min(8.0, timeout))
+        self._mpv_manager._send_command(
+            {"command": ["loadfile", black_src, "replace"]},
+            timeout=timeout,
+            max_attempts=1,
+        )
+
     def _load_transition_logo(self, *, loop: bool) -> bool:
         logo_path = self._validate_logo_file()
         if not logo_path:
