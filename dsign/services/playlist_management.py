@@ -374,17 +374,9 @@ class PlaylistManager:
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
-            try:
-                resp = self._mpv_manager._send_command(
-                    {"command": ["get_property", "path"]},
-                    timeout=2.0,
-                )
-                if resp and resp.get("error") == "success":
-                    last_seen = resp.get("data")
-                    if last_seen == expected_path:
-                        return True
-            except Exception:
-                pass
+            last_seen = self._mpv_get_light("path", timeout=2.0)
+            if last_seen == expected_path:
+                return True
             # small poll interval; keep it low but not busy-loop
             time.sleep(0.1)
 
@@ -406,17 +398,9 @@ class PlaylistManager:
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
-            try:
-                resp = self._mpv_manager._send_command(
-                    {"command": ["get_property", "vo-configured"]},
-                    timeout=2.0,
-                )
-                if resp and resp.get("error") == "success":
-                    last_val = resp.get("data")
-                    if last_val is True:
-                        return True
-            except Exception:
-                pass
+            last_val = self._mpv_get_light("vo-configured", timeout=2.0)
+            if last_val is True:
+                return True
             time.sleep(0.1)
         self.logger.debug(
             "MPV vo-configured did not become true within timeout",
@@ -2050,6 +2034,10 @@ class PlaylistManager:
                 start_index = 0
 
             self._active_playlist_id = playlist_id
+            try:
+                self._mpv_manager.set_playback_session_active(True)
+            except Exception:
+                pass
             self._set_playback_active_marker(True)
             self._set_loop_position(start_index, len(items))
             first = items[start_index]

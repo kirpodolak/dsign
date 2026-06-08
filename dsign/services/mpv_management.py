@@ -337,11 +337,35 @@ class MPVManager:
         return _is_ipc_transport_error(exc)
 
     def _ipc_failure_should_systemd_restart(self, exc: BaseException) -> bool:
-        """During playlist playback avoid systemd restart on slow IPC (mpv busy opening streams)."""
-        if self._playback_session_active and not self._restart_during_playback_allowed():
-            if isinstance(exc, MPVIPCTimeoutError) or _is_ipc_transport_error(exc):
-                return False
-        return _ipc_error_should_restart_mpv(exc)
+        """Only restart mpv on dead IPC sessions — not on slow replies (ytdl/decode load)."""
+        if isinstance(exc, MPVIPCTimeoutError):
+            return False
+        if (
+            self._playback_session_active
+            or self._playback_stream_opening
+            or self._playback_network_active
+        ) and not self._restart_during_playback_allowed():
+            return False
+        return isinstance(exc, MPVIPCClosedError) or _is_ipc_transport_error(exc)
+
+    def _send_command_max_retries(self, command_name: str, prop_name: Optional[str]) -> int:
+        """Playback polling must not triple-retry slow get_property (45s+ per call)."""
+        if command_name != "get_property":
+            return PlaybackConstants.MAX_RETRIES
+        if self._playback_stream_opening or self._playback_network_active:
+            return 1
+        if self._playback_session_active and prop_name in (
+            "path",
+            "vo-configured",
+            "idle-active",
+            "time-pos",
+            "duration",
+            "eof-reached",
+            "demuxer",
+            "stream-open-filename",
+        ):
+            return 1
+        return PlaybackConstants.MAX_RETRIES
 
     def _check_systemd_service(self) -> bool:
         """Проверка статуса systemd сервиса"""
@@ -632,8 +656,12 @@ class MPVManager:
                     },
                 )
 
+        batch_retries = PlaybackConstants.MAX_RETRIES
+        if self._playback_stream_opening or self._playback_network_active:
+            batch_retries = 1
+
         first_rid = 0
-        for attempt in range(PlaybackConstants.MAX_RETRIES):
+        for attempt in range(batch_retries):
             base_rid = int(time.time() * 1_000_000) & 0x7FFFFFFF
             ids: List[int] = []
             items: List[tuple[int, Dict[str, Any]]] = []
@@ -693,7 +721,7 @@ class MPVManager:
             except Exception as e:
                 if self._ipc_error_needs_session_reset(e):
                     self._reset_ipc_session()
-                if attempt == PlaybackConstants.MAX_RETRIES - 1:
+                if attempt == batch_retries - 1:
                     self.logger.warning(
                         "MPV get_properties_snapshot failed",
                         extra={
@@ -712,7 +740,7 @@ class MPVManager:
                             "type": type(e).__name__,
                         },
                     )
-                if attempt == PlaybackConstants.MAX_RETRIES - 1:
+                if attempt == batch_retries - 1:
                     self._note_playback_ipc_failure(e)
                 if self._ipc_failure_should_systemd_restart(e):
                     _maybe_restart_mpv_batch(
@@ -844,8 +872,9 @@ class MPVManager:
                     },
                 )
 
+        max_attempts = self._send_command_max_retries(command_name, prop_name)
         ipc_request_id = 0
-        for attempt in range(PlaybackConstants.MAX_RETRIES):
+        for attempt in range(max_attempts):
             ipc_request_id = int(time.time() * 1_000_000) & 0x7FFFFFFF
             if log_ipc_debug:
                 self.logger.debug(
@@ -979,7 +1008,7 @@ class MPVManager:
             except Exception as e:
                 log_level = (
                     self.logger.warning
-                    if attempt == PlaybackConstants.MAX_RETRIES - 1
+                    if attempt == max_attempts - 1
                     else self.logger.debug
                 )
                 log_level(
@@ -996,7 +1025,7 @@ class MPVManager:
                 )
                 if self._ipc_error_needs_session_reset(e):
                     self._reset_ipc_session()
-                if attempt == PlaybackConstants.MAX_RETRIES - 1:
+                if attempt == max_attempts - 1:
                     self._note_playback_ipc_failure(e)
                 if self._ipc_failure_should_systemd_restart(e):
                     _maybe_restart_mpv_for_transport(
@@ -1011,7 +1040,7 @@ class MPVManager:
                 "operation": "MPVCommand",
                 "command": command_name,
                 "request_id": ipc_request_id,
-                "max_attempts": PlaybackConstants.MAX_RETRIES,
+                "max_attempts": max_attempts,
                 "duration_sec": round(time.time() - start_time, 3),
             },
         )
@@ -1175,7 +1204,7 @@ class MPVManager:
                 )
                 last_check = time.time()
                 
-                if self._send_command({"command": ["get_property", "idle-active"]}):
+                if self.get_property_light("idle-active", timeout=3.0) is not None:
                     self._mpv_ready = True
                     self._log_operation(
                         "WaitForMPVReady",
@@ -1249,7 +1278,7 @@ class MPVManager:
         service_ok = systemd_ok or socket_ok
         responsive = False
         if socket_ok:
-            responsive = self._send_command({"command": ["get_property", "mpv-version"]}) is not None
+            responsive = self.get_property_light("mpv-version", timeout=3.0) is not None
         return {
             "service_active": service_ok,
             "socket_available": socket_ok,
