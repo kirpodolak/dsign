@@ -294,7 +294,7 @@ class PlaybackService:
         try:
             with self._app_context():
                 self._last_socket_identity = self._mpv_socket_identity()
-                self.recover_after_mpv_systemd_restart(resume_advance=False)
+                self.recover_after_mpv_systemd_restart(resume_advance=True)
         except Exception as e:
             self._log_warning(
                 "Post-restart playback recovery failed",

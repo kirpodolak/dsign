@@ -435,13 +435,25 @@ class PlaylistManager:
             return None
 
     def _request_mpv_stall_restart(self, *, playlist_id: int, reason: str) -> None:
-        """mpv wedged during playback; restart service and let PlaybackService resume."""
+        """mpv IPC socket gone during playback; restart service and let PlaybackService resume."""
         self.logger.warning(
             "playlist: requesting mpv restart after playback stall",
             extra={"playlist_id": playlist_id, "reason": reason},
         )
         try:
             self._mpv_manager._schedule_hung_recovery()
+        except Exception:
+            pass
+
+    def _show_between_items_placeholder(self, *, network_next: bool = False) -> None:
+        """Hide TTY/console between playlist items while the next loadfile is prepared."""
+        try:
+            if network_next:
+                # Logo loadfile can confuse ytdl/HLS; black frame keeps VO active on DRM.
+                if not self._logo_manager._load_transition_black():
+                    self._logo_manager.display_playlist_transition()
+            else:
+                self._logo_manager.display_playlist_transition()
         except Exception:
             pass
 
@@ -1132,8 +1144,8 @@ class PlaylistManager:
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
-            snap = self._mpv_snapshot(["idle-active"], timeout=2.0)
-            if self._snap_bool(snap, "idle-active") is True:
+            idle_raw = self._mpv_get_light("idle-active", timeout=3.0)
+            if isinstance(idle_raw, bool) and idle_raw is True:
                 return True
             self._stop_event.wait(timeout=0.2)
         return False
@@ -1438,6 +1450,19 @@ class PlaylistManager:
         last_time_pos_change = time.monotonic()
         last_ipc_ok = time.monotonic()
         poll_tick = 0
+        local_idle_confirm = 1
+
+        def _finish_video_item(reason: str) -> None:
+            self.logger.info(
+                "Playlist item finished",
+                extra={
+                    "playlist_id": playlist_id,
+                    "is_network": is_network,
+                    "reason": reason,
+                },
+            )
+            if not self._stop_event.is_set():
+                self._show_between_items_placeholder(network_next=is_network)
 
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
             if time.time() - start > 6 * 3600:
@@ -1480,21 +1505,22 @@ class PlaylistManager:
                     or time.monotonic() - last_ipc_ok >= ipc_dead_sec
                 )
                 if ipc_dead:
-                    self.logger.warning(
-                        "playlist_eof_stall: MPV IPC unresponsive during EOF wait",
-                        extra={
-                            "playlist_id": playlist_id,
-                            "is_network": is_network,
-                            "stall_polls": consecutive_ipc_stall,
-                            "socket_missing": socket_missing,
-                            "ipc_dead_sec": round(time.monotonic() - last_ipc_ok, 1),
-                        },
-                    )
-                    self._request_mpv_stall_restart(
-                        playlist_id=playlist_id,
-                        reason="ipc_unresponsive_eof",
-                    )
-                    return
+                    if socket_missing:
+                        self.logger.warning(
+                            "playlist_eof_stall: MPV socket missing during EOF wait",
+                            extra={
+                                "playlist_id": playlist_id,
+                                "is_network": is_network,
+                                "stall_polls": consecutive_ipc_stall,
+                            },
+                        )
+                        self._request_mpv_stall_restart(
+                            playlist_id=playlist_id,
+                            reason="socket_missing_eof",
+                        )
+                        return
+                    _finish_video_item("ipc_quiet")
+                    break
 
             if not is_network:
                 if (
@@ -1503,6 +1529,7 @@ class PlaylistManager:
                     and tp is not None
                     and (tp + 0.2) >= dur
                 ):
+                    _finish_video_item("duration_reached")
                     break
 
             if tp is not None and time.monotonic() >= grace_until:
@@ -1524,6 +1551,7 @@ class PlaylistManager:
                                 ),
                             },
                         )
+                        _finish_video_item("time_pos_stagnation")
                         break
 
             idle = self._snap_bool({"idle-active": idle_raw}, "idle-active")
@@ -1532,10 +1560,12 @@ class PlaylistManager:
                     if stream_ready:
                         consecutive_idle += 1
                         if consecutive_idle >= 2:
+                            _finish_video_item("network_idle")
                             break
                 else:
                     consecutive_idle += 1
-                    if consecutive_idle >= 2:
+                    if consecutive_idle >= local_idle_confirm:
+                        _finish_video_item("local_idle")
                         break
             else:
                 consecutive_idle = 0
@@ -1685,6 +1715,16 @@ class PlaylistManager:
                     is_video = item["is_video"]
                     media_key = str(item.get("key") or path)
                     self._publish_current_media(playlist_id, item)
+                    self.logger.info(
+                        "Playlist item starting",
+                        extra={
+                            "playlist_id": playlist_id,
+                            "cycle": loop_cycle,
+                            "offset": offset,
+                            "media_key": media_key,
+                            "is_video": is_video,
+                        },
+                    )
                     raw_duration = item.get("duration")
                     # Only images use duration. Treat 0/None as "missing" for images.
                     duration = raw_duration if (raw_duration is not None and int(raw_duration) >= 1) else default_duration
@@ -1784,14 +1824,10 @@ class PlaylistManager:
                                 self._mpv_manager.set_playback_stream_opening(True)
                             except Exception:
                                 pass
-                        if is_network_reload:
+                            self._show_between_items_placeholder(network_next=True)
                             self._prepare_mpv_network_reload()
-                        # Network streams: skip logo placeholder (breaks ytdl/HLS reload).
-                        if not is_network_reload:
-                            try:
-                                self._logo_manager.display_playlist_transition()
-                            except Exception:
-                                pass
+                        else:
+                            self._show_between_items_placeholder(network_next=False)
                         # External streams: Referer/UA must be set before loadfile (and cleared between items).
                         normalized_headers, mpv_per_file_opts = self._apply_mpv_http_headers(item, stream_url=str(path))
                         self._apply_mpv_ytdl_options(item, stream_url=str(path))
