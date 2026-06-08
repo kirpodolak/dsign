@@ -67,6 +67,11 @@ class PlaybackService:
 
         self._mpv_manager.set_post_restart_callback(self._on_mpv_app_initiated_restart)
 
+        self._log_info(
+            "PlaybackService constructed (non-blocking MPV init)",
+            extra={"action": "init", "mpv_init_mode": "background"},
+        )
+
         # Do not block Flask bind on MPV IPC (ytdl can stall get_property for 15s+).
         Thread(
             target=self._init_background_loop,
