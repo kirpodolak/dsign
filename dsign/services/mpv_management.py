@@ -3,8 +3,8 @@ import shutil
 import socket
 import time
 import subprocess
-from threading import Lock
-from typing import Dict, Optional, Any, List
+from threading import Lock, Thread
+from typing import Callable, Dict, Optional, Any, List
 from pathlib import Path
 
 from .playback_constants import PlaybackConstants
@@ -57,8 +57,13 @@ class MPVManager:
         self._managed_by_systemd = True
         self._playback_session_active = False
         self._playback_stream_opening = False
+        self._playback_network_active = False
         self._playback_ipc_fail_streak = 0
         self._playback_ipc_fail_lock = Lock()
+        self._hung_recovery_lock = Lock()
+        self._hung_recovery_running = False
+        self._app_initiated_restart_ts = 0.0
+        self._post_restart_callback: Optional[Callable[[], None]] = None
 
         # Логирование инициализации
         self.logger.info(
@@ -119,6 +124,21 @@ class MPVManager:
         if active:
             self._reset_playback_ipc_fail_streak()
 
+    def set_playback_network_active(self, active: bool) -> None:
+        """Network stream playing/buffering — mpv IPC can lag without being hung."""
+        self._playback_network_active = bool(active)
+        if active:
+            self._reset_playback_ipc_fail_streak()
+
+    def set_post_restart_callback(self, callback: Optional[Callable[[], None]]) -> None:
+        """PlaybackService registers to resume playlist after app-initiated mpv restart."""
+        self._post_restart_callback = callback
+
+    def was_recent_app_initiated_restart(self, within_sec: float = 25.0) -> bool:
+        if self._app_initiated_restart_ts <= 0:
+            return False
+        return (time.time() - self._app_initiated_restart_ts) < max(1.0, float(within_sec))
+
 
     def _ipc_lock_timeout_sec(self, lock_wait: Optional[float] = None) -> float:
         if lock_wait is not None:
@@ -144,21 +164,29 @@ class MPVManager:
 
     def _playback_hung_restart_threshold(self) -> int:
         try:
-            n = int((os.getenv("DSIGN_MPV_PLAYBACK_HUNG_RESTART_AFTER") or "18").strip())
+            n = int((os.getenv("DSIGN_MPV_PLAYBACK_HUNG_RESTART_AFTER") or "8").strip())
         except ValueError:
-            n = 18
-        return max(6, min(120, n))
+            n = 8
+        return max(3, min(120, n))
+
+    def _ipc_failure_counts_toward_hung(self, exc: BaseException) -> bool:
+        if self._playback_stream_opening or self._playback_network_active:
+            return False
+        if isinstance(exc, MPVIPCTimeoutError) and "IPC lock busy" in str(exc):
+            return False
+        # Slow IPC during ytdl/HLS open or network playback is common on Pi; hung recovery
+        # should react to dead sessions, not every get_property/set_property timeout.
+        if isinstance(exc, MPVIPCTimeoutError):
+            return False
+        return (
+            isinstance(exc, MPVIPCClosedError)
+            or _is_ipc_transport_error(exc)
+        )
 
     def _note_playback_ipc_failure(self, exc: BaseException) -> None:
         if not self._playback_session_active:
             return
-        if self._playback_stream_opening:
-            return
-        if not (
-            isinstance(exc, MPVIPCTimeoutError)
-            or isinstance(exc, MPVIPCClosedError)
-            or _is_ipc_transport_error(exc)
-        ):
+        if not self._ipc_failure_counts_toward_hung(exc):
             return
         with self._playback_ipc_fail_lock:
             self._playback_ipc_fail_streak += 1
@@ -176,19 +204,37 @@ class MPVManager:
         )
         with self._playback_ipc_fail_lock:
             self._playback_ipc_fail_streak = 0
-        self._force_restart_mpv_for_hung_recovery()
+        self._schedule_hung_recovery()
+
+    def _schedule_hung_recovery(self) -> None:
+        with self._hung_recovery_lock:
+            if self._hung_recovery_running:
+                return
+            self._hung_recovery_running = True
+        Thread(
+            target=self._run_hung_recovery,
+            name="mpv-hung-recovery",
+            daemon=True,
+        ).start()
+
+    def _run_hung_recovery(self) -> None:
+        try:
+            self._force_restart_mpv_for_hung_recovery()
+        finally:
+            with self._hung_recovery_lock:
+                self._hung_recovery_running = False
 
     def _force_restart_mpv_for_hung_recovery(self) -> bool:
         """
-        Restart mpv when a streak of IPC failures proves the player is hung.
+        Restart mpv when a streak of IPC transport failures proves the player is hung.
 
         Unlike `_restart_systemd_service_if_needed`, this bypasses the active-playlist
-        guard: a responsive socket with no command replies is exactly the failure mode
-        we are recovering from.
+        guard: a dead IPC session during playback is exactly the failure mode we recover from.
         """
-        self._playback_stream_opening = False
+        now = time.time()
         with self._mpv_restart_coalesce_lock:
-            self._last_mpv_restart_attempt_ts = time.time()
+            self._last_mpv_restart_attempt_ts = now
+            self._app_initiated_restart_ts = now
         self.logger.warning(
             "MPV hung during playlist; forcing systemd restart",
             extra={"operation": "PlaybackHungRecovery"},
@@ -197,6 +243,19 @@ class MPVManager:
         if ok:
             self._wait_for_socket(timeout=15.0)
             self._reset_ipc_session()
+            cb = self._post_restart_callback
+            if cb is not None:
+                try:
+                    cb()
+                except Exception as e:
+                    self.logger.warning(
+                        "Post-restart playback callback failed",
+                        extra={
+                            "operation": "PlaybackHungRecovery",
+                            "error": str(e),
+                            "type": type(e).__name__,
+                        },
+                    )
         return ok
 
     def _restart_during_playback_allowed(self) -> bool:
@@ -269,12 +328,40 @@ class MPVManager:
 
         return self._restart_systemd_service()
 
+    def _ipc_error_needs_session_reset(self, exc: BaseException) -> bool:
+        """Timeout alone is often mpv busy — keep the socket; reset only on transport/session loss."""
+        if isinstance(exc, MPVIPCTimeoutError):
+            return False
+        if isinstance(exc, MPVIPCClosedError):
+            return True
+        return _is_ipc_transport_error(exc)
+
     def _ipc_failure_should_systemd_restart(self, exc: BaseException) -> bool:
-        """During playlist playback avoid systemd restart on slow IPC (mpv busy opening streams)."""
-        if self._playback_session_active and not self._restart_during_playback_allowed():
-            if isinstance(exc, MPVIPCTimeoutError) or _is_ipc_transport_error(exc):
-                return False
-        return _ipc_error_should_restart_mpv(exc)
+        """Only restart mpv on dead IPC sessions — not on slow replies (ytdl/decode load)."""
+        if isinstance(exc, MPVIPCTimeoutError):
+            return False
+        if (
+            self._playback_session_active
+            or self._playback_stream_opening
+            or self._playback_network_active
+        ) and not self._restart_during_playback_allowed():
+            return False
+        return isinstance(exc, MPVIPCClosedError) or _is_ipc_transport_error(exc)
+
+    def _send_command_max_retries(self, command_name: str, prop_name: Optional[str]) -> int:
+        """get_property: one attempt — mpv under load can block IPC for seconds; 3× retry freezes Flask."""
+        if command_name == "get_property":
+            return 1
+        if (
+            command_name == "set_property"
+            and (
+                self._playback_stream_opening
+                or self._playback_network_active
+                or self._playback_session_active
+            )
+        ):
+            return 1
+        return PlaybackConstants.MAX_RETRIES
 
     def _check_systemd_service(self) -> bool:
         """Проверка статуса systemd сервиса"""
@@ -565,8 +652,12 @@ class MPVManager:
                     },
                 )
 
+        batch_retries = PlaybackConstants.MAX_RETRIES
+        if self._playback_stream_opening or self._playback_network_active:
+            batch_retries = 1
+
         first_rid = 0
-        for attempt in range(PlaybackConstants.MAX_RETRIES):
+        for attempt in range(batch_retries):
             base_rid = int(time.time() * 1_000_000) & 0x7FFFFFFF
             ids: List[int] = []
             items: List[tuple[int, Dict[str, Any]]] = []
@@ -624,8 +715,9 @@ class MPVManager:
                     continue
                 continue
             except Exception as e:
-                self._reset_ipc_session()
-                if attempt == PlaybackConstants.MAX_RETRIES - 1:
+                if self._ipc_error_needs_session_reset(e):
+                    self._reset_ipc_session()
+                if attempt == batch_retries - 1:
                     self.logger.warning(
                         "MPV get_properties_snapshot failed",
                         extra={
@@ -644,7 +736,8 @@ class MPVManager:
                             "type": type(e).__name__,
                         },
                     )
-                self._note_playback_ipc_failure(e)
+                if attempt == batch_retries - 1:
+                    self._note_playback_ipc_failure(e)
                 if self._ipc_failure_should_systemd_restart(e):
                     _maybe_restart_mpv_batch(
                         reason=str(e),
@@ -653,8 +746,46 @@ class MPVManager:
                     )
                 _retry_sleep_after_failure(e, attempt)
 
+        self._reset_ipc_session()
         empty: Dict[str, Optional[Any]] = {p: None for p in ordered}
         return empty
+
+    def get_property_light(
+        self,
+        name: str,
+        *,
+        timeout: float = 8.0,
+        lock_wait: Optional[float] = None,
+    ) -> Optional[Any]:
+        """
+        One get_property, one attempt, no retries — for tight playback polling loops.
+
+        Avoids 3× batch retries (~60s) when mpv is busy decoding network streams.
+        """
+        prop = str(name or "").strip()
+        if not prop:
+            return None
+        wait = self._ipc_lock_timeout_sec(lock_wait) if lock_wait is not None else 0.75
+        try:
+            if not self._acquire_ipc_lock(lock_wait=wait):
+                return None
+            try:
+                ipc_request_id = max(1, int(time.time() * 1_000_000) & 0x7FFFFFFF)
+                sess = self._get_ipc_session()
+                raw = sess.command(
+                    {"command": ["get_property", prop]},
+                    timeout=float(timeout),
+                    request_id=ipc_request_id,
+                )
+            finally:
+                self._release_ipc_lock()
+            norm = self._normalize_get_property_batch_reply(raw, ipc_request_id)
+            if norm.get("error") != "success":
+                return None
+            self._reset_playback_ipc_fail_streak()
+            return norm.get("data")
+        except Exception:
+            return None
 
     def _send_command(self, command: Dict[str, Any], timeout: float = 5.0) -> Optional[Dict[str, Any]]:
         """Отправка команды в MPV. Успехи — только DEBUG (слайдшоу иначе забивает journal)."""
@@ -737,8 +868,9 @@ class MPVManager:
                     },
                 )
 
+        max_attempts = self._send_command_max_retries(command_name, prop_name)
         ipc_request_id = 0
-        for attempt in range(PlaybackConstants.MAX_RETRIES):
+        for attempt in range(max_attempts):
             ipc_request_id = int(time.time() * 1_000_000) & 0x7FFFFFFF
             if log_ipc_debug:
                 self.logger.debug(
@@ -872,7 +1004,7 @@ class MPVManager:
             except Exception as e:
                 log_level = (
                     self.logger.warning
-                    if attempt == PlaybackConstants.MAX_RETRIES - 1
+                    if attempt == max_attempts - 1
                     else self.logger.debug
                 )
                 log_level(
@@ -887,8 +1019,10 @@ class MPVManager:
                         "duration_sec": round(time.time() - start_time, 3),
                     },
                 )
-                self._reset_ipc_session()
-                self._note_playback_ipc_failure(e)
+                if self._ipc_error_needs_session_reset(e):
+                    self._reset_ipc_session()
+                if attempt == max_attempts - 1:
+                    self._note_playback_ipc_failure(e)
                 if self._ipc_failure_should_systemd_restart(e):
                     _maybe_restart_mpv_for_transport(
                         reason=str(e), attempt_num=attempt + 1
@@ -902,7 +1036,7 @@ class MPVManager:
                 "operation": "MPVCommand",
                 "command": command_name,
                 "request_id": ipc_request_id,
-                "max_attempts": PlaybackConstants.MAX_RETRIES,
+                "max_attempts": max_attempts,
                 "duration_sec": round(time.time() - start_time, 3),
             },
         )
@@ -918,25 +1052,35 @@ class MPVManager:
                     if not self._restart_systemd_service_if_needed() or not self._wait_for_socket():
                         raise ConnectionError("MPV socket not available")
 
-            resp = None
-            for ping_try in range(8):
-                resp = self._send_command({"command": ["get_property", "mpv-version"]})
-                if resp and resp.get("error") == "success":
+            version = None
+            for _ in range(3):
+                version = self.get_property_light("mpv-version", timeout=2.5)
+                if version is not None:
                     break
-                time.sleep(0.25)
-            if not resp or resp.get("error") != "success":
-                raise RuntimeError("MPV not responding properly")
-            
+                time.sleep(0.2)
+
             self._mpv_ready = True
-            self.logger.info(
-                "MPV initialized successfully",
-                extra={
-                    "operation": "mpv_init",
-                    "status": "success",
-                    "backend": "DRM",
-                    "duration_sec": round(time.time() - start_time, 3)
-                }
-            )
+            if version is None:
+                # ytdl_hook / DRM startup can block IPC for minutes; socket up is enough to play().
+                self.logger.warning(
+                    "MPV IPC socket ready but version ping timed out (player busy); continuing",
+                    extra={
+                        "operation": "mpv_init",
+                        "status": "socket_only",
+                        "duration_sec": round(time.time() - start_time, 3),
+                    },
+                )
+            else:
+                self.logger.info(
+                    "MPV initialized successfully",
+                    extra={
+                        "operation": "mpv_init",
+                        "status": "success",
+                        "backend": "DRM",
+                        "mpv_version": str(version)[:80],
+                        "duration_sec": round(time.time() - start_time, 3),
+                    },
+                )
             return True
             
         except Exception as e:
@@ -1066,7 +1210,7 @@ class MPVManager:
                 )
                 last_check = time.time()
                 
-                if self._send_command({"command": ["get_property", "idle-active"]}):
+                if self.get_property_light("idle-active", timeout=3.0) is not None:
                     self._mpv_ready = True
                     self._log_operation(
                         "WaitForMPVReady",
@@ -1140,7 +1284,7 @@ class MPVManager:
         service_ok = systemd_ok or socket_ok
         responsive = False
         if socket_ok:
-            responsive = self._send_command({"command": ["get_property", "mpv-version"]}) is not None
+            responsive = self.get_property_light("mpv-version", timeout=3.0) is not None
         return {
             "service_active": service_ok,
             "socket_available": socket_ok,
