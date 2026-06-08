@@ -1053,24 +1053,34 @@ class MPVManager:
                         raise ConnectionError("MPV socket not available")
 
             version = None
-            for _ in range(5):
-                version = self.get_property_light("mpv-version", timeout=4.0)
+            for _ in range(3):
+                version = self.get_property_light("mpv-version", timeout=2.5)
                 if version is not None:
                     break
-                time.sleep(0.3)
-            if version is None:
-                raise RuntimeError("MPV not responding properly")
+                time.sleep(0.2)
 
             self._mpv_ready = True
-            self.logger.info(
-                "MPV initialized successfully",
-                extra={
-                    "operation": "mpv_init",
-                    "status": "success",
-                    "backend": "DRM",
-                    "duration_sec": round(time.time() - start_time, 3)
-                }
-            )
+            if version is None:
+                # ytdl_hook / DRM startup can block IPC for minutes; socket up is enough to play().
+                self.logger.warning(
+                    "MPV IPC socket ready but version ping timed out (player busy); continuing",
+                    extra={
+                        "operation": "mpv_init",
+                        "status": "socket_only",
+                        "duration_sec": round(time.time() - start_time, 3),
+                    },
+                )
+            else:
+                self.logger.info(
+                    "MPV initialized successfully",
+                    extra={
+                        "operation": "mpv_init",
+                        "status": "success",
+                        "backend": "DRM",
+                        "mpv_version": str(version)[:80],
+                        "duration_sec": round(time.time() - start_time, 3),
+                    },
+                )
             return True
             
         except Exception as e:

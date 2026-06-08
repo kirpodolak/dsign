@@ -181,25 +181,25 @@ class PlaybackService:
                     
             except Exception as e:
                 last_exception = e
-                self._log_error(
-                    f"Initialization attempt {attempt+1} failed", 
+                self._log_warning(
+                    f"Initialization attempt {attempt + 1} failed",
                     extra={
-                        'attempt': attempt+1, 
-                        'action': 'init',
-                        'error': str(e),
-                        'type': type(e).__name__
-                    }
+                        "attempt": attempt + 1,
+                        "action": "init",
+                        "error": str(e),
+                        "type": type(e).__name__,
+                    },
                 )
                 if attempt < max_attempts - 1:
                     time.sleep(delay)
-        
-        self._log_error(
-            "Initialization failed after all attempts", 
+
+        self._log_warning(
+            "Initialization failed after all attempts",
             extra={
-                'action': 'init', 
-                'status': 'failed',
-                'last_error': str(last_exception)
-            }
+                "action": "init",
+                "status": "failed",
+                "last_error": str(last_exception),
+            },
         )
         raise RuntimeError(f"Initialization failed: {str(last_exception)}")
 
