@@ -456,13 +456,11 @@ class PlaylistManager:
 
     def _show_between_items_placeholder(self, *, network_next: bool = False) -> None:
         """Hide TTY/console between playlist items while the next loadfile is prepared."""
+        if not network_next:
+            # Local→local: replace loadfile is enough; logo loadfile blocks IPC when mpv is busy.
+            return
         try:
-            if network_next:
-                # Logo loadfile can confuse ytdl/HLS; black frame keeps VO active on DRM.
-                if not self._logo_manager._load_transition_black():
-                    self._logo_manager.display_playlist_transition()
-            else:
-                self._logo_manager.display_playlist_transition()
+            self._logo_manager.show_between_items_frame()
         except Exception:
             pass
 
@@ -1470,8 +1468,6 @@ class PlaylistManager:
                     "reason": reason,
                 },
             )
-            if not self._stop_event.is_set():
-                self._show_between_items_placeholder(network_next=is_network)
 
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
             if time.time() - start > 6 * 3600:
@@ -1757,8 +1753,9 @@ class PlaylistManager:
                         and path.startswith(("http://", "https://", "ytdl://"))
                     )
 
-                    # Do not spam IPC while play()-issued loadfile is still opening (ytdl/HLS).
-                    if not is_preloaded_network:
+                    # Only tune mpv for the first preloaded item; before the next loadfile replace
+                    # these extra set_property calls just queue behind a busy IPC socket.
+                    if skip_load and not is_preloaded_network:
                         try:
                             self._mpv_manager._send_command(
                                 {"command": ["set_property", "loop-file", "no"]},
@@ -1835,8 +1832,6 @@ class PlaylistManager:
                                 pass
                             self._show_between_items_placeholder(network_next=True)
                             self._prepare_mpv_network_reload()
-                        else:
-                            self._show_between_items_placeholder(network_next=False)
                         # External streams: Referer/UA must be set before loadfile (and cleared between items).
                         normalized_headers, mpv_per_file_opts = self._apply_mpv_http_headers(item, stream_url=str(path))
                         self._apply_mpv_ytdl_options(item, stream_url=str(path))
@@ -1871,6 +1866,11 @@ class PlaylistManager:
                                 media_key,
                                 reason="socket_missing" if socket_missing else "loadfile_failed",
                             )
+                            if is_network_reload:
+                                try:
+                                    self._mpv_manager.set_playback_stream_opening(False)
+                                except Exception:
+                                    pass
                             if socket_missing:
                                 self._stop_event.wait(timeout=5.0)
                             continue
