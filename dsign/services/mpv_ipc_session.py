@@ -190,10 +190,11 @@ class MpvJsonIpcSession:
             raise
 
         n = len(qs)
-        budget = float(timeout)
-        if n > 1:
-            budget = min(35.0, budget + 0.45 * float(n - 1))
-        deadline = time.monotonic() + max(0.05, budget)
+        per_cmd = max(0.05, float(timeout))
+        # mpv may answer batched get_property sequentially; a flat +0.45s/n almost always
+        # times out on Pi under decode load (5 props @ 3s → 4.8s total was too tight).
+        budget = min(60.0, max(per_cmd + 1.0, per_cmd * float(n)))
+        deadline = time.monotonic() + budget
         results: List[Dict[str, Any]] = []
         try:
             for q in qs:
@@ -287,7 +288,9 @@ class MpvJsonIpcSession:
                 time.sleep(0.03)
                 continue
             try:
-                sock.settimeout(0.6)
+                with self._pending_lock:
+                    pending = bool(self._pending)
+                sock.settimeout(0.15 if pending else 0.6)
                 chunk = sock.recv(self._recv_chunk_size)
             except socket.timeout:
                 continue
