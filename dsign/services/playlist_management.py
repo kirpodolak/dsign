@@ -41,12 +41,21 @@ class PlaylistManager:
         self._loop_item_index: Optional[int] = None
         self._loop_items_count: int = 0
         self._loop_position_lock = Lock()
+        self._app_ready = Event()
 
     def set_app(self, app) -> None:
         """Attach Flask app so background playback threads can use db.session safely."""
         self._app = app
+        self._app_ready.set()
+
+    def _ensure_app_wired(self, timeout: float = 90.0) -> bool:
+        if self._app is not None:
+            return True
+        return self._app_ready.wait(timeout=max(0.0, float(timeout)))
 
     def _app_context(self):
+        if self._app is None:
+            self._ensure_app_wired(timeout=90.0)
         return self._app.app_context() if self._app is not None else nullcontext()
 
     def set_external_media_service(self, service) -> None:
