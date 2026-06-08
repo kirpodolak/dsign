@@ -352,6 +352,8 @@ class MPVManager:
         """get_property: one attempt — mpv under load can block IPC for seconds; 3× retry freezes Flask."""
         if command_name == "get_property":
             return 1
+        if command_name == "loadfile" and self._playback_session_active:
+            return 1
         if (
             command_name == "set_property"
             and (
@@ -787,7 +789,13 @@ class MPVManager:
         except Exception:
             return None
 
-    def _send_command(self, command: Dict[str, Any], timeout: float = 5.0) -> Optional[Dict[str, Any]]:
+    def _send_command(
+        self,
+        command: Dict[str, Any],
+        timeout: float = 5.0,
+        *,
+        max_attempts: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Отправка команды в MPV. Успехи — только DEBUG (слайдшоу иначе забивает journal)."""
         command_arr = command.get("command", ["unknown"])
         command_name = command_arr[0] if isinstance(command_arr, list) and command_arr else "unknown"
@@ -808,6 +816,12 @@ class MPVManager:
         if slow_ms < 0:
             slow_ms = 0
 
+        attempt_limit = (
+            max(1, int(max_attempts))
+            if max_attempts is not None
+            else self._send_command_max_retries(command_name, prop_name)
+        )
+
         delays_transport = getattr(
             PlaybackConstants,
             "RETRY_DELAY_TRANSPORT_SEC",
@@ -817,7 +831,7 @@ class MPVManager:
             delays_transport = (0.15, 0.35, 0.75)
 
         def _retry_sleep_after_failure(exc: BaseException, attempt_idx: int) -> None:
-            if attempt_idx >= PlaybackConstants.MAX_RETRIES - 1:
+            if attempt_idx >= attempt_limit - 1:
                 return
             if (
                 _ipc_error_should_restart_mpv(exc)
@@ -868,9 +882,8 @@ class MPVManager:
                     },
                 )
 
-        max_attempts = self._send_command_max_retries(command_name, prop_name)
         ipc_request_id = 0
-        for attempt in range(max_attempts):
+        for attempt in range(attempt_limit):
             ipc_request_id = int(time.time() * 1_000_000) & 0x7FFFFFFF
             if log_ipc_debug:
                 self.logger.debug(
@@ -1004,7 +1017,7 @@ class MPVManager:
             except Exception as e:
                 log_level = (
                     self.logger.warning
-                    if attempt == max_attempts - 1
+                    if attempt == attempt_limit - 1
                     else self.logger.debug
                 )
                 log_level(
@@ -1021,7 +1034,7 @@ class MPVManager:
                 )
                 if self._ipc_error_needs_session_reset(e):
                     self._reset_ipc_session()
-                if attempt == max_attempts - 1:
+                if attempt == attempt_limit - 1:
                     self._note_playback_ipc_failure(e)
                 if self._ipc_failure_should_systemd_restart(e):
                     _maybe_restart_mpv_for_transport(
@@ -1036,7 +1049,7 @@ class MPVManager:
                 "operation": "MPVCommand",
                 "command": command_name,
                 "request_id": ipc_request_id,
-                "max_attempts": max_attempts,
+                "max_attempts": attempt_limit,
                 "duration_sec": round(time.time() - start_time, 3),
             },
         )
