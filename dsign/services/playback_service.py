@@ -63,6 +63,7 @@ class PlaybackService:
         self._recover_lock = Lock()
         self._last_socket_identity: Optional[tuple] = None
         self._app = None
+        self._app_ready = Event()
         self._mpv_init_ready = Event()
 
         self._mpv_manager.set_post_restart_callback(self._on_mpv_app_initiated_restart)
@@ -83,11 +84,20 @@ class PlaybackService:
     def set_app(self, app) -> None:
         """Attach Flask app for DB access from background threads (socket watch, boot resume)."""
         self._app = app
+        self._app_ready.set()
         pm = getattr(self, "_playlist_manager", None)
         if pm is not None and hasattr(pm, "set_app"):
             pm.set_app(app)
 
+    def _ensure_app_wired(self, timeout: float = 90.0) -> bool:
+        """Background MPV init can finish before init_routes calls set_app."""
+        if self._app is not None:
+            return True
+        return self._app_ready.wait(timeout=max(0.0, float(timeout)))
+
     def _app_context(self):
+        if self._app is None:
+            self._ensure_app_wired(timeout=90.0)
         return self._app.app_context() if self._app is not None else nullcontext()
 
     def display_idle_logo(self):
@@ -294,7 +304,7 @@ class PlaybackService:
         try:
             with self._app_context():
                 self._last_socket_identity = self._mpv_socket_identity()
-                self.recover_after_mpv_systemd_restart(resume_advance=False)
+                self.recover_after_mpv_systemd_restart(resume_advance=True)
         except Exception as e:
             self._log_warning(
                 "Post-restart playback recovery failed",
