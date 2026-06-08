@@ -38,6 +38,9 @@ class PlaylistManager:
         self._preloaded_stream_ready = False
         self._current_media_label: Optional[str] = None
         self._current_media_lock = Lock()
+        self._loop_item_index: Optional[int] = None
+        self._loop_items_count: int = 0
+        self._loop_position_lock = Lock()
 
     def set_app(self, app) -> None:
         """Attach Flask app so background playback threads can use db.session safely."""
@@ -154,6 +157,27 @@ class PlaylistManager:
                 )
         except Exception:
             pass
+
+    def _set_loop_position(self, index: int, items_count: int) -> None:
+        with self._loop_position_lock:
+            self._loop_item_index = int(index)
+            self._loop_items_count = max(0, int(items_count))
+
+    def _clear_loop_position(self) -> None:
+        with self._loop_position_lock:
+            self._loop_item_index = None
+            self._loop_items_count = 0
+
+    def get_resume_start_index(self, *, advance: bool = True) -> int:
+        """Index to start/resume playlist loop; advance=True skips the interrupted item."""
+        with self._loop_position_lock:
+            idx = self._loop_item_index
+            count = self._loop_items_count
+        if idx is None or count <= 0:
+            return 0
+        if advance:
+            return (int(idx) + 1) % count
+        return int(idx)
 
     def _clear_current_media_label(self, *, emit: bool = True, playlist_id: Optional[int] = None) -> None:
         with self._current_media_lock:
@@ -293,6 +317,8 @@ class PlaylistManager:
         if not self._wait_mpv_leave_idle(
             timeout_sec=leave_to, poll_sec=poll_sec, snap_timeout=snap_to
         ):
+            if self._stop_event.is_set():
+                return False
             self.logger.warning(
                 "Network stream did not leave idle after play() loadfile",
                 extra={"media_key": media_key, "path_preview": path_s[:120]},
@@ -306,6 +332,8 @@ class PlaylistManager:
         dem_to = max(5.0, min(120.0, dem_to))
         dem_poll = 0.75 if is_ytdl else 0.4
         if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to, poll_sec=dem_poll):
+            if self._stop_event.is_set():
+                return False
             self.logger.warning(
                 "Network stream demuxer not ready after play() loadfile",
                 extra={"media_key": media_key, "path_preview": path_s[:120]},
@@ -346,17 +374,9 @@ class PlaylistManager:
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
-            try:
-                resp = self._mpv_manager._send_command(
-                    {"command": ["get_property", "path"]},
-                    timeout=2.0,
-                )
-                if resp and resp.get("error") == "success":
-                    last_seen = resp.get("data")
-                    if last_seen == expected_path:
-                        return True
-            except Exception:
-                pass
+            last_seen = self._mpv_get_light("path", timeout=2.0)
+            if last_seen == expected_path:
+                return True
             # small poll interval; keep it low but not busy-loop
             time.sleep(0.1)
 
@@ -378,17 +398,9 @@ class PlaylistManager:
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
-            try:
-                resp = self._mpv_manager._send_command(
-                    {"command": ["get_property", "vo-configured"]},
-                    timeout=2.0,
-                )
-                if resp and resp.get("error") == "success":
-                    last_val = resp.get("data")
-                    if last_val is True:
-                        return True
-            except Exception:
-                pass
+            last_val = self._mpv_get_light("vo-configured", timeout=2.0)
+            if last_val is True:
+                return True
             time.sleep(0.1)
         self.logger.debug(
             "MPV vo-configured did not become true within timeout",
@@ -414,6 +426,24 @@ class PlaylistManager:
             return self._mpv_manager.get_properties_snapshot(props, timeout=timeout)
         except Exception:
             return {p: None for p in props}
+
+    def _mpv_get_light(self, prop: str, *, timeout: float = 8.0) -> Optional[Any]:
+        """Single-property IPC read for playback polling (no batch retries)."""
+        try:
+            return self._mpv_manager.get_property_light(prop, timeout=timeout)
+        except Exception:
+            return None
+
+    def _request_mpv_stall_restart(self, *, playlist_id: int, reason: str) -> None:
+        """mpv wedged during playback; restart service and let PlaybackService resume."""
+        self.logger.warning(
+            "playlist: requesting mpv restart after playback stall",
+            extra={"playlist_id": playlist_id, "reason": reason},
+        )
+        try:
+            self._mpv_manager._schedule_hung_recovery()
+        except Exception:
+            pass
 
     @staticmethod
     def _snap_bool(snap: Dict[str, Any], key: str) -> Optional[bool]:
@@ -1090,9 +1120,8 @@ class PlaylistManager:
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
-            snap = self._mpv_snapshot(["idle-active"], timeout=snap_timeout)
-            idle = self._snap_bool(snap, "idle-active")
-            if idle is False:
+            idle_raw = self._mpv_get_light("idle-active", timeout=snap_timeout)
+            if isinstance(idle_raw, bool) and idle_raw is False:
                 return True
             self._stop_event.wait(timeout=poll_sec)
         return False
@@ -1368,6 +1397,11 @@ class PlaylistManager:
         consecutive_idle = 0
         if is_network:
             try:
+                self._mpv_manager.set_playback_network_active(True)
+            except Exception:
+                pass
+        if is_network:
+            try:
                 poll_sec = float(
                     (os.getenv("DSIGN_MPV_NETWORK_EOF_POLL_SEC") or "3.0").strip()
                 )
@@ -1376,40 +1410,76 @@ class PlaylistManager:
             poll_sec = max(1.0, min(10.0, poll_sec))
 
         consecutive_ipc_stall = 0
+        default_stall = "5" if is_network else "15"
         try:
-            stall_limit = int((os.getenv("DSIGN_MPV_EOF_IPC_STALL_POLLS") or "15").strip())
+            stall_limit = int(
+                (os.getenv("DSIGN_MPV_EOF_IPC_STALL_POLLS") or default_stall).strip()
+            )
         except ValueError:
-            stall_limit = 15
+            stall_limit = int(default_stall)
         stall_limit = max(3, min(120, stall_limit))
+
+        try:
+            stagnation_sec = float(
+                (os.getenv("DSIGN_MPV_PLAYBACK_STAGNATION_SEC") or "90").strip()
+            )
+        except ValueError:
+            stagnation_sec = 90.0
+        stagnation_sec = max(20.0, min(600.0, stagnation_sec))
+        try:
+            ipc_dead_sec = float(
+                (os.getenv("DSIGN_MPV_EOF_IPC_DEAD_SEC") or "45").strip()
+            )
+        except ValueError:
+            ipc_dead_sec = 45.0
+        ipc_dead_sec = max(15.0, min(300.0, ipc_dead_sec))
+
+        last_time_pos: Optional[float] = None
+        last_time_pos_change = time.monotonic()
+        last_ipc_ok = time.monotonic()
+        poll_tick = 0
 
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
             if time.time() - start > 6 * 3600:
                 break
 
-            snap_timeout = 5.0 if is_network else 3.0
+            snap_timeout = 10.0 if is_network else 4.0
             try:
                 raw_to = (os.getenv("DSIGN_MPV_EOF_SNAPSHOT_TIMEOUT_SEC") or "").strip()
                 if raw_to:
                     snap_timeout = float(raw_to)
             except ValueError:
                 pass
-            snap_timeout = max(2.0, min(15.0, snap_timeout))
-            prop_keys = [
-                "eof-reached",
-                "duration",
-                "time-pos",
-                "idle-active",
-                "core-idle",
-            ]
-            snap = self._mpv_snapshot(prop_keys, timeout=snap_timeout)
+            snap_timeout = max(2.0, min(20.0, snap_timeout))
 
+            poll_tick += 1
+            tp_raw = self._mpv_get_light("time-pos", timeout=snap_timeout)
+            tp = self._snap_number({"time-pos": tp_raw}, "time-pos")
+
+            idle_raw: Optional[Any] = None
+            if is_network:
+                if poll_tick % 2 == 0:
+                    idle_raw = self._mpv_get_light("idle-active", timeout=snap_timeout)
+            else:
+                idle_raw = self._mpv_get_light("idle-active", timeout=snap_timeout)
+
+            dur: Optional[float] = None
+            if not is_network and poll_tick % 3 == 0:
+                dur_raw = self._mpv_get_light("duration", timeout=snap_timeout)
+                dur = self._snap_number({"duration": dur_raw}, "duration")
+
+            got_ipc = tp is not None or idle_raw is not None or dur is not None
             socket_missing = not os.path.exists(PlaybackConstants.SOCKET_PATH)
-            ipc_unresponsive = not socket_missing and all(
-                snap.get(k) is None for k in prop_keys
-            )
-            if socket_missing or ipc_unresponsive:
+            if got_ipc:
+                last_ipc_ok = time.monotonic()
+                consecutive_ipc_stall = 0
+            else:
                 consecutive_ipc_stall += 1
-                if consecutive_ipc_stall >= stall_limit:
+                ipc_dead = (
+                    consecutive_ipc_stall >= stall_limit
+                    or time.monotonic() - last_ipc_ok >= ipc_dead_sec
+                )
+                if ipc_dead:
                     self.logger.warning(
                         "playlist_eof_stall: MPV IPC unresponsive during EOF wait",
                         extra={
@@ -1417,19 +1487,16 @@ class PlaylistManager:
                             "is_network": is_network,
                             "stall_polls": consecutive_ipc_stall,
                             "socket_missing": socket_missing,
+                            "ipc_dead_sec": round(time.monotonic() - last_ipc_ok, 1),
                         },
                     )
-                    break
-            else:
-                consecutive_ipc_stall = 0
-
-            eof = self._snap_bool(snap, "eof-reached")
-            if eof is True:
-                break
+                    self._request_mpv_stall_restart(
+                        playlist_id=playlist_id,
+                        reason="ipc_unresponsive_eof",
+                    )
+                    return
 
             if not is_network:
-                dur = self._snap_number(snap, "duration")
-                tp = self._snap_number(snap, "time-pos")
                 if (
                     dur is not None
                     and dur > 0.5
@@ -1438,7 +1505,28 @@ class PlaylistManager:
                 ):
                     break
 
-            idle = self._snap_bool(snap, "idle-active")
+            if tp is not None and time.monotonic() >= grace_until:
+                if last_time_pos is None or abs(tp - last_time_pos) > 0.05:
+                    last_time_pos = tp
+                    last_time_pos_change = time.monotonic()
+                elif time.monotonic() - last_time_pos_change >= stagnation_sec:
+                    near_end = dur is not None and dur > 0.5 and tp + 2.0 >= dur
+                    if not near_end:
+                        self.logger.warning(
+                            "playlist_eof_stall: playback time-pos frozen; treating as end",
+                            extra={
+                                "playlist_id": playlist_id,
+                                "is_network": is_network,
+                                "time_pos": tp,
+                                "duration": dur,
+                                "stagnation_sec": round(
+                                    time.monotonic() - last_time_pos_change, 1
+                                ),
+                            },
+                        )
+                        break
+
+            idle = self._snap_bool({"idle-active": idle_raw}, "idle-active")
             if idle is True and time.monotonic() >= grace_until:
                 if is_network:
                     if stream_ready:
@@ -1452,17 +1540,12 @@ class PlaylistManager:
             else:
                 consecutive_idle = 0
 
-            core_idle = self._snap_bool(snap, "core-idle")
-            if (
-                eof is False
-                and core_idle is True
-                and idle is True
-                and time.monotonic() >= grace_until
-                and (stream_ready or not is_network)
-            ):
-                break
-
             self._stop_event.wait(timeout=max(0.2, float(poll_sec)))
+        if is_network:
+            try:
+                self._mpv_manager.set_playback_network_active(False)
+            except Exception:
+                pass
 
     def _log_mpv_network_debug_snapshot(self, *, media_key: str, url: str) -> None:
         """
@@ -1526,6 +1609,7 @@ class PlaylistManager:
         self._active_playlist_id = None
         self._preloaded_stream_ready = False
         self._clear_current_media_label(emit=False)
+        self._clear_loop_position()
         self._set_playback_active_marker(False)
         try:
             self._mpv_manager.set_playback_session_active(False)
@@ -1591,7 +1675,9 @@ class PlaylistManager:
                 )
                 # Iterate cyclically starting from start_index.
                 for offset in range(len(items)):
-                    item = items[(start_index + offset) % len(items)]
+                    item_index = (start_index + offset) % len(items)
+                    item = items[item_index]
+                    self._set_loop_position(item_index, len(items))
                     if self._stop_event.is_set() or self._active_playlist_id != playlist_id:
                         break
 
@@ -1694,6 +1780,11 @@ class PlaylistManager:
                             or path.startswith("ytdl://")
                         )
                         if is_network_reload:
+                            try:
+                                self._mpv_manager.set_playback_stream_opening(True)
+                            except Exception:
+                                pass
+                        if is_network_reload:
                             self._prepare_mpv_network_reload()
                         # Network streams: skip logo placeholder (breaks ytdl/HLS reload).
                         if not is_network_reload:
@@ -1753,6 +1844,8 @@ class PlaylistManager:
                                 str(path),
                                 normalized_headers=normalized_headers or None,
                             ):
+                                if self._stop_event.is_set():
+                                    break
                                 self._register_media_failure(media_key, reason="open_failed")
                                 continue
                             stream_ready = True
@@ -1857,12 +1950,12 @@ class PlaylistManager:
             except Exception:
                 self._media_backoff.pop(media_key, None)
 
-    def play(self, playlist_id: int) -> bool:
+    def play(self, playlist_id: int, *, start_index: int = 0) -> bool:
         """Play playlist with profile support"""
         with self._app_context():
-            return self._play_impl(playlist_id)
+            return self._play_impl(playlist_id, start_index=start_index)
 
-    def _play_impl(self, playlist_id: int) -> bool:
+    def _play_impl(self, playlist_id: int, *, start_index: int = 0) -> bool:
         from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
 
         try:
@@ -1936,46 +2029,70 @@ class PlaylistManager:
                     + (" ..." if len(missing) > 10 else "")
                 )
 
-            self._active_playlist_id = playlist_id
-            self._set_playback_active_marker(True)
-            self._set_current_media_label(self._item_media_label(items[0]))
+            start_index = int(start_index or 0)
+            if start_index < 0 or start_index >= len(items):
+                start_index = 0
 
-            # Show first item immediately for responsiveness
-            first = items[0]
+            self._active_playlist_id = playlist_id
             try:
-                # Do NOT loop the file at MPV level; the app controls looping.
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "loop-file", "no"]},
-                    timeout=2.0,
-                )
+                self._mpv_manager.set_playback_session_active(True)
             except Exception:
                 pass
-            _, first_mpv_opts = self._apply_mpv_http_headers(first, stream_url=str(first.get("path") or ""))
-            self._apply_mpv_ytdl_options(first, stream_url=str(first.get("path") or ""))
+            self._set_playback_active_marker(True)
+            self._set_loop_position(start_index, len(items))
+            first = items[start_index]
+            self._set_current_media_label(self._item_media_label(first))
+
             first_path = str(first.get("path") or "")
-            first_load_cmd = self._mpv_loadfile_command(
-                first_path,
-                "replace",
-                per_file_opts=first_mpv_opts,
-            )
             first_is_network = first_path.startswith(("http://", "https://", "ytdl://"))
-            first_load_timeout = 45.0 if first_is_network else 10.0
-            first_load_resp = self._mpv_manager._send_command(
-                {"command": first_load_cmd}, timeout=first_load_timeout
-            )
-            self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
-            self._sync_settings_audio_to_mpv()
+            if first_is_network:
+                try:
+                    self._mpv_manager.set_playback_stream_opening(True)
+                except Exception:
+                    pass
             try:
-                first_muted = self._effective_playback_muted(
-                    item_muted=bool(first.get("muted", False)),
-                    profile_muted=profile_muted,
+                # Show first item immediately for responsiveness
+                try:
+                    # Do NOT loop the file at MPV level; the app controls looping.
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "loop-file", "no"]},
+                        timeout=2.0,
+                    )
+                except Exception:
+                    pass
+                _, first_mpv_opts = self._apply_mpv_http_headers(first, stream_url=first_path)
+                self._apply_mpv_ytdl_options(first, stream_url=first_path)
+                first_load_cmd = self._mpv_loadfile_command(
+                    first_path,
+                    "replace",
+                    per_file_opts=first_mpv_opts,
                 )
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "mute", "yes" if first_muted else "no"]},
-                    timeout=3.0,
+                first_load_timeout = 120.0 if first_path.startswith("ytdl://") else (
+                    45.0 if first_is_network else 10.0
                 )
+                first_load_resp = self._mpv_manager._send_command(
+                    {"command": first_load_cmd}, timeout=first_load_timeout
+                )
+                self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
+                self._sync_settings_audio_to_mpv()
+                try:
+                    first_muted = self._effective_playback_muted(
+                        item_muted=bool(first.get("muted", False)),
+                        profile_muted=profile_muted,
+                    )
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "mute", "yes" if first_muted else "no"]},
+                        timeout=3.0,
+                    )
+                except Exception:
+                    pass
             except Exception:
-                pass
+                if first_is_network:
+                    try:
+                        self._mpv_manager.set_playback_stream_opening(False)
+                    except Exception:
+                        pass
+                raise
 
             self._preloaded_stream_ready = False
             if first_is_network and bool(first.get("is_video")):
@@ -1997,10 +2114,10 @@ class PlaylistManager:
             self.db_session.commit()
 
             # Start background loop to enforce durations and EOF waits.
-            # play() always loadfile'd items[0]; loop walks 0..n-1, skips reload on first offset once.
+            # play() loadfile'd items[start_index]; loop walks from there, skips reload on first offset once.
             self._play_thread = Thread(
                 target=self._run_manual_slideshow_loop,
-                args=(playlist_id, items, 0),
+                args=(playlist_id, items, start_index),
                 kwargs={
                     "first_item_preloaded": True,
                     "profile_muted": profile_muted,
