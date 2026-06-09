@@ -1,4 +1,4 @@
-from threading import Lock
+from threading import Lock, Thread
 import os
 import shutil
 import subprocess
@@ -1186,6 +1186,11 @@ def init_api_routes(api_bp, services):
             # Use -n to avoid hanging / requiring a tty in web context.
             systemctl = shutil.which("systemctl") or "/bin/systemctl"
             cmd = ["sudo", "-n", systemctl, "restart", unit]
+            mpv_mgr = None
+            if service_key == "mpv" and playback_service is not None:
+                mpv_mgr = getattr(playback_service, "_mpv_manager", None)
+                if mpv_mgr is not None and hasattr(mpv_mgr, "mark_app_initiated_restart"):
+                    mpv_mgr.mark_app_initiated_restart()
             try:
                 subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=20.0)
             except FileNotFoundError:
@@ -1205,6 +1210,17 @@ def init_api_routes(api_bp, services):
             with _svc_status_cache_lock:
                 _svc_status_cache["payload"] = None
                 _svc_status_cache["ts"] = 0.0
+            if service_key == "mpv" and playback_service is not None:
+                def _recover_mpv_playback() -> None:
+                    try:
+                        playback_service.recover_after_mpv_systemd_restart()
+                    except Exception as exc:
+                        current_app.logger.warning(
+                            "MPV service restart: playback recover failed",
+                            exc_info=exc,
+                        )
+
+                Thread(target=_recover_mpv_playback, name="mpv-api-restart-recover", daemon=True).start()
             return jsonify({"success": True, "service": service_key, "unit": unit})
         except Exception as e:
             current_app.logger.error(f"Error restarting service {service_key}: {str(e)}", exc_info=True)
