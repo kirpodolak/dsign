@@ -1057,11 +1057,15 @@ class MPVManager:
                 continue
 
             except Exception as e:
-                log_level = (
-                    self.logger.warning
-                    if attempt == attempt_limit - 1
-                    else self.logger.debug
-                )
+                busy_ipc = (
+                    self._playback_stream_opening or self._playback_network_active
+                ) and command_name in ("set_property", "loadfile")
+                if busy_ipc and isinstance(e, MPVIPCTimeoutError):
+                    log_level = self.logger.debug
+                elif attempt == attempt_limit - 1:
+                    log_level = self.logger.warning
+                else:
+                    log_level = self.logger.debug
                 log_level(
                     f"Attempt {attempt + 1} failed",
                     extra={
@@ -1085,7 +1089,12 @@ class MPVManager:
                 _retry_sleep_after_failure(e, attempt)
                 continue
 
-        self.logger.error(
+        busy_timeout = (
+            self._playback_stream_opening
+            or self._playback_network_active
+        ) and command_name in ("set_property", "loadfile")
+        log_fn = self.logger.debug if busy_timeout else self.logger.error
+        log_fn(
             "Command failed after max attempts",
             extra={
                 "operation": "MPVCommand",
