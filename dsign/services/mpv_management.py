@@ -139,18 +139,47 @@ class MPVManager:
             return False
         return (time.time() - self._app_initiated_restart_ts) < max(1.0, float(within_sec))
 
+    def _playback_ipc_contended(self) -> bool:
+        return bool(
+            self._playback_session_active
+            or self._playback_stream_opening
+            or self._playback_network_active
+        )
 
-    def _ipc_lock_timeout_sec(self, lock_wait: Optional[float] = None) -> float:
+
+    def _ipc_lock_timeout_sec(
+        self, lock_wait: Optional[float] = None, *, prefer_long: bool = False
+    ) -> float:
         if lock_wait is not None:
-            return max(0.1, min(60.0, float(lock_wait)))
+            return max(0.05, min(60.0, float(lock_wait)))
+        if prefer_long:
+            try:
+                sec = float(
+                    (os.getenv("DSIGN_MPV_IPC_LOCK_TIMEOUT_LONG_SEC") or "45").strip()
+                )
+            except ValueError:
+                sec = 45.0
+            return max(1.0, min(120.0, sec))
+        if self._playback_session_active:
+            try:
+                sec = float(
+                    (os.getenv("DSIGN_MPV_IPC_LOCK_TIMEOUT_PLAYBACK_SEC") or "0.35").strip()
+                )
+            except ValueError:
+                sec = 0.35
+            return max(0.05, min(5.0, sec))
         try:
             sec = float((os.getenv("DSIGN_MPV_IPC_LOCK_TIMEOUT_SEC") or "6").strip())
         except ValueError:
             sec = 6.0
         return max(0.5, min(30.0, sec))
 
-    def _acquire_ipc_lock(self, *, lock_wait: Optional[float] = None) -> bool:
-        return self._ipc_lock.acquire(timeout=self._ipc_lock_timeout_sec(lock_wait))
+    def _acquire_ipc_lock(
+        self, *, lock_wait: Optional[float] = None, prefer_long: bool = False
+    ) -> bool:
+        return self._ipc_lock.acquire(
+            timeout=self._ipc_lock_timeout_sec(lock_wait, prefer_long=prefer_long)
+        )
 
     def _release_ipc_lock(self) -> None:
         try:
@@ -596,6 +625,10 @@ class MPVManager:
         if not ordered:
             return {}
 
+        contended = self._playback_ipc_contended()
+        if lock_wait is None and contended:
+            lock_wait = 0.35
+
         delays_transport = getattr(
             PlaybackConstants,
             "RETRY_DELAY_TRANSPORT_SEC",
@@ -654,9 +687,7 @@ class MPVManager:
                     },
                 )
 
-        batch_retries = PlaybackConstants.MAX_RETRIES
-        if self._playback_stream_opening or self._playback_network_active:
-            batch_retries = 1
+        batch_retries = 1 if contended else PlaybackConstants.MAX_RETRIES
 
         first_rid = 0
         for attempt in range(batch_retries):
@@ -717,10 +748,18 @@ class MPVManager:
                     continue
                 continue
             except Exception as e:
+                if isinstance(e, MPVIPCTimeoutError) and "IPC lock busy" in str(e):
+                    return {p: None for p in ordered}
                 if self._ipc_error_needs_session_reset(e):
                     self._reset_ipc_session()
                 if attempt == batch_retries - 1:
-                    self.logger.warning(
+                    log_fn = (
+                        self.logger.debug
+                        if isinstance(e, MPVIPCTimeoutError)
+                        and "IPC lock busy" in str(e)
+                        else self.logger.warning
+                    )
+                    log_fn(
                         "MPV get_properties_snapshot failed",
                         extra={
                             "operation": "MPVCommandBatch",
@@ -767,9 +806,8 @@ class MPVManager:
         prop = str(name or "").strip()
         if not prop:
             return None
-        wait = self._ipc_lock_timeout_sec(lock_wait) if lock_wait is not None else 0.75
         try:
-            if not self._acquire_ipc_lock(lock_wait=wait):
+            if not self._acquire_ipc_lock(lock_wait=lock_wait):
                 return None
             try:
                 ipc_request_id = max(1, int(time.time() * 1_000_000) & 0x7FFFFFFF)
@@ -795,6 +833,7 @@ class MPVManager:
         timeout: float = 5.0,
         *,
         max_attempts: Optional[int] = None,
+        lock_wait: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """Отправка команды в MPV. Успехи — только DEBUG (слайдшоу иначе забивает journal)."""
         command_arr = command.get("command", ["unknown"])
@@ -896,7 +935,10 @@ class MPVManager:
                     },
                 )
             try:
-                if not self._acquire_ipc_lock():
+                prefer_long_lock = command_name == "loadfile"
+                if not self._acquire_ipc_lock(
+                    lock_wait=lock_wait, prefer_long=prefer_long_lock
+                ):
                     self.logger.debug(
                         "IPC lock busy; command skipped",
                         extra={"operation": "MPVCommand", "command": command_name},

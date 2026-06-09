@@ -278,7 +278,9 @@ class PlaybackService:
             if ident == self._last_socket_identity:
                 continue
             self._last_socket_identity = ident
-            if self._mpv_manager.was_recent_app_initiated_restart():
+            if self._mpv_manager.was_recent_app_initiated_restart(within_sec=60.0):
+                continue
+            if self._recover_lock.locked():
                 continue
             self._log_warning(
                 "MPV IPC socket recreated (systemd restart?); recovering playback",
@@ -330,79 +332,98 @@ class PlaybackService:
         restart_playlist: Optional[bool] = None,
         resume_advance: bool = True,
     ) -> bool:
-        with self._recover_lock:
-            playlist_id: Optional[int] = None
-            resume_index = 0
-            if restart_playlist is not False:
-                playlist_id = self._resolve_playlist_id_for_recovery()
-                if playlist_id is not None:
-                    try:
-                        resume_index = self._playlist_manager.get_resume_start_index(
-                            advance=resume_advance
-                        )
-                    except Exception:
-                        resume_index = 0
-            try:
-                self._playlist_manager.stop(show_idle_logo=False, update_status=False)
-            except Exception:
-                pass
-            self._mpv_manager._reset_ipc_session()
-            if not self._mpv_manager.wait_for_ipc_socket_at_startup():
-                self._log_warning(
-                    "MPV recover: socket not available",
-                    extra={"action": "mpv_recover"},
-                )
-                return False
-            if not self._mpv_manager.initialize():
-                self._log_warning(
-                    "MPV recover: initialize failed",
-                    extra={"action": "mpv_recover"},
-                )
-                return False
-            self._wait_after_mpv_recover()
-            self._last_socket_identity = self._mpv_socket_identity()
+        if not self._recover_lock.acquire(blocking=False):
+            self._log_warning(
+                "MPV recover skipped (already in progress)",
+                extra={"action": "mpv_recover"},
+            )
+            return False
+        try:
+            return self._recover_after_mpv_systemd_restart_body(
+                restart_playlist=restart_playlist,
+                resume_advance=resume_advance,
+            )
+        finally:
+            self._recover_lock.release()
+
+    def _recover_after_mpv_systemd_restart_body(
+        self,
+        *,
+        restart_playlist: Optional[bool] = None,
+        resume_advance: bool = True,
+    ) -> bool:
+        playlist_id: Optional[int] = None
+        resume_index = 0
+        if restart_playlist is not False:
+            playlist_id = self._resolve_playlist_id_for_recovery()
             if playlist_id is not None:
-                ok = False
-                for attempt in range(2):
-                    try:
-                        ok = bool(self.play(playlist_id, start_index=resume_index))
-                    except Exception as e:
-                        ok = False
-                        self._log_warning(
-                            "MPV recover: play() raised",
-                            extra={
-                                "playlist_id": playlist_id,
-                                "attempt": attempt + 1,
-                                "error": str(e),
-                                "type": type(e).__name__,
-                                "action": "mpv_recover",
-                            },
-                        )
-                    if ok:
-                        self._log_info(
-                            "Resumed playlist after MPV service restart",
-                            extra={
-                                "playlist_id": playlist_id,
-                                "start_index": resume_index,
-                                "action": "mpv_recover",
-                            },
-                        )
-                        return True
-                    if attempt == 0:
-                        time.sleep(2.0)
-                self._log_warning(
-                    "MPV recover: play() failed after mpv restart",
-                    extra={"playlist_id": playlist_id, "action": "mpv_recover"},
-                )
-                return False
-            if not self._playback_active_marker_exists() and not self._playlist_manager_has_active_playback():
-                Thread(target=self._preload_resources, daemon=True).start()
-            else:
-                self._log_warning(
-                    "MPV recover: playback looked active but no playlist_id to resume",
-                    extra={"action": "mpv_recover"},
-                )
-            return True
+                try:
+                    resume_index = self._playlist_manager.get_resume_start_index(
+                        advance=resume_advance
+                    )
+                except Exception:
+                    resume_index = 0
+        try:
+            self._playlist_manager.stop(show_idle_logo=False, update_status=False)
+        except Exception:
+            pass
+        self._mpv_manager._reset_ipc_session()
+        if not self._mpv_manager.wait_for_ipc_socket_at_startup():
+            self._log_warning(
+                "MPV recover: socket not available",
+                extra={"action": "mpv_recover"},
+            )
+            return False
+        if not self._mpv_manager.initialize():
+            self._log_warning(
+                "MPV recover: initialize failed",
+                extra={"action": "mpv_recover"},
+            )
+            return False
+        self._wait_after_mpv_recover()
+        self._last_socket_identity = self._mpv_socket_identity()
+        if playlist_id is not None:
+            ok = False
+            for attempt in range(2):
+                try:
+                    ok = bool(self.play(playlist_id, start_index=resume_index))
+                except Exception as e:
+                    ok = False
+                    self._log_warning(
+                        "MPV recover: play() raised",
+                        extra={
+                            "playlist_id": playlist_id,
+                            "attempt": attempt + 1,
+                            "error": str(e),
+                            "type": type(e).__name__,
+                            "action": "mpv_recover",
+                        },
+                    )
+                if ok:
+                    self._log_info(
+                        "Resumed playlist after MPV service restart",
+                        extra={
+                            "playlist_id": playlist_id,
+                            "start_index": resume_index,
+                            "action": "mpv_recover",
+                        },
+                    )
+                    return True
+                if attempt == 0:
+                    time.sleep(2.0)
+            self._log_warning(
+                "MPV recover: play() failed after mpv restart",
+                extra={"playlist_id": playlist_id, "action": "mpv_recover"},
+            )
+            return False
+        if not self._playback_active_marker_exists() and not self._playlist_manager_has_active_playback():
+            Thread(target=self._preload_resources, daemon=True).start()
+        else:
+            self._log_warning(
+                "MPV recover: playback looked active but no playlist_id to resume",
+                extra={"action": "mpv_recover"},
+            )
+        return True
 
 
     def _network_assistant_interactive_enabled(self) -> bool:
