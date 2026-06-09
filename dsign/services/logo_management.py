@@ -102,7 +102,11 @@ class LogoManager:
             ["set_property", "pause", "no"],
         ]
         for cmd in commands:
-            response = self._mpv_manager._send_command({"command": cmd}, timeout=8.0)
+            response = self._mpv_manager._send_command(
+                {"command": cmd},
+                timeout=5.0,
+                max_attempts=1,
+            )
             if not response or response.get("error") != "success":
                 self.logger.warning(f"Failed command: {' '.join(map(str, cmd))}")
                 return False
@@ -110,6 +114,7 @@ class LogoManager:
         self._mpv_manager._send_command(
             {"command": ["set_property", "panscan", 0.0]},
             timeout=2.0,
+            max_attempts=1,
         )
         return True
 

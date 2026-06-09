@@ -553,6 +553,11 @@ class PlaybackService:
             if playlist_id is None:
                 return
             self._wait_before_boot_playlist()
+            try:
+                settle = float((os.getenv("DSIGN_MPV_POST_INIT_SETTLE_SEC") or "3").strip())
+            except ValueError:
+                settle = 3.0
+            time.sleep(max(0.0, min(15.0, settle)))
             if self.play(playlist_id):
                 self._log_info(
                     "Resumed playlist after boot",
@@ -571,9 +576,9 @@ class PlaybackService:
 
     def _transition_to_idle(self):
         """Transition to idle state with logo"""
-        max_attempts = 5
-        delay = 2
-    
+        max_attempts = 2
+        delay = 1.0
+
         for attempt in range(max_attempts):
             try:
                 if self._logo_manager.display_idle_logo():

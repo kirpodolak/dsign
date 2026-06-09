@@ -1493,17 +1493,21 @@ class PlaylistManager:
         while time.monotonic() < deadline:
             if self._stop_event.is_set():
                 return False
-            snap = self._mpv_snapshot(
-                ["idle-active", "demuxer", "demuxer-cache-time"], timeout=2.0
-            )
-            idle = self._snap_bool(snap, "idle-active")
+            idle_raw = self._mpv_get_light("idle-active", timeout=0.35)
+            idle = self._snap_bool({"idle-active": idle_raw}, "idle-active")
             if idle is False:
                 saw_not_idle = True
-            dem = self._snap_str(snap, "demuxer")
+            dem_raw = self._mpv_get_light("demuxer", timeout=0.35)
+            dem = self._snap_str({"demuxer": dem_raw}, "demuxer")
             if dem and str(dem).strip():
                 saw_demuxer = True
-            elif self._snap_number(snap, "demuxer-cache-time") not in (None, 0.0):
-                saw_demuxer = True
+            else:
+                dct_raw = self._mpv_get_light("demuxer-cache-time", timeout=0.35)
+                if self._snap_number({"demuxer-cache-time": dct_raw}, "demuxer-cache-time") not in (
+                    None,
+                    0.0,
+                ):
+                    saw_demuxer = True
 
             if saw_not_idle and idle is True and saw_demuxer:
                 return True

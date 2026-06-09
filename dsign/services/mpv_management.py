@@ -382,7 +382,7 @@ class MPVManager:
         if command_name == "get_property":
             return 1
         if command_name == "loadfile" and self._playback_session_active:
-            return 1
+            return 2
         if (
             command_name == "set_property"
             and (
@@ -638,7 +638,7 @@ class MPVManager:
             delays_transport = (0.15, 0.35, 0.75)
 
         def _retry_sleep_after_failure(exc: BaseException, attempt_idx: int) -> None:
-            if attempt_idx >= PlaybackConstants.MAX_RETRIES - 1:
+            if attempt_idx >= batch_retries - 1:
                 return
             if (
                 _ipc_error_should_restart_mpv(exc)
@@ -650,8 +650,10 @@ class MPVManager:
                 except (TypeError, ValueError, IndexError):
                     d = 0.25
                 time.sleep(max(0.0, d))
+            elif isinstance(exc, MPVIPCTimeoutError):
+                time.sleep(0.15)
             else:
-                time.sleep(PlaybackConstants.RETRY_DELAY)
+                time.sleep(min(1.0, PlaybackConstants.RETRY_DELAY))
 
         def _maybe_restart_mpv_batch(
             *, reason: str, attempt_num: int, ipc_request_id: int
@@ -687,7 +689,7 @@ class MPVManager:
                     },
                 )
 
-        batch_retries = 1 if contended else PlaybackConstants.MAX_RETRIES
+        batch_retries = 1
 
         first_rid = 0
         for attempt in range(batch_retries):
@@ -748,15 +750,18 @@ class MPVManager:
                     continue
                 continue
             except Exception as e:
-                if isinstance(e, MPVIPCTimeoutError) and "IPC lock busy" in str(e):
+                if isinstance(e, (MPVIPCTimeoutError, MPVIPCClosedError)):
+                    if isinstance(e, MPVIPCTimeoutError) and "IPC lock busy" in str(e):
+                        return {p: None for p in ordered}
+                    if isinstance(e, MPVIPCClosedError):
+                        self._reset_ipc_session()
                     return {p: None for p in ordered}
                 if self._ipc_error_needs_session_reset(e):
                     self._reset_ipc_session()
                 if attempt == batch_retries - 1:
                     log_fn = (
                         self.logger.debug
-                        if isinstance(e, MPVIPCTimeoutError)
-                        and "IPC lock busy" in str(e)
+                        if isinstance(e, (MPVIPCTimeoutError, MPVIPCClosedError))
                         else self.logger.warning
                     )
                     log_fn(
@@ -1060,7 +1065,7 @@ class MPVManager:
                 busy_ipc = (
                     self._playback_stream_opening or self._playback_network_active
                 ) and command_name in ("set_property", "loadfile")
-                if busy_ipc and isinstance(e, MPVIPCTimeoutError):
+                if busy_ipc and isinstance(e, (MPVIPCTimeoutError, MPVIPCClosedError)):
                     log_level = self.logger.debug
                 elif attempt == attempt_limit - 1:
                     log_level = self.logger.warning
