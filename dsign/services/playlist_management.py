@@ -36,6 +36,7 @@ class PlaylistManager:
         self._media_backoff: Dict[str, Dict[str, Any]] = {}
         self._app = None
         self._preloaded_stream_ready = False
+        self._preloaded_load_cmd: Optional[List[Any]] = None
         self._current_media_label: Optional[str] = None
         self._current_media_lock = Lock()
         self._loop_item_index: Optional[int] = None
@@ -274,6 +275,8 @@ class PlaylistManager:
         stream_url: str,
         *,
         normalized_headers: Optional[Dict[str, str]] = None,
+        load_cmd: Optional[List[Any]] = None,
+        load_ipc_ok: bool = True,
     ) -> bool:
         """Wait until mpv opens a network stream (background thread only)."""
         path_s = str(stream_url or "")
@@ -296,13 +299,81 @@ class PlaylistManager:
             pass
         try:
             return self._ensure_network_stream_started_impl(
-                item, path_s, media_key, headers=headers
+                item,
+                path_s,
+                media_key,
+                headers=headers,
+                load_cmd=load_cmd,
+                load_ipc_ok=load_ipc_ok,
             )
         finally:
             try:
                 self._mpv_manager.set_playback_stream_opening(False)
             except Exception:
                 pass
+
+    def _issue_ytdl_loadfile(self, load_cmd: List[Any]) -> None:
+        """Fire loadfile; mpv may not IPC-reply until ytdl_hook finishes."""
+        try:
+            self._mpv_manager._send_command(
+                {"command": load_cmd},
+                timeout=self._ytdl_loadfile_ipc_timeout_sec(),
+                max_attempts=1,
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _ytdl_loadfile_ipc_timeout_sec() -> float:
+        try:
+            sec = float((os.getenv("DSIGN_MPV_YTDL_LOADFILE_IPC_SEC") or "12").strip())
+        except ValueError:
+            sec = 12.0
+        return max(5.0, min(30.0, sec))
+
+    def _ytdl_stream_open_progress(self) -> Optional[str]:
+        """True progress signal for ytdl:// resolution (not idle-active alone)."""
+        soc_raw = self._mpv_get_light("stream-open-filename", timeout=0.35)
+        soc = self._snap_str({"stream-open-filename": soc_raw}, "stream-open-filename")
+        if soc and not str(soc).startswith("ytdl://") and len(str(soc).strip()) > 8:
+            return "stream-open-filename"
+        pth_raw = self._mpv_get_light("path", timeout=0.35)
+        pth = self._snap_str({"path": pth_raw}, "path")
+        if pth and not str(pth).startswith("ytdl://") and len(str(pth).strip()) > 8:
+            return "path"
+        dct_raw = self._mpv_get_light("demuxer-cache-time", timeout=0.35)
+        dct = self._snap_number({"demuxer-cache-time": dct_raw}, "demuxer-cache-time")
+        if dct is not None and dct > 0.05:
+            return "demuxer-cache-time"
+        dem_raw = self._mpv_get_light("demuxer", timeout=0.35)
+        dem = self._snap_str({"demuxer": dem_raw}, "demuxer")
+        if dem and str(dem).strip():
+            tp_raw = self._mpv_get_light("time-pos", timeout=0.35)
+            if self._snap_number({"time-pos": tp_raw}, "time-pos") is not None:
+                return "demuxer+time-pos"
+        return None
+
+    def _wait_mpv_ytdl_stream_opening(self, *, timeout_sec: float = 180.0) -> bool:
+        """Poll until ytdl_hook resolves to a real stream URL or playback starts."""
+        try:
+            timeout_sec = float(
+                (os.getenv("DSIGN_MPV_YTDL_OPEN_SEC") or str(timeout_sec)).strip()
+            )
+        except ValueError:
+            pass
+        deadline = time.monotonic() + max(30.0, min(600.0, float(timeout_sec)))
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            reason = self._ytdl_stream_open_progress()
+            if reason:
+                self.logger.info(
+                    "ytdl stream opening progress",
+                    extra={"reason": reason},
+                )
+                return True
+            self._stop_event.wait(timeout=0.75)
+        return False
 
     def _ensure_network_stream_started_impl(
         self,
@@ -311,48 +382,87 @@ class PlaylistManager:
         media_key: str,
         *,
         headers: Optional[Dict[str, str]] = None,
+        load_cmd: Optional[List[Any]] = None,
+        load_ipc_ok: bool = True,
     ) -> bool:
-        if path_s.startswith("ytdl://"):
+        is_ytdl = path_s.startswith("ytdl://")
+        if is_ytdl:
+            if load_cmd is not None and not load_ipc_ok:
+                if not self._wait_mpv_ytdl_stream_opening(timeout_sec=20.0):
+                    self.logger.info(
+                        "ytdl: re-issuing loadfile after IPC quiet",
+                        extra={"media_key": media_key, "path_preview": path_s[:120]},
+                    )
+                    self._issue_ytdl_loadfile(load_cmd)
+            open_sec = 180.0
+            if not self._wait_mpv_ytdl_stream_opening(timeout_sec=open_sec):
+                if load_cmd is not None:
+                    self.logger.info(
+                        "ytdl: retrying loadfile after open wait timed out",
+                        extra={"media_key": media_key, "path_preview": path_s[:120]},
+                    )
+                    self._issue_ytdl_loadfile(load_cmd)
+                    if not self._wait_mpv_ytdl_stream_opening(timeout_sec=90.0):
+                        self.logger.warning(
+                            "ytdl stream did not open after loadfile retries",
+                            extra={"media_key": media_key, "path_preview": path_s[:120]},
+                        )
+                        return False
+                else:
+                    self.logger.warning(
+                        "ytdl stream did not open",
+                        extra={"media_key": media_key, "path_preview": path_s[:120]},
+                    )
+                    return False
             try:
                 self._apply_mpv_lavf_headers_after_ytdl_hook(
                     normalized_headers=headers or {},
                     stream_url=path_s,
                     provider=str(item.get("provider") or "") if item.get("provider") else None,
                     timeout_sec=12.0,
+                    skip_idle_wait=True,
                 )
             except Exception:
                 pass
-
-        is_ytdl = path_s.startswith("ytdl://")
-        leave_to = 120.0 if is_ytdl else 90.0
-        poll_sec = 1.0 if is_ytdl else 0.6
-        snap_to = 12.0 if is_ytdl else 8.0
-        if not self._wait_mpv_leave_idle(
-            timeout_sec=leave_to, poll_sec=poll_sec, snap_timeout=snap_to
-        ):
-            if self._stop_event.is_set():
+            if self._mpv_get_light("time-pos", timeout=2.0) is not None:
+                pass
+            elif not self._wait_mpv_network_demuxer_ready(timeout_sec=30.0, poll_sec=0.5):
+                if self._stop_event.is_set():
+                    return False
+                if self._ytdl_stream_open_progress() is None:
+                    self.logger.warning(
+                        "ytdl demuxer not ready after stream URL resolved",
+                        extra={"media_key": media_key, "path_preview": path_s[:120]},
+                    )
+                    self._log_mpv_network_debug_snapshot(media_key=media_key, url=path_s)
+                    return False
+        else:
+            leave_to = 90.0
+            if not self._wait_mpv_leave_idle(
+                timeout_sec=leave_to, poll_sec=0.6, snap_timeout=8.0
+            ):
+                if self._stop_event.is_set():
+                    return False
+                self.logger.warning(
+                    "Network stream did not leave idle after play() loadfile",
+                    extra={"media_key": media_key, "path_preview": path_s[:120]},
+                )
                 return False
-            self.logger.warning(
-                "Network stream did not leave idle after play() loadfile",
-                extra={"media_key": media_key, "path_preview": path_s[:120]},
-            )
-            return False
 
-        try:
-            dem_to = float((os.getenv("DSIGN_MPV_DEMUXER_WAIT_SEC") or "45").strip())
-        except ValueError:
-            dem_to = 45.0
-        dem_to = max(5.0, min(120.0, dem_to))
-        dem_poll = 0.75 if is_ytdl else 0.4
-        if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to, poll_sec=dem_poll):
-            if self._stop_event.is_set():
+            try:
+                dem_to = float((os.getenv("DSIGN_MPV_DEMUXER_WAIT_SEC") or "45").strip())
+            except ValueError:
+                dem_to = 45.0
+            dem_to = max(5.0, min(120.0, dem_to))
+            if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to, poll_sec=0.4):
+                if self._stop_event.is_set():
+                    return False
+                self.logger.warning(
+                    "Network stream demuxer not ready after play() loadfile",
+                    extra={"media_key": media_key, "path_preview": path_s[:120]},
+                )
+                self._log_mpv_network_debug_snapshot(media_key=media_key, url=path_s)
                 return False
-            self.logger.warning(
-                "Network stream demuxer not ready after play() loadfile",
-                extra={"media_key": media_key, "path_preview": path_s[:120]},
-            )
-            self._log_mpv_network_debug_snapshot(media_key=media_key, url=path_s)
-            return False
 
         if self._detect_mpv_instant_eof(window_sec=2.5):
             self.logger.warning(
@@ -796,6 +906,7 @@ class PlaylistManager:
         stream_url: Optional[str] = None,
         provider: Optional[str] = None,
         timeout_sec: float = 8.0,
+        skip_idle_wait: bool = False,
     ) -> None:
         """
         ytdl_hook often sets `file-local-options/stream-lavf-o` (cookies) *after* loadfile.
@@ -849,9 +960,9 @@ class PlaylistManager:
             extra["headers"] = hdr_blob + "\r\n"
 
         # `file-local-options/*` is only meaningful while a file is being opened/played.
-        # If mpv is still idle here, skip (avoid noisy IPC errors).
-        if not self._wait_mpv_leave_idle(timeout_sec=min(8.0, float(timeout_sec))):
-            return
+        if not skip_idle_wait:
+            if not self._wait_mpv_leave_idle(timeout_sec=min(8.0, float(timeout_sec))):
+                return
 
         # Wait briefly for ytdl_hook to populate cookies, then merge+set.
         deadline = time.monotonic() + max(0.2, float(timeout_sec))
@@ -1158,10 +1269,7 @@ class PlaylistManager:
 
     def _network_loadfile_timeout_sec(self, path: str, *, is_network: bool) -> float:
         if str(path or "").startswith("ytdl://"):
-            try:
-                return float((os.getenv("DSIGN_MPV_YTDL_LOADFILE_TIMEOUT_SEC") or "120").strip())
-            except ValueError:
-                return 120.0
+            return self._ytdl_loadfile_ipc_timeout_sec()
         if is_network:
             return 45.0
         return 20.0
@@ -1656,6 +1764,7 @@ class PlaylistManager:
         self._stop_event.clear()
         self._active_playlist_id = None
         self._preloaded_stream_ready = False
+        self._preloaded_load_cmd = None
         self._clear_current_media_label(emit=False)
         self._clear_loop_position()
         self._set_playback_active_marker(False)
@@ -1765,6 +1874,8 @@ class PlaylistManager:
                         and isinstance(path, str)
                         and path.startswith(("http://", "https://", "ytdl://"))
                     )
+                    if is_preloaded_network and load_cmd is None:
+                        load_cmd = self._preloaded_load_cmd
 
                     # Only tune mpv for the first preloaded item; before the next loadfile replace
                     # these extra set_property calls just queue behind a busy IPC socket.
@@ -1825,6 +1936,7 @@ class PlaylistManager:
                     load_ok = True
                     socket_missing = False
                     is_network_reload = False
+                    load_cmd: Optional[List[Any]] = None
                     # play() already loadfile'd preloaded items; still need header dict for ytdl lavf reapply.
                     if skip_load and is_video and isinstance(path, str) and path.startswith(
                         ("http://", "https://", "ytdl://")
@@ -1904,6 +2016,8 @@ class PlaylistManager:
                                 item,
                                 str(path),
                                 normalized_headers=normalized_headers or None,
+                                load_cmd=load_cmd,
+                                load_ipc_ok=bool(load_ok),
                             ):
                                 if self._stop_event.is_set():
                                     break
@@ -2148,12 +2262,18 @@ class PlaylistManager:
                     "replace",
                     per_file_opts=first_mpv_opts,
                 )
-                first_load_timeout = 120.0 if first_path.startswith("ytdl://") else (
-                    45.0 if first_is_network else 10.0
+                first_load_timeout = (
+                    self._ytdl_loadfile_ipc_timeout_sec()
+                    if first_path.startswith("ytdl://")
+                    else (45.0 if first_is_network else 10.0)
                 )
                 first_load_resp = self._mpv_manager._send_command(
-                    {"command": first_load_cmd}, timeout=first_load_timeout
+                    {"command": first_load_cmd},
+                    timeout=first_load_timeout,
+                    max_attempts=1,
                 )
+                if first_is_network:
+                    self._preloaded_load_cmd = first_load_cmd
                 self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
                 self._sync_settings_audio_to_mpv()
                 try:
