@@ -1863,6 +1863,10 @@ class PlaylistManager:
                         item_muted=bool(item.get("muted", False)),
                         profile_muted=profile_muted,
                     )
+                    load_cmd: Optional[List[Any]] = None
+                    load_ok = True
+                    socket_missing = False
+                    is_network_reload = False
 
                     skip_load = bool(
                         first_item_preloaded
@@ -1937,10 +1941,6 @@ class PlaylistManager:
                     )
                     normalized_headers: Dict[str, str] = {}
                     mpv_per_file_opts: Dict[str, Any] = {}
-                    load_ok = True
-                    socket_missing = False
-                    is_network_reload = False
-                    load_cmd: Optional[List[Any]] = None
                     # play() already loadfile'd preloaded items; still need header dict for ytdl lavf reapply.
                     if skip_load and is_video and isinstance(path, str) and path.startswith(
                         ("http://", "https://", "ytdl://")
