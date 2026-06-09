@@ -67,6 +67,7 @@ class PlaybackService:
         self._mpv_init_ready = Event()
 
         self._mpv_manager.set_post_restart_callback(self._on_mpv_app_initiated_restart)
+        self._playlist_manager.set_slideshow_crash_callback(self._on_slideshow_thread_crash)
 
         self._log_info(
             "PlaybackService constructed (non-blocking MPV init)",
@@ -293,6 +294,46 @@ class PlaybackService:
                     "MPV socket watch recovery failed",
                     extra={"error": str(e), "type": type(e).__name__, "action": "mpv_socket_watch"},
                 )
+
+    def _on_slideshow_thread_crash(self) -> None:
+        Thread(
+            target=self._resume_slideshow_after_crash,
+            name="slideshow-crash-recover",
+            daemon=True,
+        ).start()
+
+    def _resume_slideshow_after_crash(self) -> None:
+        try:
+            with self._app_context():
+                if not self._recover_lock.acquire(blocking=False):
+                    return
+                try:
+                    playlist_id = self._resolve_playlist_id_for_recovery()
+                    if playlist_id is None:
+                        return
+                    resume_index = self._playlist_manager.get_resume_start_index(advance=False)
+                    ok = bool(
+                        self._playlist_manager.play(
+                            playlist_id,
+                            start_index=resume_index,
+                        )
+                    )
+                    self._log_warning(
+                        "Resumed playlist after slideshow thread crash",
+                        extra={
+                            "playlist_id": playlist_id,
+                            "start_index": resume_index,
+                            "ok": ok,
+                            "action": "slideshow_recover",
+                        },
+                    )
+                finally:
+                    self._recover_lock.release()
+        except Exception as e:
+            self._log_warning(
+                "Slideshow crash recovery failed",
+                extra={"error": str(e), "type": type(e).__name__, "action": "slideshow_recover"},
+            )
 
     def _on_mpv_app_initiated_restart(self) -> None:
         """Resume playlist after hung-recovery restart (avoid racing socket-watch recover)."""

@@ -139,6 +139,11 @@ class MPVManager:
             return False
         return (time.time() - self._app_initiated_restart_ts) < max(1.0, float(within_sec))
 
+    def mark_app_initiated_restart(self) -> None:
+        """Settings/API mpv restart: socket-watch should not race a second recover."""
+        with self._mpv_restart_coalesce_lock:
+            self._app_initiated_restart_ts = time.time()
+
     def _playback_ipc_contended(self) -> bool:
         return bool(
             self._playback_session_active

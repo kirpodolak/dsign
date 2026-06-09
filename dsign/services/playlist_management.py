@@ -5,7 +5,7 @@ import traceback
 import time
 from contextlib import nullcontext
 from threading import Event, Lock, Thread
-from typing import Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Any
 from pathlib import Path
 
 from .playback_constants import PlaybackConstants
@@ -43,6 +43,10 @@ class PlaylistManager:
         self._loop_items_count: int = 0
         self._loop_position_lock = Lock()
         self._app_ready = Event()
+        self._slideshow_crash_callback: Optional[Callable[[], None]] = None
+
+    def set_slideshow_crash_callback(self, callback: Optional[Callable[[], None]]) -> None:
+        self._slideshow_crash_callback = callback
 
     def set_app(self, app) -> None:
         """Attach Flask app so background playback threads can use db.session safely."""
@@ -1787,14 +1791,38 @@ class PlaylistManager:
         profile_muted: bool = False,
     ) -> None:
         """Thread entry: push Flask app context before DB-backed external media refresh."""
-        with self._app_context():
-            self._manual_slideshow_loop(
-                playlist_id,
-                items,
-                start_index,
-                first_item_preloaded=first_item_preloaded,
-                profile_muted=profile_muted,
+        try:
+            with self._app_context():
+                self._manual_slideshow_loop(
+                    playlist_id,
+                    items,
+                    start_index,
+                    first_item_preloaded=first_item_preloaded,
+                    profile_muted=profile_muted,
+                )
+        except Exception as e:
+            self.logger.error(
+                "Slideshow loop crashed",
+                extra={
+                    "playlist_id": playlist_id,
+                    "start_index": start_index,
+                    "error": str(e),
+                    "type": type(e).__name__,
+                    "stack_trace": traceback.format_exc(),
+                },
             )
+            cb = self._slideshow_crash_callback
+            if cb is not None:
+                try:
+                    cb()
+                except Exception as cb_exc:
+                    self.logger.warning(
+                        "Slideshow crash callback failed",
+                        extra={
+                            "error": str(cb_exc),
+                            "type": type(cb_exc).__name__,
+                        },
+                    )
 
     def _manual_slideshow_loop(
         self,
