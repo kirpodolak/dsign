@@ -22,7 +22,10 @@ ExecStartPre=/bin/chmod 775 /var/lib/dsign/media/tmp /var/log/dsign
 # MPV IPC socket often appears shortly after mpv's PID — Python wait is in create_app (DSIGN_MPV_SOCKET_WAIT_ATTEMPTS).
 # Avoid a long ExecStartPre loop here: it blocks `systemctl start` (looks hung; users Ctrl-C before ExecStart runs).
 Environment="TMPDIR=/var/lib/dsign/media/tmp"
-Environment=DSIGN_LOG_LEVEL=WARNING
+Environment=DSIGN_LOG_LEVEL=INFO
+Environment=DSIGN_MPV_IPC_WATCHDOG_SEC=15
+Environment=DSIGN_MPV_IPC_WATCHDOG_FAIL_LIMIT=3
+Environment=DSIGN_MPV_PLAYBACK_STAGNATION_SEC=45
 # Faster boot when mpv socket is already up (PlaybackService wait_for_ipc_socket_at_startup).
 Environment=DSIGN_MPV_SOCKET_WAIT_ATTEMPTS=20
 Environment=DSIGN_MPV_SOCKET_WAIT_INTERVAL_SEC=0.5
