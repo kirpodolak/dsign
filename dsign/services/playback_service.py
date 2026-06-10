@@ -315,7 +315,8 @@ class PlaybackService:
                 extra={"action": "mpv_socket_watch"},
             )
             try:
-                self.recover_after_mpv_systemd_restart()
+                advance = self._playlist_manager.consume_stall_recovery_advance()
+                self.recover_after_mpv_systemd_restart(resume_advance=advance)
             except Exception as e:
                 self._log_warning(
                     "MPV socket watch recovery failed",
@@ -374,8 +375,8 @@ class PlaybackService:
         try:
             with self._app_context():
                 self._last_socket_identity = self._mpv_socket_identity()
-                # Hung IPC mid-item: replay the same playlist index, do not skip ahead.
-                self.recover_after_mpv_systemd_restart(resume_advance=False)
+                advance = self._playlist_manager.consume_stall_recovery_advance()
+                self.recover_after_mpv_systemd_restart(resume_advance=advance)
         except Exception as e:
             self._log_warning(
                 "Post-restart playback recovery failed",
@@ -474,6 +475,7 @@ class PlaybackService:
                         extra={
                             "playlist_id": playlist_id,
                             "start_index": resume_index,
+                            "resume_advance": resume_advance,
                             "action": "mpv_recover",
                         },
                     )

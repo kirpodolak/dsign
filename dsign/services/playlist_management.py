@@ -44,6 +44,9 @@ class PlaylistManager:
         self._loop_position_lock = Lock()
         self._stall_restart_lock = Lock()
         self._stall_restart_pending = False
+        self._stall_count_lock = Lock()
+        self._stall_count_by_media: Dict[str, int] = {}
+        self._stall_recovery_advance = False
         self._app_ready = Event()
         self._slideshow_crash_callback: Optional[Callable[[], None]] = None
 
@@ -575,17 +578,186 @@ class PlaylistManager:
         with self._stall_restart_lock:
             self._stall_restart_pending = False
 
-    def _request_mpv_stall_restart(self, *, playlist_id: int, reason: str) -> None:
+    def _stall_advance_threshold(self) -> int:
+        try:
+            n = int((os.getenv("DSIGN_MPV_STALL_ADVANCE_AFTER") or "2").strip())
+        except ValueError:
+            n = 2
+        return max(1, min(10, n))
+
+    def _midstream_reload_max_attempts(self) -> int:
+        try:
+            n = int((os.getenv("DSIGN_MPV_MIDSTREAM_RELOAD_MAX") or "1").strip())
+        except ValueError:
+            n = 1
+        return max(0, min(5, n))
+
+    def _record_stall_for_media(self, media_key: str) -> tuple[int, bool]:
+        """Return (stall_count, should_advance_to_next_item_on_recovery)."""
+        key = str(media_key or "").strip()
+        if not key:
+            return 0, False
+        threshold = self._stall_advance_threshold()
+        with self._stall_count_lock:
+            count = int(self._stall_count_by_media.get(key, 0)) + 1
+            self._stall_count_by_media[key] = count
+            advance = count >= threshold
+            if advance:
+                self._stall_recovery_advance = True
+            return count, advance
+
+    def _clear_stall_count_for_media(self, media_key: str) -> None:
+        key = str(media_key or "").strip()
+        if not key:
+            return
+        with self._stall_count_lock:
+            self._stall_count_by_media.pop(key, None)
+
+    def _reset_stall_tracking(self) -> None:
+        with self._stall_count_lock:
+            self._stall_count_by_media.clear()
+            self._stall_recovery_advance = False
+
+    def consume_stall_recovery_advance(self) -> bool:
+        """True once after N stalls on the same item — recovery should skip to next index."""
+        with self._stall_count_lock:
+            advance = bool(self._stall_recovery_advance)
+            self._stall_recovery_advance = False
+            if advance:
+                self._stall_count_by_media.clear()
+            return advance
+
+    def _request_mpv_stall_restart(
+        self,
+        *,
+        playlist_id: int,
+        reason: str,
+        media_key: Optional[str] = None,
+    ) -> None:
         """mpv IPC socket gone during playback; restart service and let PlaybackService resume."""
+        stall_count = 0
+        advance_next = False
+        if media_key:
+            stall_count, advance_next = self._record_stall_for_media(media_key)
         self._mark_stall_restart_pending()
         self.logger.warning(
             "playlist: requesting mpv restart after playback stall",
-            extra={"playlist_id": playlist_id, "reason": reason},
+            extra={
+                "playlist_id": playlist_id,
+                "reason": reason,
+                "media_key": media_key,
+                "stall_count": stall_count,
+                "advance_next_item": advance_next,
+                "stall_advance_threshold": self._stall_advance_threshold(),
+            },
         )
         try:
             self._mpv_manager._schedule_hung_recovery()
         except Exception:
             pass
+
+    def _try_midstream_network_reload(
+        self,
+        item: Dict[str, Any],
+        *,
+        playlist_id: int,
+        reason: str,
+    ) -> bool:
+        """
+        Reload ytdl/http stream via loadfile without systemd-restarting mpv.
+        Used when time-pos freezes mid-roll but IPC still responds.
+        """
+        media_key = str(item.get("key") or item.get("path") or "")
+        if not self._refresh_item_playback_path(item):
+            self.logger.warning(
+                "playlist: mid-stream reload skipped (URL refresh failed)",
+                extra={
+                    "playlist_id": playlist_id,
+                    "media_key": media_key,
+                    "reason": reason,
+                },
+            )
+            return False
+        path = str(item.get("path") or "")
+        if not path.startswith(("http://", "https://", "ytdl://")):
+            return False
+        self.logger.info(
+            "playlist: mid-stream network reload",
+            extra={
+                "playlist_id": playlist_id,
+                "media_key": media_key,
+                "reason": reason,
+                "path_preview": path[:120],
+            },
+        )
+        try:
+            self._mpv_manager.set_playback_stream_opening(True)
+        except Exception:
+            pass
+        try:
+            normalized_headers, mpv_per_file_opts = self._apply_mpv_http_headers(
+                item, stream_url=path
+            )
+            self._apply_mpv_ytdl_options(item, stream_url=path)
+            load_cmd = self._mpv_loadfile_command(
+                path, "replace", per_file_opts=mpv_per_file_opts
+            )
+            if path.startswith("ytdl://"):
+                self._issue_ytdl_loadfile(load_cmd)
+            else:
+                self._mpv_manager._send_command(
+                    {"command": load_cmd},
+                    timeout=self._network_loadfile_timeout_sec(path, is_network=True),
+                )
+            if not self._ensure_network_stream_started(
+                item,
+                path,
+                normalized_headers=normalized_headers,
+                load_cmd=load_cmd,
+                load_ipc_ok=True,
+            ):
+                return False
+            tp_before = self._snap_number(
+                {"time-pos": self._mpv_get_light("time-pos", timeout=3.0)},
+                "time-pos",
+            )
+            self._stop_event.wait(timeout=8.0)
+            tp_after = self._snap_number(
+                {"time-pos": self._mpv_get_light("time-pos", timeout=3.0)},
+                "time-pos",
+            )
+            ok = (
+                tp_before is not None
+                and tp_after is not None
+                and tp_after > tp_before + 0.2
+            )
+            if not ok:
+                self.logger.warning(
+                    "playlist: mid-stream reload did not resume playback",
+                    extra={
+                        "playlist_id": playlist_id,
+                        "media_key": media_key,
+                        "time_pos_before": tp_before,
+                        "time_pos_after": tp_after,
+                    },
+                )
+            return ok
+        except Exception as e:
+            self.logger.warning(
+                "playlist: mid-stream reload failed",
+                extra={
+                    "playlist_id": playlist_id,
+                    "media_key": media_key,
+                    "error": str(e),
+                    "type": type(e).__name__,
+                },
+            )
+            return False
+        finally:
+            try:
+                self._mpv_manager.set_playback_stream_opening(False)
+            except Exception:
+                pass
 
     def _show_between_items_placeholder(self, *, network_next: bool = False) -> None:
         """Hide TTY/console between playlist items while the next loadfile is prepared."""
@@ -1588,6 +1760,8 @@ class PlaylistManager:
         poll_sec: float = 1.0,
         stream_url: Optional[str] = None,
         provider: Optional[str] = None,
+        media_key: Optional[str] = None,
+        item: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
         End-of-playback detection that works when `eof-reached` is permanently unavailable.
@@ -1661,13 +1835,17 @@ class PlaylistManager:
         near_eof_stagnation_sec = (
             self._network_near_eof_stagnation_sec() if eof_capable else stagnation_sec
         )
+        midstream_reload_attempts = 0
 
         def _finish_video_item(reason: str) -> None:
+            if media_key:
+                self._clear_stall_count_for_media(media_key)
             self.logger.info(
                 "Playlist item finished",
                 extra={
                     "playlist_id": playlist_id,
                     "is_network": is_network,
+                    "media_key": media_key,
                     "reason": reason,
                 },
             )
@@ -1744,6 +1922,7 @@ class PlaylistManager:
                         self._request_mpv_stall_restart(
                             playlist_id=playlist_id,
                             reason="socket_missing_eof",
+                            media_key=media_key,
                         )
                         return False
                     self.logger.warning(
@@ -1751,12 +1930,14 @@ class PlaylistManager:
                         extra={
                             "playlist_id": playlist_id,
                             "is_network": is_network,
+                            "media_key": media_key,
                             "stall_polls": consecutive_ipc_stall,
                         },
                     )
                     self._request_mpv_stall_restart(
                         playlist_id=playlist_id,
                         reason="ipc_dead_eof",
+                        media_key=media_key,
                     )
                     return False
 
@@ -1821,9 +2002,27 @@ class PlaylistManager:
                             },
                         )
                         if is_network:
+                            max_reload = self._midstream_reload_max_attempts()
+                            if (
+                                eof_capable
+                                and item is not None
+                                and midstream_reload_attempts < max_reload
+                            ):
+                                midstream_reload_attempts += 1
+                                if self._try_midstream_network_reload(
+                                    item,
+                                    playlist_id=playlist_id,
+                                    reason="time_pos_stagnation",
+                                ):
+                                    last_time_pos = None
+                                    last_time_pos_change = time.monotonic()
+                                    consecutive_ipc_stall = 0
+                                    last_ipc_ok = time.monotonic()
+                                    continue
                             self._request_mpv_stall_restart(
                                 playlist_id=playlist_id,
                                 reason="time_pos_stagnation",
+                                media_key=media_key,
                             )
                             return False
                         _finish_video_item("time_pos_stagnation")
@@ -1918,6 +2117,7 @@ class PlaylistManager:
         self._play_thread = None
         self._stop_event.clear()
         self._clear_stall_restart_pending()
+        self._reset_stall_tracking()
         self._active_playlist_id = None
         self._preloaded_stream_ready = False
         self._preloaded_load_cmd = None
@@ -2232,6 +2432,8 @@ class PlaylistManager:
                             poll_sec=1.0,
                             stream_url=str(path) if is_network else None,
                             provider=str(item.get("provider") or "") or None,
+                            media_key=media_key,
+                            item=item if is_network else None,
                         ):
                             stall_abort = True
                             break
