@@ -42,6 +42,8 @@ class PlaylistManager:
         self._loop_item_index: Optional[int] = None
         self._loop_items_count: int = 0
         self._loop_position_lock = Lock()
+        self._stall_restart_lock = Lock()
+        self._stall_restart_pending = False
         self._app_ready = Event()
         self._slideshow_crash_callback: Optional[Callable[[], None]] = None
 
@@ -561,8 +563,21 @@ class PlaylistManager:
         except Exception:
             return None
 
+    def _mark_stall_restart_pending(self) -> None:
+        with self._stall_restart_lock:
+            self._stall_restart_pending = True
+
+    def _stall_restart_was_requested(self) -> bool:
+        with self._stall_restart_lock:
+            return bool(self._stall_restart_pending)
+
+    def _clear_stall_restart_pending(self) -> None:
+        with self._stall_restart_lock:
+            self._stall_restart_pending = False
+
     def _request_mpv_stall_restart(self, *, playlist_id: int, reason: str) -> None:
         """mpv IPC socket gone during playback; restart service and let PlaybackService resume."""
+        self._mark_stall_restart_pending()
         self.logger.warning(
             "playlist: requesting mpv restart after playback stall",
             extra={"playlist_id": playlist_id, "reason": reason},
@@ -1518,6 +1533,52 @@ class PlaylistManager:
             self._stop_event.wait(timeout=0.1)
         return False
 
+    def _is_external_stream_provider(
+        self, *, provider: Optional[str] = None, stream_url: Optional[str] = None
+    ) -> bool:
+        """Rutube / VK Video and other ytdl-backed external streams prone to HLS EOF hangs."""
+        prov = str(provider or "").strip().lower()
+        if prov in ("rutube", "vkvideo"):
+            return True
+        path_s = str(stream_url or "").strip().lower()
+        if path_s.startswith("ytdl://"):
+            return True
+        if "rutube.ru" in path_s or ("river-" in path_s and "rutube" in path_s):
+            return True
+        if "vkvideo.ru" in path_s or "vk.com/video" in path_s or "okcdn" in path_s:
+            return True
+        return False
+
+    @staticmethod
+    def _float_env(name: str, default: float, *, lo: float, hi: float) -> float:
+        try:
+            v = float((os.getenv(name) or str(default)).strip())
+        except ValueError:
+            v = float(default)
+        return max(lo, min(hi, v))
+
+    def _network_eof_advance_sec(self) -> float:
+        """Finish Rutube/VK HLS slightly before reported duration to avoid demuxer hang."""
+        return self._float_env("DSIGN_MPV_NETWORK_EOF_ADVANCE_SEC", 8.0, lo=0.0, hi=60.0)
+
+    def _network_near_eof_stagnation_sec(self) -> float:
+        """When near duration, treat frozen time-pos as EOF quickly (not mpv restart)."""
+        return self._float_env(
+            "DSIGN_MPV_NETWORK_NEAR_EOF_STAGNATION_SEC", 15.0, lo=5.0, hi=120.0
+        )
+
+    def _network_stream_near_eof(
+        self, *, time_pos: Optional[float], duration: Optional[float]
+    ) -> bool:
+        if (
+            time_pos is None
+            or duration is None
+            or duration <= 0.5
+            or time_pos < 0.0
+        ):
+            return False
+        return time_pos + self._network_eof_advance_sec() >= duration
+
     def _wait_mpv_video_end(
         self,
         playlist_id: int,
@@ -1525,13 +1586,18 @@ class PlaylistManager:
         is_network: bool,
         stream_ready: bool,
         poll_sec: float = 1.0,
-    ) -> None:
+        stream_url: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> bool:
         """
         End-of-playback detection that works when `eof-reached` is permanently unavailable.
 
         - Prefer eof-reached == True when MPV returns a real boolean.
         - Else for streams: after stream_ready, treat return to idle-active as end-of-file.
         - Else for local files: same idle fallback after a short grace period.
+
+        Returns True when the item ended normally; False when playback should stop
+        without advancing (stall restart, user stop, or playlist change).
         """
         start = time.time()
         # Short grace caused false EOF on HLS (idle flicker while buffering) → tight loadfile loops
@@ -1583,10 +1649,18 @@ class PlaylistManager:
         ipc_dead_sec = max(15.0, min(300.0, ipc_dead_sec))
 
         last_time_pos: Optional[float] = None
+        last_duration: Optional[float] = None
         last_time_pos_change = time.monotonic()
         last_ipc_ok = time.monotonic()
         poll_tick = 0
         local_idle_confirm = 1
+        eof_capable = is_network and self._is_external_stream_provider(
+            provider=provider, stream_url=stream_url
+        )
+        eof_advance_sec = self._network_eof_advance_sec() if eof_capable else 0.0
+        near_eof_stagnation_sec = (
+            self._network_near_eof_stagnation_sec() if eof_capable else stagnation_sec
+        )
 
         def _finish_video_item(reason: str) -> None:
             self.logger.info(
@@ -1623,9 +1697,12 @@ class PlaylistManager:
                 idle_raw = self._mpv_get_light("idle-active", timeout=snap_timeout)
 
             dur: Optional[float] = None
-            if not is_network and poll_tick % 3 == 0:
+            poll_duration = (not is_network) or eof_capable
+            if poll_duration and poll_tick % 3 == 0:
                 dur_raw = self._mpv_get_light("duration", timeout=snap_timeout)
                 dur = self._snap_number({"duration": dur_raw}, "duration")
+            if dur is not None and dur > 0.5:
+                last_duration = dur
 
             got_ipc = tp is not None or idle_raw is not None or dur is not None
             socket_missing = not os.path.exists(PlaybackConstants.SOCKET_PATH)
@@ -1639,6 +1716,22 @@ class PlaylistManager:
                     or time.monotonic() - last_ipc_ok >= ipc_dead_sec
                 )
                 if ipc_dead:
+                    near_eof_ipc = eof_capable and self._network_stream_near_eof(
+                        time_pos=last_time_pos, duration=last_duration
+                    )
+                    if near_eof_ipc:
+                        self.logger.info(
+                            "playlist_eof: IPC quiet near network stream end; finishing item",
+                            extra={
+                                "playlist_id": playlist_id,
+                                "provider": provider,
+                                "time_pos": last_time_pos,
+                                "duration": last_duration,
+                                "stall_polls": consecutive_ipc_stall,
+                            },
+                        )
+                        _finish_video_item("network_near_eof_ipc_dead")
+                        break
                     if socket_missing:
                         self.logger.warning(
                             "playlist_eof_stall: MPV socket missing during EOF wait",
@@ -1652,29 +1745,71 @@ class PlaylistManager:
                             playlist_id=playlist_id,
                             reason="socket_missing_eof",
                         )
-                        return
-                    _finish_video_item("ipc_quiet")
-                    break
+                        return False
+                    self.logger.warning(
+                        "playlist_eof_stall: MPV IPC dead during EOF wait; requesting restart",
+                        extra={
+                            "playlist_id": playlist_id,
+                            "is_network": is_network,
+                            "stall_polls": consecutive_ipc_stall,
+                        },
+                    )
+                    self._request_mpv_stall_restart(
+                        playlist_id=playlist_id,
+                        reason="ipc_dead_eof",
+                    )
+                    return False
 
-            if not is_network:
-                if (
-                    dur is not None
-                    and dur > 0.5
-                    and tp is not None
-                    and (tp + 0.2) >= dur
-                ):
-                    _finish_video_item("duration_reached")
+            if dur is not None and dur > 0.5 and tp is not None:
+                end_margin = eof_advance_sec if eof_capable else 0.2
+                if tp + end_margin >= dur:
+                    reason = (
+                        "network_duration_reached"
+                        if eof_capable
+                        else "duration_reached"
+                    )
+                    _finish_video_item(reason)
                     break
 
             if tp is not None and time.monotonic() >= grace_until:
                 if last_time_pos is None or abs(tp - last_time_pos) > 0.05:
                     last_time_pos = tp
                     last_time_pos_change = time.monotonic()
-                elif time.monotonic() - last_time_pos_change >= stagnation_sec:
-                    near_end = dur is not None and dur > 0.5 and tp + 2.0 >= dur
-                    if not near_end:
+                else:
+                    near_end = self._network_stream_near_eof(
+                        time_pos=tp, duration=dur
+                    ) or (
+                        dur is not None
+                        and dur > 0.5
+                        and tp + 2.0 >= dur
+                    )
+                    stall_limit_sec = (
+                        near_eof_stagnation_sec if near_end else stagnation_sec
+                    )
+                    if time.monotonic() - last_time_pos_change >= stall_limit_sec:
+                        if near_end:
+                            self.logger.info(
+                                "playlist_eof: network stream near end with frozen time-pos; finishing item",
+                                extra={
+                                    "playlist_id": playlist_id,
+                                    "is_network": is_network,
+                                    "provider": provider,
+                                    "time_pos": tp,
+                                    "duration": dur,
+                                    "stagnation_sec": round(
+                                        time.monotonic() - last_time_pos_change, 1
+                                    ),
+                                },
+                            )
+                            _finish_video_item("network_near_eof_stagnation")
+                            break
                         self.logger.warning(
-                            "playlist_eof_stall: playback time-pos frozen; treating as end",
+                            "playlist_eof_stall: playback time-pos frozen"
+                            + (
+                                "; requesting restart"
+                                if is_network
+                                else "; treating as end"
+                            ),
                             extra={
                                 "playlist_id": playlist_id,
                                 "is_network": is_network,
@@ -1685,6 +1820,12 @@ class PlaylistManager:
                                 ),
                             },
                         )
+                        if is_network:
+                            self._request_mpv_stall_restart(
+                                playlist_id=playlist_id,
+                                reason="time_pos_stagnation",
+                            )
+                            return False
                         _finish_video_item("time_pos_stagnation")
                         break
 
@@ -1710,6 +1851,12 @@ class PlaylistManager:
                 self._mpv_manager.set_playback_network_active(False)
             except Exception:
                 pass
+        if self._stall_restart_was_requested():
+            return False
+        return (
+            not self._stop_event.is_set()
+            and self._active_playlist_id == playlist_id
+        )
 
     def _log_mpv_network_debug_snapshot(self, *, media_key: str, url: str) -> None:
         """
@@ -1770,6 +1917,7 @@ class PlaylistManager:
                 pass
         self._play_thread = None
         self._stop_event.clear()
+        self._clear_stall_restart_pending()
         self._active_playlist_id = None
         self._preloaded_stream_ready = False
         self._preloaded_load_cmd = None
@@ -1862,6 +2010,7 @@ class PlaylistManager:
                     "Playlist loop cycle",
                     extra={"playlist_id": playlist_id, "cycle": loop_cycle, "items": len(items)},
                 )
+                stall_abort = False
                 # Iterate cyclically starting from start_index.
                 for offset in range(len(items)):
                     item_index = (start_index + offset) % len(items)
@@ -2076,12 +2225,16 @@ class PlaylistManager:
                             self._apply_post_loadfile_playback_props(muted=muted)
                         elif not skip_load:
                             self._apply_post_loadfile_playback_props(muted=muted)
-                        self._wait_mpv_video_end(
+                        if not self._wait_mpv_video_end(
                             playlist_id,
                             is_network=is_network,
                             stream_ready=stream_ready,
                             poll_sec=1.0,
-                        )
+                            stream_url=str(path) if is_network else None,
+                            provider=str(item.get("provider") or "") or None,
+                        ):
+                            stall_abort = True
+                            break
                     else:
                         # For still images, keep the frame open to avoid quick close/reopen churn.
                         # (Videos should not be kept open; they are EOF-driven here.)
@@ -2139,6 +2292,17 @@ class PlaylistManager:
                                     "load_wait_sec": load_wait_sec,
                                 },
                             )
+
+                if stall_abort or self._stall_restart_was_requested():
+                    self.logger.info(
+                        "Slideshow loop paused for mpv stall recovery",
+                        extra={
+                            "playlist_id": playlist_id,
+                            "cycle": loop_cycle,
+                            "loop_item_index": self._loop_item_index,
+                        },
+                    )
+                    break
 
         finally:
             self._mpv_manager.set_playback_session_active(False)
