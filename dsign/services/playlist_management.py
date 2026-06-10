@@ -42,6 +42,8 @@ class PlaylistManager:
         self._loop_item_index: Optional[int] = None
         self._loop_items_count: int = 0
         self._loop_position_lock = Lock()
+        self._stall_restart_lock = Lock()
+        self._stall_restart_pending = False
         self._app_ready = Event()
         self._slideshow_crash_callback: Optional[Callable[[], None]] = None
 
@@ -561,8 +563,21 @@ class PlaylistManager:
         except Exception:
             return None
 
+    def _mark_stall_restart_pending(self) -> None:
+        with self._stall_restart_lock:
+            self._stall_restart_pending = True
+
+    def _stall_restart_was_requested(self) -> bool:
+        with self._stall_restart_lock:
+            return bool(self._stall_restart_pending)
+
+    def _clear_stall_restart_pending(self) -> None:
+        with self._stall_restart_lock:
+            self._stall_restart_pending = False
+
     def _request_mpv_stall_restart(self, *, playlist_id: int, reason: str) -> None:
         """mpv IPC socket gone during playback; restart service and let PlaybackService resume."""
+        self._mark_stall_restart_pending()
         self.logger.warning(
             "playlist: requesting mpv restart after playback stall",
             extra={"playlist_id": playlist_id, "reason": reason},
@@ -1525,13 +1540,16 @@ class PlaylistManager:
         is_network: bool,
         stream_ready: bool,
         poll_sec: float = 1.0,
-    ) -> None:
+    ) -> bool:
         """
         End-of-playback detection that works when `eof-reached` is permanently unavailable.
 
         - Prefer eof-reached == True when MPV returns a real boolean.
         - Else for streams: after stream_ready, treat return to idle-active as end-of-file.
         - Else for local files: same idle fallback after a short grace period.
+
+        Returns True when the item ended normally; False when playback should stop
+        without advancing (stall restart, user stop, or playlist change).
         """
         start = time.time()
         # Short grace caused false EOF on HLS (idle flicker while buffering) → tight loadfile loops
@@ -1652,7 +1670,7 @@ class PlaylistManager:
                             playlist_id=playlist_id,
                             reason="socket_missing_eof",
                         )
-                        return
+                        return False
                     self.logger.warning(
                         "playlist_eof_stall: MPV IPC dead during EOF wait; requesting restart",
                         extra={
@@ -1665,7 +1683,7 @@ class PlaylistManager:
                         playlist_id=playlist_id,
                         reason="ipc_dead_eof",
                     )
-                    return
+                    return False
 
             if not is_network:
                 if (
@@ -1706,7 +1724,7 @@ class PlaylistManager:
                                 playlist_id=playlist_id,
                                 reason="time_pos_stagnation",
                             )
-                            return
+                            return False
                         _finish_video_item("time_pos_stagnation")
                         break
 
@@ -1732,6 +1750,12 @@ class PlaylistManager:
                 self._mpv_manager.set_playback_network_active(False)
             except Exception:
                 pass
+        if self._stall_restart_was_requested():
+            return False
+        return (
+            not self._stop_event.is_set()
+            and self._active_playlist_id == playlist_id
+        )
 
     def _log_mpv_network_debug_snapshot(self, *, media_key: str, url: str) -> None:
         """
@@ -1792,6 +1816,7 @@ class PlaylistManager:
                 pass
         self._play_thread = None
         self._stop_event.clear()
+        self._clear_stall_restart_pending()
         self._active_playlist_id = None
         self._preloaded_stream_ready = False
         self._preloaded_load_cmd = None
@@ -1884,6 +1909,7 @@ class PlaylistManager:
                     "Playlist loop cycle",
                     extra={"playlist_id": playlist_id, "cycle": loop_cycle, "items": len(items)},
                 )
+                stall_abort = False
                 # Iterate cyclically starting from start_index.
                 for offset in range(len(items)):
                     item_index = (start_index + offset) % len(items)
@@ -2098,12 +2124,14 @@ class PlaylistManager:
                             self._apply_post_loadfile_playback_props(muted=muted)
                         elif not skip_load:
                             self._apply_post_loadfile_playback_props(muted=muted)
-                        self._wait_mpv_video_end(
+                        if not self._wait_mpv_video_end(
                             playlist_id,
                             is_network=is_network,
                             stream_ready=stream_ready,
                             poll_sec=1.0,
-                        )
+                        ):
+                            stall_abort = True
+                            break
                     else:
                         # For still images, keep the frame open to avoid quick close/reopen churn.
                         # (Videos should not be kept open; they are EOF-driven here.)
@@ -2161,6 +2189,17 @@ class PlaylistManager:
                                     "load_wait_sec": load_wait_sec,
                                 },
                             )
+
+                if stall_abort or self._stall_restart_was_requested():
+                    self.logger.info(
+                        "Slideshow loop paused for mpv stall recovery",
+                        extra={
+                            "playlist_id": playlist_id,
+                            "cycle": loop_cycle,
+                            "loop_item_index": self._loop_item_index,
+                        },
+                    )
+                    break
 
         finally:
             self._mpv_manager.set_playback_session_active(False)
