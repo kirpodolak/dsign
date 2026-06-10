@@ -81,6 +81,7 @@ class PlaybackService:
             daemon=True,
         ).start()
         self._start_mpv_socket_watch()
+        self._start_mpv_ipc_watchdog()
 
     def set_app(self, app) -> None:
         """Attach Flask app for DB access from background threads (socket watch, boot resume)."""
@@ -261,6 +262,32 @@ class PlaybackService:
         self._last_socket_identity = self._mpv_socket_identity()
         Thread(target=self._mpv_socket_watch_loop, name="mpv-socket-watch", daemon=True).start()
 
+    def _start_mpv_ipc_watchdog(self) -> None:
+        if os.getenv("DSIGN_MPV_IPC_WATCHDOG", "1").strip().lower() in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            return
+        Thread(target=self._mpv_ipc_watchdog_loop, name="mpv-ipc-watchdog", daemon=True).start()
+
+    def _mpv_ipc_watchdog_loop(self) -> None:
+        interval = self._mpv_manager._watchdog_interval_sec()
+        while True:
+            time.sleep(interval)
+            try:
+                self._mpv_manager.run_playback_ipc_watchdog_probe()
+            except Exception as e:
+                self._log_warning(
+                    "MPV IPC watchdog probe raised",
+                    extra={
+                        "error": str(e),
+                        "type": type(e).__name__,
+                        "action": "mpv_ipc_watchdog",
+                    },
+                )
+
     def _mpv_socket_watch_loop(self) -> None:
         interval = 3.0
         try:
@@ -347,7 +374,8 @@ class PlaybackService:
         try:
             with self._app_context():
                 self._last_socket_identity = self._mpv_socket_identity()
-                self.recover_after_mpv_systemd_restart(resume_advance=True)
+                # Hung IPC mid-item: replay the same playlist index, do not skip ahead.
+                self.recover_after_mpv_systemd_restart(resume_advance=False)
         except Exception as e:
             self._log_warning(
                 "Post-restart playback recovery failed",
@@ -358,7 +386,7 @@ class PlaybackService:
         self,
         *,
         restart_playlist: Optional[bool] = None,
-        resume_advance: bool = True,
+        resume_advance: bool = False,
     ) -> bool:
         """Re-bind IPC after `systemctl restart dsign-mpv` without restarting digital-signage."""
         with self._app_context():
@@ -371,7 +399,7 @@ class PlaybackService:
         self,
         *,
         restart_playlist: Optional[bool] = None,
-        resume_advance: bool = True,
+        resume_advance: bool = False,
     ) -> bool:
         if not self._recover_lock.acquire(blocking=False):
             self._log_warning(
@@ -391,7 +419,7 @@ class PlaybackService:
         self,
         *,
         restart_playlist: Optional[bool] = None,
-        resume_advance: bool = True,
+        resume_advance: bool = False,
     ) -> bool:
         playlist_id: Optional[int] = None
         resume_index = 0
