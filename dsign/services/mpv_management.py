@@ -60,6 +60,8 @@ class MPVManager:
         self._playback_network_active = False
         self._playback_ipc_fail_streak = 0
         self._playback_ipc_fail_lock = Lock()
+        self._watchdog_ipc_fail_streak = 0
+        self._watchdog_ipc_fail_lock = Lock()
         self._hung_recovery_lock = Lock()
         self._hung_recovery_running = False
         self._app_initiated_restart_ts = 0.0
@@ -117,6 +119,7 @@ class MPVManager:
         if not active:
             self._playback_stream_opening = False
             self._reset_playback_ipc_fail_streak()
+            self._reset_watchdog_ipc_fail_streak()
 
     def set_playback_stream_opening(self, active: bool) -> None:
         """ytdl/HLS open can legitimately stall IPC replies for minutes — do not treat as hung."""
@@ -195,6 +198,117 @@ class MPVManager:
     def _reset_playback_ipc_fail_streak(self) -> None:
         with self._playback_ipc_fail_lock:
             self._playback_ipc_fail_streak = 0
+
+    def _reset_watchdog_ipc_fail_streak(self) -> None:
+        with self._watchdog_ipc_fail_lock:
+            self._watchdog_ipc_fail_streak = 0
+
+    def _watchdog_interval_sec(self) -> float:
+        try:
+            sec = float((os.getenv("DSIGN_MPV_IPC_WATCHDOG_SEC") or "15").strip())
+        except ValueError:
+            sec = 15.0
+        return max(5.0, min(120.0, sec))
+
+    def _watchdog_fail_limit(self) -> int:
+        try:
+            n = int((os.getenv("DSIGN_MPV_IPC_WATCHDOG_FAIL_LIMIT") or "4").strip())
+        except ValueError:
+            n = 4
+        return max(2, min(30, n))
+
+    def _watchdog_probe_timeout_sec(self) -> float:
+        try:
+            sec = float((os.getenv("DSIGN_MPV_IPC_WATCHDOG_PROBE_SEC") or "4").strip())
+        except ValueError:
+            sec = 4.0
+        return max(1.0, min(15.0, sec))
+
+    def run_playback_ipc_watchdog_probe(self) -> None:
+        """
+        Lightweight liveness probe while the playlist thread is active.
+
+        Fires only when mpv stops answering IPC altogether (hung process with a live socket).
+        Transient lock contention or a single slow reply does not count toward restart.
+        """
+        if os.getenv("DSIGN_MPV_IPC_WATCHDOG", "1").strip().lower() in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            return
+        if not self._playback_session_active:
+            self._reset_watchdog_ipc_fail_streak()
+            return
+        if self._playback_stream_opening:
+            self._reset_watchdog_ipc_fail_streak()
+            return
+        if self._hung_recovery_running:
+            return
+        if self.was_recent_app_initiated_restart(within_sec=45.0):
+            self._reset_watchdog_ipc_fail_streak()
+            return
+
+        probe_timeout = self._watchdog_probe_timeout_sec()
+        lock_wait = min(1.0, probe_timeout * 0.3)
+        try:
+            if not self._acquire_ipc_lock(lock_wait=lock_wait):
+                return
+            try:
+                ipc_request_id = max(1, int(time.time() * 1_000_000) & 0x7FFFFFFF)
+                sess = self._get_ipc_session()
+                raw = sess.command(
+                    {"command": ["get_property", "pause"]},
+                    timeout=probe_timeout,
+                    request_id=ipc_request_id,
+                )
+                norm = self._normalize_get_property_batch_reply(raw, ipc_request_id)
+                if norm.get("error") != "success":
+                    self._note_watchdog_ipc_probe_failure(
+                        RuntimeError(f"mpv IPC error: {norm.get('error')}")
+                    )
+                    return
+                self._reset_watchdog_ipc_fail_streak()
+            finally:
+                self._release_ipc_lock()
+        except MPVIPCTimeoutError as e:
+            self._note_watchdog_ipc_probe_failure(e)
+        except (MPVIPCClosedError, ConnectionRefusedError, FileNotFoundError) as e:
+            self._note_watchdog_ipc_probe_failure(e)
+        except OSError as e:
+            if _is_ipc_transport_error(e):
+                self._note_watchdog_ipc_probe_failure(e)
+
+    def _note_watchdog_ipc_probe_failure(self, exc: BaseException) -> None:
+        with self._watchdog_ipc_fail_lock:
+            self._watchdog_ipc_fail_streak += 1
+            streak = self._watchdog_ipc_fail_streak
+        limit = self._watchdog_fail_limit()
+        if streak < limit:
+            self.logger.warning(
+                f"MPV IPC watchdog probe failed ({streak}/{limit}); mpv may be hung",
+                extra={
+                    "operation": "PlaybackIpcWatchdog",
+                    "streak": streak,
+                    "limit": limit,
+                    "error": str(exc),
+                    "type": type(exc).__name__,
+                },
+            )
+            return
+        self.logger.error(
+            "MPV IPC watchdog: mpv not responding; forcing systemd restart",
+            extra={
+                "operation": "PlaybackIpcWatchdog",
+                "streak": streak,
+                "limit": limit,
+                "error": str(exc),
+                "type": type(exc).__name__,
+            },
+        )
+        self._reset_watchdog_ipc_fail_streak()
+        self._schedule_hung_recovery()
 
     def _playback_hung_restart_threshold(self) -> int:
         try:
