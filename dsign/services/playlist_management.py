@@ -1653,8 +1653,19 @@ class PlaylistManager:
                             reason="socket_missing_eof",
                         )
                         return
-                    _finish_video_item("ipc_quiet")
-                    break
+                    self.logger.warning(
+                        "playlist_eof_stall: MPV IPC dead during EOF wait; requesting restart",
+                        extra={
+                            "playlist_id": playlist_id,
+                            "is_network": is_network,
+                            "stall_polls": consecutive_ipc_stall,
+                        },
+                    )
+                    self._request_mpv_stall_restart(
+                        playlist_id=playlist_id,
+                        reason="ipc_dead_eof",
+                    )
+                    return
 
             if not is_network:
                 if (
@@ -1674,7 +1685,12 @@ class PlaylistManager:
                     near_end = dur is not None and dur > 0.5 and tp + 2.0 >= dur
                     if not near_end:
                         self.logger.warning(
-                            "playlist_eof_stall: playback time-pos frozen; treating as end",
+                            "playlist_eof_stall: playback time-pos frozen"
+                            + (
+                                "; requesting restart"
+                                if is_network
+                                else "; treating as end"
+                            ),
                             extra={
                                 "playlist_id": playlist_id,
                                 "is_network": is_network,
@@ -1685,6 +1701,12 @@ class PlaylistManager:
                                 ),
                             },
                         )
+                        if is_network:
+                            self._request_mpv_stall_restart(
+                                playlist_id=playlist_id,
+                                reason="time_pos_stagnation",
+                            )
+                            return
                         _finish_video_item("time_pos_stagnation")
                         break
 

@@ -399,7 +399,7 @@ class PlaybackService:
         self,
         *,
         restart_playlist: Optional[bool] = None,
-        resume_advance: bool = True,
+        resume_advance: bool = False,
     ) -> bool:
         if not self._recover_lock.acquire(blocking=False):
             self._log_warning(
@@ -419,7 +419,7 @@ class PlaybackService:
         self,
         *,
         restart_playlist: Optional[bool] = None,
-        resume_advance: bool = True,
+        resume_advance: bool = False,
     ) -> bool:
         playlist_id: Optional[int] = None
         resume_index = 0
