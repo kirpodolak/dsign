@@ -105,10 +105,10 @@ fi
 echo
 
 echo "--- proactive refresh hits (this boot) ---"
-PR_RELOAD="$(journalctl -u digital-signage.service -b --no-pager 2>/dev/null | grep -c 'reason.*proactive_refresh' || echo 0)"
-PR_DONE="$(journalctl -u digital-signage.service -b --no-pager 2>/dev/null | grep -c 'Proactive refresh completed' || echo 0)"
-echo "proactive_refresh reload events: $PR_RELOAD"
-echo "proactive_refresh completed events: $PR_DONE"
+PR_RELOAD="$(journalctl -u digital-signage.service -b --no-pager 2>/dev/null | grep -c 'reason.*proactive_refresh' 2>/dev/null || true)"
+PR_DONE="$(journalctl -u digital-signage.service -b --no-pager 2>/dev/null | grep -c 'Proactive refresh completed' 2>/dev/null || true)"
+echo "proactive_refresh reload events: ${PR_RELOAD:-0}"
+echo "proactive_refresh completed events: ${PR_DONE:-0}"
 journalctl -u digital-signage.service -b --no-pager 2>/dev/null | grep -E 'proactive_refresh|Proactive refresh completed' | tail -8 || true
 echo
 
