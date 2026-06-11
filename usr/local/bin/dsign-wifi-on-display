@@ -14,6 +14,14 @@ log() {
   logger -t dsign-wifi-on-display "$*"
 }
 
+ensure_run_dsign_dir() {
+  mkdir -p /run/dsign 2>/dev/null || true
+  if [ "$(id -u)" -eq 0 ]; then
+    chown dsign:dsign /run/dsign 2>/dev/null || true
+    chmod 0775 /run/dsign 2>/dev/null || true
+  fi
+}
+
 truthy() {
   case "${1:-}" in
     1|true|yes|on|TRUE|YES|ON) return 0 ;;
@@ -121,18 +129,15 @@ mpv_show_text() {
   local ms="${2:-8000}"
   local escaped
   escaped="$(printf '%s' "$text" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
-  mpv_ipc "{\"command\":[\"show-text\",${escaped},${ms},0,3]}" || true
+  mpv_ipc "{\"command\":[\"show-text\",${escaped},${ms},3]}" || true
 }
 
 mpv_release_display() {
+  # Pause only — never switch vo during playback (breaks DRM decoder).
   mpv_ipc '{"command":["set_property","pause","yes"]}' || true
-  mpv_ipc '{"command":["set_property","vo","null"]}' || true
 }
 
 mpv_restore_display() {
-  local vo="${DSIGN_MPV_RESTORE_VO:-drm}"
-  mpv_ipc "{\"command\":[\"set_property\",\"vo\",\"${vo}\"]}" || true
-  sleep 0.4
   mpv_ipc '{"command":["set_property","pause","no"]}' || true
 }
 
@@ -166,6 +171,11 @@ preflight() {
 }
 
 main() {
+  if [ -f /run/dsign/playback-active ]; then
+    log "Skip: playback active"
+    exit 0
+  fi
+
   if ! should_run; then
     log "Skip: Wi-Fi on-display not enabled for this boot"
     exit 0
@@ -224,8 +234,11 @@ main() {
   else
     log "Wi-Fi on-display finished without global IPv4"
   fi
-  mkdir -p /run/dsign 2>/dev/null || true
+  ensure_run_dsign_dir
   : >/run/dsign/wifi-on-display-done 2>/dev/null || true
+  if [ "$(id -u)" -eq 0 ]; then
+    chown dsign:dsign /run/dsign/wifi-on-display-done 2>/dev/null || true
+  fi
 }
 
 if [ "${1:-}" = "--preflight" ]; then
