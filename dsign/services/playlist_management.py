@@ -1901,25 +1901,37 @@ class PlaylistManager:
         us = str(int(sec * 1_000_000))
         return {"timeout": us, "rw_timeout": us}
 
-    def _proactive_refresh_enabled(self) -> bool:
-        raw = (os.getenv("DSIGN_MPV_PROACTIVE_REFRESH_MIN") or "25").strip().lower()
-        return raw not in ("0", "false", "no", "off")
+    def _proactive_refresh_interval_minutes_raw(self) -> str:
+        return (
+            os.getenv("DSIGN_MPV_PROACTIVE_REFRESH_INTERVAL_MIN")
+            or os.getenv("DSIGN_MPV_PROACTIVE_REFRESH_MIN")
+            or "25"
+        ).strip()
 
-    def _proactive_refresh_at_sec(self) -> Optional[float]:
+    def _proactive_refresh_enabled(self) -> bool:
+        return self._proactive_refresh_interval_minutes_raw().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+            "",
+        )
+
+    def _proactive_refresh_interval_sec(self) -> Optional[float]:
+        """Recurring mid-roll reload interval (default 25 min). None when disabled."""
         if not self._proactive_refresh_enabled():
             return None
         try:
-            minutes = float(
-                (os.getenv("DSIGN_MPV_PROACTIVE_REFRESH_MIN") or "25").strip()
-            )
+            minutes = float(self._proactive_refresh_interval_minutes_raw())
         except ValueError:
             minutes = 25.0
         minutes = max(5.0, min(120.0, minutes))
         return minutes * 60.0
 
     def _proactive_refresh_min_duration_sec(self) -> float:
+        """Optional floor: skip proactive refresh on short rolls. 0 = any length."""
         return self._float_env(
-            "DSIGN_MPV_PROACTIVE_REFRESH_MIN_DURATION_SEC", 1800.0, lo=600.0, hi=7200.0
+            "DSIGN_MPV_PROACTIVE_REFRESH_MIN_DURATION_SEC", 0.0, lo=0.0, hi=7200.0
         )
 
     def _tail_mpv_log_segments(self, *, limit: int = 5) -> List[str]:
@@ -2047,7 +2059,7 @@ class PlaylistManager:
             self._network_near_eof_stagnation_sec() if eof_capable else stagnation_sec
         )
         midstream_reload_attempts = 0
-        proactive_refresh_done = False
+        proactive_refresh_next_at: Optional[float] = None
         use_eof_events = False
         if is_network:
             try:
@@ -2126,34 +2138,45 @@ class PlaylistManager:
             if dur is not None and dur > 0.5:
                 last_duration = dur
 
-            duration_long_enough = (
-                last_duration is not None
-                and last_duration >= self._proactive_refresh_min_duration_sec()
-            ) or (
-                tp is not None
-                and tp >= self._proactive_refresh_min_duration_sec()
+            min_refresh_duration = self._proactive_refresh_min_duration_sec()
+            duration_long_enough = min_refresh_duration <= 0 or (
+                (last_duration is not None and last_duration >= min_refresh_duration)
+                or (tp is not None and tp >= min_refresh_duration)
             )
+            refresh_interval_sec = self._proactive_refresh_interval_sec()
             if (
                 eof_capable
                 and item is not None
-                and not proactive_refresh_done
                 and duration_long_enough
                 and tp is not None
+                and refresh_interval_sec is not None
             ):
-                refresh_at = self._proactive_refresh_at_sec()
-                if refresh_at is not None and tp >= refresh_at:
-                    proactive_refresh_done = True
+                if proactive_refresh_next_at is None:
+                    proactive_refresh_next_at = refresh_interval_sec
+                if tp >= proactive_refresh_next_at:
+                    refresh_pos = float(tp)
                     if self._try_midstream_network_reload(
                         item,
                         playlist_id=playlist_id,
                         reason="proactive_refresh",
-                        seek_to=tp,
+                        seek_to=refresh_pos,
                     ):
                         self._mpv_manager.drain_playback_events("end-file")
-                        last_time_pos = tp
+                        last_time_pos = refresh_pos
                         last_time_pos_change = time.monotonic()
                         consecutive_ipc_stall = 0
                         last_ipc_ok = time.monotonic()
+                        proactive_refresh_next_at = refresh_pos + refresh_interval_sec
+                        self.logger.info(
+                            "Proactive refresh completed; next scheduled",
+                            extra={
+                                "playlist_id": playlist_id,
+                                "media_key": media_key,
+                                "seek_to": refresh_pos,
+                                "next_refresh_at_sec": proactive_refresh_next_at,
+                                "interval_sec": refresh_interval_sec,
+                            },
+                        )
                         continue
 
             got_ipc = tp is not None or idle_raw is not None or dur is not None
