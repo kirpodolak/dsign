@@ -3021,6 +3021,16 @@ class PlaylistManager:
                     else (45.0 if first_is_network else 10.0)
                 )
                 first_media_key = str(first.get("key") or first_path)
+                # Network/ytdl opens in two phases (ytdl_hook resolve, then lavf reapply). Unpausing
+                # here made playback start before lavf headers merged — visible "double start".
+                if first_is_network:
+                    try:
+                        self._mpv_manager._send_command(
+                            {"command": ["set_property", "pause", "yes"]},
+                            timeout=3.0,
+                        )
+                    except Exception:
+                        pass
                 first_load_resp = self._issue_loadfile(
                     first_load_cmd,
                     media_key=first_media_key,
@@ -3029,7 +3039,11 @@ class PlaylistManager:
                 )
                 if first_is_network:
                     self._preloaded_load_cmd = first_load_cmd
-                self._mpv_manager._send_command({"command": ["set_property", "pause", "no"]}, timeout=5.0)
+                if not first_is_network:
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "pause", "no"]},
+                        timeout=5.0,
+                    )
                 self._sync_settings_audio_to_mpv()
                 try:
                     first_muted = self._effective_playback_muted(
@@ -3053,12 +3067,13 @@ class PlaylistManager:
             self._preloaded_stream_ready = False
             if first_is_network and bool(first.get("is_video")):
                 self.logger.info(
-                    "Playback play: network loadfile issued",
+                    "Playback play: network loadfile issued (unpause deferred until stream ready)",
                     extra={
                         "playlist_id": playlist_id,
                         "media_key": str(first.get("key") or first_path),
                         "load_ok": bool(first_load_resp and first_load_resp.get("error") == "success"),
                         "path_preview": first_path[:120],
+                        "deferred_unpause": True,
                     },
                 )
 
