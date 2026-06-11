@@ -163,6 +163,11 @@ preflight() {
 }
 
 main() {
+  if [ -f /run/dsign/playback-active ]; then
+    log "Skip: playback active"
+    exit 0
+  fi
+
   if ! should_run; then
     log "Skip: Wi-Fi on-display not enabled for this boot"
     exit 0
@@ -172,11 +177,6 @@ main() {
   if [ -f "$FORCE_MARKER" ]; then
     forced="1"
     rm -f "$FORCE_MARKER" 2>/dev/null || true
-  fi
-
-  if [ -f /run/dsign/playback-active ]; then
-    log "Skip: playback-active marker present"
-    exit 0
   fi
 
   if ! wait_for_socket; then
