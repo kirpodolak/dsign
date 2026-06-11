@@ -14,6 +14,14 @@ log() {
   logger -t dsign-wifi-on-display "$*"
 }
 
+ensure_run_dsign_dir() {
+  mkdir -p /run/dsign 2>/dev/null || true
+  if [ "$(id -u)" -eq 0 ]; then
+    chown dsign:dsign /run/dsign 2>/dev/null || true
+    chmod 0775 /run/dsign 2>/dev/null || true
+  fi
+}
+
 truthy() {
   case "${1:-}" in
     1|true|yes|on|TRUE|YES|ON) return 0 ;;
@@ -226,8 +234,11 @@ main() {
   else
     log "Wi-Fi on-display finished without global IPv4"
   fi
-  mkdir -p /run/dsign 2>/dev/null || true
+  ensure_run_dsign_dir
   : >/run/dsign/wifi-on-display-done 2>/dev/null || true
+  if [ "$(id -u)" -eq 0 ]; then
+    chown dsign:dsign /run/dsign/wifi-on-display-done 2>/dev/null || true
+  fi
 }
 
 if [ "${1:-}" = "--preflight" ]; then

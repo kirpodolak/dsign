@@ -15,6 +15,8 @@ mkdir -p "$MARKER_DIR" 2>/dev/null || {
   echo "dsign-mpv-pre-display: cannot mkdir $MARKER_DIR" >&2
   exit 0
 }
+chown dsign:dsign "$MARKER_DIR" 2>/dev/null || true
+chmod 0775 "$MARKER_DIR" 2>/dev/null || true
 
 if [ -n "$BOOT_ID" ] && [ -f "$MARKER" ]; then
   saved="$(tr -d '\n' < "$MARKER" 2>/dev/null || true)"

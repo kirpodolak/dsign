@@ -53,7 +53,8 @@ class ExternalMediaService:
         if not isinstance(headers, dict):
             headers = {}
 
-        allow = {"user-agent", "referer", "origin", "accept", "accept-language", "cookie"}
+        # Omit accept-language: commas in values (e.g. ru,en;q=0.9) break mpv stream-lavf-o parsing.
+        allow = {"user-agent", "referer", "origin", "accept", "cookie"}
         out_lc: Dict[str, str] = {}
         for k, v in headers.items():
             if k is None or v is None:
@@ -118,7 +119,6 @@ class ExternalMediaService:
             "referer": "Referer",
             "origin": "Origin",
             "accept": "Accept",
-            "accept-language": "Accept-Language",
             "cookie": "Cookie",
         }
         out: Dict[str, str] = {}

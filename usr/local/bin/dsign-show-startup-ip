@@ -119,8 +119,15 @@ build_osd_text() {
 osd_text="$(build_osd_text)"
 
 mark_startup_ip_shown() {
+  if [ -d /run/dsign ] && [ ! -w /run/dsign ]; then
+    log "startup-ip-shown skip: /run/dsign not writable (run: sudo systemd-tmpfiles --create /etc/tmpfiles.d/dsign.conf)"
+    return 0
+  fi
   mkdir -p /run/dsign 2>/dev/null || true
-  : >/run/dsign/startup-ip-shown 2>/dev/null || true
+  : >/run/dsign/startup-ip-shown 2>/dev/null || {
+    log "startup-ip-shown marker failed (check /run/dsign ownership for user dsign)"
+    return 0
+  }
 }
 
 attempt_send_osd() {

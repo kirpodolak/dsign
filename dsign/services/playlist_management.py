@@ -872,7 +872,6 @@ class PlaylistManager:
             "origin",
             "cookie",
             "accept",
-            "accept-language",
         }
 
         # Canonicalize keys (Title-Case for readability; MPV doesn't care).
@@ -1062,6 +1061,8 @@ class PlaylistManager:
             if is_rutube_cdn_hdr and lk in ("referer", "referrer", "origin"):
                 # `referer` is already provided via the dedicated option; Origin is not required for ffmpeg.
                 continue
+            if lk == "accept-language":
+                continue
             # We'll pass UA/Referer both in dedicated fields and in `headers` when present.
             hdr_lines.append(f"{str(k).strip()}: {str(v).strip()}")
         hdr_blob = "\r\n".join([h for h in hdr_lines if h])
@@ -1112,6 +1113,28 @@ class PlaylistManager:
                 pass
         return opts
 
+    @staticmethod
+    def _is_valid_lavf_option_key(key: str) -> bool:
+        """Reject ytdl_hook/parser debris (e.g. en;q=0.9 split into en;q\\ AVOption keys)."""
+        ks = str(key or "").strip()
+        if not ks:
+            return False
+        if ";" in ks or "\\" in ks or "=" in ks:
+            return False
+        return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_\-]*$", ks))
+
+    @staticmethod
+    def _strip_accept_language_header_lines(blob: str) -> str:
+        lines = []
+        for line in str(blob or "").replace("\r\n", "\n").split("\n"):
+            s = line.strip()
+            if not s:
+                continue
+            if s.lower().startswith("accept-language:"):
+                continue
+            lines.append(line.rstrip("\r"))
+        return "\r\n".join(lines)
+
     def _merge_mpv_lavf_options(self, base: Any, extra: Dict[str, str]) -> Dict[str, str]:
         """Merge dict-like lavf options, normalizing keys/values as strings."""
         out: Dict[str, str] = {}
@@ -1123,6 +1146,12 @@ class PlaylistManager:
                 vs = str(v).strip()
                 if not ks or not vs:
                     continue
+                if not self._is_valid_lavf_option_key(ks):
+                    continue
+                if ks == "headers":
+                    vs = self._strip_accept_language_header_lines(vs)
+                    if not vs.strip():
+                        continue
                 out[ks] = vs
         for k, v in (extra or {}).items():
             if k is None or v is None:
@@ -1131,6 +1160,12 @@ class PlaylistManager:
             vs = str(v).strip()
             if not ks or not vs:
                 continue
+            if not self._is_valid_lavf_option_key(ks):
+                continue
+            if ks == "headers":
+                vs = self._strip_accept_language_header_lines(vs)
+                if not vs.strip():
+                    continue
             out[ks] = vs
         return out
 
@@ -1165,7 +1200,7 @@ class PlaylistManager:
             if not k or not v:
                 continue
             lk = str(k).strip().lower()
-            if lk in ("user-agent", "referer", "referrer"):
+            if lk in ("user-agent", "referer", "referrer", "accept-language"):
                 continue
             if lk == "cookie" and cookie:
                 continue
@@ -1537,8 +1572,11 @@ class PlaylistManager:
                 marker.write_text("1", encoding="utf-8")
             elif marker.is_file():
                 marker.unlink()
-        except Exception:
-            pass
+        except Exception as exc:
+            self.logger.warning(
+                "playback-active marker failed",
+                extra={"event": "playback_active_marker", "active": active, "error": str(exc)},
+            )
 
     def _wait_mpv_network_demuxer_ready(self, *, timeout_sec: float = 45.0, poll_sec: float = 0.25) -> bool:
         """

@@ -196,11 +196,15 @@ install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/
 sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-wifi-on-display" /usr/local/bin/dsign-wifi-on-display
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-nmtui-tty" /usr/local/bin/dsign-nmtui-tty
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
 sed -i 's/\r$//' /usr/local/bin/dsign-wifi-on-display
+sed -i 's/\r$//' /usr/local/bin/dsign-nmtui-tty
+install -m 0644 "$PROJECT_DIR/etc/tmpfiles.d/dsign.conf" /etc/tmpfiles.d/dsign.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/dsign.conf 2>/dev/null || true
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-archive-log" /usr/local/bin/dsign-mpv-archive-log
 sed -i 's/\r$//' /usr/local/bin/dsign-mpv-archive-log
-chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
+chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
 
 mkdir -p /var/lib/dsign/config
 chown "$DSIGN_USER:$DSIGN_USER" /var/lib/dsign/config
