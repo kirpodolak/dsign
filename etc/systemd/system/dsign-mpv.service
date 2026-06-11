@@ -40,8 +40,7 @@ ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 ExecStart=/usr/local/bin/dsign-mpv-launch
 # Startup IP OSD is best-effort; never fail MPV startup if helper is unavailable.
 ExecStartPost=-/bin/systemctl --no-block restart dsign-show-startup-ip.service
-# Wi-Fi picker on content display (releases DRM, nmtui on tty1) when network assistant is interactive.
-ExecStartPost=-/bin/systemctl --no-block start dsign-wifi-on-display.service
+# Wi-Fi on-display is invoked only from dsign-show-startup-ip (not a separate unit).
 # Run via bash to avoid execute-bit / noexec issues.
 ExecStartPost=-/bin/bash /usr/local/bin/dsign-mpv-post-start
 # Copy log before mpv truncates it on next start. Pipe through tr so CRLF deployments
