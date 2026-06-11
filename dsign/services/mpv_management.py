@@ -66,6 +66,7 @@ class MPVManager:
         self._hung_recovery_running = False
         self._app_initiated_restart_ts = 0.0
         self._post_restart_callback: Optional[Callable[[], None]] = None
+        self._playback_eof_events_enabled = False
 
         # Логирование инициализации
         self.logger.info(
@@ -118,6 +119,7 @@ class MPVManager:
         self._playback_session_active = bool(active)
         if not active:
             self._playback_stream_opening = False
+            self._playback_eof_events_enabled = False
             self._reset_playback_ipc_fail_streak()
             self._reset_watchdog_ipc_fail_streak()
 
@@ -126,6 +128,63 @@ class MPVManager:
         self._playback_stream_opening = bool(active)
         if active:
             self._reset_playback_ipc_fail_streak()
+
+    def _eof_events_enabled(self) -> bool:
+        raw = (os.getenv("DSIGN_MPV_EOF_USE_EVENTS") or "1").strip().lower()
+        return raw not in ("0", "false", "no", "off")
+
+    def enable_playback_eof_events(self) -> None:
+        """Subscribe to mpv end-file events to reduce EOF polling IPC load."""
+        if not self._eof_events_enabled():
+            return
+        if self._playback_eof_events_enabled:
+            return
+        try:
+            if not self._acquire_ipc_lock(lock_wait=2.0):
+                return
+            try:
+                sess = self._get_ipc_session()
+                sess.subscribe_event("end-file")
+                for cmd in (
+                    ["enable_event", "end-file", True],
+                    ["enable_event", "file-loaded", True],
+                ):
+                    ipc_request_id = max(1, int(time.time() * 1_000_000) & 0x7FFFFFFF)
+                    sess.command(
+                        {"command": cmd},
+                        timeout=3.0,
+                        request_id=ipc_request_id,
+                    )
+                self._playback_eof_events_enabled = True
+            finally:
+                self._release_ipc_lock()
+        except Exception as e:
+            self.logger.debug(
+                "enable_playback_eof_events failed",
+                extra={"error": str(e), "type": type(e).__name__},
+            )
+
+    def wait_playback_event(
+        self, event_name: str, *, timeout: float
+    ) -> Optional[Dict[str, Any]]:
+        """Wait for mpv client event without holding the IPC command lock."""
+        if not self._playback_eof_events_enabled:
+            return None
+        try:
+            sess = self._get_ipc_session()
+            return sess.wait_event(event_name, timeout=float(timeout))
+        except Exception:
+            return None
+
+    def drain_playback_events(self, event_name: str, *, max_items: int = 64) -> int:
+        """Clear stale mpv events between playlist items or after loadfile replace."""
+        if not self._playback_eof_events_enabled:
+            return 0
+        try:
+            sess = self._get_ipc_session()
+            return sess.drain_events(event_name, max_items=max_items)
+        except Exception:
+            return 0
 
     def set_playback_network_active(self, active: bool) -> None:
         """Network stream playing/buffering — mpv IPC can lag without being hung."""
