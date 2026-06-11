@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# Playback / MPV / playlist diagnostics for dsign signage devices.
+set -u
+
+SOCK="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
+LOG="${DSIGN_MPV_LOG_FILE:-/var/lib/dsign/mpv/mpv.log}"
+DB="${DSIGN_DB_PATH:-/var/lib/dsign/database.db}"
+REPO="${DSIGN_REPO:-/home/dsign/dsign}"
+JOURNAL_LINES="${DSIGN_DIAG_JOURNAL_LINES:-400}"
+SINCE="${DSIGN_DIAG_SINCE:-}"
+
+echo "=== dsign playback diagnostics ==="
+echo "host: $(hostname)  time: $(date -Is 2>/dev/null || date)"
+echo
+
+echo "--- deployed code ---"
+if [ -d "$REPO/.git" ]; then
+  git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's/^/branch: /' || true
+  git -C "$REPO" log -1 --oneline 2>/dev/null | sed 's/^/commit: /' || true
+  if git -C "$REPO" grep -q "proactive_refresh_next_at" dsign/services/playlist_management.py 2>/dev/null; then
+    echo "recurring proactive refresh: present in tree"
+  else
+    echo "recurring proactive refresh: NOT in tree (deploy cursor/hls-network-stability-8ed1)"
+  fi
+else
+  echo "(no git repo at $REPO)"
+fi
+echo
+
+echo "--- proactive refresh env ---"
+for v in \
+  DSIGN_MPV_PROACTIVE_REFRESH_INTERVAL_MIN \
+  DSIGN_MPV_PROACTIVE_REFRESH_MIN \
+  DSIGN_MPV_PROACTIVE_REFRESH_MIN_DURATION_SEC \
+  DSIGN_MPV_NETWORK_TIMEOUT_SEC \
+  DSIGN_MPV_HLS_SEGMENT_TIMEOUT_SEC \
+  DSIGN_MPV_EOF_USE_EVENTS; do
+  val="$(printenv "$v" 2>/dev/null || true)"
+  if [ -z "$val" ] && [ -r /etc/dsign/environment ]; then
+    val="$(grep -E "^${v}=" /etc/dsign/environment 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  fi
+  if [ -z "$val" ]; then
+    val="$(systemctl show digital-signage.service -p Environment --value 2>/dev/null \
+      | tr ' ' '\n' | grep "^${v}=" | tail -1 | cut -d= -f2- || true)"
+  fi
+  printf '%s=%s\n' "$v" "${val:-<default>}"
+done
+echo
+
+echo "--- services ---"
+for u in digital-signage.service dsign-mpv.service; do
+  systemctl is-active "$u" 2>/dev/null | sed "s/^/$u: /" || echo "$u: unknown"
+done
+systemctl show digital-signage.service -p ActiveEnterTimestamp --value 2>/dev/null | sed 's/^/digital-signage since: /' || true
+systemctl show dsign-mpv.service -p ActiveEnterTimestamp --value 2>/dev/null | sed 's/^/dsign-mpv since: /' || true
+echo
+
+echo "--- playback DB ---"
+if command -v sqlite3 >/dev/null 2>&1 && [ -r "$DB" ]; then
+  sqlite3 -header -column "$DB" \
+    "SELECT id, playlist_id, status, datetime('now','localtime') AS now_local FROM playback_status LIMIT 1;" 2>/dev/null || true
+else
+  echo "(sqlite3 or $DB unavailable)"
+fi
+echo
+
+mpv_prop() {
+  local prop="$1"
+  if ! command -v socat >/dev/null 2>&1 || [ ! -S "$SOCK" ]; then
+    return 1
+  fi
+  local req
+  req=$(printf '{"command":["get_property","%s"],"request_id":1}\n' "$prop")
+  local resp
+  resp=$(printf '%s' "$req" | socat - UNIX-CONNECT:"$SOCK" 2>/dev/null | head -1)
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',''))" 2>/dev/null
+  else
+    printf '%s\n' "$resp"
+  fi
+}
+
+echo "--- mpv live snapshot ---"
+if [ -S "$SOCK" ]; then
+  for p in path stream-open-filename time-pos duration pause idle-active demuxer-cache-time; do
+    v="$(mpv_prop "$p" 2>/dev/null || echo '?')"
+    printf '  %-22s %s\n' "$p:" "$v"
+  done
+else
+  echo "(socket missing: $SOCK)"
+fi
+ps -o pid,etime,cmd -C mpv 2>/dev/null | sed 's/^/  /' || echo "  (mpv not running)"
+echo
+
+echo "--- playback timeline (journal) ---"
+JARGS=(journalctl -u digital-signage.service --no-pager -n "$JOURNAL_LINES")
+if [ -n "$SINCE" ]; then
+  JARGS+=(--since "$SINCE")
+else
+  JARGS+=(-b)
+fi
+"${JARGS[@]}" 2>/dev/null | grep -E \
+  'Playlist item (starting|finished)|proactive_refresh|Proactive refresh|mid-stream network reload|Network stream ready|Reapplying stream-lavf|ytdl stream opening|mpv_end_file|stall|advance|loadfile dedup|deferred_unpause|double' \
+  | tail -n 80 || echo "(no matching journal lines)"
+echo
+
+echo "--- proactive refresh hits (this boot) ---"
+PR_RELOAD="$(journalctl -u digital-signage.service -b --no-pager 2>/dev/null | grep -c 'reason.*proactive_refresh' || echo 0)"
+PR_DONE="$(journalctl -u digital-signage.service -b --no-pager 2>/dev/null | grep -c 'Proactive refresh completed' || echo 0)"
+echo "proactive_refresh reload events: $PR_RELOAD"
+echo "proactive_refresh completed events: $PR_DONE"
+journalctl -u digital-signage.service -b --no-pager 2>/dev/null | grep -E 'proactive_refresh|Proactive refresh completed' | tail -8 || true
+echo
+
+echo "--- playlist transitions (finished reasons, this boot) ---"
+journalctl -u digital-signage.service -b --no-pager 2>/dev/null \
+  | grep 'Playlist item finished' \
+  | sed 's/.*reason.: //;s/".*//' \
+  | sort | uniq -c | sort -rn | head -15 || true
+echo
+
+echo "--- mpv.log tail (segments / opens) ---"
+if [ -r "$LOG" ]; then
+  tail -n 40 "$LOG" | grep -E 'Opening|segment-|hls|error|403|timeout|EOF' | tail -20 || tail -5 "$LOG"
+else
+  echo "(missing $LOG)"
+fi
+echo
+
+echo "=== hints ==="
+echo "  SINCE='2 hours ago' $0   # limit journal window"
+echo "  DSIGN_DIAG_JOURNAL_LINES=2000 $0"
+echo "  Look for: Proactive refresh completed; next scheduled (every ~25 min at time-pos 1500, 3000, …)"
