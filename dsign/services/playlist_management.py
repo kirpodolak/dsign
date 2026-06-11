@@ -670,18 +670,53 @@ class PlaylistManager:
                 self._stall_count_by_media.clear()
             return advance
 
+    def _set_stall_recovery_advance(self) -> None:
+        """Next mpv recovery should resume at the following playlist index."""
+        with self._stall_count_lock:
+            self._stall_recovery_advance = True
+
+    def _midstream_ipc_advance_enabled(self) -> bool:
+        raw = (os.getenv("DSIGN_MPV_MIDSTREAM_IPC_ADVANCE") or "1").strip().lower()
+        return raw not in ("0", "false", "no", "off")
+
+    def _should_advance_after_midstream_ipc_failure(
+        self,
+        *,
+        is_network: bool,
+        eof_capable: bool,
+        time_pos: Optional[float],
+        duration: Optional[float],
+    ) -> bool:
+        """
+        IPC died while the stream still has meaningful duration left — skip to next item
+        instead of restarting the same long HLS roll from the beginning.
+        """
+        if not self._midstream_ipc_advance_enabled():
+            return False
+        if not (is_network and eof_capable):
+            return False
+        if self._network_stream_near_eof(time_pos=time_pos, duration=duration):
+            return False
+        if time_pos is not None and time_pos >= 30.0:
+            return True
+        return duration is not None and duration > 120.0
+
     def _request_mpv_stall_restart(
         self,
         *,
         playlist_id: int,
         reason: str,
         media_key: Optional[str] = None,
+        skip_stall_count: bool = False,
     ) -> None:
         """mpv IPC socket gone during playback; restart service and let PlaybackService resume."""
         stall_count = 0
         advance_next = False
-        if media_key:
+        if media_key and not skip_stall_count:
             stall_count, advance_next = self._record_stall_for_media(media_key)
+        elif skip_stall_count:
+            with self._stall_count_lock:
+                advance_next = bool(self._stall_recovery_advance)
         self._mark_stall_restart_pending()
         self.logger.warning(
             "playlist: requesting mpv restart after playback stall",
@@ -1992,7 +2027,35 @@ class PlaylistManager:
                         )
                         _finish_video_item("network_near_eof_ipc_dead")
                         break
+                    midstream_advance = self._should_advance_after_midstream_ipc_failure(
+                        is_network=is_network,
+                        eof_capable=eof_capable,
+                        time_pos=last_time_pos,
+                        duration=last_duration,
+                    )
                     if socket_missing:
+                        if midstream_advance:
+                            self.logger.warning(
+                                "playlist_eof_stall: MPV socket missing mid-stream;"
+                                " finishing item and advancing",
+                                extra={
+                                    "playlist_id": playlist_id,
+                                    "is_network": is_network,
+                                    "media_key": media_key,
+                                    "time_pos": last_time_pos,
+                                    "duration": last_duration,
+                                    "stall_polls": consecutive_ipc_stall,
+                                },
+                            )
+                            _finish_video_item("network_midstream_socket_missing")
+                            self._set_stall_recovery_advance()
+                            self._request_mpv_stall_restart(
+                                playlist_id=playlist_id,
+                                reason="socket_missing_midstream",
+                                media_key=media_key,
+                                skip_stall_count=True,
+                            )
+                            return False
                         self.logger.warning(
                             "playlist_eof_stall: MPV socket missing during EOF wait",
                             extra={
@@ -2005,6 +2068,28 @@ class PlaylistManager:
                             playlist_id=playlist_id,
                             reason="socket_missing_eof",
                             media_key=media_key,
+                        )
+                        return False
+                    if midstream_advance:
+                        self.logger.warning(
+                            "playlist_eof_stall: MPV IPC dead mid-stream;"
+                            " finishing item and advancing",
+                            extra={
+                                "playlist_id": playlist_id,
+                                "is_network": is_network,
+                                "media_key": media_key,
+                                "time_pos": last_time_pos,
+                                "duration": last_duration,
+                                "stall_polls": consecutive_ipc_stall,
+                            },
+                        )
+                        _finish_video_item("network_midstream_ipc_dead")
+                        self._set_stall_recovery_advance()
+                        self._request_mpv_stall_restart(
+                            playlist_id=playlist_id,
+                            reason="ipc_dead_midstream",
+                            media_key=media_key,
+                            skip_stall_count=True,
                         )
                         return False
                     self.logger.warning(
@@ -2189,7 +2274,7 @@ class PlaylistManager:
             # never let diagnostics break playback
             pass
 
-    def _stop_play_thread(self):
+    def _stop_play_thread(self, *, preserve_stall_tracking: bool = False):
         if self._play_thread and self._play_thread.is_alive():
             self._stop_event.set()
             try:
@@ -2199,7 +2284,8 @@ class PlaylistManager:
         self._play_thread = None
         self._stop_event.clear()
         self._clear_stall_restart_pending()
-        self._reset_stall_tracking()
+        if not preserve_stall_tracking:
+            self._reset_stall_tracking()
         self._active_playlist_id = None
         self._preloaded_stream_ready = False
         self._preloaded_load_cmd = None
@@ -2626,17 +2712,33 @@ class PlaylistManager:
             except Exception:
                 self._media_backoff.pop(media_key, None)
 
-    def play(self, playlist_id: int, *, start_index: int = 0) -> bool:
+    def play(
+        self,
+        playlist_id: int,
+        *,
+        start_index: int = 0,
+        preserve_stall_tracking: bool = False,
+    ) -> bool:
         """Play playlist with profile support"""
         with self._app_context():
-            return self._play_impl(playlist_id, start_index=start_index)
+            return self._play_impl(
+                playlist_id,
+                start_index=start_index,
+                preserve_stall_tracking=preserve_stall_tracking,
+            )
 
-    def _play_impl(self, playlist_id: int, *, start_index: int = 0) -> bool:
+    def _play_impl(
+        self,
+        playlist_id: int,
+        *,
+        start_index: int = 0,
+        preserve_stall_tracking: bool = False,
+    ) -> bool:
         from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
 
         try:
             # Stop any previous manual playback loop
-            self._stop_play_thread()
+            self._stop_play_thread(preserve_stall_tracking=preserve_stall_tracking)
             # Mark playback starting before DB/profile IPC so Wi-Fi-on-display skips.
             self._set_playback_active_marker(True)
 
@@ -2868,19 +2970,35 @@ class PlaylistManager:
             self._logo_manager.display_idle_logo()
             raise RuntimeError(f"Failed to start playback: {str(e)}")
 
-    def stop(self, *, show_idle_logo: bool = True, update_status: bool = True) -> bool:
+    def stop(
+        self,
+        *,
+        show_idle_logo: bool = True,
+        update_status: bool = True,
+        preserve_stall_tracking: bool = False,
+    ) -> bool:
         """Stop playback and persist stopped state so UI/API match MPV (idle logo)."""
         with self._app_context():
-            return self._stop_impl(show_idle_logo=show_idle_logo, update_status=update_status)
+            return self._stop_impl(
+                show_idle_logo=show_idle_logo,
+                update_status=update_status,
+                preserve_stall_tracking=preserve_stall_tracking,
+            )
 
-    def _stop_impl(self, *, show_idle_logo: bool = True, update_status: bool = True) -> bool:
+    def _stop_impl(
+        self,
+        *,
+        show_idle_logo: bool = True,
+        update_status: bool = True,
+        preserve_stall_tracking: bool = False,
+    ) -> bool:
         from ..models import PlaybackStatus
 
         try:
             playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
             last_playlist_id = playback.playlist_id
 
-            self._stop_play_thread()
+            self._stop_play_thread(preserve_stall_tracking=preserve_stall_tracking)
             self._set_playback_active_marker(False)
             ok = True
             if show_idle_logo:

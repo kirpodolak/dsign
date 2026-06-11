@@ -434,7 +434,11 @@ class PlaybackService:
                 except Exception:
                     resume_index = 0
         try:
-            self._playlist_manager.stop(show_idle_logo=False, update_status=False)
+            self._playlist_manager.stop(
+                show_idle_logo=False,
+                update_status=False,
+                preserve_stall_tracking=True,
+            )
         except Exception:
             pass
         self._mpv_manager._reset_ipc_session()
@@ -456,7 +460,13 @@ class PlaybackService:
             ok = False
             for attempt in range(2):
                 try:
-                    ok = bool(self.play(playlist_id, start_index=resume_index))
+                    ok = bool(
+                        self.play(
+                            playlist_id,
+                            start_index=resume_index,
+                            preserve_stall_tracking=True,
+                        )
+                    )
                 except Exception as e:
                     ok = False
                     self._log_warning(
@@ -693,11 +703,21 @@ class PlaybackService:
         raise RuntimeError("Could not establish idle state")
 
     # Делегированные методы
-    def play(self, playlist_id: int, *, start_index: int = 0) -> bool:
+    def play(
+        self,
+        playlist_id: int,
+        *,
+        start_index: int = 0,
+        preserve_stall_tracking: bool = False,
+    ) -> bool:
         """Play specified playlist"""
         try:
             start_time = time.time()
-            result = self._playlist_manager.play(playlist_id, start_index=start_index)
+            result = self._playlist_manager.play(
+                playlist_id,
+                start_index=start_index,
+                preserve_stall_tracking=preserve_stall_tracking,
+            )
             self._log_info(
                 "Playing playlist", 
                 extra={
