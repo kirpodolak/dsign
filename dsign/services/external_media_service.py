@@ -53,7 +53,8 @@ class ExternalMediaService:
         if not isinstance(headers, dict):
             headers = {}
 
-        allow = {"user-agent", "referer", "origin", "accept", "accept-language", "cookie"}
+        # Omit accept-language: commas in values (e.g. ru,en;q=0.9) break mpv stream-lavf-o parsing.
+        allow = {"user-agent", "referer", "origin", "accept", "cookie"}
         out_lc: Dict[str, str] = {}
         for k, v in headers.items():
             if k is None or v is None:
@@ -105,7 +106,6 @@ class ExternalMediaService:
             out_lc["accept"] = "*/*"
         else:
             out_lc.setdefault("accept", "*/*")
-        out_lc.setdefault("accept-language", "ru,en;q=0.9")
 
         # Drop only absurdly large cookie blobs (yt-dlp edge cases). VK/Rutube often need the
         # full cookie set for CDN auth; rely on short URL refresh TTL instead of truncating.
@@ -119,7 +119,6 @@ class ExternalMediaService:
             "referer": "Referer",
             "origin": "Origin",
             "accept": "Accept",
-            "accept-language": "Accept-Language",
             "cookie": "Cookie",
         }
         out: Dict[str, str] = {}
