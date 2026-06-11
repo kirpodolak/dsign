@@ -746,6 +746,28 @@ class PlaybackService:
             )
             return False
 
+    def health_check(self) -> Dict[str, Any]:
+        """MPV IPC diagnostics for monitoring (no auto vo recovery)."""
+        pm = self._playlist_manager
+        mgr = self._mpv_manager
+        vo_configured = mgr.get_property_light("vo-configured", timeout=2.0)
+        checks: Dict[str, Any] = {
+            "socket_ok": mgr._check_mpv_socket(timeout=2.0),
+            "vo_configured": vo_configured,
+            "pause": mgr.get_property_light("pause", timeout=2.0),
+            "path": mgr.get_property_light("path", timeout=2.0),
+            "playback_session_active": mgr._playback_session_active,
+            "last_loaded_media_key": getattr(pm, "_last_loaded_media_key", None),
+            "load_in_progress": getattr(pm, "_load_in_progress", False),
+            "active_playlist_id": getattr(pm, "_active_playlist_id", None),
+        }
+        if checks["vo_configured"] is False and mgr._playback_session_active:
+            self._log_warning(
+                "MPV health: vo not configured during active playback",
+                extra={"action": "health_check", **checks},
+            )
+        return checks
+
     def get_status(self) -> Dict:
         """Get current playback status"""
         try:
