@@ -740,12 +740,22 @@ class PlaylistManager:
         *,
         playlist_id: int,
         reason: str,
+        seek_to: Optional[float] = None,
     ) -> bool:
         """
         Reload ytdl/http stream via loadfile without systemd-restarting mpv.
         Used when time-pos freezes mid-roll but IPC still responds.
+
+        When ``seek_to`` is set (proactive refresh), re-resolve URL and resume near
+        the saved position instead of restarting from 0:00.
         """
         media_key = str(item.get("key") or item.get("path") or "")
+        saved_seek = seek_to
+        if saved_seek is None:
+            saved_seek = self._snap_number(
+                {"time-pos": self._mpv_get_light("time-pos", timeout=3.0)},
+                "time-pos",
+            )
         if not self._refresh_item_playback_path(item):
             self.logger.warning(
                 "playlist: mid-stream reload skipped (URL refresh failed)",
@@ -765,6 +775,7 @@ class PlaylistManager:
                 "playlist_id": playlist_id,
                 "media_key": media_key,
                 "reason": reason,
+                "seek_to": saved_seek,
                 "path_preview": path[:120],
             },
         )
@@ -797,27 +808,37 @@ class PlaylistManager:
                 load_ipc_ok=True,
             ):
                 return False
-            tp_before = self._snap_number(
-                {"time-pos": self._mpv_get_light("time-pos", timeout=3.0)},
-                "time-pos",
-            )
+            if saved_seek is not None and saved_seek > 5.0:
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["seek", float(saved_seek), "absolute"]},
+                        timeout=8.0,
+                    )
+                    self._mpv_manager._send_command(
+                        {"command": ["set_property", "pause", "no"]},
+                        timeout=3.0,
+                    )
+                except Exception:
+                    pass
             self._stop_event.wait(timeout=8.0)
             tp_after = self._snap_number(
                 {"time-pos": self._mpv_get_light("time-pos", timeout=3.0)},
                 "time-pos",
             )
-            ok = (
-                tp_before is not None
-                and tp_after is not None
-                and tp_after > tp_before + 0.2
-            )
+            if saved_seek is not None and saved_seek > 5.0:
+                ok = (
+                    tp_after is not None
+                    and tp_after >= max(0.0, float(saved_seek) - 45.0)
+                )
+            else:
+                ok = tp_after is not None and tp_after > 0.2
             if not ok:
                 self.logger.warning(
                     "playlist: mid-stream reload did not resume playback",
                     extra={
                         "playlist_id": playlist_id,
                         "media_key": media_key,
-                        "time_pos_before": tp_before,
+                        "seek_to": saved_seek,
                         "time_pos_after": tp_after,
                     },
                 )
@@ -1128,6 +1149,12 @@ class PlaylistManager:
             pass
         if hdr_blob:
             opts["headers"] = hdr_blob + "\r\n"
+
+        if stream_url and str(stream_url).startswith(
+            ("http://", "https://", "ytdl://")
+        ):
+            for k, v in self._lavf_network_timeout_opts().items():
+                opts.setdefault(k, v)
 
         # mpv-level fallbacks; they can help non-lavf opens too.
         if ua:
@@ -1868,6 +1895,73 @@ class PlaylistManager:
             return False
         return time_pos + self._network_eof_advance_sec() >= duration
 
+    def _lavf_network_timeout_opts(self) -> Dict[str, str]:
+        """ffmpeg/lavf read timeouts (microseconds) — avoid indefinite demuxer blocks."""
+        sec = self._float_env("DSIGN_MPV_LAVF_TIMEOUT_SEC", 15.0, lo=5.0, hi=120.0)
+        us = str(int(sec * 1_000_000))
+        return {"timeout": us, "rw_timeout": us}
+
+    def _proactive_refresh_enabled(self) -> bool:
+        raw = (os.getenv("DSIGN_MPV_PROACTIVE_REFRESH_MIN") or "25").strip().lower()
+        return raw not in ("0", "false", "no", "off")
+
+    def _proactive_refresh_at_sec(self) -> Optional[float]:
+        if not self._proactive_refresh_enabled():
+            return None
+        try:
+            minutes = float(
+                (os.getenv("DSIGN_MPV_PROACTIVE_REFRESH_MIN") or "25").strip()
+            )
+        except ValueError:
+            minutes = 25.0
+        minutes = max(5.0, min(120.0, minutes))
+        return minutes * 60.0
+
+    def _proactive_refresh_min_duration_sec(self) -> float:
+        return self._float_env(
+            "DSIGN_MPV_PROACTIVE_REFRESH_MIN_DURATION_SEC", 1800.0, lo=600.0, hi=7200.0
+        )
+
+    def _tail_mpv_log_segments(self, *, limit: int = 5) -> List[str]:
+        log_path = Path(
+            os.getenv("DSIGN_MPV_LOG_FILE") or "/var/lib/dsign/mpv/mpv.log"
+        )
+        if not log_path.is_file():
+            return []
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()
+        except OSError:
+            return []
+        hits: List[str] = []
+        for line in reversed(lines):
+            if "segment-" in line or "Opening" in line:
+                hits.append(line.strip()[-240:])
+            if len(hits) >= limit:
+                break
+        return list(reversed(hits))
+
+    def _log_ipc_dead_diagnostics(
+        self,
+        *,
+        playlist_id: int,
+        media_key: Optional[str],
+        time_pos: Optional[float],
+        duration: Optional[float],
+        stall_polls: int,
+    ) -> None:
+        self.logger.warning(
+            "playlist_eof_stall: IPC dead context snapshot",
+            extra={
+                "playlist_id": playlist_id,
+                "media_key": media_key,
+                "time_pos": time_pos,
+                "duration": duration,
+                "stall_polls": stall_polls,
+                "mpv_log_segments": self._tail_mpv_log_segments(limit=5),
+            },
+        )
+
     def _wait_mpv_video_end(
         self,
         playlist_id: int,
@@ -1953,6 +2047,14 @@ class PlaylistManager:
             self._network_near_eof_stagnation_sec() if eof_capable else stagnation_sec
         )
         midstream_reload_attempts = 0
+        proactive_refresh_done = False
+        use_eof_events = False
+        if is_network:
+            try:
+                self._mpv_manager.enable_playback_eof_events()
+                use_eof_events = bool(self._mpv_manager._playback_eof_events_enabled)
+            except Exception:
+                use_eof_events = False
 
         def _finish_video_item(reason: str) -> None:
             if media_key:
@@ -1970,6 +2072,17 @@ class PlaylistManager:
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
             if time.time() - start > 6 * 3600:
                 break
+
+            poll_wait = max(0.2, float(poll_sec))
+            if use_eof_events:
+                ev = self._mpv_manager.wait_playback_event(
+                    "end-file", timeout=poll_wait
+                )
+                if ev is not None:
+                    ev_reason = str(ev.get("reason") or "").strip().lower()
+                    if ev_reason in ("eof", "stop", "quit", "error"):
+                        _finish_video_item(f"mpv_end_file_{ev_reason or 'unknown'}")
+                        break
 
             snap_timeout = 10.0 if is_network else 4.0
             try:
@@ -1998,6 +2111,35 @@ class PlaylistManager:
                 dur = self._snap_number({"duration": dur_raw}, "duration")
             if dur is not None and dur > 0.5:
                 last_duration = dur
+
+            duration_long_enough = (
+                last_duration is not None
+                and last_duration >= self._proactive_refresh_min_duration_sec()
+            ) or (
+                tp is not None
+                and tp >= self._proactive_refresh_min_duration_sec()
+            )
+            if (
+                eof_capable
+                and item is not None
+                and not proactive_refresh_done
+                and duration_long_enough
+                and tp is not None
+            ):
+                refresh_at = self._proactive_refresh_at_sec()
+                if refresh_at is not None and tp >= refresh_at:
+                    proactive_refresh_done = True
+                    if self._try_midstream_network_reload(
+                        item,
+                        playlist_id=playlist_id,
+                        reason="proactive_refresh",
+                        seek_to=tp,
+                    ):
+                        last_time_pos = tp
+                        last_time_pos_change = time.monotonic()
+                        consecutive_ipc_stall = 0
+                        last_ipc_ok = time.monotonic()
+                        continue
 
             got_ipc = tp is not None or idle_raw is not None or dur is not None
             socket_missing = not os.path.exists(PlaybackConstants.SOCKET_PATH)
@@ -2092,6 +2234,13 @@ class PlaylistManager:
                             skip_stall_count=True,
                         )
                         return False
+                    self._log_ipc_dead_diagnostics(
+                        playlist_id=playlist_id,
+                        media_key=media_key,
+                        time_pos=last_time_pos,
+                        duration=last_duration,
+                        stall_polls=consecutive_ipc_stall,
+                    )
                     self.logger.warning(
                         "playlist_eof_stall: MPV IPC dead during EOF wait; requesting restart",
                         extra={
@@ -2180,6 +2329,7 @@ class PlaylistManager:
                                     item,
                                     playlist_id=playlist_id,
                                     reason="time_pos_stagnation",
+                                    seek_to=tp,
                                 ):
                                     last_time_pos = None
                                     last_time_pos_change = time.monotonic()
@@ -2211,7 +2361,8 @@ class PlaylistManager:
             else:
                 consecutive_idle = 0
 
-            self._stop_event.wait(timeout=max(0.2, float(poll_sec)))
+            if not use_eof_events:
+                self._stop_event.wait(timeout=poll_wait)
         if is_network:
             try:
                 self._mpv_manager.set_playback_network_active(False)

@@ -57,6 +57,8 @@ class MpvJsonIpcSession:
         self._reader_thread: Optional[threading.Thread] = None
         self._reader_stop = threading.Event()
         self._buf = b""
+        self._event_queues: Dict[str, queue.Queue] = {}
+        self._event_queues_lock = threading.Lock()
 
     def close(self) -> None:
         """Stop reader and release socket (process shutdown or service restart)."""
@@ -137,6 +139,25 @@ class MpvJsonIpcSession:
         if not isinstance(result, dict):
             raise MPVIPCClosedError("mpv IPC unexpected reply payload")
         return result
+
+    def subscribe_event(self, event_name: str) -> queue.Queue:
+        """Register interest in mpv client events (e.g. end-file)."""
+        name = str(event_name or "").strip()
+        with self._event_queues_lock:
+            q = self._event_queues.get(name)
+            if q is None:
+                q = queue.Queue(maxsize=64)
+                self._event_queues[name] = q
+            return q
+
+    def wait_event(self, event_name: str, *, timeout: float) -> Optional[Dict[str, Any]]:
+        """Block until mpv emits ``event_name`` or timeout."""
+        q = self.subscribe_event(event_name)
+        try:
+            raw = q.get(timeout=max(0.0, float(timeout)))
+        except queue.Empty:
+            return None
+        return raw if isinstance(raw, dict) else None
 
     def commands_batch(
         self,
@@ -328,6 +349,17 @@ class MpvJsonIpcSession:
             except json.JSONDecodeError:
                 continue
             if not isinstance(obj, dict):
+                continue
+            if "event" in obj:
+                ev_name = str(obj.get("event") or "").strip()
+                if ev_name:
+                    with self._event_queues_lock:
+                        ev_q = self._event_queues.get(ev_name)
+                    if ev_q is not None:
+                        try:
+                            ev_q.put_nowait(obj)
+                        except queue.Full:
+                            pass
                 continue
             if "error" not in obj:
                 continue
