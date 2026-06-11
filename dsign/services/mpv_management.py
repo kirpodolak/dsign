@@ -961,7 +961,30 @@ class MPVManager:
     ) -> Optional[Dict[str, Any]]:
         """Отправка команды в MPV. Успехи — только DEBUG (слайдшоу иначе забивает journal)."""
         command_arr = command.get("command", ["unknown"])
-        command_name = command_arr[0] if isinstance(command_arr, list) and command_arr else "unknown"
+        if not isinstance(command_arr, list) or not command_arr:
+            self.logger.error("BLOCKED: empty MPV IPC command")
+            return {"error": "empty command"}
+
+        command_name = command_arr[0]
+
+        if command_name == "set_property" and len(command_arr) >= 2:
+            prop = str(command_arr[1])
+            if prop == "vo" and self._playback_session_active:
+                self.logger.error(
+                    "BLOCKED: set_property 'vo' during playback",
+                    extra={"operation": "MPVCommand", "command": command_name},
+                )
+                return {"error": "vo switch blocked during playback"}
+
+        if command_name == "show-text" and len(command_arr) > 4:
+            self.logger.warning(
+                "show-text: too many arguments, truncating",
+                extra={"operation": "MPVCommand", "arg_count": len(command_arr) - 1},
+            )
+            command = dict(command)
+            command["command"] = command_arr[:4]
+            command_arr = command["command"]
+            command_name = command_arr[0]
         # For get_property/set_property, include the property name in logs to make "property unavailable"
         # actionable (and to distinguish normal mpv behavior from real errors).
         prop_name: Optional[str] = None
