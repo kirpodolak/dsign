@@ -176,6 +176,16 @@ class MPVManager:
         except Exception:
             return None
 
+    def drain_playback_events(self, event_name: str, *, max_items: int = 64) -> int:
+        """Clear stale mpv events between playlist items or after loadfile replace."""
+        if not self._playback_eof_events_enabled:
+            return 0
+        try:
+            sess = self._get_ipc_session()
+            return sess.drain_events(event_name, max_items=max_items)
+        except Exception:
+            return 0
+
     def set_playback_network_active(self, active: bool) -> None:
         """Network stream playing/buffering — mpv IPC can lag without being hung."""
         self._playback_network_active = bool(active)

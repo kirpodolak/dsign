@@ -159,6 +159,23 @@ class MpvJsonIpcSession:
             return None
         return raw if isinstance(raw, dict) else None
 
+    def drain_events(self, event_name: str, *, max_items: int = 64) -> int:
+        """Drop queued mpv client events (e.g. stale end-file after loadfile replace)."""
+        name = str(event_name or "").strip()
+        with self._event_queues_lock:
+            q = self._event_queues.get(name)
+        if q is None:
+            return 0
+        drained = 0
+        limit = max(1, int(max_items))
+        while drained < limit:
+            try:
+                q.get_nowait()
+                drained += 1
+            except queue.Empty:
+                break
+        return drained
+
     def commands_batch(
         self,
         items: List[tuple[int, Dict[str, Any]]],

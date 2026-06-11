@@ -2053,6 +2053,17 @@ class PlaylistManager:
             try:
                 self._mpv_manager.enable_playback_eof_events()
                 use_eof_events = bool(self._mpv_manager._playback_eof_events_enabled)
+                if use_eof_events:
+                    drained = self._mpv_manager.drain_playback_events("end-file")
+                    if drained:
+                        self.logger.debug(
+                            "Drained stale mpv end-file events before EOF wait",
+                            extra={
+                                "playlist_id": playlist_id,
+                                "media_key": media_key,
+                                "drained": drained,
+                            },
+                        )
             except Exception:
                 use_eof_events = False
 
@@ -2074,15 +2085,18 @@ class PlaylistManager:
                 break
 
             poll_wait = max(0.2, float(poll_sec))
-            if use_eof_events:
+            if use_eof_events and time.monotonic() >= grace_until:
                 ev = self._mpv_manager.wait_playback_event(
                     "end-file", timeout=poll_wait
                 )
                 if ev is not None:
                     ev_reason = str(ev.get("reason") or "").strip().lower()
-                    if ev_reason in ("eof", "stop", "quit", "error"):
-                        _finish_video_item(f"mpv_end_file_{ev_reason or 'unknown'}")
+                    # loadfile replace emits end-file/stop for the *previous* file — not EOF.
+                    if ev_reason == "eof":
+                        _finish_video_item("mpv_end_file_eof")
                         break
+                    if ev_reason in ("stop", "quit"):
+                        self._mpv_manager.drain_playback_events("end-file")
 
             snap_timeout = 10.0 if is_network else 4.0
             try:
@@ -2135,6 +2149,7 @@ class PlaylistManager:
                         reason="proactive_refresh",
                         seek_to=tp,
                     ):
+                        self._mpv_manager.drain_playback_events("end-file")
                         last_time_pos = tp
                         last_time_pos_change = time.monotonic()
                         consecutive_ipc_stall = 0
@@ -2331,6 +2346,9 @@ class PlaylistManager:
                                     reason="time_pos_stagnation",
                                     seek_to=tp,
                                 ):
+                                    self._mpv_manager.drain_playback_events(
+                                        "end-file"
+                                    )
                                     last_time_pos = None
                                     last_time_pos_change = time.monotonic()
                                     consecutive_ipc_stall = 0
@@ -2361,7 +2379,7 @@ class PlaylistManager:
             else:
                 consecutive_idle = 0
 
-            if not use_eof_events:
+            if not use_eof_events or time.monotonic() < grace_until:
                 self._stop_event.wait(timeout=poll_wait)
         if is_network:
             try:
