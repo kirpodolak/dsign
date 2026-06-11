@@ -49,6 +49,9 @@ class PlaylistManager:
         self._stall_recovery_advance = False
         self._app_ready = Event()
         self._slideshow_crash_callback: Optional[Callable[[], None]] = None
+        self._last_loaded_media_key: Optional[str] = None
+        self._load_in_progress = False
+        self._load_lock = Lock()
 
     def set_slideshow_crash_callback(self, callback: Optional[Callable[[], None]]) -> None:
         self._slideshow_crash_callback = callback
@@ -321,11 +324,51 @@ class PlaylistManager:
             except Exception:
                 pass
 
-    def _issue_ytdl_loadfile(self, load_cmd: List[Any]) -> None:
+    def _issue_loadfile(
+        self,
+        load_cmd: List[Any],
+        *,
+        media_key: str,
+        force: bool = False,
+        timeout: float = 5.0,
+        max_attempts: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Centralized loadfile IPC with deduplication by media_key.
+
+        Use ``media_key`` (ext-4, ytdl:// URL) — not resolved HLS path after ytdl_hook.
+        """
+        key = str(media_key or "").strip()
+        if not key and isinstance(load_cmd, list) and len(load_cmd) >= 2:
+            key = str(load_cmd[1])
+
+        with self._load_lock:
+            if not force and self._load_in_progress and self._last_loaded_media_key == key:
+                self.logger.warning(
+                    "loadfile dedup: skipped duplicate while load in progress",
+                    extra={"media_key": key, "event": "loadfile_dedup"},
+                )
+                return None
+            self._load_in_progress = True
+            self._last_loaded_media_key = key
+
+        try:
+            return self._mpv_manager._send_command(
+                {"command": load_cmd},
+                timeout=timeout,
+                max_attempts=max_attempts,
+            )
+        finally:
+            with self._load_lock:
+                self._load_in_progress = False
+
+    def _issue_ytdl_loadfile(self, load_cmd: List[Any], *, media_key: str) -> None:
         """Fire loadfile; mpv may not IPC-reply until ytdl_hook finishes."""
         try:
-            self._mpv_manager._send_command(
-                {"command": load_cmd},
+            self._issue_loadfile(
+                load_cmd,
+                media_key=media_key,
+                force=True,
                 timeout=self._ytdl_loadfile_ipc_timeout_sec(),
                 max_attempts=1,
             )
@@ -402,7 +445,7 @@ class PlaylistManager:
                         "ytdl: re-issuing loadfile after IPC quiet",
                         extra={"media_key": media_key, "path_preview": path_s[:120]},
                     )
-                    self._issue_ytdl_loadfile(load_cmd)
+                    self._issue_ytdl_loadfile(load_cmd, media_key=media_key)
             open_sec = 180.0
             if not self._wait_mpv_ytdl_stream_opening(timeout_sec=open_sec):
                 if load_cmd is not None:
@@ -410,7 +453,7 @@ class PlaylistManager:
                         "ytdl: retrying loadfile after open wait timed out",
                         extra={"media_key": media_key, "path_preview": path_s[:120]},
                     )
-                    self._issue_ytdl_loadfile(load_cmd)
+                    self._issue_ytdl_loadfile(load_cmd, media_key=media_key)
                     if not self._wait_mpv_ytdl_stream_opening(timeout_sec=90.0):
                         self.logger.warning(
                             "ytdl stream did not open after loadfile retries",
@@ -703,10 +746,12 @@ class PlaylistManager:
                 path, "replace", per_file_opts=mpv_per_file_opts
             )
             if path.startswith("ytdl://"):
-                self._issue_ytdl_loadfile(load_cmd)
+                self._issue_ytdl_loadfile(load_cmd, media_key=media_key)
             else:
-                self._mpv_manager._send_command(
-                    {"command": load_cmd},
+                self._issue_loadfile(
+                    load_cmd,
+                    media_key=media_key,
+                    force=True,
                     timeout=self._network_loadfile_timeout_sec(path, is_network=True),
                 )
             if not self._ensure_network_stream_started(
@@ -878,7 +923,6 @@ class PlaylistManager:
 
         # Set Accept defaults (some CDNs are picky; keep it minimal).
         out.setdefault("Accept", "*/*")
-        out.setdefault("Accept-Language", "ru,en;q=0.9")
 
         # Ensure we always have a UA (MPV default can be too generic).
         out.setdefault(
@@ -2352,8 +2396,9 @@ class PlaylistManager:
                             str(path), is_network=is_network_reload
                         )
                         load_timeout = max(5.0, min(180.0, float(load_timeout)))
-                        load_resp = self._mpv_manager._send_command(
-                            {"command": load_cmd},
+                        load_resp = self._issue_loadfile(
+                            load_cmd,
+                            media_key=media_key,
                             timeout=load_timeout,
                         )
                         load_ok = bool(load_resp and load_resp.get("error") == "success")
@@ -2554,6 +2599,8 @@ class PlaylistManager:
         try:
             # Stop any previous manual playback loop
             self._stop_play_thread()
+            # Mark playback starting before DB/profile IPC so Wi-Fi-on-display skips.
+            self._set_playback_active_marker(True)
 
             # Get playlist and validate
             playlist = self.db_session.query(Playlist).get(playlist_id)
@@ -2631,7 +2678,6 @@ class PlaylistManager:
                 self._mpv_manager.set_playback_session_active(True)
             except Exception:
                 pass
-            self._set_playback_active_marker(True)
             self._set_loop_position(start_index, len(items))
             first = items[start_index]
             self._set_current_media_label(self._item_media_label(first))
@@ -2665,8 +2711,10 @@ class PlaylistManager:
                     if first_path.startswith("ytdl://")
                     else (45.0 if first_is_network else 10.0)
                 )
-                first_load_resp = self._mpv_manager._send_command(
-                    {"command": first_load_cmd},
+                first_media_key = str(first.get("key") or first_path)
+                first_load_resp = self._issue_loadfile(
+                    first_load_cmd,
+                    media_key=first_media_key,
                     timeout=first_load_timeout,
                     max_attempts=1,
                 )
@@ -2771,6 +2819,12 @@ class PlaylistManager:
                     self.db_session.rollback()
                 except Exception:
                     pass
+
+            self._set_playback_active_marker(False)
+            try:
+                self._mpv_manager.set_playback_session_active(False)
+            except Exception:
+                pass
 
             # Fall back to idle logo
             self._logo_manager.display_idle_logo()

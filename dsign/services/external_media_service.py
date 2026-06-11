@@ -105,7 +105,6 @@ class ExternalMediaService:
             out_lc["accept"] = "*/*"
         else:
             out_lc.setdefault("accept", "*/*")
-        out_lc.setdefault("accept-language", "ru,en;q=0.9")
 
         # Drop only absurdly large cookie blobs (yt-dlp edge cases). VK/Rutube often need the
         # full cookie set for CDN auth; rely on short URL refresh TTL instead of truncating.

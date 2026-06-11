@@ -133,7 +133,7 @@ sock_path = sys.argv[3]
 
 rid = int(time.time() * 1_000_000) & 0x7fffffff
 payload = {
-    "command": ["show-text", text, duration_ms, 0, 3],
+    "command": ["show-text", text, duration_ms, 3],
     "request_id": rid,
 }
 
@@ -186,7 +186,7 @@ if [ "$osd_skip" -eq 0 ]; then
     done
   else
     if command -v socat >/dev/null 2>&1; then
-      printf '%s\n' "$(printf '%s' "{\"command\":[\"show-text\",\"${osd_text}\",${SHOW_DURATION_MS},0,3]}")" | socat - "$MPV_SOCKET" >/dev/null 2>&1 || true
+      printf '%s\n' "$(printf '%s' "{\"command\":[\"show-text\",\"${osd_text}\",${SHOW_DURATION_MS},3]}")" | socat - "$MPV_SOCKET" >/dev/null 2>&1 || true
       ok=0
     else
       ok=1
