@@ -50,8 +50,8 @@ ExecStopPost=-/bin/bash -c "tr -d '\\r' < /usr/local/bin/dsign-mpv-archive-log |
 # Настройки перезапуска
 Restart=always
 RestartSec=5s
-StartLimitInterval=60s
-StartLimitBurst=3
+StartLimitInterval=300s
+StartLimitBurst=10
 
 [Install]
 WantedBy=multi-user.target

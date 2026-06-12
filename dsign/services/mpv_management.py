@@ -626,67 +626,93 @@ class MPVManager:
 
         Процесс digital-signage работает от пользователя dsign; прямой вызов systemctl
         требует интерактивной политики/polkit. Используем sudo -n при наличии sudoers NOPASSWD.
+
+        Prefer ``dsign-mpv-recover`` (reset-failed + stop + kill stale mpv + start) when
+        plain ``systemctl restart`` fails on hung players or start-limit-hit.
         """
-        try:
-            start_time = time.time()
-            systemctl = shutil.which("systemctl") or "/bin/systemctl"
-            result = subprocess.run(
-                ["sudo", "-n", systemctl, "restart", "dsign-mpv.service"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=25.0,
-            )
-            duration = time.time() - start_time
-            
-            self._log_operation(
-                "SystemdServiceRestart",
-                "success",
-                {
-                    "duration_sec": round(duration, 3),
-                    "output": result.stdout.strip()
-                }
-            )
-            return True
-            
-        except subprocess.TimeoutExpired:
-            self.logger.error(
-                "Systemd restart timeout",
-                extra={"operation": "SystemdServiceRestart"}
-            )
-            return False
-            
-        except subprocess.CalledProcessError as e:
-            msg = (e.stderr or e.stdout or "").strip() or str(e)
-            msg_l = msg.lower()
-            if (
-                "a terminal is required" in msg_l
-                or "password is required" in msg_l
-                or "interactive authentication is required" in msg_l
-            ):
-                msg = (
-                    "sudoers not configured (NOPASSWD) for: sudo systemctl restart dsign-mpv.service"
+        recover_bin = (
+            os.getenv("DSIGN_MPV_RECOVER_BIN") or "/usr/local/bin/dsign-mpv-recover"
+        ).strip()
+        systemctl = shutil.which("systemctl") or "/bin/systemctl"
+        commands: List[List[str]] = []
+        if recover_bin and os.path.isfile(recover_bin):
+            commands.append(["sudo", "-n", recover_bin])
+        commands.append(["sudo", "-n", systemctl, "restart", "dsign-mpv.service"])
+
+        last_error = ""
+        for cmd in commands:
+            try:
+                start_time = time.time()
+                result = subprocess.run(
+                    cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=45.0,
                 )
+                duration = time.time() - start_time
+                self._log_operation(
+                    "SystemdServiceRestart",
+                    "success",
+                    {
+                        "duration_sec": round(duration, 3),
+                        "output": (result.stdout or result.stderr or "").strip(),
+                        "command": " ".join(cmd),
+                    },
+                )
+                return True
+            except subprocess.TimeoutExpired:
+                last_error = "timeout"
+                self.logger.error(
+                    "Systemd restart timeout",
+                    extra={
+                        "operation": "SystemdServiceRestart",
+                        "command": " ".join(cmd),
+                    },
+                )
+            except subprocess.CalledProcessError as e:
+                msg = (e.stderr or e.stdout or "").strip() or str(e)
+                msg_l = msg.lower()
+                if (
+                    "a terminal is required" in msg_l
+                    or "password is required" in msg_l
+                    or "interactive authentication is required" in msg_l
+                ):
+                    msg = (
+                        "sudoers not configured (NOPASSWD) for: "
+                        + " ".join(cmd)
+                    )
+                last_error = msg
+                self.logger.error(
+                    "Systemd restart failed",
+                    extra={
+                        "operation": "SystemdServiceRestart",
+                        "error": str(e),
+                        "stderr": msg,
+                        "command": " ".join(cmd),
+                    },
+                )
+            except Exception as e:
+                last_error = str(e)
+                self.logger.error(
+                    "Systemd restart unexpected error",
+                    extra={
+                        "operation": "SystemdServiceRestart",
+                        "error": str(e),
+                        "type": type(e).__name__,
+                        "command": " ".join(cmd),
+                    },
+                )
+
+        if last_error:
             self.logger.error(
-                "Systemd restart failed",
+                "All MPV systemd recovery commands failed",
                 extra={
                     "operation": "SystemdServiceRestart",
-                    "error": str(e),
-                    "stderr": msg,
-                }
+                    "last_error": last_error,
+                },
             )
-            return False
-            
-        except Exception as e:
-            self.logger.error(
-                "Systemd restart unexpected error",
-                extra={
-                    "operation": "SystemdServiceRestart",
-                    "error": str(e),
-                    "type": type(e).__name__
-                }
-            )
-            return False
+        return False
 
     def _check_mpv_socket(self, timeout=5) -> bool:
         """Проверка доступности сокета MPV"""
@@ -902,6 +928,11 @@ class MPVManager:
                     out[pname] = norm.get("data")
                 return out
             except (ConnectionRefusedError, FileNotFoundError):
+                if self._playback_session_active:
+                    self._note_playback_ipc_failure(
+                        ConnectionRefusedError("socket missing during batch snapshot")
+                    )
+                    return {p: None for p in ordered}
                 self.logger.warning(
                     "MPV socket not available during batch snapshot, restarting mpv…",
                     extra={
