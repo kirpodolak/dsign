@@ -34,9 +34,32 @@ fi
 
 rm -f "$SOCK" 2>/dev/null || true
 
+# DRM/vo=drm needs the graphics VT; hung recoveries often leave tty1 busy.
+if command -v chvt >/dev/null 2>&1; then
+  log "switching to vt1 for DRM"
+  chvt 1 2>/dev/null || true
+  sleep 0.5
+fi
+
+# Release stale DRM master (Intel vo=drm) if something still holds card0.
+if command -v fuser >/dev/null 2>&1; then
+  for dri in /dev/dri/card*; do
+    [ -e "$dri" ] || continue
+    if fuser -s "$dri" 2>/dev/null; then
+      log "releasing $dri"
+      fuser -k "$dri" 2>/dev/null || true
+      sleep 1
+    fi
+  done
+fi
+
 log "starting $UNIT"
 if ! "$SYSTEMCTL" start "$UNIT"; then
   log "start failed"
+  if [ -r /var/lib/dsign/mpv/mpv.log ]; then
+    log "last mpv.log lines:"
+    tail -n 15 /var/lib/dsign/mpv/mpv.log >&2 || true
+  fi
   exit 1
 fi
 
@@ -55,4 +78,8 @@ if "$SYSTEMCTL" is-active --quiet "$UNIT" 2>/dev/null; then
 fi
 
 log "unit did not become active"
+if [ -r /var/lib/dsign/mpv/mpv.log ]; then
+  log "last mpv.log lines:"
+  tail -n 15 /var/lib/dsign/mpv/mpv.log >&2 || true
+fi
 exit 1
