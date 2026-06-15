@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Hard recovery when `systemctl restart dsign-mpv.service` fails (hung mpv, start-limit-hit, stale TTY).
+set -u
+
+UNIT="${DSIGN_MPV_UNIT:-dsign-mpv.service}"
+SOCK="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
+SYSTEMCTL="${SYSTEMCTL:-/usr/bin/systemctl}"
+
+if [ ! -x "$SYSTEMCTL" ] && [ -x /bin/systemctl ]; then
+  SYSTEMCTL=/bin/systemctl
+fi
+
+log() {
+  echo "dsign-mpv-recover: $*" >&2
+}
+
+"$SYSTEMCTL" reset-failed "$UNIT" 2>/dev/null || true
+
+if "$SYSTEMCTL" is-active --quiet "$UNIT" 2>/dev/null; then
+  log "stopping $UNIT"
+  "$SYSTEMCTL" stop "$UNIT" 2>/dev/null || true
+  sleep 1
+fi
+
+if pgrep -x mpv >/dev/null 2>&1; then
+  log "terminating stale mpv"
+  pkill -TERM -x mpv 2>/dev/null || true
+  sleep 2
+  if pgrep -x mpv >/dev/null 2>&1; then
+    pkill -KILL -x mpv 2>/dev/null || true
+    sleep 1
+  fi
+fi
+
+rm -f "$SOCK" 2>/dev/null || true
+
+# DRM/vo=drm needs the graphics VT; hung recoveries often leave tty1 busy.
+if command -v chvt >/dev/null 2>&1; then
+  log "switching to vt1 for DRM"
+  chvt 1 2>/dev/null || true
+  sleep 0.5
+fi
+
+# Release stale DRM master (Intel vo=drm) if something still holds card0.
+if command -v fuser >/dev/null 2>&1; then
+  for dri in /dev/dri/card*; do
+    [ -e "$dri" ] || continue
+    if fuser -s "$dri" 2>/dev/null; then
+      log "releasing $dri"
+      fuser -k "$dri" 2>/dev/null || true
+      sleep 1
+    fi
+  done
+fi
+
+log "starting $UNIT"
+if ! "$SYSTEMCTL" start "$UNIT"; then
+  log "start failed"
+  if [ -r /var/lib/dsign/mpv/mpv.log ]; then
+    log "last mpv.log lines:"
+    tail -n 15 /var/lib/dsign/mpv/mpv.log >&2 || true
+  fi
+  exit 1
+fi
+
+deadline=$((SECONDS + 20))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  if "$SYSTEMCTL" is-active --quiet "$UNIT" 2>/dev/null && [ -S "$SOCK" ]; then
+    log "ok (unit active, socket present)"
+    exit 0
+  fi
+  sleep 0.5
+done
+
+if "$SYSTEMCTL" is-active --quiet "$UNIT" 2>/dev/null; then
+  log "unit active (socket may still be opening)"
+  exit 0
+fi
+
+log "unit did not become active"
+if [ -r /var/lib/dsign/mpv/mpv.log ]; then
+  log "last mpv.log lines:"
+  tail -n 15 /var/lib/dsign/mpv/mpv.log >&2 || true
+fi
+exit 1
