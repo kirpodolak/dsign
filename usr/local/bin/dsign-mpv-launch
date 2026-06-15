@@ -27,6 +27,12 @@ HLS_SEG_TIMEOUT="${DSIGN_MPV_HLS_SEGMENT_TIMEOUT_SEC:-15}"
 DEMUXER_MAX="${DSIGN_MPV_DEMUXER_MAX_BYTES:-64MiB}"
 CACHE_SECS="${DSIGN_MPV_CACHE_SECS:-20}"
 
+_mpv_listed_option() {
+  # Avoid fatal exit on older distro mpv builds missing newer flags.
+  local opt="$1"
+  /usr/bin/mpv -h 2>&1 | grep -q -- "--${opt}"
+}
+
 BASE=(
   --idle=yes
   --no-terminal
@@ -39,11 +45,16 @@ BASE=(
   --script-opts=ytdl_hook-ytdl_path=/usr/bin/yt-dlp
   --log-file="$LOG"
   --network-timeout="$NET_TIMEOUT"
-  --hls-segment-timeout="$HLS_SEG_TIMEOUT"
   --demuxer-max-bytes="$DEMUXER_MAX"
   --cache=yes
   --cache-secs="$CACHE_SECS"
 )
+
+if _mpv_listed_option "hls-segment-timeout"; then
+  BASE+=(--hls-segment-timeout="$HLS_SEG_TIMEOUT")
+else
+  echo "dsign-mpv-launch: mpv has no --hls-segment-timeout; using lavf timeouts from playback code only" >&2
+fi
 
 signboard_generic() {
   exec /usr/bin/mpv "${BASE[@]}" \
