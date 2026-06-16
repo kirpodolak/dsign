@@ -1,0 +1,97 @@
+#!/bin/bash
+# MPV launcher for labwc/Wayland (vo=gpu). DRM fallback: dsign-mpv-launch.
+set -euo pipefail
+
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+PROFILE="${DSIGN_MPV_PROFILE:-intel-balanced-wayland}"
+CFG="${DSIGN_MPV_CONFIG_DIR:-/var/lib/dsign/mpv-minimal}"
+SOCK="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
+LOG="${DSIGN_MPV_LOG_FILE:-/var/lib/dsign/mpv/mpv.log}"
+NET_TIMEOUT="${DSIGN_MPV_NETWORK_TIMEOUT_SEC:-15}"
+HLS_SEG_TIMEOUT="${DSIGN_MPV_HLS_SEGMENT_TIMEOUT_SEC:-15}"
+DEMUXER_MAX="${DSIGN_MPV_DEMUXER_MAX_BYTES:-64MiB}"
+CACHE_SECS="${DSIGN_MPV_CACHE_SECS:-20}"
+AO="${DSIGN_MPV_AO:-alsa}"
+
+_mpv_listed_option() {
+  local opt="$1"
+  /usr/bin/mpv -h 2>&1 | grep -q -- "--${opt}"
+}
+
+_wait_wayland() {
+  local sock="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
+  local i
+  for i in $(seq 1 60); do
+    if [ -S "$sock" ]; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "dsign-mpv-launch-wayland: wayland socket not ready: $sock" >&2
+  return 1
+}
+
+_wait_wayland
+
+BASE=(
+  --idle=yes
+  --no-terminal
+  --config-dir="$CFG"
+  --no-osc
+  --no-input-default-bindings
+  --input-ipc-server="$SOCK"
+  --fullscreen
+  --demuxer-lavf-o=safe=0
+  --script-opts=ytdl_hook-ytdl_path=/usr/bin/yt-dlp
+  --log-file="$LOG"
+  --network-timeout="$NET_TIMEOUT"
+  --demuxer-max-bytes="$DEMUXER_MAX"
+  --cache=yes
+  --cache-secs="$CACHE_SECS"
+  --vo=gpu
+  --gpu-context=wayland
+  --hwdec=vaapi
+  --video-sync=display-vdrop
+  --vd-lavc-dr=no
+  --ao="$AO"
+  --audio-device=auto
+  --scale=bilinear
+  --dscale=bilinear
+  --cscale=bilinear
+)
+
+if _mpv_listed_option "hls-segment-timeout"; then
+  BASE+=(--hls-segment-timeout="$HLS_SEG_TIMEOUT")
+fi
+
+intel_with_include() {
+  local name="$1"
+  shift
+  local inc="$CFG/profiles/${name}.conf"
+  if [[ ! -f "$inc" ]]; then
+    echo "dsign-mpv-launch-wayland: missing profile $inc" >&2
+    exit 1
+  fi
+  exec /usr/bin/mpv "${BASE[@]}" --include="$inc" "$@"
+}
+
+case "$PROFILE" in
+  signboard-wayland|signboard)
+    exec /usr/bin/mpv "${BASE[@]}" "$@"
+    ;;
+  intel-balanced-wayland|intel-balanced)
+    intel_with_include "intel-iris-xe-balanced-wayland" "$@"
+    ;;
+  intel-balanced-vulkan-wayland|intel-balanced-vulkan)
+    intel_with_include "intel-iris-xe-balanced-vulkan" "$@"
+    ;;
+  intel-high-quality-wayland|intel-high-quality)
+    intel_with_include "intel-iris-xe-high-quality" "$@"
+    ;;
+  *)
+    echo "dsign-mpv-launch-wayland: unknown profile '$PROFILE'" >&2
+    exit 1
+    ;;
+esac
