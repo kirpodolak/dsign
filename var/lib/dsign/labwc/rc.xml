@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<labwc_config>
+  <core>
+    <gap>0</gap>
+  </core>
+  <windowRules>
+    <windowRule identifier="mpv" serverDecoration="no" skipTaskbar="yes"/>
+    <windowRule identifier="imv" serverDecoration="no" skipTaskbar="yes"/>
+    <windowRule title=".*mpv.*" serverDecoration="no" skipTaskbar="yes"/>
+    <windowRule title=".*imv.*" serverDecoration="no" skipTaskbar="yes"/>
+  </windowRules>
+  <keyboard>
+    <keybind key="A-F4" onRelease="no" action="None"/>
+    <keybind key="W-Left" onRelease="no" action="None"/>
+    <keybind key="W-Right" onRelease="no" action="None"/>
+  </keyboard>
+</labwc_config>
