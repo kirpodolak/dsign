@@ -576,7 +576,7 @@ class MPVManager:
         """Проверка статуса systemd сервиса"""
         try:
             result = subprocess.run(
-                ["systemctl", "is-active", "dsign-mpv.service"],
+                ["systemctl", "is-active", PlaybackConstants.mpv_systemd_unit()],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -637,7 +637,8 @@ class MPVManager:
         commands: List[List[str]] = []
         if recover_bin and os.path.isfile(recover_bin):
             commands.append(["sudo", "-n", recover_bin])
-        commands.append(["sudo", "-n", systemctl, "restart", "dsign-mpv.service"])
+        unit = PlaybackConstants.mpv_systemd_unit()
+        commands.append(["sudo", "-n", systemctl, "restart", unit])
 
         last_error = ""
         for cmd in commands:
@@ -1377,7 +1378,7 @@ class MPVManager:
                     extra={
                         "operation": "mpv_init",
                         "status": "success",
-                        "backend": "DRM",
+                        "backend": PlaybackConstants.mpv_backend_label(),
                         "mpv_version": str(version)[:80],
                         "duration_sec": round(time.time() - start_time, 3),
                     },
