@@ -27,7 +27,13 @@ fi
 # -f fullscreen; imv stays running and shows the logo layer.
 IMV_BIN="${DSIGN_IMV_BIN:-}"
 if [ -z "$IMV_BIN" ]; then
-  IMV_BIN="$(command -v imv 2>/dev/null || command -v imv-wayland 2>/dev/null || true)"
+  for _cand in imv-wayland imv; do
+    _p="$(command -v "$_cand" 2>/dev/null || true)"
+    if [ -n "$_p" ] && [ -x "$_p" ]; then
+      IMV_BIN="$_p"
+      break
+    fi
+  done
 fi
 if [ -z "$IMV_BIN" ] || [ ! -x "$IMV_BIN" ]; then
   echo "dsign-logo-launch: imv not found (install: apt install imv; try: dpkg -L imv | grep bin)" >&2
