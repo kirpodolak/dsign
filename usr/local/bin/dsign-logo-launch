@@ -1,0 +1,36 @@
+#!/bin/bash
+# Idle logo viewer for labwc stack (imv fullscreen, below MPV).
+set -euo pipefail
+
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+LOGO="${DSIGN_LOGO_PATH:-/var/lib/dsign/media/idle_logo.jpg}"
+
+if [ ! -r "$LOGO" ]; then
+  echo "dsign-logo-launch: logo not readable: $LOGO" >&2
+  exit 1
+fi
+
+sock="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
+for _ in $(seq 1 90); do
+  if [ -S "$sock" ]; then
+    break
+  fi
+  sleep 0.5
+done
+
+if [ ! -S "$sock" ]; then
+  echo "dsign-logo-launch: wayland socket missing: $sock" >&2
+  exit 1
+fi
+
+# -f fullscreen; imv stays running and shows the logo layer.
+IMV_BIN="${DSIGN_IMV_BIN:-}"
+if [ -z "$IMV_BIN" ]; then
+  IMV_BIN="$(command -v imv 2>/dev/null || command -v imv-wayland 2>/dev/null || true)"
+fi
+if [ -z "$IMV_BIN" ] || [ ! -x "$IMV_BIN" ]; then
+  echo "dsign-logo-launch: imv not found (install: apt install imv; try: dpkg -L imv | grep bin)" >&2
+  exit 127
+fi
+exec "$IMV_BIN" -f "$LOGO"
