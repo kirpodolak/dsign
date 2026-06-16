@@ -1,7 +1,7 @@
 [Unit]
 Description=Digital Signage Controller
-After=network.target dsign-mpv.service dsign-network-assistant.service
-Wants=dsign-mpv.service
+After=network.target dsign-compositor.service dsign-mpv-wayland.service dsign-network-assistant.service
+Wants=dsign-compositor.service dsign-mpv-wayland.service dsign-logo.service
 # Do not Wants= network-assistant here: it is Type=oneshot (can block ~120s). MPV unit already Wants it before signage.
 StartLimitIntervalSec=60
 StartLimitBurst=5
