@@ -184,12 +184,10 @@ if [ -f "$PROJECT_DIR/etc/dsign/wayland.env.example" ] && [ ! -f "$DB_DIR/config
     for _c in /dev/dri/card*; do
         [ -e "$_c" ] && _dri_card="$_c" && break
     done
-    {
-        cat "$PROJECT_DIR/etc/dsign/wayland.env.example"
-        echo "WLR_DRM_DEVICES=${_dri_card:-/dev/dri/card0}"
-    } > "$DB_DIR/config/wayland.env"
+    _dri_card="${_dri_card:-/dev/dri/card0}"
+    install -m 0644 "$PROJECT_DIR/etc/dsign/wayland.env.example" "$DB_DIR/config/wayland.env"
+    sed -i "s|^WLR_DRM_DEVICES=.*|WLR_DRM_DEVICES=${_dri_card}|" "$DB_DIR/config/wayland.env"
     chown "$DSIGN_USER:$DSIGN_USER" "$DB_DIR/config/wayland.env"
-    chmod 0644 "$DB_DIR/config/wayland.env"
 fi
 if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
     install -d /etc/systemd/system/digital-signage.service.d
