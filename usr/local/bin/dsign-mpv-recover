@@ -3,6 +3,14 @@
 set -u
 
 UNIT="${DSIGN_MPV_UNIT:-dsign-mpv.service}"
+if [ -z "${DSIGN_MPV_UNIT:-}" ]; then
+  case "${DSIGN_DISPLAY_BACKEND:-}" in
+    wayland|labwc|wl)
+      UNIT="dsign-mpv-wayland.service"
+      ;;
+  esac
+fi
+
 SOCK="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
 SYSTEMCTL="${SYSTEMCTL:-/usr/bin/systemctl}"
 
@@ -34,15 +42,20 @@ fi
 
 rm -f "$SOCK" 2>/dev/null || true
 
+WAYLAND_MODE=0
+case "${DSIGN_DISPLAY_BACKEND:-}" in
+  wayland|labwc|wl) WAYLAND_MODE=1 ;;
+esac
+
 # DRM/vo=drm needs the graphics VT; hung recoveries often leave tty1 busy.
-if command -v chvt >/dev/null 2>&1; then
+if [ "$WAYLAND_MODE" -eq 0 ] && command -v chvt >/dev/null 2>&1; then
   log "switching to vt1 for DRM"
   chvt 1 2>/dev/null || true
   sleep 0.5
 fi
 
 # Release stale DRM master (Intel vo=drm) if something still holds card0.
-if command -v fuser >/dev/null 2>&1; then
+if [ "$WAYLAND_MODE" -eq 0 ] && command -v fuser >/dev/null 2>&1; then
   for dri in /dev/dri/card*; do
     [ -e "$dri" ] || continue
     if fuser -s "$dri" 2>/dev/null; then
