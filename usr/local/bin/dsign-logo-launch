@@ -2,7 +2,7 @@
 # Idle logo viewer for labwc stack (imv fullscreen, below MPV).
 set -euo pipefail
 
-export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 LOGO="${DSIGN_LOGO_PATH:-/var/lib/dsign/media/idle_logo.jpg}"
 
@@ -25,4 +25,12 @@ if [ ! -S "$sock" ]; then
 fi
 
 # -f fullscreen; imv stays running and shows the logo layer.
-exec /usr/bin/imv -f "$LOGO"
+IMV_BIN="${DSIGN_IMV_BIN:-}"
+if [ -z "$IMV_BIN" ]; then
+  IMV_BIN="$(command -v imv 2>/dev/null || command -v imv-wayland 2>/dev/null || true)"
+fi
+if [ -z "$IMV_BIN" ] || [ ! -x "$IMV_BIN" ]; then
+  echo "dsign-logo-launch: imv not found (install: apt install imv; try: dpkg -L imv | grep bin)" >&2
+  exit 127
+fi
+exec "$IMV_BIN" -f "$LOGO"

@@ -2,7 +2,7 @@
 # MPV launcher for labwc/Wayland (vo=gpu). DRM fallback: dsign-mpv-launch.
 set -euo pipefail
 
-export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 PROFILE="${DSIGN_MPV_PROFILE:-intel-balanced-wayland}"
@@ -82,7 +82,7 @@ case "$PROFILE" in
     exec /usr/bin/mpv "${BASE[@]}" "$@"
     ;;
   intel-balanced-wayland|intel-balanced)
-    intel_with_include "intel-iris-xe-balanced" "$@"
+    intel_with_include "intel-iris-xe-balanced-wayland" "$@"
     ;;
   intel-balanced-vulkan-wayland|intel-balanced-vulkan)
     intel_with_include "intel-iris-xe-balanced-vulkan" "$@"
