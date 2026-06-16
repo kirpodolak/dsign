@@ -1,0 +1,20 @@
+[Unit]
+Description=Idle logo viewer for Digital Signage (imv on labwc)
+After=dsign-compositor.service
+Requires=dsign-compositor.service
+BindsTo=dsign-compositor.service
+
+[Service]
+Type=simple
+User=dsign
+Group=video
+SupplementaryGroups=video render
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DSIGN_LOGO_PATH=/var/lib/dsign/media/idle_logo.jpg
+ExecStart=/usr/local/bin/dsign-logo-launch
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
