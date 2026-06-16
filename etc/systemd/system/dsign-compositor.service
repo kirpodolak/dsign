@@ -1,0 +1,30 @@
+[Unit]
+Description=Wayland compositor for Digital Signage (labwc)
+Documentation=file:/home/dsign/dsign/etc/dsign/labwc/rc.xml
+Before=dsign-logo.service dsign-mpv-wayland.service dsign-show-startup-ip.service
+After=network.target seatd.service
+Wants=seatd.service
+
+[Service]
+Type=simple
+User=dsign
+Group=video
+SupplementaryGroups=tty audio input render
+EnvironmentFile=-/var/lib/dsign/config/wayland.env
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=WLR_BACKENDS=drm
+Environment=LIBSEAT_BACKEND=seatd
+ExecStartPre=/bin/mkdir -p /run/user/1000 /var/lib/dsign/labwc
+ExecStartPre=/bin/chown dsign:dsign /run/user/1000
+ExecStartPre=/bin/chmod 700 /run/user/1000
+ExecStartPre=/bin/chown -R dsign:dsign /var/lib/dsign/labwc
+ExecStart=/usr/bin/labwc -c /var/lib/dsign/labwc
+ExecStartPost=-/usr/local/bin/dsign-labwc-autostart
+Restart=always
+RestartSec=2s
+StartLimitInterval=300s
+StartLimitBurst=10
+
+[Install]
+WantedBy=multi-user.target
