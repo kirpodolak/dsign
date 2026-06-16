@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from flask import current_app
 
 from .playback_constants import PlaybackConstants
+from .logo_viewer import LogoViewer
 
 class LogoManager:
     def __init__(self, logger, socketio, upload_folder, db_session, mpv_manager):
@@ -16,6 +17,7 @@ class LogoManager:
         self.db_session = db_session
         self._mpv_manager = mpv_manager
         self._last_playback_state = {}
+        self._logo_viewer = LogoViewer(logger=logger)
 
     def _initialize_default_logo(self):
         """Initialize default logo in background"""
@@ -44,8 +46,10 @@ class LogoManager:
     def display_playlist_transition(self) -> bool:
         """
         Short placeholder between playlist items (streams): idle logo or black frame.
-        Avoids visible TTY/console flash when the next loadfile is still opening.
+        Wayland/labwc: compositor keeps imv logo underneath; no MPV placeholder needed.
         """
+        if PlaybackConstants.is_wayland_backend():
+            return True
         mode = self._transition_mode()
         if mode == "none":
             return True
@@ -71,12 +75,11 @@ class LogoManager:
 
     def show_between_items_frame(self) -> None:
         """
-        Best-effort black frame between playlist items.
-
-        Must not block the slideshow loop: one short loadfile attempt only.
-        Never load idle_logo.jpg here — mpv busy with ytdl/decode often ignores
-        logo loadfile for ~24s (3× retry), stalling the next item.
+        Best-effort black frame between playlist items (DRM mode only).
+        Wayland: imv logo stays visible under MPV; no lavf black flash.
         """
+        if PlaybackConstants.is_wayland_backend():
+            return
         black_src = (os.getenv("DSIGN_TRANSITION_BLACK_SRC") or "").strip()
         if not black_src:
             black_src = "lavfi://color=c=black:s=1920x1080:r=24"
@@ -119,20 +122,20 @@ class LogoManager:
         return True
 
     def display_idle_logo(self) -> bool:
+        if PlaybackConstants.is_wayland_backend():
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["stop"]},
+                    timeout=3.0,
+                    max_attempts=1,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Wayland idle: MPV stop failed (logo still visible via imv)",
+                    extra={"error": str(exc)},
+                )
+            return True
         return self._load_transition_logo(loop=True)
-
-    def _validate_logo_file(self) -> Path:
-        """Проверка доступности файла логотипа"""
-        logo_path = self.upload_folder / PlaybackConstants.DEFAULT_LOGO
-        
-        if not logo_path.exists():
-            self._handle_missing_logo(logo_path)
-
-        if not os.access(logo_path, os.R_OK):
-            self._fix_logo_permissions(logo_path)
-
-        return logo_path
-
 
     def _send_ipc_command(self, command: Dict, timeout: float = 2.0) -> bool:
         """Safe IPC command sending with retries and timeout"""
@@ -252,11 +255,13 @@ class LogoManager:
         return False
             
     def restart_idle_logo(self, upload_folder=None, idle_logo=None, rotate: Optional[int] = None):
-        """Обновляет логотип (best-effort).
-
-        На некоторых сборках mpv свойства вроде `filename` могут быть `property unavailable`,
-        поэтому не делаем "жесткую" проверку через get_property, а считаем успехом успешный loadfile.
-        """
+        """Refresh idle logo. Wayland: restart imv; DRM: loadfile in MPV."""
+        if PlaybackConstants.is_wayland_backend():
+            self._initialize_default_logo()
+            if self._logo_viewer.reload():
+                return True
+            self.logger.warning("Wayland logo viewer reload failed; imv may still show old file")
+            return True
         try:
             # Установка значений по умолчанию из конфига
             upload_folder = upload_folder or current_app.config['UPLOAD_FOLDER']

@@ -9,6 +9,8 @@ fi
 # Конфигурация
 DSIGN_USER="dsign"
 WWW_USER="www-data"
+# drm (default) | wayland — Wayland uses labwc + imv + dsign-mpv-wayland.service
+DSIGN_DISPLAY_BACKEND="${DSIGN_DISPLAY_BACKEND:-drm}"
 PROJECT_DIR="/home/dsign/dsign"
 VENV_DIR="/home/dsign/venv"
 CONFIG_DIR="/home/dsign/config"
@@ -26,17 +28,24 @@ fi
 usermod -a -G "$DSIGN_USER" "$WWW_USER"
 usermod -a -G "$WWW_USER" "$DSIGN_USER"
 usermod -a -G video "$DSIGN_USER"  # Для доступа к /dev/dri
+usermod -a -G input "$DSIGN_USER" 2>/dev/null || true  # seatd/labwc input devices
 
 # Установка зависимостей
 apt-get update
-apt-get install -y \
-    python3-pip python3-venv python3-dev \
-    sqlite3 libsqlite3-dev \
-    mpv ffmpeg yt-dlp \
-    socat \
-    nginx git \
-    acl libdrm-dev \
-    xauth  # Для X11 авторизации
+BASE_PACKAGES=(
+    python3-pip python3-venv python3-dev
+    sqlite3 libsqlite3-dev
+    mpv ffmpeg yt-dlp
+    socat
+    nginx git
+    acl libdrm-dev
+    xauth
+)
+WAYLAND_PACKAGES=()
+if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
+    WAYLAND_PACKAGES=(labwc imv seatd wayland-protocols)
+fi
+apt-get install -y "${BASE_PACKAGES[@]}" "${WAYLAND_PACKAGES[@]}"
 
 # Создание структуры директорий
 mkdir -p "$PROJECT_DIR" "$VENV_DIR" "$CONFIG_DIR" "$LOG_DIR" "$UPLOAD_DIR" "$DB_DIR" "$X11_USER_DIR"
@@ -149,7 +158,56 @@ install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-launch" /usr/local/bin/dsi
 sed -i 's/\r$//' /usr/local/bin/dsign-mpv-launch
 chown root:root /usr/local/bin/dsign-mpv-launch
 
-# MPV Player Service
+# Wayland/labwc stack scripts (optional; used when DSIGN_DISPLAY_BACKEND=wayland)
+for _wl_script in dsign-mpv-launch-wayland dsign-labwc-autostart dsign-logo-launch dsign-mpv-recover; do
+    if [ -f "$PROJECT_DIR/usr/local/bin/$_wl_script" ]; then
+        install -m 0755 "$PROJECT_DIR/usr/local/bin/$_wl_script" "/usr/local/bin/$_wl_script"
+        sed -i 's/\r$//' "/usr/local/bin/$_wl_script"
+        chown root:root "/usr/local/bin/$_wl_script"
+    fi
+done
+
+# Wayland systemd units + labwc config (installed always; enable only in wayland mode)
+for _wl_unit in dsign-compositor.service dsign-logo.service dsign-mpv-wayland.service; do
+    if [ -f "$PROJECT_DIR/etc/systemd/system/$_wl_unit" ]; then
+        install -m 0644 "$PROJECT_DIR/etc/systemd/system/$_wl_unit" "/etc/systemd/system/$_wl_unit"
+    fi
+done
+mkdir -p "$DB_DIR/labwc"
+if [ -f "$PROJECT_DIR/etc/dsign/labwc/rc.xml" ]; then
+    install -m 0644 "$PROJECT_DIR/etc/dsign/labwc/rc.xml" "$DB_DIR/labwc/rc.xml"
+fi
+chown -R "$DSIGN_USER:$DSIGN_USER" "$DB_DIR/labwc"
+mkdir -p "$DB_DIR/config"
+if [ -f "$PROJECT_DIR/etc/dsign/wayland.env.example" ] && [ ! -f "$DB_DIR/config/wayland.env" ]; then
+    _dri_card=""
+    for _c in /dev/dri/card*; do
+        [ -e "$_c" ] && _dri_card="$_c" && break
+    done
+    {
+        cat "$PROJECT_DIR/etc/dsign/wayland.env.example"
+        echo "WLR_DRM_DEVICES=${_dri_card:-/dev/dri/card0}"
+    } > "$DB_DIR/config/wayland.env"
+    chown "$DSIGN_USER:$DSIGN_USER" "$DB_DIR/config/wayland.env"
+    chmod 0644 "$DB_DIR/config/wayland.env"
+fi
+if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
+    install -d /etc/systemd/system/digital-signage.service.d
+    if [ -f "$PROJECT_DIR/etc/systemd/system/digital-signage.service.d/wayland.conf" ]; then
+        install -m 0644 "$PROJECT_DIR/etc/systemd/system/digital-signage.service.d/wayland.conf" \
+            /etc/systemd/system/digital-signage.service.d/wayland.conf
+    fi
+fi
+if [ -f "$PROJECT_DIR/etc/sudoers.d/dsign-systemctl" ]; then
+    install -m 0440 "$PROJECT_DIR/etc/sudoers.d/dsign-systemctl" /etc/sudoers.d/dsign-systemctl
+    visudo -cf /etc/sudoers.d/dsign-systemctl 2>/dev/null || true
+fi
+if [ -f "$PROJECT_DIR/etc/sudoers.d/dsign-mpv-restart" ]; then
+    install -m 0440 "$PROJECT_DIR/etc/sudoers.d/dsign-mpv-restart" /etc/sudoers.d/dsign-mpv-restart
+    visudo -cf /etc/sudoers.d/dsign-mpv-restart 2>/dev/null || true
+fi
+
+# MPV Player Service (DRM / vo=drm — default stack)
 cat > /etc/systemd/system/dsign-mpv.service <<EOL
 [Unit]
 Description=Digital Signage MPV Player
@@ -251,17 +309,30 @@ EOL
 
 # Настройка прав на DRI устройства
 cat > /etc/udev/rules.d/99-dsign.rules <<EOL
-KERNEL=="card0", GROUP="video", MODE="0660"
-KERNEL=="renderD128", GROUP="video", MODE="0660"
+KERNEL=="card[0-9]*", GROUP="video", MODE="0660"
+KERNEL=="renderD*", GROUP="video", MODE="0660"
 EOL
 
 udevadm control --reload-rules
 udevadm trigger
 
 systemctl daemon-reload
-systemctl enable digital-signage.service dsign-mpv.service dsign-network-assistant.service
-systemctl disable dsign-show-startup-ip.service || true
-systemctl start dsign-network-assistant.service dsign-mpv.service digital-signage.service
+if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
+    systemctl enable seatd.service 2>/dev/null || true
+    systemctl enable dsign-compositor.service dsign-logo.service dsign-mpv-wayland.service
+    systemctl disable dsign-mpv.service 2>/dev/null || true
+    systemctl enable digital-signage.service dsign-network-assistant.service
+    systemctl disable dsign-show-startup-ip.service || true
+    systemctl start seatd.service 2>/dev/null || true
+    systemctl start dsign-compositor.service dsign-logo.service dsign-mpv-wayland.service
+    systemctl start dsign-network-assistant.service digital-signage.service
+else
+    rm -f /etc/systemd/system/digital-signage.service.d/wayland.conf 2>/dev/null || true
+    systemctl daemon-reload
+    systemctl enable digital-signage.service dsign-mpv.service dsign-network-assistant.service
+    systemctl disable dsign-show-startup-ip.service || true
+    systemctl start dsign-network-assistant.service dsign-mpv.service digital-signage.service
+fi
 
 # Настройка Nginx
 cat > /etc/nginx/sites-available/dsign <<EOL
@@ -296,5 +367,12 @@ echo "База данных: $DB_FILE"
 echo "Администратор: admin/admin123"
 echo "Сервисы:"
 echo "  Веб-интерфейс: systemctl status digital-signage.service"
-echo "  MPV плеер:     systemctl status dsign-mpv.service"
+if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
+    echo "  Compositor:    systemctl status dsign-compositor.service"
+    echo "  Logo (imv):    systemctl status dsign-logo.service"
+    echo "  MPV (Wayland): systemctl status dsign-mpv-wayland.service"
+else
+    echo "  MPV плеер:     systemctl status dsign-mpv.service"
+    echo "  Wayland pilot: DSIGN_DISPLAY_BACKEND=wayland $0"
+fi
 echo "----------------------------------------"

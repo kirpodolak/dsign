@@ -862,6 +862,8 @@ class PlaylistManager:
 
     def _show_between_items_placeholder(self, *, network_next: bool = False) -> None:
         """Hide TTY/console between playlist items while the next loadfile is prepared."""
+        if PlaybackConstants.is_wayland_backend():
+            return
         if not network_next:
             # Local→local: replace loadfile is enough; logo loadfile blocks IPC when mpv is busy.
             return

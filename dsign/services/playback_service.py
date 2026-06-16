@@ -14,6 +14,7 @@ from .logo_management import LogoManager
 from .profile_management import ProfileManager
 from .playlist_management import PlaylistManager
 from .playback_constants import PlaybackConstants
+from .wayland_manager import WaylandManager
 from .logger import ServiceLogger
 
 class PlaybackService:
@@ -61,6 +62,7 @@ class PlaybackService:
         )
         
         self._recover_lock = Lock()
+        self._wayland_manager = WaylandManager(logger=self.logger)
         self._last_socket_identity: Optional[tuple] = None
         self._app = None
         self._app_ready = Event()
@@ -176,6 +178,11 @@ class PlaybackService:
             try:
                 delay = min(initial_delay * (2 ** attempt), 30)
                 
+                if PlaybackConstants.is_wayland_backend():
+                    if not self._wayland_manager.wait_for_compositor(timeout_sec=45.0):
+                        raise RuntimeError("Wayland compositor socket not ready")
+                    self._wayland_manager.log_status()
+
                 if not self._mpv_manager.wait_for_ipc_socket_at_startup():
                     raise RuntimeError(
                         "MPV IPC socket not available after startup wait "
@@ -633,6 +640,12 @@ class PlaybackService:
             playlist_id = self._resolve_playlist_id_for_recovery()
             if playlist_id is None:
                 return
+            if PlaybackConstants.is_wayland_backend():
+                if not self._wayland_manager.wait_for_compositor(timeout_sec=60.0):
+                    self._log_warning(
+                        "Compositor not ready for boot resume; continuing",
+                        extra={"action": "boot_resume"},
+                    )
             self._wait_before_boot_playlist()
             try:
                 settle = float((os.getenv("DSIGN_MPV_POST_INIT_SETTLE_SEC") or "3").strip())
@@ -656,49 +669,58 @@ class PlaybackService:
             )
 
     def _transition_to_idle(self):
-        """Transition to idle state with logo"""
+        """Transition to idle state with logo (Wayland: imv underneath; DRM: MPV loadfile)."""
         max_attempts = 2
         delay = 1.0
+        wayland = PlaybackConstants.is_wayland_backend()
 
         for attempt in range(max_attempts):
             try:
                 if self._logo_manager.display_idle_logo():
                     self._log_info(
-                        "Successfully transitioned to idle state", 
+                        "Successfully transitioned to idle state",
                         extra={
-                            'action': 'transition_to_idle',
-                            'attempt': attempt+1
-                        }
+                            "action": "transition_to_idle",
+                            "attempt": attempt + 1,
+                            "backend": PlaybackConstants.mpv_backend_label(),
+                        },
                     )
                     return
-                    
+
                 self._log_warning(
-                    "Idle logo attempt failed", 
+                    "Idle logo attempt failed",
                     extra={
-                        'attempt': attempt+1, 
-                        'action': 'transition_to_idle'
-                    }
+                        "attempt": attempt + 1,
+                        "action": "transition_to_idle",
+                    },
                 )
             except Exception as e:
                 self._log_error(
-                    "Idle transition error", 
+                    "Idle transition error",
                     extra={
-                        'attempt': attempt+1, 
-                        'action': 'transition_to_idle',
-                        'error': str(e),
-                        'type': type(e).__name__
-                    }
+                        "attempt": attempt + 1,
+                        "action": "transition_to_idle",
+                        "error": str(e),
+                        "type": type(e).__name__,
+                    },
                 )
-        
+
             time.sleep(delay)
-    
+
+        if wayland:
+            self._log_warning(
+                "MPV stop failed but logo is visible via compositor",
+                extra={"action": "transition_to_idle", "status": "degraded"},
+            )
+            return
+
         self._log_error(
-            "Could not establish idle state", 
+            "Could not establish idle state",
             extra={
-                'action': 'transition_to_idle', 
-                'status': 'failed',
-                'max_attempts': max_attempts
-            }
+                "action": "transition_to_idle",
+                "status": "failed",
+                "max_attempts": max_attempts,
+            },
         )
         raise RuntimeError("Could not establish idle state")
 
