@@ -136,10 +136,18 @@ is_wayland_backend() {
   case "${DSIGN_DISPLAY_BACKEND:-}" in
     wayland|labwc|wl) return 0 ;;
   esac
-  if [ -r /var/lib/dsign/config/wayland.env ] \
-    && grep -qE '^DSIGN_DISPLAY_BACKEND=wayland' /var/lib/dsign/config/wayland.env 2>/dev/null; then
+  local wl_env="/var/lib/dsign/config/wayland.env"
+  if [ -r "$wl_env" ] && grep -qE '^(DSIGN_DISPLAY_BACKEND=wayland|WAYLAND_DISPLAY=)' "$wl_env" 2>/dev/null; then
     return 0
   fi
+  local rt uid disp
+  uid="$(id -u dsign 2>/dev/null || echo 1000)"
+  rt="/run/user/${uid}"
+  for disp in wayland-0 wayland-1; do
+    if [ -S "${rt}/${disp}" ]; then
+      return 0
+    fi
+  done
   return 1
 }
 
