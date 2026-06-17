@@ -6,6 +6,8 @@ MPV_SOCKET="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
 NETWORK_STATUS_FILE="${DSIGN_NETWORK_STATUS_FILE:-/run/dsign/network-status.env}"
 NETASSIST_ENV="${DSIGN_NETWORK_ASSISTANT_ENV:-/var/lib/dsign/config/network-assistant.env}"
 FORCE_MARKER="${DSIGN_WIFI_ON_DISPLAY_FORCE_MARKER:-/run/dsign/wifi-on-display-force}"
+WIFI_BOOT_MARKER="${DSIGN_WIFI_BOOT_MARKER:-/run/dsign/wifi-boot-invoke}"
+
 WIFI_PROMPT_SEC="${DSIGN_NETWORK_WIFI_PROMPT_SEC:-60}"
 WAIT_SOCKET_SEC="${DSIGN_WIFI_WAIT_SOCKET_SEC:-30}"
 PRE_OSD_SEC="${DSIGN_WIFI_PRE_OSD_SEC:-2}"
@@ -262,14 +264,18 @@ preflight() {
 }
 
 main() {
-  local forced="0"
+  local forced="0" wifi_boot="0"
+  if [ -f "$WIFI_BOOT_MARKER" ]; then
+    wifi_boot="1"
+    rm -f "$WIFI_BOOT_MARKER" 2>/dev/null || true
+  fi
   if [ -f "$FORCE_MARKER" ]; then
     forced="1"
     rm -f "$FORCE_MARKER" 2>/dev/null || true
   fi
 
   if [ -f /run/dsign/playback-active ] && [ "$forced" != "1" ] \
-     && [ "${DSIGN_WIFI_BOOT:-0}" != "1" ]; then
+     && [ "$wifi_boot" != "1" ]; then
     log "Skip: playback active"
     exit 0
   fi

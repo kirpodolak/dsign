@@ -246,30 +246,30 @@ run_wifi_on_display() {
     return 0
   fi
 
-  local sudo_env=(DSIGN_WIFI_BOOT=1)
-  if is_wayland_backend; then
-    sudo_env+=(DSIGN_DISPLAY_BACKEND=wayland)
-    if [ -r /var/lib/dsign/config/wayland.env ]; then
-      local wl_disp wl_rt
-      wl_disp="$(grep -E '^WAYLAND_DISPLAY=' /var/lib/dsign/config/wayland.env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r' || true)"
-      wl_rt="$(grep -E '^XDG_RUNTIME_DIR=' /var/lib/dsign/config/wayland.env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r' || true)"
-      sudo_env+=(WAYLAND_DISPLAY="${wl_disp:-wayland-0}")
-      sudo_env+=(XDG_RUNTIME_DIR="${wl_rt:-/run/user/1000}")
-    fi
-  fi
+  : > /run/dsign/wifi-boot-invoke 2>/dev/null || true
+  chown dsign:dsign /run/dsign/wifi-boot-invoke 2>/dev/null || true
 
-  local err rc wifi_cmd=(/bin/bash "$wifi_script")
+  local err rc
   if [ -x "$wifi_script" ]; then
-    wifi_cmd=("$wifi_script")
+    err="$(sudo -n "$wifi_script" 2>&1)" || {
+      rc=$?
+      if [ -n "$err" ]; then
+        log "Wi-Fi on-display failed (rc=${rc}): ${err}"
+      else
+        log "Wi-Fi on-display failed (rc=${rc}): check /etc/sudoers.d/dsign-systemctl NOPASSWD for ${wifi_script}"
+      fi
+      return 0
+    }
+  else
+    err="$(sudo -n /bin/bash "$wifi_script" 2>&1)" || {
+      rc=$?
+      if [ -n "$err" ]; then
+        log "Wi-Fi on-display failed (rc=${rc}): ${err}"
+      else
+        log "Wi-Fi on-display failed (rc=${rc}): check sudoers NOPASSWD for bash ${wifi_script}"
+      fi
+      return 0
+    }
   fi
-  err="$(sudo -n env "${sudo_env[@]}" "${wifi_cmd[@]}" 2>&1)" || {
-    rc=$?
-    if [ -n "$err" ]; then
-      log "Wi-Fi on-display failed (rc=${rc}): ${err}"
-    else
-      log "Wi-Fi on-display failed (rc=${rc}): check /etc/sudoers.d/dsign-systemctl NOPASSWD for ${wifi_script}"
-    fi
-    return 0
-  }
 }
 run_wifi_on_display

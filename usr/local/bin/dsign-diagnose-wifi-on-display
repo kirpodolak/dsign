@@ -46,8 +46,9 @@ echo "--- mpv / display backend ---"
 ps -o pid,user,tty,cmd -C mpv 2>/dev/null || echo "(mpv not running)"
 mpv_count="$(pgrep -c mpv 2>/dev/null || echo 0)"
 if [ "${mpv_count:-0}" -gt 1 ] 2>/dev/null; then
-  echo "WARNING: ${mpv_count} mpv processes — mask DRM unit on Wayland:"
-  echo "  sudo systemctl mask dsign-mpv.service"
+  echo "WARNING: ${mpv_count} mpv processes — disable DRM mpv on Wayland:"
+  echo "  sudo bash /usr/local/bin/dsign-disable-drm-mpv"
+  echo "  (or: sudo systemctl stop dsign-mpv.service; sudo ln -sf /dev/null /etc/systemd/system/dsign-mpv.service; sudo systemctl daemon-reload)"
 fi
 if [ -r /var/lib/dsign/config/wayland.env ]; then
   echo "wayland.env:"
