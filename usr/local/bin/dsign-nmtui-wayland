@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Run nmtui-connect in foot on labwc (Wayland). Invoked as user dsign with compositor socket.
+set -u
+
+TIMEOUT_SEC="${1:-120}"
+WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+DSIGN_NMTUI_CMD="${DSIGN_NMTUI_CMD:-nmtui-connect}"
+
+log() {
+  logger -t dsign-nmtui-wayland "$*"
+}
+
+if ! [[ "$TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [ "$TIMEOUT_SEC" -lt 1 ]; then
+  TIMEOUT_SEC=120
+fi
+
+if ! command -v "$DSIGN_NMTUI_CMD" >/dev/null 2>&1; then
+  log "command missing: ${DSIGN_NMTUI_CMD}"
+  exit 1
+fi
+
+foot_bin="${DSIGN_FOOT_BIN:-}"
+if [ -z "$foot_bin" ]; then
+  foot_bin=$(command -v foot 2>/dev/null || true)
+fi
+if [ -z "$foot_bin" ] || [ ! -x "$foot_bin" ]; then
+  log "foot missing (install: apt install foot)"
+  exit 1
+fi
+
+sock="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
+if [ ! -S "$sock" ]; then
+  log "wayland socket missing: ${sock}"
+  exit 1
+fi
+
+export WAYLAND_DISPLAY XDG_RUNTIME_DIR
+export LANG="${LANG:-C.UTF-8}"
+
+log "Starting ${DSIGN_NMTUI_CMD} in foot (timeout=${TIMEOUT_SEC}s, display=${WAYLAND_DISPLAY})"
+timeout --foreground "$TIMEOUT_SEC" \
+  "$foot_bin" --app-id=dsign-wifi --title="Wi-Fi" --maximized \
+  "$DSIGN_NMTUI_CMD" || true
+exit 0
