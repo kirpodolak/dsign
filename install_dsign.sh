@@ -43,7 +43,7 @@ BASE_PACKAGES=(
 )
 WAYLAND_PACKAGES=()
 if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
-    WAYLAND_PACKAGES=(labwc imv seatd wayland-protocols grim)
+    WAYLAND_PACKAGES=(labwc imv seatd wayland-protocols grim foot)
 fi
 apt-get install -y "${BASE_PACKAGES[@]}" "${WAYLAND_PACKAGES[@]}"
 
@@ -200,6 +200,11 @@ if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
         install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.service.d/wayland.conf" \
             /etc/systemd/system/screenshot.service.d/wayland.conf
     fi
+    install -d /etc/systemd/system/dsign-show-startup-ip.service.d
+    if [ -f "$PROJECT_DIR/etc/systemd/system/dsign-show-startup-ip.service.d/wayland.conf" ]; then
+        install -m 0644 "$PROJECT_DIR/etc/systemd/system/dsign-show-startup-ip.service.d/wayland.conf" \
+            /etc/systemd/system/dsign-show-startup-ip.service.d/wayland.conf
+    fi
 fi
 if [ -f "$PROJECT_DIR/usr/local/bin/dsign-capture" ]; then
     install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-capture" /usr/local/bin/dsign-capture
@@ -272,6 +277,10 @@ sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-wifi-on-display" /usr/local/bin/dsign-wifi-on-display
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-nmtui-tty" /usr/local/bin/dsign-nmtui-tty
+if [ -f "$PROJECT_DIR/usr/local/bin/dsign-nmtui-wayland" ]; then
+    install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-nmtui-wayland" /usr/local/bin/dsign-nmtui-wayland
+    sed -i 's/\r$//' /usr/local/bin/dsign-nmtui-wayland
+fi
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
 sed -i 's/\r$//' /usr/local/bin/dsign-wifi-on-display
 sed -i 's/\r$//' /usr/local/bin/dsign-nmtui-tty
@@ -279,6 +288,7 @@ install -m 0644 "$PROJECT_DIR/etc/tmpfiles.d/dsign.conf" /etc/tmpfiles.d/dsign.c
 systemd-tmpfiles --create /etc/tmpfiles.d/dsign.conf 2>/dev/null || true
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-archive-log" /usr/local/bin/dsign-mpv-archive-log
 sed -i 's/\r$//' /usr/local/bin/dsign-mpv-archive-log
+chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-nmtui-wayland /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log 2>/dev/null || \
 chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
 
 mkdir -p /var/lib/dsign/config

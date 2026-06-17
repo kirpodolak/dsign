@@ -132,6 +132,17 @@ truthy() {
   esac
 }
 
+is_wayland_backend() {
+  case "${DSIGN_DISPLAY_BACKEND:-}" in
+    wayland|labwc|wl) return 0 ;;
+  esac
+  if [ -r /var/lib/dsign/config/wayland.env ] \
+    && grep -qE '^DSIGN_DISPLAY_BACKEND=wayland' /var/lib/dsign/config/wayland.env 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
 run_nmtui_once() {
   local remaining="$1"
   local helper="/usr/local/bin/dsign-nmtui-tty"
@@ -251,6 +262,12 @@ main() {
   write_network_status_file "$online" "$(primary_ip || true)" "$ssid" "$debug_on" "$STATUS_DISPLAY_SEC"
 
   if [ "$debug_on" = "1" ]; then
+    if is_wayland_backend; then
+      log "DEBUG mode (Wayland): status written; on-display Wi-Fi runs after MPV OSD"
+      persist_startup_ip
+      mark_done
+      return 0
+    fi
     log "DEBUG mode: showing network status for ${STATUS_DISPLAY_SEC}s on tty1"
     chvt 1 >/dev/null 2>&1 || true
     if [ "$online" = "1" ]; then
@@ -284,6 +301,13 @@ main() {
 
   if ! command -v nmtui-connect >/dev/null 2>&1; then
     log "nmtui-connect is unavailable, cannot run interactive setup"
+    persist_startup_ip
+    mark_done
+    return 0
+  fi
+
+  if is_wayland_backend; then
+    log "Wayland: skip early tty nmtui; Wi-Fi picker runs on-display after MPV OSD"
     persist_startup_ip
     mark_done
     return 0

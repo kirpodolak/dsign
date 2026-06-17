@@ -5,7 +5,7 @@ echo "=== dsign-wifi-on-display diagnostics ==="
 echo
 
 echo "--- scripts ---"
-for f in /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-nmtui-tty; do
+for f in /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-nmtui-wayland; do
   if [ -e "$f" ]; then
     ls -l "$f"
     file "$f" || true
@@ -36,9 +36,17 @@ else
 fi
 echo
 
-echo "--- mpv / tty ---"
+echo "--- mpv / display backend ---"
 ps -o pid,user,tty,cmd -C mpv 2>/dev/null || echo "(mpv not running)"
-command -v openvt >/dev/null 2>&1 && echo "openvt: OK" || echo "openvt: MISSING (apt install util-linux)"
+if [ -r /var/lib/dsign/config/wayland.env ]; then
+  echo "wayland.env:"
+  grep -E '^(DSIGN_DISPLAY_BACKEND|WAYLAND_DISPLAY|XDG_RUNTIME_DIR)=' /var/lib/dsign/config/wayland.env 2>/dev/null || true
+  sock="${XDG_RUNTIME_DIR:-/run/user/1000}/${WAYLAND_DISPLAY:-wayland-0}"
+  [ -S "$sock" ] && echo "wayland socket: OK ($sock)" || echo "wayland socket: missing ($sock)"
+  command -v foot >/dev/null 2>&1 && echo "foot: OK" || echo "foot: MISSING (apt install foot)"
+else
+  command -v openvt >/dev/null 2>&1 && echo "openvt: OK" || echo "openvt: MISSING (apt install util-linux)"
+fi
 command -v nmtui-connect >/dev/null 2>&1 && echo "nmtui-connect: OK" || echo "nmtui-connect: MISSING (apt install network-manager)"
 echo
 
@@ -51,4 +59,4 @@ fi
 echo
 
 echo "--- recent journal ---"
-journalctl -t dsign-wifi-on-display -t dsign-show-startup-ip -t dsign-nmtui-tty -b --no-pager -n 30 2>/dev/null || true
+journalctl -t dsign-wifi-on-display -t dsign-show-startup-ip -t dsign-nmtui-tty -t dsign-nmtui-wayland -b --no-pager -n 30 2>/dev/null || true
