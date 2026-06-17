@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Stop and permanently disable DRM dsign-mpv on Wayland devices (keep dsign-mpv-wayland only).
+set -u
+
+UNIT=dsign-mpv.service
+DROPIN=/etc/systemd/system/digital-signage.service.d/wayland.conf
+
+log() { echo "dsign-disable-drm-mpv: $*"; }
+
+systemctl stop "$UNIT" 2>/dev/null || true
+systemctl disable "$UNIT" 2>/dev/null || true
+
+if systemctl mask "$UNIT" 2>/dev/null; then
+  log "masked via systemctl mask"
+else
+  log "systemctl mask failed — linking unit to /dev/null"
+  ln -sf /dev/null "/etc/systemd/system/${UNIT}"
+fi
+
+systemctl daemon-reload
+systemctl reset-failed "$UNIT" 2>/dev/null || true
+
+if [ ! -f "$DROPIN" ]; then
+  log "WARNING: missing $DROPIN — digital-signage may still Wants=dsign-mpv.service"
+fi
+
+n="$(pgrep -c mpv 2>/dev/null || echo 0)"
+if [ "$n" -gt 1 ] 2>/dev/null; then
+  log "Still $n mpv processes — stopping DRM mpv on tty1:"
+  pkill -f 'mpv.*--vo=drm' 2>/dev/null || pkill -f 'mpv.*--gpu-context=drm' 2>/dev/null || true
+  sleep 1
+  n="$(pgrep -c mpv 2>/dev/null || echo 0)"
+  log "mpv count now: $n"
+fi
+
+log "done — use: systemctl status dsign-mpv-wayland.service"
