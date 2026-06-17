@@ -29,6 +29,34 @@ truthy() {
   esac
 }
 
+is_wayland_backend() {
+  case "${DSIGN_DISPLAY_BACKEND:-}" in
+    wayland|labwc|wl) return 0 ;;
+  esac
+  if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY}"
+    if [ -S "$sock" ]; then
+      return 0
+    fi
+  fi
+  if [ -r /var/lib/dsign/config/wayland.env ] \
+    && grep -qE '^DSIGN_DISPLAY_BACKEND=wayland' /var/lib/dsign/config/wayland.env 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+load_wayland_env() {
+  if [ -r /var/lib/dsign/config/wayland.env ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . /var/lib/dsign/config/wayland.env
+    set +a
+  fi
+  export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
+}
+
 load_env_value() {
   local file="$1" key="$2" default="${3:-}"
   [ -r "$file" ] || { printf '%s' "$default"; return 0; }
@@ -143,6 +171,24 @@ mpv_restore_display() {
 
 run_nmtui() {
   local remaining="$1"
+  if is_wayland_backend; then
+    local helper="/usr/local/bin/dsign-nmtui-wayland"
+    if [ ! -x "$helper" ]; then
+      log "dsign-nmtui-wayland missing or not executable"
+      return 1
+    fi
+    load_wayland_env
+    if [ "$(id -u)" -eq 0 ]; then
+      sudo -u dsign env \
+        WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+        XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+        DSIGN_DISPLAY_BACKEND=wayland \
+        "$helper" "$remaining" || true
+    else
+      "$helper" "$remaining" || true
+    fi
+    return 0
+  fi
   local helper="/usr/local/bin/dsign-nmtui-tty"
   if [ ! -x "$helper" ]; then
     log "dsign-nmtui-tty missing or not executable"
@@ -154,18 +200,31 @@ run_nmtui() {
 
 preflight() {
   local missing=0
-  for f in /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-wifi-on-display; do
-    if [ ! -x "$f" ]; then
-      log "preflight: not executable: $f"
+  if is_wayland_backend; then
+    for f in /usr/local/bin/dsign-nmtui-wayland /usr/local/bin/dsign-wifi-on-display; do
+      if [ ! -x "$f" ]; then
+        log "preflight: not executable: $f"
+        missing=1
+      fi
+    done
+    if ! command -v foot >/dev/null 2>&1; then
+      log "preflight: foot missing (apt install foot)"
       missing=1
     fi
-  done
+  else
+    for f in /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-wifi-on-display; do
+      if [ ! -x "$f" ]; then
+        log "preflight: not executable: $f"
+        missing=1
+      fi
+    done
+    if ! command -v openvt >/dev/null 2>&1; then
+      log "preflight: openvt missing (install util-linux; keyboard may not work)"
+    fi
+  fi
   if ! command -v nmtui-connect >/dev/null 2>&1; then
     log "preflight: nmtui-connect missing"
     missing=1
-  fi
-  if ! command -v openvt >/dev/null 2>&1; then
-    log "preflight: openvt missing (install util-linux; keyboard may not work)"
   fi
   return "$missing"
 }
