@@ -8,9 +8,9 @@
     <windowRule identifier="imv" serverDecoration="no" skipTaskbar="yes"/>
     <windowRule title=".*mpv.*" serverDecoration="no" skipTaskbar="yes"/>
     <windowRule title=".*imv.*" serverDecoration="no" skipTaskbar="yes"/>
-    <windowRule identifier="foot" serverDecoration="no" skipTaskbar="yes" maximize="yes"/>
-    <windowRule title=".*foot.*" serverDecoration="no" skipTaskbar="yes" maximize="yes"/>
-    <windowRule title="Wi-Fi" serverDecoration="no" skipTaskbar="yes" maximize="yes"/>
+    <windowRule identifier="foot" serverDecoration="no" skipTaskbar="yes" maximize="yes" focusOnMap="yes"/>
+    <windowRule title=".*foot.*" serverDecoration="no" skipTaskbar="yes" maximize="yes" focusOnMap="yes"/>
+    <windowRule title="Wi-Fi" serverDecoration="no" skipTaskbar="yes" maximize="yes" focusOnMap="yes"/>
   </windowRules>
   <keyboard>
     <keybind key="A-F4" onRelease="no" action="None"/>
