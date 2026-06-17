@@ -142,6 +142,8 @@ sudo chmod 755 /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-
 
 ```bash
 # /usr/local may be mounted noexec — invoke via bash if you see "Permission denied"
+# After manual copy from Windows, strip CRLF or bash fails with "set: invalid option" / $'\r'
+sudo sed -i 's/\r$//' /usr/local/bin/dsign-diagnose-wifi-on-display /usr/local/bin/dsign-*
 sudo bash /usr/local/bin/dsign-diagnose-wifi-on-display
 command -v openvt   # DRM stack; on Wayland: command -v foot
 ```

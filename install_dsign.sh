@@ -296,6 +296,11 @@ install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-archive-log" /usr/local/bi
 sed -i 's/\r$//' /usr/local/bin/dsign-mpv-archive-log
 chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-nmtui-wayland /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log 2>/dev/null || \
 chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
+# Manual deploys from Windows editors often leave CRLF — breaks bash (set: invalid option).
+for _dsign_bin in /usr/local/bin/dsign-*; do
+    [ -f "$_dsign_bin" ] || continue
+    sed -i 's/\r$//' "$_dsign_bin"
+done
 
 mkdir -p /var/lib/dsign/config
 chown "$DSIGN_USER:$DSIGN_USER" /var/lib/dsign/config
