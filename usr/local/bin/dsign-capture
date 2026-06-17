@@ -140,6 +140,64 @@ commit_preview() {
     return 0
 }
 
+is_wayland_capture() {
+    case "${DSIGN_DISPLAY_BACKEND:-}" in
+        wayland|labwc|wl) return 0 ;;
+    esac
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY}"
+        if [ -S "$sock" ]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+wayland_runtime_dir() {
+    printf '%s' "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+}
+
+# labwc/Wayland: compositor framebuffer (shows mpv on top of imv logo).
+capture_via_grim() {
+    local out="$WORK_DIR/grim.jpg"
+    local png="$WORK_DIR/grim.png"
+    rm -f "$out" "$png"
+
+    local grim_bin="${DSIGN_GRIM_BIN:-}"
+    if [ -z "$grim_bin" ]; then
+        grim_bin=$(command -v grim 2>/dev/null || true)
+    fi
+    if [ -z "$grim_bin" ] || [ ! -x "$grim_bin" ]; then
+        echo "grim not found (install: apt install grim)" >&2
+        return 1
+    fi
+
+    export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+    export XDG_RUNTIME_DIR="$(wayland_runtime_dir)"
+
+    if [ ! -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ]; then
+        echo "grim: wayland socket missing: ${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" >&2
+        return 1
+    fi
+
+    if ! "$grim_bin" "$png" 2>"$WORK_DIR/grim.err"; then
+        echo "grim capture failed:" >&2
+        tail -n 10 "$WORK_DIR/grim.err" >&2 || true
+        return 1
+    fi
+    if ! mpv_screenshot_ok "$png"; then
+        echo "grim produced empty output" >&2
+        return 1
+    fi
+    if ffmpeg -hide_banner -nostdin -loglevel error -y -i "$png" -frames:v 1 -q:v 5 "$out" 2>/dev/null \
+        && mpv_screenshot_ok "$out"; then
+        printf '%s' "$out"
+        return 0
+    fi
+    rm -f "$out"
+    return 1
+}
+
 _mpv_ipc_ensure_lock() {
     mkdir -p "$(dirname "$MPV_IPC_LOCK")" 2>/dev/null || true
     touch "$MPV_IPC_LOCK" 2>/dev/null || true
@@ -473,6 +531,15 @@ capture_via_kmsgrab() {
 
 mkdir -p "$OUTPUT_DIR"
 
+if is_wayland_capture; then
+    grim_out=""
+    grim_out=$(capture_via_grim || true)
+    if [ -n "$grim_out" ] && commit_preview "$grim_out"; then
+        echo "Screenshot taken via grim (Wayland compositor)."
+        exit 0
+    fi
+fi
+
 if screenshot_with_mpv && [ -n "${CAPTURE_MPV_OUT:-}" ]; then
     if commit_preview "$CAPTURE_MPV_OUT"; then
         rm -f "$MPV_WRITE_DIR"/preview-capture-*.jpg 2>/dev/null || true
@@ -505,15 +572,17 @@ if [ -n "$media_out" ] && commit_preview "$media_out"; then
 fi
 
 kms_out=""
-kms_out=$(capture_via_kmsgrab || true)
+if ! is_wayland_capture; then
+    kms_out=$(capture_via_kmsgrab || true)
+fi
 if [ -n "$kms_out" ] && commit_preview "$kms_out"; then
     echo "Screenshot taken via ffmpeg kmsgrab (DRM)."
     exit 0
 fi
 
 # With vo=drm, Linux fbcon (/dev/fb0) often does not contain the decoded video — captures look black.
-# Opt in with DSIGN_CAPTURE_USE_FB=1 if you really use a classic framebuffer console mirror.
-if [ "${DSIGN_CAPTURE_USE_FB:-0}" = "1" ] && [ -c "$FB_DEV" ]; then
+# On Wayland, framebuffer/kmsgrab are not used (grim + MPV IPC above).
+if ! is_wayland_capture && [ "${DSIGN_CAPTURE_USE_FB:-0}" = "1" ] && [ -c "$FB_DEV" ]; then
     echo "Using framebuffer fallback (DSIGN_CAPTURE_USE_FB=1)..."
     TEMP_RAW=$(mktemp "$WORK_DIR/fb.raw.XXXXXX")
     if capture_fb_raw "$TEMP_RAW"; then
@@ -523,7 +592,11 @@ if [ "${DSIGN_CAPTURE_USE_FB:-0}" = "1" ] && [ -c "$FB_DEV" ]; then
         fi
     fi
 else
-    echo "Skipping framebuffer fallback (vo=drm: fb is usually black; set DSIGN_CAPTURE_USE_FB=1 to force)." >&2
+    if is_wayland_capture; then
+        echo "Skipping framebuffer/kmsgrab fallback (Wayland mode; install grim or use MPV IPC)." >&2
+    else
+        echo "Skipping framebuffer fallback (vo=drm: fb is usually black; set DSIGN_CAPTURE_USE_FB=1 to force)." >&2
+    fi
 fi
 
 echo "All capture methods failed." >&2

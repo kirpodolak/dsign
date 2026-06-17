@@ -43,7 +43,7 @@ BASE_PACKAGES=(
 )
 WAYLAND_PACKAGES=()
 if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
-    WAYLAND_PACKAGES=(labwc imv seatd wayland-protocols)
+    WAYLAND_PACKAGES=(labwc imv seatd wayland-protocols grim)
 fi
 apt-get install -y "${BASE_PACKAGES[@]}" "${WAYLAND_PACKAGES[@]}"
 
@@ -195,6 +195,25 @@ if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
         install -m 0644 "$PROJECT_DIR/etc/systemd/system/digital-signage.service.d/wayland.conf" \
             /etc/systemd/system/digital-signage.service.d/wayland.conf
     fi
+    install -d /etc/systemd/system/screenshot.service.d
+    if [ -f "$PROJECT_DIR/etc/systemd/system/screenshot.service.d/wayland.conf" ]; then
+        install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.service.d/wayland.conf" \
+            /etc/systemd/system/screenshot.service.d/wayland.conf
+    fi
+fi
+if [ -f "$PROJECT_DIR/usr/local/bin/dsign-capture" ]; then
+    install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-capture" /usr/local/bin/dsign-capture
+    sed -i 's/\r$//' /usr/local/bin/dsign-capture
+fi
+if [ -f "$PROJECT_DIR/etc/systemd/system/screenshot.service" ]; then
+    install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.service" /etc/systemd/system/screenshot.service
+fi
+if [ -f "$PROJECT_DIR/etc/systemd/system/screenshot.timer" ]; then
+    install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.timer" /etc/systemd/system/screenshot.timer
+fi
+if [ -f "$PROJECT_DIR/etc/sudoers.d/dsign-screenshot" ]; then
+    install -m 0440 "$PROJECT_DIR/etc/sudoers.d/dsign-screenshot" /etc/sudoers.d/dsign-screenshot
+    visudo -cf /etc/sudoers.d/dsign-screenshot 2>/dev/null || true
 fi
 if [ -f "$PROJECT_DIR/etc/sudoers.d/dsign-systemctl" ]; then
     install -m 0440 "$PROJECT_DIR/etc/sudoers.d/dsign-systemctl" /etc/sudoers.d/dsign-systemctl
@@ -315,6 +334,8 @@ udevadm control --reload-rules
 udevadm trigger
 
 systemctl daemon-reload
+systemctl enable screenshot.service screenshot.timer 2>/dev/null || true
+systemctl start screenshot.timer 2>/dev/null || true
 if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
     systemctl enable seatd.service 2>/dev/null || true
     systemctl enable dsign-compositor.service dsign-logo.service dsign-mpv-wayland.service
@@ -369,6 +390,7 @@ if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
     echo "  Compositor:    systemctl status dsign-compositor.service"
     echo "  Logo (imv):    systemctl status dsign-logo.service"
     echo "  MPV (Wayland): systemctl status dsign-mpv-wayland.service"
+    echo "  Screenshot:    systemctl status screenshot.timer  (grim + MPV IPC fallback)"
 else
     echo "  MPV плеер:     systemctl status dsign-mpv.service"
     echo "  Wayland pilot: DSIGN_DISPLAY_BACKEND=wayland $0"
