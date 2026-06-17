@@ -8,7 +8,7 @@ XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 DSIGN_NMTUI_CMD="${DSIGN_NMTUI_CMD:-nmtui-connect}"
 
 log() {
-  logger -t dsign-nmtui-wayland "$*"
+  logger -t dsign-nmtui-wayland -- "$*"
 }
 
 if ! [[ "$TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [ "$TIMEOUT_SEC" -lt 1 ]; then
@@ -25,24 +25,31 @@ if [ -z "$foot_bin" ]; then
   foot_bin=$(command -v foot 2>/dev/null || true)
 fi
 if [ -z "$foot_bin" ] || [ ! -x "$foot_bin" ]; then
-  log "foot missing (install: apt install foot)"
+  log "foot missing (apt install foot)"
   exit 1
 fi
 
 sock="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
+dbus="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+
 if [ ! -S "$sock" ]; then
   log "wayland socket missing: ${sock}"
   exit 1
 fi
+if [ ! -S "${XDG_RUNTIME_DIR}/bus" ]; then
+  log "dbus session bus missing: ${XDG_RUNTIME_DIR}/bus (log in dsign or enable user bus)"
+  exit 1
+fi
 
 export WAYLAND_DISPLAY XDG_RUNTIME_DIR
+export DBUS_SESSION_BUS_ADDRESS="$dbus"
 export LANG="${LANG:-C.UTF-8}"
 export TERM="${TERM:-foot}"
 
 err_file="$(mktemp /var/tmp/dsign-nmtui-wayland.XXXXXX)"
 trap 'rm -f "$err_file"' EXIT
 
-log "Starting ${DSIGN_NMTUI_CMD} in foot (timeout=${TIMEOUT_SEC}s display=${WAYLAND_DISPLAY} sock=${sock})"
+log "foot start cmd=${DSIGN_NMTUI_CMD} timeout=${TIMEOUT_SEC}s wl=${WAYLAND_DISPLAY} dbus=${dbus}"
 
 set +e
 timeout --foreground "$TIMEOUT_SEC" \
@@ -58,6 +65,6 @@ if [ "$rc" -eq 124 ]; then
 elif [ "$rc" -ne 0 ]; then
   log "foot exited rc=${rc}"
 else
-  log "foot finished normally"
+  log "foot finished rc=0"
 fi
 exit 0

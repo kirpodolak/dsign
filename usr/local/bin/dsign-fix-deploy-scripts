@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Strip CRLF and fix mode after manual deploy (Windows editors / SCP).
+set -u
+fixed=0
+for f in /usr/local/bin/dsign-*; do
+  [ -f "$f" ] || continue
+  if grep -q $'\r' "$f" 2>/dev/null; then
+    sed -i 's/\r$//' "$f"
+    fixed=$((fixed + 1))
+    echo "fixed CRLF: $f"
+  fi
+  chmod 755 "$f" 2>/dev/null || true
+done
+echo "done (CRLF fixes: ${fixed})"

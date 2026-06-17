@@ -370,6 +370,10 @@ if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
         install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-disable-drm-mpv" /usr/local/bin/dsign-disable-drm-mpv
         sed -i 's/\r$//' /usr/local/bin/dsign-disable-drm-mpv
     fi
+    if [ -f "$PROJECT_DIR/usr/local/bin/dsign-fix-deploy-scripts" ]; then
+        install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-fix-deploy-scripts" /usr/local/bin/dsign-fix-deploy-scripts
+        sed -i 's/\r$//' /usr/local/bin/dsign-fix-deploy-scripts
+    fi
     systemctl daemon-reload
     systemctl enable digital-signage.service dsign-network-assistant.service
     systemctl disable dsign-show-startup-ip.service || true

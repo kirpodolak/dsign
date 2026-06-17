@@ -13,7 +13,7 @@ systemctl disable "$UNIT" 2>/dev/null || true
 if systemctl mask "$UNIT" 2>/dev/null; then
   log "masked via systemctl mask"
 else
-  log "systemctl mask failed — linking unit to /dev/null"
+  log "systemctl mask failed, linking unit to /dev/null"
   ln -sf /dev/null "/etc/systemd/system/${UNIT}"
 fi
 
@@ -21,16 +21,15 @@ systemctl daemon-reload
 systemctl reset-failed "$UNIT" 2>/dev/null || true
 
 if [ ! -f "$DROPIN" ]; then
-  log "WARNING: missing $DROPIN — digital-signage may still Wants=dsign-mpv.service"
+  log "WARNING: missing $DROPIN"
 fi
 
 n="$(pgrep -c mpv 2>/dev/null || echo 0)"
 if [ "$n" -gt 1 ] 2>/dev/null; then
-  log "Still $n mpv processes — stopping DRM mpv on tty1:"
-  pkill -f 'mpv.*--vo=drm' 2>/dev/null || pkill -f 'mpv.*--gpu-context=drm' 2>/dev/null || true
+  log "Still $n mpv processes, killing DRM mpv"
+  pkill -f 'mpv.*--vo=drm' 2>/dev/null || true
   sleep 1
-  n="$(pgrep -c mpv 2>/dev/null || echo 0)"
-  log "mpv count now: $n"
+  log "mpv count now: $(pgrep -c mpv 2>/dev/null || echo 0)"
 fi
 
-log "done — use: systemctl status dsign-mpv-wayland.service"
+log "done"
