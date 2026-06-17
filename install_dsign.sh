@@ -362,6 +362,15 @@ if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
     systemctl enable seatd.service 2>/dev/null || true
     systemctl enable dsign-compositor.service dsign-logo.service dsign-mpv-wayland.service
     systemctl disable dsign-mpv.service 2>/dev/null || true
+    systemctl stop dsign-mpv.service 2>/dev/null || true
+    if ! systemctl mask dsign-mpv.service 2>/dev/null; then
+        ln -sf /dev/null /etc/systemd/system/dsign-mpv.service
+    fi
+    if [ -f "$PROJECT_DIR/usr/local/bin/dsign-disable-drm-mpv" ]; then
+        install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-disable-drm-mpv" /usr/local/bin/dsign-disable-drm-mpv
+        sed -i 's/\r$//' /usr/local/bin/dsign-disable-drm-mpv
+    fi
+    systemctl daemon-reload
     systemctl enable digital-signage.service dsign-network-assistant.service
     systemctl disable dsign-show-startup-ip.service || true
     systemctl start seatd.service 2>/dev/null || true
