@@ -15,18 +15,18 @@ Environment=WAYLAND_DISPLAY=wayland-0
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=DSIGN_DISPLAY_BACKEND=wayland
 Environment=DSIGN_MPV_PROFILE=intel-balanced-wayland
+Environment=DSIGN_STARTUP_IP_DURATION_MS=8000
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
 ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 ExecStart=/usr/local/bin/dsign-mpv-launch-wayland
-ExecStartPost=-/bin/systemctl --no-block restart dsign-show-startup-ip.service
-ExecStartPost=-/bin/bash /usr/local/bin/dsign-mpv-post-start
+ExecStartPost=-/bin/systemctl --no-block start dsign-show-startup-ip.service
 ExecStopPost=-/bin/bash -c "tr -d '\\r' < /usr/local/bin/dsign-mpv-archive-log | bash"
 Restart=always
 RestartSec=5s
-StartLimitInterval=300s
-StartLimitBurst=10
+StartLimitInterval=60s
+StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target
