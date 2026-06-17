@@ -284,12 +284,24 @@ fi
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
 sed -i 's/\r$//' /usr/local/bin/dsign-wifi-on-display
 sed -i 's/\r$//' /usr/local/bin/dsign-nmtui-tty
+for _diag in dsign-diagnose-wifi-on-display dsign-diagnose-playback; do
+    if [ -f "$PROJECT_DIR/usr/local/bin/$_diag" ]; then
+        install -m 0755 "$PROJECT_DIR/usr/local/bin/$_diag" "/usr/local/bin/$_diag"
+        sed -i 's/\r$//' "/usr/local/bin/$_diag"
+    fi
+done
 install -m 0644 "$PROJECT_DIR/etc/tmpfiles.d/dsign.conf" /etc/tmpfiles.d/dsign.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/dsign.conf 2>/dev/null || true
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-archive-log" /usr/local/bin/dsign-mpv-archive-log
 sed -i 's/\r$//' /usr/local/bin/dsign-mpv-archive-log
 chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-nmtui-wayland /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log 2>/dev/null || \
 chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
+# Manual deploys from Windows editors often leave CRLF — breaks bash (set: invalid option).
+for _dsign_bin in /usr/local/bin/dsign-*; do
+    [ -f "$_dsign_bin" ] || continue
+    sed -i 's/\r$//' "$_dsign_bin"
+    chmod 755 "$_dsign_bin" 2>/dev/null || true
+done
 
 mkdir -p /var/lib/dsign/config
 chown "$DSIGN_USER:$DSIGN_USER" /var/lib/dsign/config
