@@ -141,8 +141,9 @@ sudo chmod 755 /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-
 Проверка на устройстве:
 
 ```bash
-sudo dsign-diagnose-wifi-on-display
-command -v openvt   # должен быть (пакет util-linux)
+# /usr/local may be mounted noexec — invoke via bash if you see "Permission denied"
+sudo bash /usr/local/bin/dsign-diagnose-wifi-on-display
+command -v openvt   # DRM stack; on Wayland: command -v foot
 ```
 
 После деплоя:

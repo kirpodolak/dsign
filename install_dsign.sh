@@ -284,6 +284,12 @@ fi
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
 sed -i 's/\r$//' /usr/local/bin/dsign-wifi-on-display
 sed -i 's/\r$//' /usr/local/bin/dsign-nmtui-tty
+for _diag in dsign-diagnose-wifi-on-display dsign-diagnose-playback; do
+    if [ -f "$PROJECT_DIR/usr/local/bin/$_diag" ]; then
+        install -m 0755 "$PROJECT_DIR/usr/local/bin/$_diag" "/usr/local/bin/$_diag"
+        sed -i 's/\r$//' "/usr/local/bin/$_diag"
+    fi
+done
 install -m 0644 "$PROJECT_DIR/etc/tmpfiles.d/dsign.conf" /etc/tmpfiles.d/dsign.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/dsign.conf 2>/dev/null || true
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-archive-log" /usr/local/bin/dsign-mpv-archive-log

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Diagnostics for on-display Wi-Fi (DRM vt2 or Wayland foot+nmtui).
+# If `sudo .../dsign-diagnose-wifi-on-display` fails with Permission denied (noexec /usr/local):
+#   sudo bash /usr/local/bin/dsign-diagnose-wifi-on-display
 set -u
 
 echo "=== dsign-wifi-on-display diagnostics ==="
