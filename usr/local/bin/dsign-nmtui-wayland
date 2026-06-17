@@ -37,7 +37,7 @@ if [ ! -S "$sock" ]; then
   exit 1
 fi
 if [ ! -S "${XDG_RUNTIME_DIR}/bus" ]; then
-  log "dbus session bus missing: ${XDG_RUNTIME_DIR}/bus (log in dsign or enable user bus)"
+  log "dbus session bus missing: ${XDG_RUNTIME_DIR}/bus"
   exit 1
 fi
 
@@ -49,13 +49,23 @@ export TERM="${TERM:-foot}"
 err_file="$(mktemp /var/tmp/dsign-nmtui-wayland.XXXXXX)"
 trap 'rm -f "$err_file"' EXIT
 
-log "foot start cmd=${DSIGN_NMTUI_CMD} timeout=${TIMEOUT_SEC}s wl=${WAYLAND_DISPLAY}"
-
-foot_args=(-W)
-if "$foot_bin" --help 2>&1 | grep -qE '(^|[[:space:]])--app-id'; then
+# foot CLI: -W is WIDTHxHEIGHT in chars, NOT maximized. Use -m / --maximized.
+foot_args=()
+foot_help="$("$foot_bin" --help 2>&1 || true)"
+if grep -q '\--maximized' <<<"$foot_help"; then
+  if grep -qE '(^|[[:space:]])-m,' <<<"$foot_help"; then
+    foot_args=(-m)
+  else
+    foot_args=(--maximized)
+  fi
+elif grep -q 'window-size-chars' <<<"$foot_help"; then
+  foot_args=(-W 220x58)
+fi
+if grep -q '\--app-id' <<<"$foot_help"; then
   foot_args+=(--app-id=dsign-wifi)
 fi
-# Do NOT use -a: on older foot builds -a is window-size-chars, not app-id.
+
+log "foot start cmd=${DSIGN_NMTUI_CMD} timeout=${TIMEOUT_SEC}s args=${foot_args[*]}"
 
 set +e
 timeout --foreground "$TIMEOUT_SEC" \
