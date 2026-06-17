@@ -11,6 +11,25 @@ log() {
   logger -t dsign-show-startup-ip "$*"
 }
 
+is_wayland_backend() {
+  case "${DSIGN_DISPLAY_BACKEND:-}" in
+    wayland|labwc|wl) return 0 ;;
+  esac
+  local wl_env="/var/lib/dsign/config/wayland.env"
+  if [ -r "$wl_env" ] && grep -qE '^(DSIGN_DISPLAY_BACKEND=wayland|WAYLAND_DISPLAY=)' "$wl_env" 2>/dev/null; then
+    return 0
+  fi
+  local rt uid disp
+  uid="$(id -u dsign 2>/dev/null || echo 1000)"
+  rt="/run/user/${uid}"
+  for disp in wayland-0 wayland-1; do
+    if [ -S "${rt}/${disp}" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 wait_for_socket() {
   local deadline now
   deadline=$(( $(date +%s) + WAIT_TIMEOUT_SEC ))
@@ -226,13 +245,24 @@ run_wifi_on_display() {
     log "Wi-Fi on-display skip: ${wifi_script} missing (deploy from repo + chmod 755)"
     return 0
   fi
-  if [ ! -x "$wifi_script" ]; then
-    log "Wi-Fi on-display skip: ${wifi_script} not executable (sudo chmod 755 ${wifi_script})"
-    return 0
+
+  local sudo_env=(DSIGN_WIFI_BOOT=1)
+  if is_wayland_backend; then
+    sudo_env+=(DSIGN_DISPLAY_BACKEND=wayland)
+    if [ -r /var/lib/dsign/config/wayland.env ]; then
+      local wl_disp wl_rt
+      wl_disp="$(grep -E '^WAYLAND_DISPLAY=' /var/lib/dsign/config/wayland.env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r' || true)"
+      wl_rt="$(grep -E '^XDG_RUNTIME_DIR=' /var/lib/dsign/config/wayland.env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r' || true)"
+      sudo_env+=(WAYLAND_DISPLAY="${wl_disp:-wayland-0}")
+      sudo_env+=(XDG_RUNTIME_DIR="${wl_rt:-/run/user/1000}")
+    fi
   fi
 
-  local err rc
-  err="$(sudo -n "$wifi_script" 2>&1)" || {
+  local err rc wifi_cmd=(/bin/bash "$wifi_script")
+  if [ -x "$wifi_script" ]; then
+    wifi_cmd=("$wifi_script")
+  fi
+  err="$(sudo -n env "${sudo_env[@]}" "${wifi_cmd[@]}" 2>&1)" || {
     rc=$?
     if [ -n "$err" ]; then
       log "Wi-Fi on-display failed (rc=${rc}): ${err}"
@@ -242,8 +272,4 @@ run_wifi_on_display() {
     return 0
   }
 }
-if [ ! -f /run/dsign/playback-active ]; then
-  run_wifi_on_display
-else
-  log "Wi-Fi on-display skip: playback-active"
-fi
+run_wifi_on_display
