@@ -37,9 +37,27 @@ fi
 
 export WAYLAND_DISPLAY XDG_RUNTIME_DIR
 export LANG="${LANG:-C.UTF-8}"
+export TERM="${TERM:-foot}"
 
-log "Starting ${DSIGN_NMTUI_CMD} in foot (timeout=${TIMEOUT_SEC}s, display=${WAYLAND_DISPLAY})"
+err_file="$(mktemp /var/tmp/dsign-nmtui-wayland.XXXXXX)"
+trap 'rm -f "$err_file"' EXIT
+
+log "Starting ${DSIGN_NMTUI_CMD} in foot (timeout=${TIMEOUT_SEC}s display=${WAYLAND_DISPLAY} sock=${sock})"
+
+set +e
 timeout --foreground "$TIMEOUT_SEC" \
-  "$foot_bin" --app-id=dsign-wifi --title="Wi-Fi" --maximized \
-  "$DSIGN_NMTUI_CMD" || true
+  "$foot_bin" -W -a dsign-wifi -- "$DSIGN_NMTUI_CMD" 2>"$err_file"
+rc=$?
+set -e
+
+if [ -s "$err_file" ]; then
+  log "foot stderr: $(tr '\n' ' ' < "$err_file" | head -c 400)"
+fi
+if [ "$rc" -eq 124 ]; then
+  log "foot timed out after ${TIMEOUT_SEC}s"
+elif [ "$rc" -ne 0 ]; then
+  log "foot exited rc=${rc}"
+else
+  log "foot finished normally"
+fi
 exit 0
