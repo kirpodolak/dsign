@@ -49,11 +49,17 @@ export TERM="${TERM:-foot}"
 err_file="$(mktemp /var/tmp/dsign-nmtui-wayland.XXXXXX)"
 trap 'rm -f "$err_file"' EXIT
 
-log "foot start cmd=${DSIGN_NMTUI_CMD} timeout=${TIMEOUT_SEC}s wl=${WAYLAND_DISPLAY} dbus=${dbus}"
+log "foot start cmd=${DSIGN_NMTUI_CMD} timeout=${TIMEOUT_SEC}s wl=${WAYLAND_DISPLAY}"
+
+foot_args=(-W)
+if "$foot_bin" --help 2>&1 | grep -qE '(^|[[:space:]])--app-id'; then
+  foot_args+=(--app-id=dsign-wifi)
+fi
+# Do NOT use -a: on older foot builds -a is window-size-chars, not app-id.
 
 set +e
 timeout --foreground "$TIMEOUT_SEC" \
-  "$foot_bin" -W -a dsign-wifi -- "$DSIGN_NMTUI_CMD" 2>"$err_file"
+  "$foot_bin" "${foot_args[@]}" -- "$DSIGN_NMTUI_CMD" 2>"$err_file"
 rc=$?
 set -e
 
