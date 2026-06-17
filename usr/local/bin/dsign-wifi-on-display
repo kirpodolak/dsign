@@ -66,6 +66,7 @@ load_wayland_env() {
   export DSIGN_DISPLAY_BACKEND="${DSIGN_DISPLAY_BACKEND:-wayland}"
   export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
+  export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
 }
 
 invoke_dsign_script() {
@@ -209,12 +210,14 @@ run_nmtui() {
           DSIGN_DISPLAY_BACKEND="$DSIGN_DISPLAY_BACKEND" \
           WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
           XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+          DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
           "$helper" "$remaining" || true
       else
         sudo -u dsign env \
           DSIGN_DISPLAY_BACKEND="$DSIGN_DISPLAY_BACKEND" \
           WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
           XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+          DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
           /bin/bash "$helper" "$remaining" || true
       fi
     else
