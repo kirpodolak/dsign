@@ -12,46 +12,33 @@ Group=video
 SupplementaryGroups=tty audio
 PermissionsStartOnly=true
 Environment="TERM=linux"
-# Профиль: signboard | intel-balanced | intel-balanced-vulkan | intel-high-quality (см. dsign-mpv-launch)
 Environment="DSIGN_MPV_PROFILE=signboard"
+# Startup IP overlay length (ms). Keep short so reboot/mpv restart does not block signage for minutes.
+Environment=DSIGN_STARTUP_IP_DURATION_MS=8000
 WorkingDirectory=/home/dsign
 
-# Attach to tty1 so DRM can switch to graphics mode
 StandardInput=tty
 TTYPath=/dev/tty1
-# Be conservative with TTY flags:
-# - TTYVHangup/TTYVTDisallocate can deliver SIGHUP / tear down the VT in ways that
-#   make mpv exit immediately, causing restart loops and start-limit-hit.
-# - Keep only the minimum needed for DRM/KMS.
 TTYReset=no
 TTYVHangup=no
 TTYVTDisallocate=no
 
-# Подготовка директории и прав
-ExecStartPre=/bin/chvt 1
+# Root-only: chvt once per boot. '-' = ignore errors; bash fallback avoids 203/EXEC if script missing.
+ExecStartPre=-/bin/bash -c 'if [ -f /usr/local/bin/dsign-mpv-pre-display ]; then /bin/bash /usr/local/bin/dsign-mpv-pre-display; else mkdir -p /run/dsign 2>/dev/null; /bin/chvt 1 2>/dev/null || true; fi'
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
 ExecStartPre=/bin/chown dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv/archive
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 
-# Основная команда запуска (dsign-mpv-launch читает DSIGN_MPV_PROFILE и общие пути).
-# Для Raspberry Pi в install_dsign.sh задаётся DSIGN_MPV_SIGNBOARD_VARIANT=pi.
-# Intel: например Environment=DSIGN_MPV_PROFILE=intel-balanced в drop-in.
 ExecStart=/usr/local/bin/dsign-mpv-launch
-# Startup IP OSD is best-effort; never fail MPV startup if helper is unavailable.
-ExecStartPost=-/bin/systemctl --no-block restart dsign-show-startup-ip.service
-# Wi-Fi on-display is invoked only from dsign-show-startup-ip (not a separate unit).
-# Run via bash to avoid execute-bit / noexec issues.
-ExecStartPost=-/bin/bash /usr/local/bin/dsign-mpv-post-start
-# Copy log before mpv truncates it on next start. Pipe through tr so CRLF deployments
-# (Windows editor / core.autocrlf) do not break bash; same pattern as sed in install_dsign.sh.
+# Boot-once IP OSD (non-blocking). Do NOT use "restart" or dsign-mpv-post-start here.
+ExecStartPost=-/bin/systemctl --no-block start dsign-show-startup-ip.service
 ExecStopPost=-/bin/bash -c "tr -d '\\r' < /usr/local/bin/dsign-mpv-archive-log | bash"
 
-# Настройки перезапуска
 Restart=always
 RestartSec=5s
-StartLimitInterval=300s
-StartLimitBurst=10
+StartLimitInterval=60s
+StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target

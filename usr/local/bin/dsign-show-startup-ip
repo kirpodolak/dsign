@@ -1,19 +1,65 @@
 #!/usr/bin/env bash
+# Best-effort MPV OSD for startup IP. Must NOT block mpv/digital-signage or playlist.
 set -u
 
 STARTUP_IP_FILE="${DSIGN_STARTUP_IP_FILE:-/tmp/dsign-startup-ip.txt}"
-NETWORK_STATUS_FILE="${DSIGN_NETWORK_STATUS_FILE:-/run/dsign/network-status.env}"
 MPV_SOCKET="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
-SHOW_DURATION_MS="${DSIGN_STARTUP_IP_DURATION_MS:-60000}"
-WAIT_TIMEOUT_SEC="${DSIGN_STARTUP_IP_WAIT_SEC:-15}"
+# Short overlay: long durations block the screen and slow perceived mpv/signage restarts.
+SHOW_DURATION_MS="${DSIGN_STARTUP_IP_DURATION_MS:-8000}"
+SOCKET_WAIT_SEC="${DSIGN_STARTUP_IP_SOCKET_WAIT_SEC:-3}"
+BG_RETRY_SEC="${DSIGN_STARTUP_IP_BG_RETRY_SEC:-15}"
 
 log() {
   logger -t dsign-show-startup-ip "$*"
 }
 
+boot_id=""
+if [ -r /proc/sys/kernel/random/boot_id ]; then
+  boot_id="$(tr -d '\n-' < /proc/sys/kernel/random/boot_id)"
+fi
+startup_ip_mark_boot_shown() {
+  [ -n "$boot_id" ] || return 0
+  mkdir -p /run/dsign 2>/dev/null || return 0
+  printf '%s' "$boot_id" > /run/dsign/startup-ip-shown 2>/dev/null || true
+}
+startup_ip_already_shown_this_boot() {
+  [ -n "$boot_id" ] || return 1
+  [ -f /run/dsign/startup-ip-shown ] || return 1
+  [ "$(tr -d '\n' </run/dsign/startup-ip-shown 2>/dev/null || true)" = "$boot_id" ]
+}
+
+read_ip_from_file() {
+  [ -r "$STARTUP_IP_FILE" ] || return 1
+  tr -d '\r\n' < "$STARTUP_IP_FILE" 2>/dev/null || true
+}
+
+primary_ip() {
+  ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}'
+}
+
+resolve_ip() {
+  local ip from_file
+  from_file="$(read_ip_from_file || true)"
+  if [ -n "$from_file" ]; then
+    printf '%s' "$from_file"
+    return 0
+  fi
+  allow_live="${DSIGN_STARTUP_IP_ALLOW_LIVE_LOOKUP:-1}"
+  case "$allow_live" in
+    1|true|yes|on|TRUE|YES|ON)
+      ip="$(primary_ip || true)"
+      if [ -n "$ip" ]; then
+        printf '%s' "$ip"
+        return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
 wait_for_socket() {
   local deadline now
-  deadline=$(( $(date +%s) + WAIT_TIMEOUT_SEC ))
+  deadline=$(( $(date +%s) + SOCKET_WAIT_SEC ))
   while true; do
     if [ -S "$MPV_SOCKET" ]; then
       return 0
@@ -22,228 +68,99 @@ wait_for_socket() {
     if [ "$now" -ge "$deadline" ]; then
       return 1
     fi
-    sleep 0.2
+    sleep 0.15
   done
 }
 
-if ! wait_for_socket; then
-  log "Skip: MPV socket missing (timeout=${WAIT_TIMEOUT_SEC}s)"
+send_ip_osd_once() {
+  local ip_addr="$1"
+  [ -n "$ip_addr" ] || return 1
+  [ -S "$MPV_SOCKET" ] || return 1
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$ip_addr" "$SHOW_DURATION_MS" "$MPV_SOCKET" <<'PY' || return 1
+import json, socket, sys
+
+ip = sys.argv[1]
+duration_ms = int(sys.argv[2]) if len(sys.argv) > 2 else 8000
+sock_path = sys.argv[3]
+payload = {
+    "command": ["show-text", f"IP: {ip}", duration_ms],
+    "request_id": 1,
+}
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(0.8)
+    s.connect(sock_path)
+    s.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+    s.close()
+except Exception:
+    sys.exit(1)
+sys.exit(0)
+PY
+    return $?
+  fi
+  if command -v socat >/dev/null 2>&1; then
+    printf '%s\n' "{\"command\":[\"show-text\",\"IP: ${ip_addr}\",${SHOW_DURATION_MS}]}" \
+      | socat - "$MPV_SOCKET" >/dev/null 2>&1 || return 1
+    return 0
+  fi
+  return 1
+}
+
+try_show_ip() {
+  if startup_ip_already_shown_this_boot; then
+    log "Skip: startup IP already shown this boot (mpv service restart ignored)"
+    return 0
+  fi
+  local ip_addr
+  ip_addr="$(resolve_ip || true)"
+  if [ -z "$ip_addr" ]; then
+    log "Skip: no startup IP yet (file or live lookup)"
+    return 1
+  fi
+  if ! wait_for_socket; then
+    return 1
+  fi
+  if send_ip_osd_once "$ip_addr"; then
+    log "OSD sent: IP=$ip_addr duration_ms=$SHOW_DURATION_MS"
+    startup_ip_mark_boot_shown
+    if [ -r "$STARTUP_IP_FILE" ]; then
+      rm -f "$STARTUP_IP_FILE" 2>/dev/null || true
+    fi
+    return 0
+  fi
+  return 1
+}
+
+background_retry() {
+  if startup_ip_already_shown_this_boot; then
+    return 0
+  fi
+  local ip_addr deadline
+  deadline=$(( $(date +%s) + BG_RETRY_SEC ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    ip_addr="$(resolve_ip || true)"
+    if [ -n "$ip_addr" ] && send_ip_osd_once "$ip_addr"; then
+      log "OSD sent (background): IP=$ip_addr"
+      startup_ip_mark_boot_shown
+      if [ -r "$STARTUP_IP_FILE" ]; then
+        rm -f "$STARTUP_IP_FILE" 2>/dev/null || true
+      fi
+      return 0
+    fi
+    sleep 0.5
+  done
+  log "Background retry ended without OSD"
+  return 0
+}
+
+if try_show_ip; then
   exit 0
 fi
 
-primary_ip() {
-  ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}'
-}
-
-read_ip_from_file() {
-  [ -r "$STARTUP_IP_FILE" ] || return 1
-  tr -d '\r\n' < "$STARTUP_IP_FILE" 2>/dev/null || true
-}
-
-load_env_value() {
-  local key="$1"
-  local default="${2:-}"
-  if [ ! -r "$NETWORK_STATUS_FILE" ]; then
-    printf '%s' "$default"
-    return 0
-  fi
-  local line val
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      "${key}="*)
-        val="${line#*=}"
-        printf '%s' "$val"
-        return 0
-        ;;
-    esac
-  done < "$NETWORK_STATUS_FILE"
-  printf '%s' "$default"
-}
-
-ip_addr="$(read_ip_from_file || true)"
-if [ -z "$ip_addr" ]; then
-  ip_addr="$(primary_ip || true)"
+if [ "${DSIGN_STARTUP_IP_BACKGROUND_RETRY:-1}" != "0" ]; then
+  ( background_retry ) >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  log "Spawned background IP OSD retry (${BG_RETRY_SEC}s)"
 fi
-
-internet_flag="$(load_env_value INTERNET "")"
-ssid="$(load_env_value SSID "")"
-connection="$(load_env_value CONNECTION "")"
-debug_flag="$(load_env_value DEBUG "0")"
-display_sec="$(load_env_value DISPLAY_SEC "0")"
-
-if [ -n "$display_sec" ] && [ "$display_sec" -gt 0 ] 2>/dev/null; then
-  SHOW_DURATION_MS=$((display_sec * 1000))
-elif [ "$debug_flag" = "1" ]; then
-  SHOW_DURATION_MS=10000
-fi
-
-osd_skip=0
-if [ -z "$ip_addr" ] && [ -z "$connection" ] && [ -z "$ssid" ]; then
-  log "Skip OSD: startup IP/network status unavailable (Wi-Fi on-display may still run)"
-  osd_skip=1
-fi
-
-build_osd_text() {
-  local lines=()
-  if [ "$internet_flag" = "1" ]; then
-    lines+=("Интернет: подключён")
-  elif [ "$internet_flag" = "0" ]; then
-    lines+=("Интернет: нет соединения")
-  fi
-  if [ -n "$connection" ]; then
-    lines+=("$connection")
-  elif [ -n "$ssid" ]; then
-    lines+=("Wi-Fi: ${ssid}")
-  fi
-  if [ -n "$ip_addr" ]; then
-    lines+=("IP: ${ip_addr}")
-  fi
-  if [ "$debug_flag" = "1" ] && [ -n "$display_sec" ] && [ "$display_sec" -gt 0 ] 2>/dev/null; then
-    lines+=("Автозапуск через ${display_sec} сек")
-  fi
-  if [ "${#lines[@]}" -eq 0 ]; then
-    lines+=("IP: ${ip_addr}")
-  fi
-  local out=""
-  local line
-  for line in "${lines[@]}"; do
-    if [ -n "$out" ]; then
-      out="${out}\\N${line}"
-    else
-      out="$line"
-    fi
-  done
-  printf '%s' "$out"
-}
-
-osd_text="$(build_osd_text)"
-
-mark_startup_ip_shown() {
-  if [ -d /run/dsign ] && [ ! -w /run/dsign ]; then
-    log "startup-ip-shown skip: /run/dsign not writable (run: sudo systemd-tmpfiles --create /etc/tmpfiles.d/dsign.conf)"
-    return 0
-  fi
-  mkdir -p /run/dsign 2>/dev/null || true
-  : >/run/dsign/startup-ip-shown 2>/dev/null || {
-    log "startup-ip-shown marker failed (check /run/dsign ownership for user dsign)"
-    return 0
-  }
-}
-
-attempt_send_osd() {
-  python3 - "$osd_text" "$SHOW_DURATION_MS" "$MPV_SOCKET" <<'PY'
-import json, socket, sys, time
-
-text = sys.argv[1]
-duration_ms = int(sys.argv[2]) if len(sys.argv) > 2 else 60000
-sock_path = sys.argv[3]
-
-rid = int(time.time() * 1_000_000) & 0x7fffffff
-payload = {
-    "command": ["show-text", text, duration_ms, 3],
-    "request_id": rid,
-}
-
-def send_once():
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(1.5)
-    s.connect(sock_path)
-    s.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-    data = b""
-    while True:
-        chunk = s.recv(4096)
-        if not chunk:
-            break
-        data += chunk
-        if b"\n" in data:
-            break
-    s.close()
-    line = data.split(b"\n", 1)[0].strip()
-    if not line:
-        return None
-    try:
-        obj = json.loads(line.decode("utf-8", errors="replace"))
-    except Exception:
-        return None
-    if not isinstance(obj, dict):
-        return None
-    if obj.get("request_id") != rid:
-        return None
-    return obj
-
-obj = None
-try:
-    obj = send_once()
-except Exception:
-    obj = None
-
-if obj and obj.get("error") == "success":
-    sys.exit(0)
-sys.exit(1)
-PY
-}
-
-ok=1
-if [ "$osd_skip" -eq 0 ]; then
-  deadline=$(( $(date +%s) + WAIT_TIMEOUT_SEC ))
-  if command -v python3 >/dev/null 2>&1; then
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-      attempt_send_osd && ok=0 && break || true
-      sleep 0.3
-    done
-  else
-    if command -v socat >/dev/null 2>&1; then
-      printf '%s\n' "$(printf '%s' "{\"command\":[\"show-text\",\"${osd_text}\",${SHOW_DURATION_MS},3]}")" | socat - "$MPV_SOCKET" >/dev/null 2>&1 || true
-      ok=0
-    else
-      ok=1
-    fi
-  fi
-
-  if [ "$ok" -eq 0 ]; then
-    log "OSD shown: ${osd_text}"
-  else
-    log "OSD not shown (MPV did not reply in time): ${osd_text}"
-  fi
-else
-  log "OSD skipped (no network status payload)"
-fi
-mark_startup_ip_shown
-
-if [ -r "$STARTUP_IP_FILE" ]; then
-  rm -f "$STARTUP_IP_FILE" 2>/dev/null || true
-fi
-
-# Wi-Fi picker on content display (part of network-assistant flow, no separate systemd unit).
-run_wifi_on_display() {
-  local wifi_script="/usr/local/bin/dsign-wifi-on-display"
-
-  if ! command -v sudo >/dev/null 2>&1; then
-    log "Wi-Fi on-display skip: sudo not available"
-    return 0
-  fi
-  if [ ! -f "$wifi_script" ]; then
-    log "Wi-Fi on-display skip: ${wifi_script} missing (deploy from repo + chmod 755)"
-    return 0
-  fi
-  if [ ! -x "$wifi_script" ]; then
-    log "Wi-Fi on-display skip: ${wifi_script} not executable (sudo chmod 755 ${wifi_script})"
-    return 0
-  fi
-
-  local err rc
-  err="$(sudo -n "$wifi_script" 2>&1)" || {
-    rc=$?
-    if [ -n "$err" ]; then
-      log "Wi-Fi on-display failed (rc=${rc}): ${err}"
-    else
-      log "Wi-Fi on-display failed (rc=${rc}): check /etc/sudoers.d/dsign-systemctl NOPASSWD for ${wifi_script}"
-    fi
-    return 0
-  }
-}
-if [ ! -f /run/dsign/playback-active ]; then
-  run_wifi_on_display
-else
-  log "Wi-Fi on-display skip: playback-active"
-fi
+exit 0

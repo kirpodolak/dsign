@@ -221,22 +221,21 @@ PermissionsStartOnly=true
 Environment="TERM=linux"
 Environment="DSIGN_MPV_PROFILE=signboard"
 Environment="DSIGN_MPV_SIGNBOARD_VARIANT=pi"
+Environment=DSIGN_STARTUP_IP_DURATION_MS=8000
 WorkingDirectory=/home/dsign
 StandardInput=tty
 TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
-TTYVTDisallocate=yes
+TTYReset=no
+TTYVHangup=no
+TTYVTDisallocate=no
 UMask=0002
-ExecStartPre=/bin/chvt 1
+ExecStartPre=-/bin/bash -c 'if [ -f /usr/local/bin/dsign-mpv-pre-display ]; then /bin/bash /usr/local/bin/dsign-mpv-pre-display; else mkdir -p /run/dsign 2>/dev/null; /bin/chvt 1 2>/dev/null || true; fi'
 ExecStartPre=/bin/mkdir -p /var/lib/dsign/mpv /var/lib/dsign/mpv/archive /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/chown -R dsign:video /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/chmod 775 /var/lib/dsign/mpv /var/lib/dsign/mpv-minimal
 ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 ExecStart=/usr/local/bin/dsign-mpv-launch
-# Startup IP OSD helper should run on every MPV (re)start.
-# Use systemd oneshot unit so it doesn't get stuck active(exited).
-ExecStartPost=-/bin/systemctl --no-block restart dsign-show-startup-ip.service
+ExecStartPost=-/bin/systemctl --no-block start dsign-show-startup-ip.service
 ExecStopPost=-/bin/bash -c "tr -d '\\r' < /usr/local/bin/dsign-mpv-archive-log | bash"
 Restart=always
 RestartSec=5s
@@ -250,6 +249,8 @@ EOL
 # Network assistant helper (OSD on content screen via MPV IPC)
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-network-assistant" /usr/local/bin/dsign-network-assistant
 sed -i 's/\r$//' /usr/local/bin/dsign-network-assistant
+install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-pre-display" /usr/local/bin/dsign-mpv-pre-display
+sed -i 's/\r$//' /usr/local/bin/dsign-mpv-pre-display
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-show-startup-ip" /usr/local/bin/dsign-show-startup-ip
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-wifi-on-display" /usr/local/bin/dsign-wifi-on-display
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-nmtui-tty" /usr/local/bin/dsign-nmtui-tty
@@ -260,7 +261,7 @@ install -m 0644 "$PROJECT_DIR/etc/tmpfiles.d/dsign.conf" /etc/tmpfiles.d/dsign.c
 systemd-tmpfiles --create /etc/tmpfiles.d/dsign.conf 2>/dev/null || true
 install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-mpv-archive-log" /usr/local/bin/dsign-mpv-archive-log
 sed -i 's/\r$//' /usr/local/bin/dsign-mpv-archive-log
-chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
+chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-mpv-pre-display /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-mpv-launch /usr/local/bin/dsign-mpv-archive-log
 
 mkdir -p /var/lib/dsign/config
 chown "$DSIGN_USER:$DSIGN_USER" /var/lib/dsign/config
@@ -291,15 +292,18 @@ EOL
 cat > /etc/systemd/system/dsign-show-startup-ip.service <<EOL
 [Unit]
 Description=Digital Signage Startup IP OSD helper
-After=dsign-mpv.service dsign-network-assistant.service
-Wants=dsign-network-assistant.service
+After=dsign-mpv.service dsign-mpv-wayland.service dsign-network-assistant.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=no
+TimeoutStartSec=10
 User=$DSIGN_USER
 Group=$DSIGN_USER
-ExecStart=/usr/local/bin/dsign-show-startup-ip
+Environment=DSIGN_STARTUP_IP_ALLOW_LIVE_LOOKUP=1
+Environment=DSIGN_STARTUP_IP_SOCKET_WAIT_SEC=3
+Environment=DSIGN_STARTUP_IP_BG_RETRY_SEC=60
+ExecStart=-/bin/bash /usr/local/bin/dsign-show-startup-ip
 
 [Install]
 WantedBy=multi-user.target
