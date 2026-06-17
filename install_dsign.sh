@@ -300,6 +300,7 @@ chown root:root /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show
 for _dsign_bin in /usr/local/bin/dsign-*; do
     [ -f "$_dsign_bin" ] || continue
     sed -i 's/\r$//' "$_dsign_bin"
+    chmod 755 "$_dsign_bin" 2>/dev/null || true
 done
 
 mkdir -p /var/lib/dsign/config

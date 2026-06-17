@@ -33,15 +33,23 @@ is_wayland_backend() {
   case "${DSIGN_DISPLAY_BACKEND:-}" in
     wayland|labwc|wl) return 0 ;;
   esac
+  local wl_env="/var/lib/dsign/config/wayland.env"
+  if [ -r "$wl_env" ] && grep -qE '^(DSIGN_DISPLAY_BACKEND=wayland|WAYLAND_DISPLAY=)' "$wl_env" 2>/dev/null; then
+    return 0
+  fi
+  local rt uid disp
+  uid="$(id -u dsign 2>/dev/null || echo 1000)"
+  rt="/run/user/${uid}"
+  for disp in wayland-0 wayland-1; do
+    if [ -S "${rt}/${disp}" ]; then
+      return 0
+    fi
+  done
   if [ -n "${WAYLAND_DISPLAY:-}" ]; then
     local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY}"
     if [ -S "$sock" ]; then
       return 0
     fi
-  fi
-  if [ -r /var/lib/dsign/config/wayland.env ] \
-    && grep -qE '^DSIGN_DISPLAY_BACKEND=wayland' /var/lib/dsign/config/wayland.env 2>/dev/null; then
-    return 0
   fi
   return 1
 }
@@ -53,8 +61,23 @@ load_wayland_env() {
     . /var/lib/dsign/config/wayland.env
     set +a
   fi
+  export DSIGN_DISPLAY_BACKEND="${DSIGN_DISPLAY_BACKEND:-wayland}"
   export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
+}
+
+invoke_dsign_script() {
+  local script="$1"
+  shift
+  if [ ! -f "$script" ]; then
+    log "missing: $script"
+    return 1
+  fi
+  if [ -x "$script" ]; then
+    "$script" "$@"
+  else
+    /bin/bash "$script" "$@"
+  fi
 }
 
 load_env_value() {
@@ -173,28 +196,33 @@ run_nmtui() {
   local remaining="$1"
   if is_wayland_backend; then
     local helper="/usr/local/bin/dsign-nmtui-wayland"
-    if [ ! -x "$helper" ]; then
-      log "dsign-nmtui-wayland missing or not executable"
+    load_wayland_env
+    if [ ! -f "$helper" ]; then
+      log "dsign-nmtui-wayland missing"
       return 1
     fi
-    load_wayland_env
     if [ "$(id -u)" -eq 0 ]; then
-      sudo -u dsign env \
-        WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
-        XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-        DSIGN_DISPLAY_BACKEND=wayland \
-        "$helper" "$remaining" || true
+      if [ -x "$helper" ]; then
+        sudo -u dsign env \
+          DSIGN_DISPLAY_BACKEND="$DSIGN_DISPLAY_BACKEND" \
+          WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+          XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+          "$helper" "$remaining" || true
+      else
+        sudo -u dsign env \
+          DSIGN_DISPLAY_BACKEND="$DSIGN_DISPLAY_BACKEND" \
+          WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+          XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+          /bin/bash "$helper" "$remaining" || true
+      fi
     else
-      "$helper" "$remaining" || true
+      invoke_dsign_script "$helper" "$remaining" || true
     fi
     return 0
   fi
   local helper="/usr/local/bin/dsign-nmtui-tty"
-  if [ ! -x "$helper" ]; then
-    log "dsign-nmtui-tty missing or not executable"
-    return 1
-  fi
-  DSIGN_NMTUI_RETURN_VT=1 DSIGN_NMTUI_VT="${DSIGN_NMTUI_VT:-2}" "$helper" "$remaining" || true
+  DSIGN_NMTUI_RETURN_VT=1 DSIGN_NMTUI_VT="${DSIGN_NMTUI_VT:-2}" \
+    invoke_dsign_script "$helper" "$remaining" || true
 }
 
 
@@ -202,9 +230,11 @@ preflight() {
   local missing=0
   if is_wayland_backend; then
     for f in /usr/local/bin/dsign-nmtui-wayland /usr/local/bin/dsign-wifi-on-display; do
-      if [ ! -x "$f" ]; then
-        log "preflight: not executable: $f"
+      if [ ! -f "$f" ]; then
+        log "preflight: missing: $f"
         missing=1
+      elif [ ! -x "$f" ]; then
+        log "preflight: not executable (will use bash): $f"
       fi
     done
     if ! command -v foot >/dev/null 2>&1; then
@@ -213,9 +243,11 @@ preflight() {
     fi
   else
     for f in /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-wifi-on-display; do
-      if [ ! -x "$f" ]; then
-        log "preflight: not executable: $f"
+      if [ ! -f "$f" ]; then
+        log "preflight: missing: $f"
         missing=1
+      elif [ ! -x "$f" ]; then
+        log "preflight: not executable (will use bash): $f"
       fi
     done
     if ! command -v openvt >/dev/null 2>&1; then
@@ -230,7 +262,14 @@ preflight() {
 }
 
 main() {
-  if [ -f /run/dsign/playback-active ]; then
+  local forced="0"
+  if [ -f "$FORCE_MARKER" ]; then
+    forced="1"
+    rm -f "$FORCE_MARKER" 2>/dev/null || true
+  fi
+
+  if [ -f /run/dsign/playback-active ] && [ "$forced" != "1" ] \
+     && [ "${DSIGN_WIFI_BOOT:-0}" != "1" ]; then
     log "Skip: playback active"
     exit 0
   fi
@@ -238,12 +277,6 @@ main() {
   if ! should_run; then
     log "Skip: Wi-Fi on-display not enabled for this boot"
     exit 0
-  fi
-
-  local forced="0"
-  if [ -f "$FORCE_MARKER" ]; then
-    forced="1"
-    rm -f "$FORCE_MARKER" 2>/dev/null || true
   fi
 
   if ! wait_for_socket; then

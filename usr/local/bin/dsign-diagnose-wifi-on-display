@@ -11,6 +11,9 @@ echo "--- scripts ---"
 for f in /usr/local/bin/dsign-wifi-on-display /usr/local/bin/dsign-show-startup-ip /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-nmtui-wayland; do
   if [ -e "$f" ]; then
     ls -l "$f"
+    if [ ! -x "$f" ]; then
+      echo "  NOTE: not executable — wifi uses: sudo bash $f"
+    fi
     file "$f" || true
     head -1 "$f" | od -An -tc | head -1 || true
   else
@@ -41,6 +44,11 @@ echo
 
 echo "--- mpv / display backend ---"
 ps -o pid,user,tty,cmd -C mpv 2>/dev/null || echo "(mpv not running)"
+mpv_count="$(pgrep -c mpv 2>/dev/null || echo 0)"
+if [ "${mpv_count:-0}" -gt 1 ] 2>/dev/null; then
+  echo "WARNING: ${mpv_count} mpv processes — mask DRM unit on Wayland:"
+  echo "  sudo systemctl mask dsign-mpv.service"
+fi
 if [ -r /var/lib/dsign/config/wayland.env ]; then
   echo "wayland.env:"
   grep -E '^(DSIGN_DISPLAY_BACKEND|WAYLAND_DISPLAY|XDG_RUNTIME_DIR)=' /var/lib/dsign/config/wayland.env 2>/dev/null || true
@@ -51,6 +59,12 @@ else
   command -v openvt >/dev/null 2>&1 && echo "openvt: OK" || echo "openvt: MISSING (apt install util-linux)"
 fi
 command -v nmtui-connect >/dev/null 2>&1 && echo "nmtui-connect: OK" || echo "nmtui-connect: MISSING (apt install network-manager)"
+if [ -r /usr/local/bin/dsign-wifi-on-display ]; then
+  echo "wayland backend (wifi script): $(grep -q is_wayland_backend /usr/local/bin/dsign-wifi-on-display 2>/dev/null && echo 'patched' || echo 'old — redeploy dsign-wifi-on-display')"
+fi
+if [ -f /run/dsign/playback-active ]; then
+  echo "playback-active: set (manual Wi-Fi test needs: sudo rm /run/dsign/wifi-on-display-force; sudo touch /run/dsign/wifi-on-display-force; sudo bash /usr/local/bin/dsign-wifi-on-display)"
+fi
 echo
 
 echo "--- sudo test as dsign (must not ask password) ---"
