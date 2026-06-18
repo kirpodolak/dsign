@@ -1,6 +1,10 @@
 #!/bin/sh
-# Hide the pointer after labwc starts (see HideCursor keybind A-W-h in rc.xml).
+# Hide the pointer after labwc starts (HideCursor keybind A-W-h in rc.xml).
+# Requires labwc -C /var/lib/dsign/labwc (autostart is NOT loaded when only -c rc.xml is set).
 if command -v wtype >/dev/null 2>&1; then
   sleep 2
   wtype -M alt -M logo -P h 2>/dev/null || true
+fi
+if command -v swayidle >/dev/null 2>&1 && command -v wtype >/dev/null 2>&1; then
+  swayidle -w timeout 3 'wtype -M alt -M logo -P h' >/dev/null 2>&1 &
 fi
