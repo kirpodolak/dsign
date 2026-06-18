@@ -9,7 +9,7 @@ Type=simple
 User=dsign
 Group=video
 SupplementaryGroups=video render
-Environment=WAYLAND_DISPLAY=wayland-1
+EnvironmentFile=-/var/lib/dsign/config/wayland.env
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=DSIGN_LOGO_PATH=/var/lib/dsign/media/idle_logo.jpg
 ExecStart=/usr/local/bin/dsign-logo-launch

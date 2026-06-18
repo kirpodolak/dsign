@@ -11,15 +11,15 @@ User=dsign
 Group=video
 SupplementaryGroups=tty audio input render
 EnvironmentFile=-/var/lib/dsign/config/wayland.env
-Environment=WAYLAND_DISPLAY=wayland-1
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=WLR_BACKENDS=drm
 Environment=LIBSEAT_BACKEND=seatd
 ExecStartPre=/bin/mkdir -p /run/user/1000 /var/lib/dsign/labwc
 ExecStartPre=/bin/chown dsign:dsign /run/user/1000
 ExecStartPre=/bin/chmod 700 /run/user/1000
-ExecStartPre=/bin/chown -R dsign:dsign /var/lib/dsign/labwc
-ExecStart=/usr/bin/labwc -c /var/lib/dsign/labwc
+ExecStartPre=/bin/sh -c 'install -d -o dsign -g dsign -m 0755 /var/lib/dsign/labwc; for f in rc.xml autostart; do if [ -e "/var/lib/dsign/labwc/$$f" ]; then chown dsign:dsign "/var/lib/dsign/labwc/$$f" || true; fi; done'
+# -c must be rc.xml (file). Passing the directory causes: fread(...): Bad address
+ExecStart=/usr/bin/labwc -c /var/lib/dsign/labwc/rc.xml
 ExecStartPost=-/usr/local/bin/dsign-labwc-autostart
 Restart=always
 RestartSec=2s

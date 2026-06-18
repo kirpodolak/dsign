@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Diagnostics for dsign-compositor.service (labwc + seatd + DRM).
+# Usage: sudo bash /usr/local/bin/dsign-diagnose-compositor
+set -u
+
+echo "=== dsign-compositor diagnostics ==="
+echo
+
+echo "--- labwc ---"
+command -v labwc >/dev/null 2>&1 && labwc -v 2>&1 || echo "labwc: MISSING"
+echo
+
+echo "--- seatd ---"
+systemctl is-active seatd.service 2>/dev/null || true
+systemctl status seatd.service --no-pager -n 5 2>/dev/null || echo "seatd: check failed"
+echo
+
+echo "--- user dsign groups (need video render input) ---"
+if id dsign >/dev/null 2>&1; then
+  id dsign
+else
+  echo "user dsign: MISSING"
+fi
+echo
+
+echo "--- wayland.env ---"
+if [ -r /var/lib/dsign/config/wayland.env ]; then
+  grep -E '^(DSIGN_DISPLAY_BACKEND|WAYLAND_DISPLAY|XDG_RUNTIME_DIR|WLR_DRM_DEVICES|WLR_RENDERER|WLR_BACKENDS|LIBSEAT_BACKEND)=' \
+    /var/lib/dsign/config/wayland.env || true
+else
+  echo "(missing /var/lib/dsign/config/wayland.env)"
+fi
+echo
+
+echo "--- DRM devices ---"
+ls -la /dev/dri/ 2>/dev/null || echo "(no /dev/dri)"
+for card in /dev/dri/card[0-9]*; do
+  [ -e "$card" ] || continue
+  base="$(basename "$card")"
+  echo -n "$card: "
+  if [ -r "$card" ]; then
+    echo -n "readable "
+  else
+    echo -n "NOT readable "
+  fi
+  for st in /sys/class/drm/"${base}"-*/status; do
+    [ -r "$st" ] || continue
+    conn="${st%/status}"
+    conn="${conn##*/}"
+    echo -n "${conn}=$(cat "$st" 2>/dev/null) "
+  done
+  echo
+done
+echo
+
+echo "--- labwc config ---"
+for f in /var/lib/dsign/labwc/rc.xml /var/lib/dsign/labwc/autostart; do
+  if [ -e "$f" ]; then
+    ls -l "$f"
+  else
+    echo "MISSING: $f"
+  fi
+done
+if [ -r /var/lib/dsign/labwc/rc.xml ]; then
+  xmllint --noout /var/lib/dsign/labwc/rc.xml 2>&1 && echo "rc.xml: XML OK" || echo "rc.xml: XML INVALID"
+fi
+if [ -r /etc/systemd/system/dsign-compositor.service ]; then
+  echo "unit ExecStart: $(grep '^ExecStart=' /etc/systemd/system/dsign-compositor.service | tail -1)"
+fi
+echo
+
+echo "--- wayland socket ---"
+rt="${XDG_RUNTIME_DIR:-/run/user/1000}"
+disp="${WAYLAND_DISPLAY:-wayland-0}"
+if [ -r /var/lib/dsign/config/wayland.env ]; then
+  # shellcheck disable=SC1091
+  . /var/lib/dsign/config/wayland.env
+  rt="${XDG_RUNTIME_DIR:-$rt}"
+  disp="${WAYLAND_DISPLAY:-$disp}"
+fi
+sock="${rt}/${disp}"
+if [ -S "$sock" ]; then
+  echo "socket OK: $sock"
+else
+  echo "socket missing: $sock"
+fi
+echo
+
+echo "--- compositor unit ---"
+systemctl status dsign-compositor.service --no-pager -n 12 2>/dev/null || true
+echo
+
+echo "--- recent journal ---"
+journalctl -u dsign-compositor.service -b --no-pager -n 40 2>/dev/null || true
+echo
+
+echo "--- suggested fixes ---"
+if [ -r /var/lib/dsign/config/wayland.env ]; then
+  wlr_dev="$(grep '^WLR_DRM_DEVICES=' /var/lib/dsign/config/wayland.env | cut -d= -f2-)"
+  if [ -n "$wlr_dev" ] && [ ! -r "$wlr_dev" ]; then
+    echo "WLR_DRM_DEVICES=$wlr_dev is not readable — pick a connected card:"
+    echo "  ls -la /dev/dri/ && grep -H . /sys/class/drm/card*-*/status"
+    echo "  sudo sed -i 's|^WLR_DRM_DEVICES=.*|WLR_DRM_DEVICES=/dev/dri/card0|' /var/lib/dsign/config/wayland.env"
+  fi
+  if grep -q '^WLR_RENDERER=gles2' /var/lib/dsign/config/wayland.env; then
+    echo "WLR_RENDERER=gles2 often breaks Intel labwc — use pixman:"
+    echo "  sudo sed -i 's/^WLR_RENDERER=.*/WLR_RENDERER=pixman/' /var/lib/dsign/config/wayland.env"
+  fi
+fi
+if grep -q 'labwc -c /var/lib/dsign/labwc$' /etc/systemd/system/dsign-compositor.service 2>/dev/null; then
+  echo "ExecStart must point to rc.xml file, not directory:"
+  echo "  ExecStart=/usr/bin/labwc -c /var/lib/dsign/labwc/rc.xml"
+fi
+echo "After fixes:"
+echo "  sudo systemctl reset-failed dsign-compositor.service"
+echo "  sudo systemctl restart dsign-compositor.service dsign-logo.service dsign-mpv-wayland.service"
