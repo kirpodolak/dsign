@@ -54,7 +54,6 @@ BASE=(
   --vo=gpu
   --gpu-context=wayland
   --hwdec=vaapi
-  --video-sync=display-vdrop
   --vd-lavc-dr=no
   --ao="$AO"
   --audio-device=auto
