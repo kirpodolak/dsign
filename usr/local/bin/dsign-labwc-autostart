@@ -1,13 +1,30 @@
 #!/bin/bash
-# labwc session helper: ensure XDG_RUNTIME_DIR exists (compositor owns the session).
+# labwc session helper: wait for compositor socket, hide pointer, optional idle re-hide.
 set -euo pipefail
 
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
+hide_cursor() {
+  if ! command -v wtype >/dev/null 2>&1; then
+    return 0
+  fi
+  # Triggers HideCursor + WarpCursor keybind A-W-h in /var/lib/dsign/labwc/rc.xml
+  wtype -M alt -M logo -P h 2>/dev/null || true
+}
+
 sock="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
 for _ in $(seq 1 90); do
   if [ -S "$sock" ]; then
+    sleep 1
+    hide_cursor
+    if command -v swayidle >/dev/null 2>&1 && command -v wtype >/dev/null 2>&1; then
+      # labwc shows the cursor again on pointer motion — re-hide after brief idle
+      swayidle -w \
+        timeout 3 'wtype -M alt -M logo -P h' \
+        before-sleep 'wtype -M alt -M logo -P h' \
+        >/dev/null 2>&1 &
+    fi
     exit 0
   fi
   sleep 0.5
