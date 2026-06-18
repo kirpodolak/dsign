@@ -1,4 +1,1 @@
-dsign ALL=(root) NOPASSWD: /usr/local/bin/dsign-preview-timer off
-dsign ALL=(root) NOPASSWD: /usr/local/bin/dsign-preview-timer set 300
-dsign ALL=(root) NOPASSWD: /usr/local/bin/dsign-preview-timer set 600
-dsign ALL=(root) NOPASSWD: /usr/local/bin/dsign-preview-timer set 900
+dsign ALL=(root) NOPASSWD: /usr/local/bin/dsign-preview-timer

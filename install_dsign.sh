@@ -243,11 +243,15 @@ if [ -f "$PROJECT_DIR/usr/local/bin/dsign-preview-timer" ]; then
 fi
 _install_sudoers() {
     local src="$1"
-    local name
+    local dst name
     name="$(basename "$src")"
-    install -m 0440 "$src" "/etc/sudoers.d/$name"
-    if ! visudo -cf "/etc/sudoers.d/$name"; then
-        echo "ERROR: invalid sudoers file: /etc/sudoers.d/$name (check trailing newline and syntax)" >&2
+    dst="/etc/sudoers.d/$name"
+    install -m 0440 "$src" "$dst"
+    sed -i 's/\r$//' "$dst"
+    # visudo requires LF-only lines and a newline at EOF (CRLF manual deploy breaks sudo).
+    tail -c1 "$dst" | read -r _ || echo >>"$dst"
+    if ! visudo -cf "$dst"; then
+        echo "ERROR: invalid sudoers file: $dst (check trailing newline and syntax)" >&2
         exit 1
     fi
 }
@@ -262,6 +266,10 @@ if [ -f "$PROJECT_DIR/etc/sudoers.d/dsign-mpv-restart" ]; then
 fi
 if [ -f "$PROJECT_DIR/etc/sudoers.d/dsign-preview-timer" ]; then
     _install_sudoers "$PROJECT_DIR/etc/sudoers.d/dsign-preview-timer"
+fi
+if [ -f "$PROJECT_DIR/usr/local/bin/dsign-fix-sudoers" ]; then
+    install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-fix-sudoers" /usr/local/bin/dsign-fix-sudoers
+    sed -i 's/\r$//' /usr/local/bin/dsign-fix-sudoers
 fi
 
 # MPV Player Service (DRM / vo=drm — default stack)
