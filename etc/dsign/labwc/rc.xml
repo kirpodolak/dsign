@@ -8,13 +8,19 @@
     <windowRule identifier="imv" serverDecoration="no" skipTaskbar="yes"/>
     <windowRule title=".*mpv.*" serverDecoration="no" skipTaskbar="yes"/>
     <windowRule title=".*imv.*" serverDecoration="no" skipTaskbar="yes"/>
-    <windowRule identifier="foot" serverDecoration="no" skipTaskbar="yes" maximize="yes" focusOnMap="yes"/>
-    <windowRule title=".*foot.*" serverDecoration="no" skipTaskbar="yes" maximize="yes" focusOnMap="yes"/>
-    <windowRule title=".*nmtui.*" serverDecoration="no" skipTaskbar="yes" maximize="yes" focusOnMap="yes"/>
+    <!-- Do not maximize foot: labwc may keep keyboard on a maximized client (#2534). -->
+    <windowRule identifier="dsign-wifi" serverDecoration="no" skipTaskbar="yes" focusOnMap="yes"/>
+    <windowRule identifier="foot" serverDecoration="no" skipTaskbar="yes" focusOnMap="yes"/>
+    <windowRule title=".*foot.*" serverDecoration="no" skipTaskbar="yes" focusOnMap="yes"/>
+    <windowRule title=".*nmtui.*" serverDecoration="no" skipTaskbar="yes" focusOnMap="yes"/>
   </windowRules>
   <keyboard>
     <keybind key="A-F4" onRelease="no" action="None"/>
     <keybind key="W-Left" onRelease="no" action="None"/>
     <keybind key="W-Right" onRelease="no" action="None"/>
+    <keybind key="A-W-h">
+      <action name="HideCursor"/>
+      <action name="WarpCursor" x="-1" y="-1"/>
+    </keybind>
   </keyboard>
 </labwc_config>

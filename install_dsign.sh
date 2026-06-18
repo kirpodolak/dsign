@@ -43,7 +43,7 @@ BASE_PACKAGES=(
 )
 WAYLAND_PACKAGES=()
 if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
-    WAYLAND_PACKAGES=(labwc imv seatd wayland-protocols grim foot)
+    WAYLAND_PACKAGES=(labwc imv seatd wayland-protocols grim foot wtype wlrctl)
 fi
 apt-get install -y "${BASE_PACKAGES[@]}" "${WAYLAND_PACKAGES[@]}"
 
@@ -176,6 +176,10 @@ done
 mkdir -p "$DB_DIR/labwc"
 if [ -f "$PROJECT_DIR/etc/dsign/labwc/rc.xml" ]; then
     install -m 0644 "$PROJECT_DIR/etc/dsign/labwc/rc.xml" "$DB_DIR/labwc/rc.xml"
+fi
+if [ -f "$PROJECT_DIR/etc/dsign/labwc/autostart" ]; then
+    install -m 0755 "$PROJECT_DIR/etc/dsign/labwc/autostart" "$DB_DIR/labwc/autostart"
+    sed -i 's/\r$//' "$DB_DIR/labwc/autostart"
 fi
 chown -R "$DSIGN_USER:$DSIGN_USER" "$DB_DIR/labwc"
 mkdir -p "$DB_DIR/config"

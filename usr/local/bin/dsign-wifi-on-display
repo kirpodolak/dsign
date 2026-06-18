@@ -100,6 +100,10 @@ load_env_value() {
 }
 
 should_run() {
+  local forced="${1:-0}"
+  if [ "$forced" = "1" ]; then
+    return 0
+  fi
   if [ -f "$FORCE_MARKER" ]; then
     return 0
   fi
@@ -186,12 +190,19 @@ mpv_show_text() {
   mpv_ipc "{\"command\":[\"show-text\",${escaped},${ms},3]}" || true
 }
 
+mpv_set_input_vo_keyboard() {
+  local enabled="$1"
+  mpv_ipc "{\"command\":[\"set_property\",\"input-vo-keyboard\",${enabled}]}" || true
+}
+
 mpv_release_display() {
   # Pause only — never switch vo during playback (breaks DRM decoder).
   mpv_ipc '{"command":["set_property","pause","yes"]}' || true
+  mpv_set_input_vo_keyboard false
 }
 
 mpv_restore_display() {
+  mpv_set_input_vo_keyboard true
   mpv_ipc '{"command":["set_property","pause","no"]}' || true
 }
 
@@ -246,6 +257,9 @@ preflight() {
       log "preflight: foot missing (apt install foot)"
       missing=1
     fi
+    if ! command -v wlrctl >/dev/null 2>&1; then
+      log "preflight: wlrctl missing (apt install wlrctl; keyboard may stay on mpv)"
+    fi
   else
     for f in /usr/local/bin/dsign-nmtui-tty /usr/local/bin/dsign-wifi-on-display; do
       if [ ! -f "$f" ]; then
@@ -283,7 +297,7 @@ main() {
     exit 0
   fi
 
-  if ! should_run; then
+  if ! should_run "$forced"; then
     log "Skip: Wi-Fi on-display not enabled for this boot"
     exit 0
   fi

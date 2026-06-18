@@ -41,6 +41,7 @@ BASE=(
   --config-dir="$CFG"
   --no-osc
   --no-input-default-bindings
+  --input-vo-keyboard=no
   --input-ipc-server="$SOCK"
   --fullscreen
   --demuxer-lavf-o=safe=0

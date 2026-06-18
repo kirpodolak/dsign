@@ -134,9 +134,9 @@ sudo chmod 755 /usr/local/bin/dsign-network-assistant /usr/local/bin/dsign-show-
 
 ### Кнопки в nmtui неактивны (сети видны, но Enter/стрелки не работают)
 
-Причина: `nmtui` запускался с перенаправлением на `/dev/tty1`, но без **controlling TTY**. MPV держит tty1, клавиатура не доходит до nmtui.
+**DRM (tty):** `nmtui` запускался без **controlling TTY**. MPV держит tty1, клавиатура не доходит до nmtui. Фикс: Wi-Fi UI на **vt2** через `openvt` (`dsign-nmtui-tty`).
 
-Фикс (ветка с `dsign-nmtui-tty`): Wi-Fi UI открывается на **vt2** через `openvt`.
+**Wayland (labwc + foot):** клавиатура может оставаться у mpv, если `foot` открыт с `--maximized` поверх fullscreen mpv (labwc #2534). Фикс: `foot -W` (без maximize), `wlrctl toplevel focus app_id:dsign-wifi`, mpv `--input-vo-keyboard=no`. Пакеты: `foot`, `wlrctl`, `wtype`.
 
 Проверка на устройстве:
 

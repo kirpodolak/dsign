@@ -56,6 +56,8 @@ if [ -r /var/lib/dsign/config/wayland.env ]; then
   sock="${XDG_RUNTIME_DIR:-/run/user/1000}/${WAYLAND_DISPLAY:-wayland-0}"
   [ -S "$sock" ] && echo "wayland socket: OK ($sock)" || echo "wayland socket: missing ($sock)"
   command -v foot >/dev/null 2>&1 && echo "foot: OK" || echo "foot: MISSING (apt install foot)"
+  command -v wlrctl >/dev/null 2>&1 && echo "wlrctl: OK" || echo "wlrctl: MISSING (apt install wlrctl — keyboard may stay on mpv)"
+  command -v wtype >/dev/null 2>&1 && echo "wtype: OK" || echo "wtype: MISSING (apt install wtype — cursor hide autostart)"
 else
   command -v openvt >/dev/null 2>&1 && echo "openvt: OK" || echo "openvt: MISSING (apt install util-linux)"
 fi

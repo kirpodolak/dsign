@@ -6,6 +6,8 @@ TIMEOUT_SEC="${1:-120}"
 WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 DSIGN_NMTUI_CMD="${DSIGN_NMTUI_CMD:-nmtui-connect}"
+DSIGN_FOOT_APP_ID="${DSIGN_FOOT_APP_ID:-dsign-wifi}"
+DSIGN_FOOT_WIFI_CHARS="${DSIGN_FOOT_WIFI_CHARS:-240x68}"
 
 log() {
   logger -t dsign-nmtui-wayland -- "$*"
@@ -49,29 +51,58 @@ export TERM="${TERM:-foot}"
 err_file="$(mktemp /var/tmp/dsign-nmtui-wayland.XXXXXX)"
 trap 'rm -f "$err_file"' EXIT
 
-# foot CLI: -W is WIDTHxHEIGHT in chars, NOT maximized. Use -m / --maximized.
+# Avoid foot --maximized: labwc may not transfer keyboard focus from a
+# fullscreen/maximized client (labwc/labwc#2534).
 foot_args=()
 foot_help="$("$foot_bin" --help 2>&1 || true)"
-if grep -q '\--maximized' <<<"$foot_help"; then
+if grep -q 'window-size-chars' <<<"$foot_help"; then
+  foot_args=(-W "$DSIGN_FOOT_WIFI_CHARS")
+elif grep -q '\--maximized' <<<"$foot_help"; then
+  log "warning: foot --maximized fallback (keyboard may not work with labwc)"
   if grep -qE '(^|[[:space:]])-m,' <<<"$foot_help"; then
     foot_args=(-m)
   else
     foot_args=(--maximized)
   fi
-elif grep -q 'window-size-chars' <<<"$foot_help"; then
-  foot_args=(-W 220x58)
 fi
 if grep -q '\--app-id' <<<"$foot_help"; then
-  foot_args+=(--app-id=dsign-wifi)
+  foot_args+=(--app-id="$DSIGN_FOOT_APP_ID")
 fi
 
+focus_wifi_window() {
+  local app_id="$1"
+  if ! command -v wlrctl >/dev/null 2>&1; then
+    log "wlrctl missing (apt install wlrctl) — keyboard may stay on mpv"
+    return 1
+  fi
+  local i
+  for i in $(seq 1 80); do
+    if wlrctl toplevel focus "app_id:${app_id}" 2>/dev/null; then
+      log "wlrctl focus ok app_id=${app_id}"
+      return 0
+    fi
+    sleep 0.125
+  done
+  log "wlrctl focus failed app_id=${app_id}"
+  return 1
+}
+
 log "foot start cmd=${DSIGN_NMTUI_CMD} timeout=${TIMEOUT_SEC}s args=${foot_args[*]}"
+
+(
+  sleep 0.25
+  focus_wifi_window "$DSIGN_FOOT_APP_ID" || true
+) &
+focus_pid=$!
 
 set +e
 timeout --foreground "$TIMEOUT_SEC" \
   "$foot_bin" "${foot_args[@]}" -- "$DSIGN_NMTUI_CMD" 2>"$err_file"
 rc=$?
 set -e
+
+kill "$focus_pid" 2>/dev/null || true
+wait "$focus_pid" 2>/dev/null || true
 
 if [ -s "$err_file" ]; then
   log "foot stderr: $(tr '\n' ' ' < "$err_file" | head -c 400)"
