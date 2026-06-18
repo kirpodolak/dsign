@@ -39,7 +39,7 @@ ExecStartPre=/bin/rm -f /var/lib/dsign/mpv/socket
 # Intel: например Environment=DSIGN_MPV_PROFILE=intel-balanced в drop-in.
 ExecStart=/usr/local/bin/dsign-mpv-launch
 # Startup IP OSD is best-effort; never fail MPV startup if helper is unavailable.
-ExecStartPost=-/bin/systemctl --no-block restart dsign-show-startup-ip.service
+ExecStartPost=+-/usr/bin/systemctl --no-block restart dsign-show-startup-ip.service
 # Wi-Fi on-display is invoked only from dsign-show-startup-ip (not a separate unit).
 # Run via bash to avoid execute-bit / noexec issues.
 ExecStartPost=-/bin/bash /usr/local/bin/dsign-mpv-post-start
