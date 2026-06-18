@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Diagnostics for dsign-compositor.service (labwc + seatd + DRM).
-# Usage: sudo bash /usr/local/bin/dsign-diagnose-compositor
+# If direct execution fails (noexec /usr/local): sudo bash /usr/local/bin/dsign-diagnose-compositor
+# After manual copy from Windows, strip CRLF or bash fails with "set: invalid option" / $'\r':
+#   sudo sed -i 's/\r$//' /usr/local/bin/dsign-diagnose-compositor
+#   sudo bash /usr/local/bin/dsign-fix-deploy-scripts
 set -u
 
 echo "=== dsign-compositor diagnostics ==="
