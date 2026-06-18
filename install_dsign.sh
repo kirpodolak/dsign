@@ -28,6 +28,7 @@ fi
 usermod -a -G "$DSIGN_USER" "$WWW_USER"
 usermod -a -G "$WWW_USER" "$DSIGN_USER"
 usermod -a -G video "$DSIGN_USER"  # Для доступа к /dev/dri
+usermod -a -G render "$DSIGN_USER" 2>/dev/null || true
 usermod -a -G input "$DSIGN_USER" 2>/dev/null || true  # seatd/labwc input devices
 
 # Установка зависимостей
@@ -43,7 +44,7 @@ BASE_PACKAGES=(
 )
 WAYLAND_PACKAGES=()
 if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
-    WAYLAND_PACKAGES=(labwc imv seatd wayland-protocols grim foot)
+    WAYLAND_PACKAGES=(labwc imv seatd wayland-protocols grim foot wtype wlrctl)
 fi
 apt-get install -y "${BASE_PACKAGES[@]}" "${WAYLAND_PACKAGES[@]}"
 
@@ -177,17 +178,37 @@ mkdir -p "$DB_DIR/labwc"
 if [ -f "$PROJECT_DIR/etc/dsign/labwc/rc.xml" ]; then
     install -m 0644 "$PROJECT_DIR/etc/dsign/labwc/rc.xml" "$DB_DIR/labwc/rc.xml"
 fi
+if [ -f "$PROJECT_DIR/etc/dsign/labwc/autostart" ]; then
+    install -m 0755 "$PROJECT_DIR/etc/dsign/labwc/autostart" "$DB_DIR/labwc/autostart"
+    sed -i 's/\r$//' "$DB_DIR/labwc/autostart"
+fi
 chown -R "$DSIGN_USER:$DSIGN_USER" "$DB_DIR/labwc"
 mkdir -p "$DB_DIR/config"
 if [ -f "$PROJECT_DIR/etc/dsign/wayland.env.example" ] && [ ! -f "$DB_DIR/config/wayland.env" ]; then
     _dri_card=""
-    for _c in /dev/dri/card*; do
-        [ -e "$_c" ] && _dri_card="$_c" && break
+    for _c in /dev/dri/card[0-9]*; do
+        [ -e "$_c" ] || continue
+        _base="$(basename "$_c")"
+        for _st in /sys/class/drm/"${_base}"-*/status; do
+            [ -r "$_st" ] || continue
+            if [ "$(cat "$_st" 2>/dev/null)" = "connected" ]; then
+                _dri_card="$_c"
+                break 2
+            fi
+        done
     done
+    if [ -z "$_dri_card" ]; then
+        for _c in /dev/dri/card[0-9]*; do
+            [ -e "$_c" ] && _dri_card="$_c" && break
+        done
+    fi
     _dri_card="${_dri_card:-/dev/dri/card0}"
     install -m 0644 "$PROJECT_DIR/etc/dsign/wayland.env.example" "$DB_DIR/config/wayland.env"
     sed -i "s|^WLR_DRM_DEVICES=.*|WLR_DRM_DEVICES=${_dri_card}|" "$DB_DIR/config/wayland.env"
     chown "$DSIGN_USER:$DSIGN_USER" "$DB_DIR/config/wayland.env"
+fi
+if [ -f "$DB_DIR/config/wayland.env" ] && grep -q '^WLR_RENDERER=gles2' "$DB_DIR/config/wayland.env" 2>/dev/null; then
+    sed -i 's/^WLR_RENDERER=.*/WLR_RENDERER=pixman/' "$DB_DIR/config/wayland.env"
 fi
 if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
     install -d /etc/systemd/system/digital-signage.service.d
@@ -284,7 +305,7 @@ fi
 sed -i 's/\r$//' /usr/local/bin/dsign-show-startup-ip
 sed -i 's/\r$//' /usr/local/bin/dsign-wifi-on-display
 sed -i 's/\r$//' /usr/local/bin/dsign-nmtui-tty
-for _diag in dsign-diagnose-wifi-on-display dsign-diagnose-playback; do
+for _diag in dsign-diagnose-wifi-on-display dsign-diagnose-playback dsign-diagnose-compositor; do
     if [ -f "$PROJECT_DIR/usr/local/bin/$_diag" ]; then
         install -m 0755 "$PROJECT_DIR/usr/local/bin/$_diag" "/usr/local/bin/$_diag"
         sed -i 's/\r$//' "/usr/local/bin/$_diag"
