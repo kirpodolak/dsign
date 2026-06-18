@@ -1,0 +1,6 @@
+#!/bin/sh
+# Hide the pointer after labwc starts (see HideCursor keybind A-W-h in rc.xml).
+if command -v wtype >/dev/null 2>&1; then
+  sleep 2
+  wtype -M alt -M logo -P h 2>/dev/null || true
+fi
