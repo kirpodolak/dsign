@@ -237,17 +237,39 @@ fi
 if [ -f "$PROJECT_DIR/etc/systemd/system/screenshot.timer" ]; then
     install -m 0644 "$PROJECT_DIR/etc/systemd/system/screenshot.timer" /etc/systemd/system/screenshot.timer
 fi
+if [ -f "$PROJECT_DIR/usr/local/bin/dsign-preview-timer" ]; then
+    install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-preview-timer" /usr/local/bin/dsign-preview-timer
+    sed -i 's/\r$//' /usr/local/bin/dsign-preview-timer
+fi
+_install_sudoers() {
+    local src="$1"
+    local dst name
+    name="$(basename "$src")"
+    dst="/etc/sudoers.d/$name"
+    install -m 0440 "$src" "$dst"
+    sed -i 's/\r$//' "$dst"
+    # visudo requires LF-only lines and a newline at EOF (CRLF manual deploy breaks sudo).
+    tail -c1 "$dst" | read -r _ || echo >>"$dst"
+    if ! visudo -cf "$dst"; then
+        echo "ERROR: invalid sudoers file: $dst (check trailing newline and syntax)" >&2
+        exit 1
+    fi
+}
 if [ -f "$PROJECT_DIR/etc/sudoers.d/dsign-screenshot" ]; then
-    install -m 0440 "$PROJECT_DIR/etc/sudoers.d/dsign-screenshot" /etc/sudoers.d/dsign-screenshot
-    visudo -cf /etc/sudoers.d/dsign-screenshot 2>/dev/null || true
+    _install_sudoers "$PROJECT_DIR/etc/sudoers.d/dsign-screenshot"
 fi
 if [ -f "$PROJECT_DIR/etc/sudoers.d/dsign-systemctl" ]; then
-    install -m 0440 "$PROJECT_DIR/etc/sudoers.d/dsign-systemctl" /etc/sudoers.d/dsign-systemctl
-    visudo -cf /etc/sudoers.d/dsign-systemctl 2>/dev/null || true
+    _install_sudoers "$PROJECT_DIR/etc/sudoers.d/dsign-systemctl"
 fi
 if [ -f "$PROJECT_DIR/etc/sudoers.d/dsign-mpv-restart" ]; then
-    install -m 0440 "$PROJECT_DIR/etc/sudoers.d/dsign-mpv-restart" /etc/sudoers.d/dsign-mpv-restart
-    visudo -cf /etc/sudoers.d/dsign-mpv-restart 2>/dev/null || true
+    _install_sudoers "$PROJECT_DIR/etc/sudoers.d/dsign-mpv-restart"
+fi
+if [ -f "$PROJECT_DIR/etc/sudoers.d/dsign-preview-timer" ]; then
+    _install_sudoers "$PROJECT_DIR/etc/sudoers.d/dsign-preview-timer"
+fi
+if [ -f "$PROJECT_DIR/usr/local/bin/dsign-fix-sudoers" ]; then
+    install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-fix-sudoers" /usr/local/bin/dsign-fix-sudoers
+    sed -i 's/\r$//' /usr/local/bin/dsign-fix-sudoers
 fi
 
 # MPV Player Service (DRM / vo=drm — default stack)
