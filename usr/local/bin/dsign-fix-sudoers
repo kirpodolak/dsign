@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Fix CRLF / missing EOF newline in dsign sudoers after manual deploy (Windows editors).
+set -u
+fixed=0
+for f in /etc/sudoers.d/dsign-*; do
+  [ -f "$f" ] || continue
+  if grep -q $'\r' "$f" 2>/dev/null; then
+    sed -i 's/\r$//' "$f"
+    fixed=$((fixed + 1))
+    echo "fixed CRLF: $f"
+  fi
+  tail -c1 "$f" | read -r _ || echo >>"$f"
+  chmod 440 "$f" 2>/dev/null || true
+  if ! visudo -cf "$f"; then
+    echo "ERROR: still invalid after fix: $f" >&2
+    exit 1
+  fi
+  echo "OK: $f"
+done
+echo "done (CRLF fixes: ${fixed})"
