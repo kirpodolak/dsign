@@ -119,6 +119,11 @@ done
 check_rc_xml
 if [ -r /etc/systemd/system/dsign-compositor.service ]; then
   echo "unit ExecStart: $(grep '^ExecStart=' /etc/systemd/system/dsign-compositor.service | tail -1 | tr -d '\r')"
+  if grep -qE 'labwc -c /var/lib/dsign/labwc/rc\.xml' /etc/systemd/system/dsign-compositor.service 2>/dev/null \
+     && ! grep -qE 'labwc -C /var/lib/dsign/labwc' /etc/systemd/system/dsign-compositor.service 2>/dev/null; then
+    echo "WARNING: labwc started with -c rc.xml only — autostart (cursor hide) is NOT run."
+    echo "  Fix: ExecStart=/usr/bin/labwc -C /var/lib/dsign/labwc"
+  fi
 fi
 echo
 
@@ -197,8 +202,12 @@ if [ -r /var/lib/dsign/config/wayland.env ]; then
   fi
 fi
 if grep -q 'labwc -c /var/lib/dsign/labwc$' /etc/systemd/system/dsign-compositor.service 2>/dev/null; then
-  echo "ExecStart must point to rc.xml file, not directory:"
-  echo "  ExecStart=/usr/bin/labwc -c /var/lib/dsign/labwc/rc.xml"
+  echo "ExecStart must use -C for config directory (not -c with a directory path):"
+  echo "  ExecStart=/usr/bin/labwc -C /var/lib/dsign/labwc"
+fi
+if grep -qE 'labwc -c /var/lib/dsign/labwc/rc\.xml' /etc/systemd/system/dsign-compositor.service 2>/dev/null \
+   && ! grep -qE 'labwc -C /var/lib/dsign/labwc' /etc/systemd/system/dsign-compositor.service 2>/dev/null; then
+  echo "Cursor hide autostart skipped — add -C /var/lib/dsign/labwc to ExecStart"
 fi
 if [ "$wlr_renderer" = "pixman" ] && systemctl is-active --quiet dsign-compositor.service 2>/dev/null; then
   echo "Compositor OK but playback may lag — switch WLR_RENDERER to vulkan or gles2 (see performance section)."
