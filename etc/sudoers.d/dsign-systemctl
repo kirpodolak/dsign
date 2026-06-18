@@ -14,3 +14,4 @@ dsign ALL=(root) NOPASSWD: /usr/local/bin/dsign-wifi-on-display
 dsign ALL=(root) NOPASSWD: /usr/local/bin/dsign-nmtui-tty
 dsign ALL=(root) NOPASSWD: /sbin/reboot, /usr/bin/systemctl reboot
 dsign ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
+
