@@ -11,7 +11,6 @@ User=dsign
 Group=video
 SupplementaryGroups=video audio render
 EnvironmentFile=-/var/lib/dsign/config/wayland.env
-Environment=WAYLAND_DISPLAY=wayland-0
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=DSIGN_DISPLAY_BACKEND=wayland
 Environment=DSIGN_MPV_PROFILE=intel-balanced-wayland
