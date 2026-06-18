@@ -71,7 +71,7 @@ class PlaybackConstants:
 
     @classmethod
     def wayland_display(cls) -> str:
-        return (os.getenv("WAYLAND_DISPLAY") or "wayland-1").strip() or "wayland-1"
+        return (os.getenv("WAYLAND_DISPLAY") or "wayland-0").strip() or "wayland-0"
 
     @classmethod
     def wayland_env(cls) -> dict:
