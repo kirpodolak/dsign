@@ -1,0 +1,1 @@
+dsign ALL=(root) NOPASSWD: /usr/local/bin/dsign-preview-timer
