@@ -1588,13 +1588,30 @@ def init_api_routes(api_bp, services):
             settings_service.set_preview_auto_interval_sec(interval_sec)
 
             helper = "/usr/local/bin/dsign-preview-timer"
-            cmd = ["sudo", helper, "off"] if interval_sec == 0 else ["sudo", helper, "set", str(interval_sec)]
+            cmd = (
+                ["sudo", "-n", helper, "off"]
+                if interval_sec == 0
+                else ["sudo", "-n", helper, "set", str(interval_sec)]
+            )
             try:
-                subprocess.run(cmd, check=True, capture_output=True, text=True)
+                subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30.0)
             except FileNotFoundError:
                 return jsonify({"success": False, "error": f"Helper script not found: {helper}"}), 500
+            except subprocess.TimeoutExpired:
+                return jsonify({"success": False, "error": "Timed out applying preview timer"}), 504
             except subprocess.CalledProcessError as e:
                 msg = (e.stderr or e.stdout or "").strip() or f"Command failed: {e.returncode}"
+                msg_l = msg.lower()
+                if (
+                    "a terminal is required" in msg_l
+                    or "password is required" in msg_l
+                    or "interactive authentication is required" in msg_l
+                    or "missing line terminator" in msg_l
+                ):
+                    msg = (
+                        "sudoers not configured for preview timer "
+                        "(deploy /etc/sudoers.d/dsign-preview-timer and fix /etc/sudoers.d/dsign-systemctl)"
+                    )
                 return jsonify({"success": False, "error": msg}), 403
 
             return jsonify({"success": True, "interval_sec": interval_sec})
