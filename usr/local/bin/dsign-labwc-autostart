@@ -2,7 +2,7 @@
 # labwc session helper: ensure XDG_RUNTIME_DIR exists (compositor owns the session).
 set -euo pipefail
 
-export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 sock="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
