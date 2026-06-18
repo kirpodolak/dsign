@@ -1,58 +1,102 @@
 #!/usr/bin/env bash
-# Playback / MPV / playlist diagnostics for dsign signage devices.
+# Playback / MPV / playlist diagnostics for dsign signage devices (DRM + Wayland).
 set -u
 
 SOCK="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
 LOG="${DSIGN_MPV_LOG_FILE:-/var/lib/dsign/mpv/mpv.log}"
+ARCHIVE="${DSIGN_MPV_ARCHIVE:-/var/lib/dsign/mpv/archive}"
 DB="${DSIGN_DB_PATH:-/var/lib/dsign/database.db}"
 REPO="${DSIGN_REPO:-/home/dsign/dsign}"
-JOURNAL_LINES="${DSIGN_DIAG_JOURNAL_LINES:-400}"
+JOURNAL_LINES="${DSIGN_DIAG_JOURNAL_LINES:-600}"
 SINCE="${DSIGN_DIAG_SINCE:-}"
 
 echo "=== dsign playback diagnostics ==="
 echo "host: $(hostname)  time: $(date -Is 2>/dev/null || date)"
 echo
 
-echo "--- deployed code ---"
-if [ -d "$REPO/.git" ]; then
-  git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's/^/branch: /' || true
-  git -C "$REPO" log -1 --oneline 2>/dev/null | sed 's/^/commit: /' || true
-  if git -C "$REPO" grep -q "proactive_refresh_next_at" dsign/services/playlist_management.py 2>/dev/null; then
-    echo "recurring proactive refresh: present in tree"
-  else
-    echo "recurring proactive refresh: NOT in tree (deploy cursor/hls-network-stability-8ed1)"
-  fi
+echo "--- display backend ---"
+if [ -r /var/lib/dsign/config/wayland.env ]; then
+  grep -E '^(DSIGN_DISPLAY_BACKEND|WAYLAND_DISPLAY|XDG_RUNTIME_DIR)=' \
+    /var/lib/dsign/config/wayland.env 2>/dev/null || true
+fi
+if [ -S "${XDG_RUNTIME_DIR:-/run/user/1000}/${WAYLAND_DISPLAY:-wayland-0}" ] \
+  || [ -S /run/user/1000/wayland-0 ]; then
+  echo "wayland socket: OK"
 else
-  echo "(no git repo at $REPO)"
+  echo "wayland socket: MISSING"
 fi
 echo
 
-echo "--- proactive refresh env ---"
-for v in \
-  DSIGN_MPV_PROACTIVE_REFRESH_INTERVAL_MIN \
-  DSIGN_MPV_PROACTIVE_REFRESH_MIN \
-  DSIGN_MPV_PROACTIVE_REFRESH_MIN_DURATION_SEC \
-  DSIGN_MPV_NETWORK_TIMEOUT_SEC \
-  DSIGN_MPV_HLS_SEGMENT_TIMEOUT_SEC \
-  DSIGN_MPV_EOF_USE_EVENTS; do
-  val="$(printenv "$v" 2>/dev/null || true)"
-  if [ -z "$val" ] && [ -r /etc/dsign/environment ]; then
-    val="$(grep -E "^${v}=" /etc/dsign/environment 2>/dev/null | tail -1 | cut -d= -f2- || true)"
-  fi
-  if [ -z "$val" ]; then
-    val="$(systemctl show digital-signage.service -p Environment --value 2>/dev/null \
-      | tr ' ' '\n' | grep "^${v}=" | tail -1 | cut -d= -f2- || true)"
-  fi
-  printf '%s=%s\n' "$v" "${val:-<default>}"
+echo "--- services ---"
+for u in digital-signage.service dsign-mpv-wayland.service dsign-compositor.service dsign-logo.service dsign-mpv.service; do
+  st="$(systemctl is-active "$u" 2>/dev/null || echo unknown)"
+  en="$(systemctl is-enabled "$u" 2>/dev/null || echo unknown)"
+  printf '  %-28s active=%-10s enabled=%s\n' "$u" "$st" "$en"
 done
+if systemctl is-enabled dsign-mpv.service 2>/dev/null | grep -qv masked; then
+  echo "  WARNING: dsign-mpv.service (DRM) is not masked — dual mpv can stall playback:"
+  echo "    sudo bash /usr/local/bin/dsign-disable-drm-mpv"
+fi
 echo
 
-echo "--- services ---"
-for u in digital-signage.service dsign-mpv.service; do
-  systemctl is-active "$u" 2>/dev/null | sed "s/^/$u: /" || echo "$u: unknown"
-done
-systemctl show digital-signage.service -p ActiveEnterTimestamp --value 2>/dev/null | sed 's/^/digital-signage since: /' || true
-systemctl show dsign-mpv.service -p ActiveEnterTimestamp --value 2>/dev/null | sed 's/^/dsign-mpv since: /' || true
+echo "--- mpv processes ---"
+mpv_n="$(pgrep -c mpv 2>/dev/null || echo 0)"
+echo "mpv count: ${mpv_n:-0}"
+ps -o pid,tty,etime,cmd -C mpv 2>/dev/null | sed 's/^/  /' || echo "  (mpv not running)"
+if [ "${mpv_n:-0}" -gt 1 ] 2>/dev/null; then
+  echo "  WARNING: multiple mpv — only dsign-mpv-wayland should run on Wayland"
+fi
+if ps -o cmd -C mpv 2>/dev/null | grep -q -- '--vo=drm'; then
+  echo "  WARNING: DRM mpv detected (--vo=drm) — causes idle logo on Wayland"
+fi
+echo
+
+echo "--- IPC socket ---"
+if [ -S "$SOCK" ]; then
+  ls -la "$SOCK"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof "$SOCK" 2>/dev/null | sed 's/^/  /' || true
+  fi
+else
+  echo "(socket missing: $SOCK)"
+fi
+echo
+
+mpv_prop() {
+  local prop="$1"
+  if ! command -v python3 >/dev/null 2>&1 || [ ! -S "$SOCK" ]; then
+    return 1
+  fi
+  python3 <<PY
+import json, socket
+s = "${SOCK}"
+prop = "${prop}"
+try:
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(2)
+    c.connect(s)
+    c.sendall((json.dumps({"command":["get_property",prop],"request_id":1})+"\\n").encode())
+    d = json.loads(c.recv(4096).decode().split("\\n",1)[0])
+    print(d.get("data",""))
+except Exception as e:
+    print("?", e)
+PY
+}
+
+echo "--- mpv live snapshot (idle-active=True => logo on screen) ---"
+if [ -S "$SOCK" ]; then
+  for p in idle-active pause path stream-open-filename time-pos duration demuxer-cache-time eof-reached; do
+    v="$(mpv_prop "$p" 2>/dev/null || echo '?')"
+    printf '  %-22s %s\n' "$p:" "$v"
+  done
+else
+  echo "(no IPC)"
+fi
+echo
+
+echo "--- markers ---"
+ls -la /run/dsign/playback-active /run/dsign/startup-ip-shown 2>/dev/null | sed 's/^/  /' \
+  || echo "  (no markers under /run/dsign/)"
 echo
 
 echo "--- playback DB ---"
@@ -64,35 +108,7 @@ else
 fi
 echo
 
-mpv_prop() {
-  local prop="$1"
-  if ! command -v socat >/dev/null 2>&1 || [ ! -S "$SOCK" ]; then
-    return 1
-  fi
-  local req
-  req=$(printf '{"command":["get_property","%s"],"request_id":1}\n' "$prop")
-  local resp
-  resp=$(printf '%s' "$req" | socat - UNIX-CONNECT:"$SOCK" 2>/dev/null | head -1)
-  if command -v python3 >/dev/null 2>&1; then
-    printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',''))" 2>/dev/null
-  else
-    printf '%s\n' "$resp"
-  fi
-}
-
-echo "--- mpv live snapshot ---"
-if [ -S "$SOCK" ]; then
-  for p in path stream-open-filename time-pos duration pause idle-active demuxer-cache-time; do
-    v="$(mpv_prop "$p" 2>/dev/null || echo '?')"
-    printf '  %-22s %s\n' "$p:" "$v"
-  done
-else
-  echo "(socket missing: $SOCK)"
-fi
-ps -o pid,etime,cmd -C mpv 2>/dev/null | sed 's/^/  /' || echo "  (mpv not running)"
-echo
-
-echo "--- playback timeline (journal) ---"
+echo "--- timeline (journal, last events) ---"
 JARGS=(journalctl -u digital-signage.service --no-pager -n "$JOURNAL_LINES")
 if [ -n "$SINCE" ]; then
   JARGS+=(--since "$SINCE")
@@ -100,34 +116,59 @@ else
   JARGS+=(-b)
 fi
 "${JARGS[@]}" 2>/dev/null | grep -E \
-  'Playlist item (starting|finished)|proactive_refresh|Proactive refresh|mid-stream network reload|Network stream ready|Reapplying stream-lavf|ytdl stream opening|mpv_end_file|stall|advance|loadfile dedup|deferred_unpause|double' \
-  | tail -n 80 || echo "(no matching journal lines)"
+  'Playlist item (starting|finished)|proactive_refresh|Proactive refresh|mid-stream network reload|Network stream ready|ytdl stream did not open|ytdl: retrying|MPV network stream debug|Slideshow loop paused|Resumed playlist|MPV IPC socket recreated|hung|forcing systemd restart|deferred_unpause|instant_eof|vo init|loadfile' \
+  | tail -n 60 || echo "(no matching journal lines)"
 echo
 
-echo "--- proactive refresh hits (this boot) ---"
-PR_RELOAD="$(journalctl -u digital-signage.service -b --no-pager 2>/dev/null | grep -c 'reason.*proactive_refresh' 2>/dev/null || true)"
-PR_DONE="$(journalctl -u digital-signage.service -b --no-pager 2>/dev/null | grep -c 'Proactive refresh completed' 2>/dev/null || true)"
-echo "proactive_refresh reload events: ${PR_RELOAD:-0}"
-echo "proactive_refresh completed events: ${PR_DONE:-0}"
-journalctl -u digital-signage.service -b --no-pager 2>/dev/null | grep -E 'proactive_refresh|Proactive refresh completed' | tail -8 || true
-echo
-
-echo "--- playlist transitions (finished reasons, this boot) ---"
+echo "--- recovery / hung (journal) ---"
 journalctl -u digital-signage.service -b --no-pager 2>/dev/null \
-  | grep 'Playlist item finished' \
-  | sed 's/.*reason.: //;s/".*//' \
-  | sort | uniq -c | sort -rn | head -15 || true
+  | grep -iE 'hung|IPC socket recreated|stall recovery|forcing systemd restart|ytdl stream did not open' \
+  | tail -20 || true
 echo
 
-echo "--- mpv.log tail (segments / opens) ---"
+echo "--- dsign-mpv-wayland (journal) ---"
+journalctl -u dsign-mpv-wayland.service -b --no-pager -n 25 2>/dev/null || true
+echo
+
+echo "--- dsign-mpv DRM unit (journal, should be empty if masked) ---"
+journalctl -u dsign-mpv.service -b --no-pager -n 15 2>/dev/null || true
+echo
+
+echo "--- mpv.log errors (vo/drm, alsa busy, open fail) ---"
 if [ -r "$LOG" ]; then
-  tail -n 40 "$LOG" | grep -E 'Opening|segment-|hls|error|403|timeout|EOF' | tail -20 || tail -5 "$LOG"
+  grep -iE 'vo/drm|Error opening/initializing|alsa.*busy|failed to commit atomic|ytdl stream did not|EOF' "$LOG" 2>/dev/null \
+    | tail -15 || echo "  (no error patterns in current log tail — check archive)"
+  echo "  ... last HLS/opens:"
+  tail -n 30 "$LOG" | grep -E 'Opening|segment-|hls' | tail -8 || tail -3 "$LOG" | sed 's/^/  /'
 else
   echo "(missing $LOG)"
 fi
 echo
 
+echo "--- mpv archive (recent stops) ---"
+if [ -d "$ARCHIVE" ]; then
+  ls -lt "$ARCHIVE" 2>/dev/null | head -5 | sed 's/^/  /'
+  latest="$(ls -t "$ARCHIVE"/mpv-before-stop-*.log 2>/dev/null | head -1 || true)"
+  if [ -n "$latest" ] && [ -r "$latest" ]; then
+    echo "  errors in latest archive $(basename "$latest"):"
+    grep -iE 'vo/drm|Error opening|alsa.*busy|failed to commit|EOF reached' "$latest" 2>/dev/null \
+      | tail -8 | sed 's/^/    /' || echo "    (no vo/drm/alsa errors)"
+  fi
+else
+  echo "(no archive dir)"
+fi
+echo
+
+echo "--- finished reasons (this boot) ---"
+journalctl -u digital-signage.service -b --no-pager 2>/dev/null \
+  | grep 'Playlist item finished' \
+  | sed 's/.*"reason": "//;s/".*//' \
+  | sort | uniq -c | sort -rn | head -10 || true
+echo
+
 echo "=== hints ==="
-echo "  SINCE='2 hours ago' $0   # limit journal window"
-echo "  DSIGN_DIAG_JOURNAL_LINES=2000 $0"
-echo "  Look for: Proactive refresh completed; next scheduled (every ~25 min at time-pos 1500, 3000, …)"
+echo "  Immediate snapshot:     bash $0"
+echo "  Last 2 hours only:      SINCE='2 hours ago' bash $0"
+echo "  Idle logo + idle-active=True: mpv not playing (check vo/drm dual mpv above)"
+echo "  Fix dual mpv on Wayland: sudo bash /usr/local/bin/dsign-disable-drm-mpv"
+echo "  Save full bundle:       SINCE='12 hours ago' DSIGN_DIAG_JOURNAL_LINES=3000 bash $0 | tee /tmp/dsign-playback-$(date +%Y%m%dT%H%M).txt"
