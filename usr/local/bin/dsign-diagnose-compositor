@@ -155,6 +155,30 @@ echo "--- recent journal ---"
 journalctl -u dsign-compositor.service -b --no-pager -n 40 2>/dev/null || true
 echo
 
+echo "--- performance (renderer) ---"
+wlr_renderer=""
+if [ -r /var/lib/dsign/config/wayland.env ]; then
+  wlr_renderer="$(grep '^WLR_RENDERER=' /var/lib/dsign/config/wayland.env | head -1 | cut -d= -f2-)"
+  wlr_renderer="$(strip_crlf "$wlr_renderer")"
+  echo "WLR_RENDERER=${wlr_renderer:-<unset>}"
+fi
+if [ "$wlr_renderer" = "pixman" ]; then
+  echo "WARNING: pixman = CPU compositing. Fullscreen mpv/imv will stutter (labwc CPU often ~100%)."
+  echo "Try GPU renderer (test one at a time, watch: journalctl -u dsign-compositor -f):"
+  echo "  1) sudo sed -i 's/^WLR_RENDERER=.*/WLR_RENDERER=vulkan/' /var/lib/dsign/config/wayland.env"
+  echo "  2) if compositor fails: WLR_RENDERER=gles2"
+  echo "  3) fallback only: WLR_RENDERER=pixman"
+  echo "  sudo apt install -y mesa-vulkan-drivers vulkan-tools"
+  echo "  sudo systemctl restart dsign-compositor.service dsign-logo.service dsign-mpv-wayland.service"
+elif [ -n "$wlr_renderer" ]; then
+  echo "GPU renderer ($wlr_renderer) — if playback still stutters, check mpv hwdec and CPU load (top)."
+fi
+if systemctl is-active --quiet dsign-compositor.service 2>/dev/null; then
+  labwc_cpu="$(systemctl show dsign-compositor.service -p CPUUsageNSec --value 2>/dev/null || true)"
+  [ -n "$labwc_cpu" ] && echo "labwc CPU time (ns): $labwc_cpu"
+fi
+echo
+
 echo "--- suggested fixes ---"
 if [ -r /var/lib/dsign/config/wayland.env ]; then
   wlr_dev="$(grep '^WLR_DRM_DEVICES=' /var/lib/dsign/config/wayland.env | head -1 | cut -d= -f2-)"
@@ -167,8 +191,9 @@ if [ -r /var/lib/dsign/config/wayland.env ]; then
     echo "WLR_DRM_DEVICES=$wlr_dev is not readable for this user — add dsign to video group or fix permissions"
   fi
   if grep -q '^WLR_RENDERER=gles2' /var/lib/dsign/config/wayland.env 2>/dev/null; then
-    echo "WLR_RENDERER=gles2 often breaks Intel labwc — use pixman:"
-    echo "  sudo sed -i 's/^WLR_RENDERER=.*/WLR_RENDERER=pixman/' /var/lib/dsign/config/wayland.env"
+    echo "If labwc crashes with gles2 (swapchain/EGL), try vulkan before pixman:"
+    echo "  sudo sed -i 's/^WLR_RENDERER=.*/WLR_RENDERER=vulkan/' /var/lib/dsign/config/wayland.env"
+    echo "  Last resort (slow playback): WLR_RENDERER=pixman"
   fi
 fi
 if grep -q 'labwc -c /var/lib/dsign/labwc$' /etc/systemd/system/dsign-compositor.service 2>/dev/null; then
