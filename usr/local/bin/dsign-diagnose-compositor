@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# Diagnostics for dsign-compositor.service (labwc + seatd + DRM).
+# If direct execution fails (noexec /usr/local): sudo bash /usr/local/bin/dsign-diagnose-compositor
+# After manual copy from Windows, strip CRLF or bash fails with "set: invalid option" / $'\r':
+#   sudo sed -i 's/\r$//' /usr/local/bin/dsign-diagnose-compositor
+#   sudo bash /usr/local/bin/dsign-fix-deploy-scripts
+set -u
+
+strip_crlf() {
+  printf '%s' "${1:-}" | tr -d '\r'
+}
+
+pick_connected_dri_card() {
+  local card base st conn
+  for card in /dev/dri/card[0-9]*; do
+    [ -e "$card" ] || continue
+    base="$(basename "$card")"
+    for st in /sys/class/drm/"${base}"-*/status; do
+      [ -r "$st" ] || continue
+      if [ "$(cat "$st" 2>/dev/null | tr -d '\r\n')" = "connected" ]; then
+        echo "$card"
+        return 0
+      fi
+    done
+  done
+  for card in /dev/dri/card[0-9]*; do
+    [ -e "$card" ] && echo "$card" && return 0
+  done
+  return 1
+}
+
+check_rc_xml() {
+  local rc="/var/lib/dsign/labwc/rc.xml"
+  [ -r "$rc" ] || return 0
+  if command -v xmllint >/dev/null 2>&1; then
+    xmllint --noout "$rc" 2>&1 && echo "rc.xml: XML OK" || echo "rc.xml: XML INVALID"
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    if python3 - "$rc" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+ET.parse(sys.argv[1])
+PY
+    then
+      echo "rc.xml: XML OK (python3)"
+    else
+      echo "rc.xml: XML INVALID (python3)"
+    fi
+    return 0
+  fi
+  echo "rc.xml: present (install libxml2-utils for xmllint validation)"
+}
+
+echo "=== dsign-compositor diagnostics ==="
+echo
+
+echo "--- labwc ---"
+command -v labwc >/dev/null 2>&1 && labwc -v 2>&1 || echo "labwc: MISSING"
+echo
+
+echo "--- seatd ---"
+systemctl is-active seatd.service 2>/dev/null || true
+systemctl status seatd.service --no-pager -n 5 2>/dev/null || echo "seatd: check failed"
+echo
+
+echo "--- user dsign groups (need video render input) ---"
+if id dsign >/dev/null 2>&1; then
+  id dsign
+else
+  echo "user dsign: MISSING"
+fi
+echo
+
+echo "--- wayland.env ---"
+if [ -r /var/lib/dsign/config/wayland.env ]; then
+  grep -E '^(DSIGN_DISPLAY_BACKEND|WAYLAND_DISPLAY|XDG_RUNTIME_DIR|WLR_DRM_DEVICES|WLR_RENDERER|WLR_BACKENDS|LIBSEAT_BACKEND)=' \
+    /var/lib/dsign/config/wayland.env | tr -d '\r' || true
+  if grep -q $'\r' /var/lib/dsign/config/wayland.env 2>/dev/null; then
+    echo "WARNING: wayland.env contains CRLF — run: sudo sed -i 's/\\r$//' /var/lib/dsign/config/wayland.env"
+  fi
+else
+  echo "(missing /var/lib/dsign/config/wayland.env)"
+fi
+echo
+
+echo "--- DRM devices ---"
+ls -la /dev/dri/ 2>/dev/null || echo "(no /dev/dri)"
+for card in /dev/dri/card[0-9]*; do
+  [ -e "$card" ] || continue
+  base="$(basename "$card")"
+  echo -n "$card: "
+  if [ -r "$card" ]; then
+    echo -n "readable "
+  else
+    echo -n "NOT readable "
+  fi
+  for st in /sys/class/drm/"${base}"-*/status; do
+    [ -r "$st" ] || continue
+    conn="${st%/status}"
+    conn="${conn##*/}"
+    echo -n "${conn}=$(cat "$st" 2>/dev/null | tr -d '\r\n') "
+  done
+  echo
+done
+echo
+
+echo "--- labwc config ---"
+for f in /var/lib/dsign/labwc/rc.xml /var/lib/dsign/labwc/autostart; do
+  if [ -e "$f" ]; then
+    ls -l "$f"
+    if ls -l "$f" 2>/dev/null | grep -q '+'; then
+      echo "  NOTE: ACL present (+) — chown may fail: sudo setfacl -b $f"
+    fi
+  else
+    echo "MISSING: $f"
+  fi
+done
+check_rc_xml
+if [ -r /etc/systemd/system/dsign-compositor.service ]; then
+  echo "unit ExecStart: $(grep '^ExecStart=' /etc/systemd/system/dsign-compositor.service | tail -1 | tr -d '\r')"
+fi
+echo
+
+echo "--- wayland socket ---"
+rt="/run/user/1000"
+disp="wayland-0"
+if [ -r /var/lib/dsign/config/wayland.env ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(strip_crlf "$line")"
+    case "$line" in
+      XDG_RUNTIME_DIR=*) rt="${line#*=}" ;;
+      WAYLAND_DISPLAY=*) disp="${line#*=}" ;;
+    esac
+  done < /var/lib/dsign/config/wayland.env
+fi
+rt="$(strip_crlf "$rt")"
+disp="$(strip_crlf "$disp")"
+sock="${rt}/${disp}"
+if [ -S "$sock" ]; then
+  echo "socket OK: $sock"
+else
+  echo "socket missing: $sock"
+  if systemctl is-active --quiet dsign-compositor.service 2>/dev/null; then
+    echo "  compositor is active — check WAYLAND_DISPLAY / XDG_RUNTIME_DIR in wayland.env (CRLF?)"
+  fi
+fi
+echo
+
+echo "--- compositor unit ---"
+systemctl status dsign-compositor.service --no-pager -n 12 2>/dev/null || true
+echo
+
+echo "--- recent journal ---"
+journalctl -u dsign-compositor.service -b --no-pager -n 40 2>/dev/null || true
+echo
+
+echo "--- suggested fixes ---"
+if [ -r /var/lib/dsign/config/wayland.env ]; then
+  wlr_dev="$(grep '^WLR_DRM_DEVICES=' /var/lib/dsign/config/wayland.env | head -1 | cut -d= -f2-)"
+  wlr_dev="$(strip_crlf "$wlr_dev")"
+  if [ -n "$wlr_dev" ] && [ ! -e "$wlr_dev" ]; then
+    suggested="$(pick_connected_dri_card || echo /dev/dri/card0)"
+    echo "WLR_DRM_DEVICES=$wlr_dev does not exist — use a connected card, e.g.:"
+    echo "  sudo sed -i 's|^WLR_DRM_DEVICES=.*|WLR_DRM_DEVICES=${suggested}|' /var/lib/dsign/config/wayland.env"
+  elif [ -n "$wlr_dev" ] && [ ! -r "$wlr_dev" ]; then
+    echo "WLR_DRM_DEVICES=$wlr_dev is not readable for this user — add dsign to video group or fix permissions"
+  fi
+  if grep -q '^WLR_RENDERER=gles2' /var/lib/dsign/config/wayland.env 2>/dev/null; then
+    echo "WLR_RENDERER=gles2 often breaks Intel labwc — use pixman:"
+    echo "  sudo sed -i 's/^WLR_RENDERER=.*/WLR_RENDERER=pixman/' /var/lib/dsign/config/wayland.env"
+  fi
+fi
+if grep -q 'labwc -c /var/lib/dsign/labwc$' /etc/systemd/system/dsign-compositor.service 2>/dev/null; then
+  echo "ExecStart must point to rc.xml file, not directory:"
+  echo "  ExecStart=/usr/bin/labwc -c /var/lib/dsign/labwc/rc.xml"
+fi
+if systemctl is-active --quiet dsign-compositor.service 2>/dev/null; then
+  echo "Compositor looks healthy — no mandatory fixes."
+else
+  echo "After fixes:"
+  echo "  sudo systemctl reset-failed dsign-compositor.service"
+  echo "  sudo systemctl restart dsign-compositor.service dsign-logo.service dsign-mpv-wayland.service"
+fi
