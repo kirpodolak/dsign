@@ -44,7 +44,7 @@ BASE_PACKAGES=(
 )
 WAYLAND_PACKAGES=()
 if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
-    WAYLAND_PACKAGES=(labwc imv seatd wayland-protocols grim foot wtype wlrctl)
+    WAYLAND_PACKAGES=(labwc imv seatd wayland-protocols grim foot wtype wlrctl swayidle mesa-vulkan-drivers vulkan-tools)
 fi
 apt-get install -y "${BASE_PACKAGES[@]}" "${WAYLAND_PACKAGES[@]}"
 
