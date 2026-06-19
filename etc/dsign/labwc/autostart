@@ -1,10 +1,4 @@
 #!/bin/sh
-# Hide the pointer after labwc starts (HideCursor keybind A-W-h in rc.xml).
-# Requires labwc -C /var/lib/dsign/labwc (autostart is NOT loaded when only -c rc.xml is set).
-if command -v wtype >/dev/null 2>&1; then
-  sleep 2
-  wtype -M alt -M logo -P h 2>/dev/null || true
-fi
-if command -v swayidle >/dev/null 2>&1 && command -v wtype >/dev/null 2>&1; then
-  swayidle -w timeout 3 'wtype -M alt -M logo -P h' >/dev/null 2>&1 &
-fi
+# Cursor hide + idle re-hide are handled by systemd ExecStartPost:
+#   /usr/local/bin/dsign-labwc-autostart (dsign-compositor.service)
+# Do not start swayidle here — labwc -C also runs this file and would duplicate swayidle.
