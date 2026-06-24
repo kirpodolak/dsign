@@ -3503,53 +3503,6 @@ class PlaylistManager:
             'network_health': self.get_network_playback_health(),
         }
 
-    def restart_mpv(self) -> bool:
-        """Restart MPV process with enhanced reliability"""
-        try:
-            if self._mpv_manager._mpv_process:
-                try:
-                    self._mpv_manager._mpv_process.terminate()
-                    self._mpv_manager._mpv_process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    self.logger.warning("MPV process did not terminate gracefully, killing...")
-                    self._mpv_manager._mpv_process.kill()
-                    self._mpv_manager._mpv_process.wait()
-                except Exception as e:
-                    self.logger.warning(f"Error terminating MPV process: {str(e)}")
-            
-            if os.path.exists(PlaybackConstants.SOCKET_PATH):
-                try:
-                    os.unlink(PlaybackConstants.SOCKET_PATH)
-                except Exception as e:
-                    self.logger.warning(f"Error removing socket: {str(e)}")
-                    try:
-                        os.chmod(PlaybackConstants.SOCKET_PATH, 0o777)
-                        os.unlink(PlaybackConstants.SOCKET_PATH)
-                    except:
-                        pass
-            
-            self._mpv_manager._mpv_ready = False
-            self._mpv_manager._socket_ready_event.clear()
-            self._mpv_manager._ensure_mpv_service()
-            
-            try:
-                self._mpv_manager._wait_for_mpv_ready(timeout=30)
-                return True
-            except Exception as e:
-                self.logger.error(f"Failed to verify MPV restart: {str(e)}")
-                return False
-                
-        except Exception as e:
-            self.logger.error(
-                "MPV restart failed",
-                extra={
-                    "error": str(e),
-                    "type": type(e).__name__,
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            return False
-
     def get_playback_info(self) -> Dict:
         """Get current playback info"""
         info = {}
