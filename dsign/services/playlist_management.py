@@ -52,6 +52,8 @@ class PlaylistManager:
         self._last_loaded_media_key: Optional[str] = None
         self._load_in_progress = False
         self._load_lock = Lock()
+        self._post_mpv_restart_until: float = 0.0
+        self._consecutive_network_open_failures = 0
 
     def set_slideshow_crash_callback(self, callback: Optional[Callable[[], None]]) -> None:
         self._slideshow_crash_callback = callback
@@ -324,6 +326,24 @@ class PlaylistManager:
             except Exception:
                 pass
 
+    def mark_post_mpv_restart(self, within_sec: float = 300.0) -> None:
+        """Shorter ytdl open waits right after hung/systemd mpv recovery."""
+        self._post_mpv_restart_until = time.monotonic() + max(30.0, float(within_sec))
+
+    def _in_post_mpv_restart_window(self) -> bool:
+        return time.monotonic() < float(self._post_mpv_restart_until or 0.0)
+
+    def _ytdl_open_timeout_sec(self, default_sec: float) -> float:
+        if not self._in_post_mpv_restart_window():
+            return default_sec
+        try:
+            sec = float(
+                (os.getenv("DSIGN_MPV_YTDL_OPEN_SEC_AFTER_RECOVER") or "60").strip()
+            )
+        except ValueError:
+            sec = 60.0
+        return max(20.0, min(float(default_sec), sec))
+
     def _issue_loadfile(
         self,
         load_cmd: List[Any],
@@ -446,7 +466,7 @@ class PlaylistManager:
                         extra={"media_key": media_key, "path_preview": path_s[:120]},
                     )
                     self._issue_ytdl_loadfile(load_cmd, media_key=media_key)
-            open_sec = 180.0
+            open_sec = self._ytdl_open_timeout_sec(180.0)
             if not self._wait_mpv_ytdl_stream_opening(timeout_sec=open_sec):
                 if load_cmd is not None:
                     self.logger.info(
@@ -454,7 +474,8 @@ class PlaylistManager:
                         extra={"media_key": media_key, "path_preview": path_s[:120]},
                     )
                     self._issue_ytdl_loadfile(load_cmd, media_key=media_key)
-                    if not self._wait_mpv_ytdl_stream_opening(timeout_sec=90.0):
+                    retry_sec = self._ytdl_open_timeout_sec(90.0)
+                    if not self._wait_mpv_ytdl_stream_opening(timeout_sec=retry_sec):
                         self.logger.warning(
                             "ytdl stream did not open after loadfile retries",
                             extra={"media_key": media_key, "path_preview": path_s[:120]},
@@ -808,6 +829,10 @@ class PlaylistManager:
                 load_ipc_ok=True,
             ):
                 return False
+            try:
+                self._mpv_manager.set_playback_stream_opening(True)
+            except Exception:
+                pass
             if saved_seek is not None and saved_seek > 5.0:
                 try:
                     self._mpv_manager._send_command(
@@ -2468,7 +2493,12 @@ class PlaylistManager:
             # never let diagnostics break playback
             pass
 
-    def _stop_play_thread(self, *, preserve_stall_tracking: bool = False):
+    def _stop_play_thread(
+        self,
+        *,
+        preserve_stall_tracking: bool = False,
+        preserve_loop_position: bool = False,
+    ):
         if self._play_thread and self._play_thread.is_alive():
             self._stop_event.set()
             try:
@@ -2484,7 +2514,8 @@ class PlaylistManager:
         self._preloaded_stream_ready = False
         self._preloaded_load_cmd = None
         self._clear_current_media_label(emit=False)
-        self._clear_loop_position()
+        if not preserve_loop_position:
+            self._clear_loop_position()
         self._set_playback_active_marker(False)
         try:
             self._mpv_manager.set_playback_session_active(False)
@@ -2566,6 +2597,21 @@ class PlaylistManager:
             # Without this flag, skip_load stays true forever and the file never reloads for cycle 2+.
             did_skip_first_preload = False
             loop_cycle = 0
+            consecutive_network_open_failures = 0
+            try:
+                net_open_abort = int(
+                    (os.getenv("DSIGN_PLAYLIST_NET_OPEN_FAIL_ABORT") or "3").strip()
+                )
+            except ValueError:
+                net_open_abort = 3
+            net_open_abort = max(2, min(20, net_open_abort))
+            try:
+                net_open_cooldown_sec = float(
+                    (os.getenv("DSIGN_PLAYLIST_NET_OPEN_FAIL_COOLDOWN_SEC") or "90").strip()
+                )
+            except ValueError:
+                net_open_cooldown_sec = 90.0
+            net_open_cooldown_sec = max(15.0, min(600.0, net_open_cooldown_sec))
             while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
                 loop_cycle += 1
                 self.logger.debug(
@@ -2573,6 +2619,7 @@ class PlaylistManager:
                     extra={"playlist_id": playlist_id, "cycle": loop_cycle, "items": len(items)},
                 )
                 stall_abort = False
+                net_open_cycle_abort = False
                 # Iterate cyclically starting from start_index.
                 for offset in range(len(items)):
                     item_index = (start_index + offset) % len(items)
@@ -2781,11 +2828,30 @@ class PlaylistManager:
                                     media_key,
                                     reason="socket_missing" if socket_missing else "open_failed",
                                 )
+                                if is_network:
+                                    consecutive_network_open_failures += 1
+                                    if consecutive_network_open_failures >= net_open_abort:
+                                        self.logger.warning(
+                                            "Aborting playlist scan after consecutive network open failures",
+                                            extra={
+                                                "playlist_id": playlist_id,
+                                                "failures": consecutive_network_open_failures,
+                                                "abort_threshold": net_open_abort,
+                                                "cooldown_sec": round(net_open_cooldown_sec, 1),
+                                                "resume_index": item_index,
+                                            },
+                                        )
+                                        start_index = item_index
+                                        consecutive_network_open_failures = 0
+                                        self._stop_event.wait(timeout=net_open_cooldown_sec)
+                                        net_open_cycle_abort = True
+                                        break
                                 if socket_missing:
                                     self._stop_event.wait(timeout=5.0)
                                 continue
                             stream_ready = True
                             self._apply_post_loadfile_playback_props(muted=muted)
+                            consecutive_network_open_failures = 0
                         elif not skip_load:
                             self._apply_post_loadfile_playback_props(muted=muted)
                         if not self._wait_mpv_video_end(
@@ -2857,6 +2923,9 @@ class PlaylistManager:
                                     "load_wait_sec": load_wait_sec,
                                 },
                             )
+
+                if net_open_cycle_abort:
+                    continue
 
                 if stall_abort or self._stall_restart_was_requested():
                     self.logger.info(
@@ -3185,6 +3254,7 @@ class PlaylistManager:
         show_idle_logo: bool = True,
         update_status: bool = True,
         preserve_stall_tracking: bool = False,
+        preserve_loop_position: bool = False,
     ) -> bool:
         """Stop playback and persist stopped state so UI/API match MPV (idle logo)."""
         with self._app_context():
@@ -3192,6 +3262,7 @@ class PlaylistManager:
                 show_idle_logo=show_idle_logo,
                 update_status=update_status,
                 preserve_stall_tracking=preserve_stall_tracking,
+                preserve_loop_position=preserve_loop_position,
             )
 
     def _stop_impl(
@@ -3200,6 +3271,7 @@ class PlaylistManager:
         show_idle_logo: bool = True,
         update_status: bool = True,
         preserve_stall_tracking: bool = False,
+        preserve_loop_position: bool = False,
     ) -> bool:
         from ..models import PlaybackStatus
 
@@ -3207,7 +3279,10 @@ class PlaylistManager:
             playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
             last_playlist_id = playback.playlist_id
 
-            self._stop_play_thread(preserve_stall_tracking=preserve_stall_tracking)
+            self._stop_play_thread(
+                preserve_stall_tracking=preserve_stall_tracking,
+                preserve_loop_position=preserve_loop_position,
+            )
             self._set_playback_active_marker(False)
             ok = True
             if show_idle_logo:
