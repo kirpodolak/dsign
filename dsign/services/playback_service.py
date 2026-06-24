@@ -445,9 +445,11 @@ class PlaybackService:
                 show_idle_logo=False,
                 update_status=False,
                 preserve_stall_tracking=True,
+                preserve_loop_position=True,
             )
         except Exception:
             pass
+        self._playlist_manager.mark_post_mpv_restart()
         self._mpv_manager._reset_ipc_session()
         if not self._mpv_manager.wait_for_ipc_socket_at_startup():
             self._log_warning(

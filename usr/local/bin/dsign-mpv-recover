@@ -2,14 +2,46 @@
 # Hard recovery when `systemctl restart dsign-mpv.service` fails (hung mpv, start-limit-hit, stale TTY).
 set -u
 
-UNIT="${DSIGN_MPV_UNIT:-dsign-mpv.service}"
-if [ -z "${DSIGN_MPV_UNIT:-}" ]; then
-  case "${DSIGN_DISPLAY_BACKEND:-}" in
+_resolve_display_backend() {
+  if [ -n "${DSIGN_DISPLAY_BACKEND:-}" ]; then
+    printf '%s' "${DSIGN_DISPLAY_BACKEND}"
+    return
+  fi
+  if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    printf '%s' "wayland"
+    return
+  fi
+  if [ -r /var/lib/dsign/config/wayland.env ]; then
+    # shellcheck disable=SC1091
+    . /var/lib/dsign/config/wayland.env 2>/dev/null || true
+    if [ -n "${DSIGN_DISPLAY_BACKEND:-}" ]; then
+      printf '%s' "${DSIGN_DISPLAY_BACKEND}"
+      return
+    fi
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+      printf '%s' "wayland"
+      return
+    fi
+  fi
+  printf '%s' "drm"
+}
+
+_resolve_mpv_unit() {
+  if [ -n "${DSIGN_MPV_UNIT:-}" ]; then
+    printf '%s' "${DSIGN_MPV_UNIT}"
+    return
+  fi
+  case "$(_resolve_display_backend)" in
     wayland|labwc|wl)
-      UNIT="dsign-mpv-wayland.service"
+      printf '%s' "dsign-mpv-wayland.service"
+      ;;
+    *)
+      printf '%s' "dsign-mpv.service"
       ;;
   esac
-fi
+}
+
+UNIT="$(_resolve_mpv_unit)"
 
 SOCK="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
 SYSTEMCTL="${SYSTEMCTL:-/usr/bin/systemctl}"
@@ -43,7 +75,7 @@ fi
 rm -f "$SOCK" 2>/dev/null || true
 
 WAYLAND_MODE=0
-case "${DSIGN_DISPLAY_BACKEND:-}" in
+case "$(_resolve_display_backend)" in
   wayland|labwc|wl) WAYLAND_MODE=1 ;;
 esac
 
