@@ -53,7 +53,12 @@ class PlaylistManager:
         self._load_in_progress = False
         self._load_lock = Lock()
         self._post_mpv_restart_until: float = 0.0
-        self._consecutive_network_open_failures = 0
+        self._consecutive_ytdl_failures: int = 0
+        self._ytdl_health_lock = Lock()
+        self._last_good_item_index: Optional[int] = None
+        self._last_good_media_key: Optional[str] = None
+        self._last_good_items_count: int = 0
+        self._last_good_playlist_id: Optional[int] = None
 
     def set_slideshow_crash_callback(self, callback: Optional[Callable[[], None]]) -> None:
         self._slideshow_crash_callback = callback
@@ -207,6 +212,74 @@ class PlaylistManager:
             return (int(idx) + 1) % count
         return int(idx)
 
+    def get_resume_start_index_for_hung_recovery(self) -> int:
+        """After hung mpv restart, prefer last successfully opened item."""
+        with self._loop_position_lock:
+            good_idx = self._last_good_item_index
+            good_count = self._last_good_items_count
+            loop_idx = self._loop_item_index
+            loop_count = self._loop_items_count
+        if good_idx is not None and good_count > 0:
+            return int(good_idx) % good_count
+        if loop_idx is not None and loop_count > 0:
+            return int(loop_idx)
+        return 0
+
+    @staticmethod
+    def _is_network_stream_path(path: Any) -> bool:
+        p = str(path or "")
+        return p.startswith(("http://", "https://", "ytdl://"))
+
+    def _set_last_good_playback(
+        self,
+        playlist_id: int,
+        item_index: int,
+        media_key: str,
+        items_count: int,
+    ) -> None:
+        with self._loop_position_lock:
+            self._last_good_playlist_id = int(playlist_id)
+            self._last_good_item_index = int(item_index)
+            self._last_good_items_count = max(1, int(items_count))
+            self._last_good_media_key = str(media_key or "")
+
+    def _record_ytdl_open_success(self) -> None:
+        with self._ytdl_health_lock:
+            prev = int(self._consecutive_ytdl_failures or 0)
+            self._consecutive_ytdl_failures = 0
+        if prev > 0:
+            self.logger.info(
+                "ytdl open recovered after failure streak",
+                extra={"previous_consecutive_ytdl_failures": prev},
+            )
+
+    def _record_ytdl_open_failure(self, *, media_key: str = "", reason: str = "") -> None:
+        with self._ytdl_health_lock:
+            self._consecutive_ytdl_failures = int(self._consecutive_ytdl_failures or 0) + 1
+            streak = self._consecutive_ytdl_failures
+        self.logger.warning(
+            "ytdl/network stream open failed (streak)",
+            extra={
+                "consecutive_ytdl_failures": streak,
+                "media_key": media_key or None,
+                "reason": reason or None,
+                "cdn_may_be_down": streak >= 3,
+            },
+        )
+
+    def get_network_playback_health(self) -> Dict[str, Any]:
+        with self._ytdl_health_lock:
+            streak = int(self._consecutive_ytdl_failures or 0)
+        with self._loop_position_lock:
+            return {
+                "consecutive_ytdl_failures": streak,
+                "cdn_may_be_down": streak >= 3,
+                "last_good_media_key": self._last_good_media_key,
+                "last_good_item_index": self._last_good_item_index,
+                "last_good_playlist_id": self._last_good_playlist_id,
+                "post_mpv_restart_window": self._in_post_mpv_restart_window(),
+            }
+
     def _clear_current_media_label(self, *, emit: bool = True, playlist_id: Optional[int] = None) -> None:
         with self._current_media_lock:
             self._current_media_label = None
@@ -334,15 +407,77 @@ class PlaylistManager:
         return time.monotonic() < float(self._post_mpv_restart_until or 0.0)
 
     def _ytdl_open_timeout_sec(self, default_sec: float) -> float:
-        if not self._in_post_mpv_restart_window():
-            return default_sec
+        streak = max(0, int(self._consecutive_ytdl_failures or 0))
+        capped = float(default_sec)
+        if streak >= 2:
+            capped = min(capped, 45.0)
+        elif streak >= 1:
+            capped = min(capped, 90.0)
+        if self._in_post_mpv_restart_window():
+            try:
+                recover_cap = float(
+                    (os.getenv("DSIGN_MPV_YTDL_OPEN_SEC_AFTER_RECOVER") or "60").strip()
+                )
+            except ValueError:
+                recover_cap = 60.0
+            capped = min(capped, recover_cap)
+        return max(15.0, capped)
+
+    def _all_network_fail_cooldown_sec(self) -> float:
         try:
             sec = float(
-                (os.getenv("DSIGN_MPV_YTDL_OPEN_SEC_AFTER_RECOVER") or "60").strip()
+                (os.getenv("DSIGN_PLAYLIST_ALL_NETWORK_FAIL_COOLDOWN_SEC") or "300").strip()
             )
         except ValueError:
-            sec = 60.0
-        return max(20.0, min(float(default_sec), sec))
+            sec = 300.0
+        return max(60.0, min(1800.0, sec))
+
+    def _handle_all_network_items_failed_cycle(
+        self,
+        *,
+        playlist_id: int,
+        items_count: int,
+    ) -> Optional[int]:
+        """
+        Full playlist cycle had only network open failures.
+
+        Returns start_index for the next outer loop iteration, or None if unchanged.
+        """
+        health = self.get_network_playback_health()
+        self.logger.error(
+            "playlist: all network items failed in cycle",
+            extra={
+                "playlist_id": playlist_id,
+                "items_count": items_count,
+                **health,
+            },
+        )
+        good_idx = self._last_good_item_index
+        if good_idx is not None and self._last_good_items_count > 0:
+            self.logger.warning(
+                "playlist: retrying last-good media after full network failure cycle",
+                extra={
+                    "playlist_id": playlist_id,
+                    "last_good_media_key": self._last_good_media_key,
+                    "resume_index": int(good_idx),
+                },
+            )
+            return int(good_idx) % self._last_good_items_count
+        cooldown = self._all_network_fail_cooldown_sec()
+        try:
+            self._logo_manager.display_idle_logo()
+        except Exception:
+            pass
+        self.logger.warning(
+            "playlist: no last-good media; logo + cooldown before next cycle",
+            extra={
+                "playlist_id": playlist_id,
+                "cooldown_sec": round(cooldown, 1),
+                "consecutive_ytdl_failures": health.get("consecutive_ytdl_failures"),
+            },
+        )
+        self._stop_event.wait(timeout=cooldown)
+        return 0
 
     def _issue_loadfile(
         self,
@@ -2597,7 +2732,6 @@ class PlaylistManager:
             # Without this flag, skip_load stays true forever and the file never reloads for cycle 2+.
             did_skip_first_preload = False
             loop_cycle = 0
-            consecutive_network_open_failures = 0
             try:
                 net_open_abort = int(
                     (os.getenv("DSIGN_PLAYLIST_NET_OPEN_FAIL_ABORT") or "3").strip()
@@ -2614,6 +2748,8 @@ class PlaylistManager:
             net_open_cooldown_sec = max(15.0, min(600.0, net_open_cooldown_sec))
             while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
                 loop_cycle += 1
+                cycle_network_attempted = 0
+                cycle_network_failed = 0
                 self.logger.debug(
                     "Playlist loop cycle",
                     extra={"playlist_id": playlist_id, "cycle": loop_cycle, "items": len(items)},
@@ -2803,6 +2939,15 @@ class PlaylistManager:
                         )
                         stream_ready = False
                         if is_network:
+                            if skip_load and is_preloaded_network:
+                                self._record_ytdl_open_success()
+                                self._set_last_good_playback(
+                                    playlist_id,
+                                    item_index,
+                                    media_key,
+                                    len(items),
+                                )
+                            cycle_network_attempted += 1
                             if not self._ensure_network_stream_started(
                                 item,
                                 str(path),
@@ -2829,20 +2974,26 @@ class PlaylistManager:
                                     reason="socket_missing" if socket_missing else "open_failed",
                                 )
                                 if is_network:
-                                    consecutive_network_open_failures += 1
-                                    if consecutive_network_open_failures >= net_open_abort:
+                                    cycle_network_failed += 1
+                                    self._record_ytdl_open_failure(
+                                        media_key=media_key,
+                                        reason="open_failed",
+                                    )
+                                    streak = int(self._consecutive_ytdl_failures or 0)
+                                    if streak >= net_open_abort:
                                         self.logger.warning(
                                             "Aborting playlist scan after consecutive network open failures",
                                             extra={
                                                 "playlist_id": playlist_id,
-                                                "failures": consecutive_network_open_failures,
+                                                "consecutive_ytdl_failures": streak,
                                                 "abort_threshold": net_open_abort,
                                                 "cooldown_sec": round(net_open_cooldown_sec, 1),
                                                 "resume_index": item_index,
+                                                "last_good_media_key": self._last_good_media_key,
                                             },
                                         )
-                                        start_index = item_index
-                                        consecutive_network_open_failures = 0
+                                        resume_at = self.get_resume_start_index_for_hung_recovery()
+                                        start_index = resume_at
                                         self._stop_event.wait(timeout=net_open_cooldown_sec)
                                         net_open_cycle_abort = True
                                         break
@@ -2851,7 +3002,14 @@ class PlaylistManager:
                                 continue
                             stream_ready = True
                             self._apply_post_loadfile_playback_props(muted=muted)
-                            consecutive_network_open_failures = 0
+                            if is_network:
+                                self._record_ytdl_open_success()
+                                self._set_last_good_playback(
+                                    playlist_id,
+                                    item_index,
+                                    media_key,
+                                    len(items),
+                                )
                         elif not skip_load:
                             self._apply_post_loadfile_playback_props(muted=muted)
                         if not self._wait_mpv_video_end(
@@ -2925,6 +3083,19 @@ class PlaylistManager:
                             )
 
                 if net_open_cycle_abort:
+                    continue
+
+                if (
+                    cycle_network_attempted > 0
+                    and cycle_network_failed >= cycle_network_attempted
+                    and not stall_abort
+                ):
+                    next_start = self._handle_all_network_items_failed_cycle(
+                        playlist_id=playlist_id,
+                        items_count=len(items),
+                    )
+                    if next_start is not None:
+                        start_index = int(next_start)
                     continue
 
                 if stall_abort or self._stall_restart_was_requested():
@@ -3328,7 +3499,8 @@ class PlaylistManager:
             'status': status.status if status else None,
             'playlist_id': status.playlist_id if status else None,
             'current_media': self._get_current_media_label(),
-            'settings': self._mpv_manager._current_settings
+            'settings': self._mpv_manager._current_settings,
+            'network_health': self.get_network_playback_health(),
         }
 
     def restart_mpv(self) -> bool:
