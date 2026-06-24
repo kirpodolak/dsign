@@ -303,6 +303,9 @@ class MPVManager:
         if self._playback_stream_opening:
             self._reset_watchdog_ipc_fail_streak()
             return
+        if self._playback_network_active:
+            self._reset_watchdog_ipc_fail_streak()
+            return
         if self._hung_recovery_running:
             return
         if self.was_recent_app_initiated_restart(within_sec=45.0):
@@ -620,6 +623,15 @@ class MPVManager:
             )
             return False
 
+    def _mpv_restart_subprocess_env(self) -> Dict[str, str]:
+        """Pass display backend + unit into sudo recover (sudo strips service Environment)."""
+        env = os.environ.copy()
+        unit = PlaybackConstants.mpv_systemd_unit()
+        env["DSIGN_MPV_UNIT"] = unit
+        if PlaybackConstants.is_wayland_backend():
+            env["DSIGN_DISPLAY_BACKEND"] = "wayland"
+        return env
+
     def _restart_systemd_service(self) -> bool:
         """
         Перезапуск systemd-сервиса MPV.
@@ -650,6 +662,7 @@ class MPVManager:
                     capture_output=True,
                     text=True,
                     timeout=45.0,
+                    env=self._mpv_restart_subprocess_env(),
                 )
                 duration = time.time() - start_time
                 self._log_operation(
