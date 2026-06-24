@@ -435,9 +435,14 @@ class PlaybackService:
             playlist_id = self._resolve_playlist_id_for_recovery()
             if playlist_id is not None:
                 try:
-                    resume_index = self._playlist_manager.get_resume_start_index(
-                        advance=resume_advance
-                    )
+                    if resume_advance:
+                        resume_index = self._playlist_manager.get_resume_start_index(
+                            advance=True
+                        )
+                    else:
+                        resume_index = (
+                            self._playlist_manager.get_resume_start_index_for_hung_recovery()
+                        )
                 except Exception:
                     resume_index = 0
         try:
@@ -495,6 +500,11 @@ class PlaybackService:
                             "playlist_id": playlist_id,
                             "start_index": resume_index,
                             "resume_advance": resume_advance,
+                            "last_good_media_key": (
+                                self._playlist_manager.get_network_playback_health().get(
+                                    "last_good_media_key"
+                                )
+                            ),
                             "action": "mpv_recover",
                         },
                     )
@@ -805,6 +815,10 @@ class PlaybackService:
             "load_in_progress": getattr(pm, "_load_in_progress", False),
             "active_playlist_id": getattr(pm, "_active_playlist_id", None),
         }
+        try:
+            checks["network_playback"] = pm.get_network_playback_health()
+        except Exception:
+            checks["network_playback"] = {}
         if checks["vo_configured"] is False and mgr._playback_session_active:
             self._log_warning(
                 "MPV health: vo not configured during active playback",
