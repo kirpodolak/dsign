@@ -169,7 +169,45 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _check_entry(project_root: Path, entry: Entry) -> EntryStatus:
+def _normalized_text(path: Path) -> Optional[str]:
+    """Text fingerprint for compare; None if file looks binary."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if b"\x00" in raw:
+        return None
+    try:
+        text = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n").decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    # Ignore trailing newline / CRLF-only deploy differences.
+    return text.rstrip("\n")
+
+
+def _compare_files(src_path: Path, dest_path: Path, *, strict: bool = False) -> Tuple[str, str]:
+    """
+    Returns (status, detail).
+    status: exact | equivalent | different
+    """
+    if filecmp.cmp(src_path, dest_path, shallow=False):
+        return "exact", ""
+    if strict:
+        return (
+            "different",
+            f"sha256 repo={_sha256(src_path)[:12]}… system={_sha256(dest_path)[:12]}…",
+        )
+    src_norm = _normalized_text(src_path)
+    dest_norm = _normalized_text(dest_path)
+    if src_norm is not None and src_norm == dest_norm:
+        return "equivalent", "content match (differs only: EOF newline and/or CRLF)"
+    return (
+        "different",
+        f"sha256 repo={_sha256(src_path)[:12]}… system={_sha256(dest_path)[:12]}…",
+    )
+
+
+def _check_entry(project_root: Path, entry: Entry, *, strict: bool = False) -> EntryStatus:
     src_path = project_root / entry.src
     dest_path = entry.dest_path
 
@@ -182,14 +220,13 @@ def _check_entry(project_root: Path, entry: Entry) -> EntryStatus:
     if not dest_path.is_file():
         return EntryStatus(entry, "MISSING", "not installed on system")
 
-    if filecmp.cmp(src_path, dest_path, shallow=False):
+    cmp_status, cmp_detail = _compare_files(src_path, dest_path, strict=strict)
+    if cmp_status in ("exact", "equivalent"):
+        if cmp_status == "equivalent":
+            return EntryStatus(entry, "OK", cmp_detail)
         return EntryStatus(entry, "OK", "")
 
-    return EntryStatus(
-        entry,
-        "DRIFT",
-        f"sha256 repo={_sha256(src_path)[:12]}… system={_sha256(dest_path)[:12]}…",
-    )
+    return EntryStatus(entry, "DRIFT", cmp_detail)
 
 
 def _extra_bins(manifest_dests: set[str]) -> List[str]:
@@ -305,8 +342,10 @@ def _install_entry(project_root: Path, entry: Entry, dry_run: bool) -> str:
     if entry.mode == "if-missing" and dest_path.is_file():
         return "SKIP"
 
-    if dest_path.is_file() and filecmp.cmp(src_path, dest_path, shallow=False):
-        return "OK"
+    if dest_path.is_file():
+        cmp_status, _ = _compare_files(src_path, dest_path)
+        if cmp_status in ("exact", "equivalent"):
+            return "OK"
 
     if dry_run:
         return "WOULD_APPLY"
@@ -356,7 +395,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     raw = _load_yaml_manifest(manifest_path)
     entries = _parse_entries(raw, args.groups)
-    results = [_check_entry(project_root, e) for e in entries]
+    results = [_check_entry(project_root, e, strict=args.strict) for e in entries]
     extras = _extra_bins({e.dest for e in entries})
 
     summary = {
@@ -428,7 +467,10 @@ def cmd_apply(args: argparse.Namespace) -> int:
     entries = _parse_entries(raw, args.groups)
 
     if args.only == "drifted":
-        statuses = {s.entry.dest: s for s in (_check_entry(project_root, e) for e in entries)}
+        statuses = {
+            s.entry.dest: s
+            for s in (_check_entry(project_root, e, strict=False) for e in entries)
+        }
         entries = [e for e in entries if statuses[e.dest].status in ("DRIFT", "MISSING")]
 
     applied = 0
@@ -467,6 +509,11 @@ def main() -> int:
     p_verify = sub.add_parser("verify", help="Compare repo manifest vs system")
     p_verify.add_argument("--json", action="store_true")
     p_verify.add_argument("-v", "--verbose", action="store_true")
+    p_verify.add_argument(
+        "--strict",
+        action="store_true",
+        help="Byte-exact compare (treat EOF newline / CRLF as DRIFT)",
+    )
     p_verify.set_defaults(func=cmd_verify)
 
     p_apply = sub.add_parser("apply", help="Install drifted/missing manifest files")
