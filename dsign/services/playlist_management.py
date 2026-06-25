@@ -230,6 +230,70 @@ class PlaylistManager:
         p = str(path or "")
         return p.startswith(("http://", "https://", "ytdl://"))
 
+    def _is_local_video_item(self, item: Dict[str, Any]) -> bool:
+        return bool(item.get("is_video")) and not self._is_network_stream_path(item.get("path"))
+
+    def _playlist_playback_mode(self, items: List[Dict[str, Any]]) -> str:
+        """Target branching: all-local-video → mpv playlist; single → loop-file=inf; else manual."""
+        if not items:
+            return "manual"
+        if not all(self._is_local_video_item(i) for i in items):
+            return "manual"
+        if len(items) == 1:
+            return "local_single"
+        return "local_playlist"
+
+    def _mpv_set_local_playback_props(
+        self,
+        *,
+        loop_file: str,
+        loop_playlist: bool,
+        prefetch: bool,
+    ) -> None:
+        props = (
+            ("loop-file", loop_file),
+            ("loop-playlist", "yes" if loop_playlist else "no"),
+            ("prefetch-playlist", "yes" if prefetch else "no"),
+            ("keep-open", "no"),
+        )
+        for prop, val in props:
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", prop, val]},
+                    timeout=3.0,
+                )
+            except Exception:
+                pass
+
+    def _write_local_video_m3u(
+        self,
+        playlist_id: int,
+        items: List[Dict[str, Any]],
+        start_index: int,
+    ) -> Path:
+        start_index = int(start_index or 0) % len(items)
+        lines = ["#EXTM3U\n"]
+        for offset in range(len(items)):
+            idx = (start_index + offset) % len(items)
+            path = Path(str(items[idx]["path"])).resolve()
+            lines.append(f"{path}\n")
+        dest = self.tmp_dir / f"local-playlist-{playlist_id}.m3u"
+        dest.write_text("".join(lines), encoding="utf-8")
+        return dest
+
+    def _apply_item_mute_property(self, item: Dict[str, Any], *, profile_muted: bool) -> None:
+        muted = self._effective_playback_muted(
+            item_muted=bool(item.get("muted", False)),
+            profile_muted=profile_muted,
+        )
+        try:
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "mute", "yes" if muted else "no"]},
+                timeout=3.0,
+            )
+        except Exception:
+            pass
+
     def _set_last_good_playback(
         self,
         playlist_id: int,
@@ -2628,6 +2692,244 @@ class PlaylistManager:
             # never let diagnostics break playback
             pass
 
+    def _play_local_video_engine(
+        self,
+        *,
+        playlist_id: int,
+        items: List[Dict[str, Any]],
+        start_index: int,
+        profile_muted: bool,
+        profile_settings: Dict[str, Any],
+        playlist: Any,
+        mode: str,
+    ) -> bool:
+        """A2 single local video (loop-file=inf) or A1 mpv internal M3U playlist."""
+        from ..models import PlaybackStatus
+
+        start_index = int(start_index or 0) % len(items)
+        self._active_playlist_id = playlist_id
+        try:
+            self._mpv_manager.set_playback_session_active(True)
+        except Exception:
+            pass
+        self._set_loop_position(start_index, len(items))
+
+        self.logger.info(
+            "Starting local video playback mode",
+            extra={
+                "playlist_id": playlist_id,
+                "mode": mode,
+                "items_count": len(items),
+                "start_index": start_index,
+            },
+        )
+
+        ordered_indices: Optional[List[int]] = None
+        if mode == "local_single":
+            item = items[start_index]
+            path = str(item.get("path") or "")
+            media_key = str(item.get("key") or path)
+            self._set_current_media_label(self._item_media_label(item))
+            self._mpv_set_local_playback_props(
+                loop_file="inf",
+                loop_playlist=False,
+                prefetch=False,
+            )
+            load_resp = self._issue_loadfile(
+                self._mpv_loadfile_command(path, "replace"),
+                media_key=media_key,
+                timeout=10.0,
+                max_attempts=1,
+            )
+            if not load_resp or load_resp.get("error") != "success":
+                raise RuntimeError(f"loadfile failed for local video: {path}")
+            self._apply_post_loadfile_playback_props(
+                muted=self._effective_playback_muted(
+                    item_muted=bool(item.get("muted", False)),
+                    profile_muted=profile_muted,
+                )
+            )
+            self._sync_settings_audio_to_mpv()
+            self._apply_item_mute_property(item, profile_muted=profile_muted)
+            self._set_last_good_playback(playlist_id, start_index, media_key, len(items))
+            thread_target = self._run_single_local_video_loop
+            thread_args: tuple = (playlist_id, items, profile_muted)
+        else:
+            m3u_path = self._write_local_video_m3u(playlist_id, items, start_index)
+            ordered_indices = [(start_index + offset) % len(items) for offset in range(len(items))]
+            first_item = items[ordered_indices[0]]
+            media_key = f"local-m3u-{playlist_id}"
+            self._set_current_media_label(self._item_media_label(first_item))
+            self._mpv_set_local_playback_props(
+                loop_file="no",
+                loop_playlist=True,
+                prefetch=True,
+            )
+            load_resp = self._issue_loadfile(
+                self._mpv_loadfile_command(str(m3u_path), "replace"),
+                media_key=media_key,
+                timeout=15.0,
+                max_attempts=1,
+            )
+            if not load_resp or load_resp.get("error") != "success":
+                raise RuntimeError(f"loadfile failed for local M3U: {m3u_path}")
+            self._apply_post_loadfile_playback_props(
+                muted=self._effective_playback_muted(
+                    item_muted=bool(first_item.get("muted", False)),
+                    profile_muted=profile_muted,
+                )
+            )
+            self._sync_settings_audio_to_mpv()
+            self._apply_item_mute_property(first_item, profile_muted=profile_muted)
+            self._set_last_good_playback(
+                playlist_id,
+                ordered_indices[0],
+                str(first_item.get("key") or first_item.get("path") or ""),
+                len(items),
+            )
+            thread_target = self._run_local_mpv_playlist_loop
+            thread_args = (playlist_id, items, ordered_indices, profile_muted)
+
+        playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
+        playback.playlist_id = playlist_id
+        playback.status = "playing"
+        self.db_session.add(playback)
+        self.db_session.commit()
+
+        self._play_thread = Thread(target=thread_target, args=thread_args, daemon=True)
+        self._play_thread.start()
+
+        try:
+            if self.socketio:
+                self.socketio.emit(
+                    "playback_update",
+                    {
+                        "status": "playing",
+                        "playlist_id": playlist.id,
+                        "current_media": self._get_current_media_label(),
+                        "playlist": {"id": playlist.id, "name": playlist.name},
+                        "settings": profile_settings,
+                        "playback_mode": mode,
+                    },
+                )
+        except Exception:
+            pass
+        return True
+
+    def _single_local_video_loop(
+        self,
+        playlist_id: int,
+        items: List[Dict[str, Any]],
+        profile_muted: bool,
+    ) -> None:
+        """A2: mpv loops via loop-file=inf — thread only tracks stop/resume state."""
+        if not items:
+            return
+        item = items[0]
+        media_key = str(item.get("key") or item.get("path") or "")
+        self._mpv_manager.set_playback_session_active(True)
+        while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
+            self._set_loop_position(0, 1)
+            self._publish_current_media(playlist_id, item)
+            self._set_last_good_playback(playlist_id, 0, media_key, 1)
+            self._stop_event.wait(timeout=2.0)
+
+    def _run_single_local_video_loop(
+        self,
+        playlist_id: int,
+        items: List[Dict[str, Any]],
+        profile_muted: bool,
+    ) -> None:
+        try:
+            with self._app_context():
+                self._single_local_video_loop(playlist_id, items, profile_muted)
+        except Exception as e:
+            self.logger.error(
+                "Single local video loop crashed",
+                extra={
+                    "playlist_id": playlist_id,
+                    "error": str(e),
+                    "type": type(e).__name__,
+                    "stack_trace": traceback.format_exc(),
+                },
+            )
+            cb = self._slideshow_crash_callback
+            if cb is not None:
+                try:
+                    cb()
+                except Exception as cb_exc:
+                    self.logger.warning(
+                        "Slideshow crash callback failed",
+                        extra={"error": str(cb_exc), "type": type(cb_exc).__name__},
+                    )
+
+    def _local_mpv_playlist_loop(
+        self,
+        playlist_id: int,
+        items: List[Dict[str, Any]],
+        ordered_indices: List[int],
+        profile_muted: bool,
+    ) -> None:
+        """A1: monitor mpv internal playlist-pos; zero-gap transitions between local files."""
+        self._mpv_manager.set_playback_session_active(True)
+        last_pos: Optional[int] = None
+        while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
+            raw_pos = self._mpv_manager.get_property_light("playlist-pos", timeout=2.0)
+            if raw_pos is not None:
+                try:
+                    pos = int(raw_pos)
+                except (TypeError, ValueError):
+                    pos = None
+                if pos is not None and 0 <= pos < len(ordered_indices) and pos != last_pos:
+                    last_pos = pos
+                    item_index = ordered_indices[pos]
+                    item = items[item_index]
+                    self._set_loop_position(item_index, len(items))
+                    self._publish_current_media(playlist_id, item)
+                    self._apply_item_mute_property(item, profile_muted=profile_muted)
+                    self._set_last_good_playback(
+                        playlist_id,
+                        item_index,
+                        str(item.get("key") or item.get("path") or ""),
+                        len(items),
+                    )
+            self._stop_event.wait(timeout=0.5)
+
+    def _run_local_mpv_playlist_loop(
+        self,
+        playlist_id: int,
+        items: List[Dict[str, Any]],
+        ordered_indices: List[int],
+        profile_muted: bool,
+    ) -> None:
+        try:
+            with self._app_context():
+                self._local_mpv_playlist_loop(
+                    playlist_id,
+                    items,
+                    ordered_indices,
+                    profile_muted,
+                )
+        except Exception as e:
+            self.logger.error(
+                "Local mpv playlist loop crashed",
+                extra={
+                    "playlist_id": playlist_id,
+                    "error": str(e),
+                    "type": type(e).__name__,
+                    "stack_trace": traceback.format_exc(),
+                },
+            )
+            cb = self._slideshow_crash_callback
+            if cb is not None:
+                try:
+                    cb()
+                except Exception as cb_exc:
+                    self.logger.warning(
+                        "Slideshow crash callback failed",
+                        extra={"error": str(cb_exc), "type": type(cb_exc).__name__},
+                    )
+
     def _stop_play_thread(
         self,
         *,
@@ -3246,6 +3548,18 @@ class PlaylistManager:
             start_index = int(start_index or 0)
             if start_index < 0 or start_index >= len(items):
                 start_index = 0
+
+            playback_mode = self._playlist_playback_mode(items)
+            if playback_mode in ("local_single", "local_playlist"):
+                return self._play_local_video_engine(
+                    playlist_id=playlist_id,
+                    items=items,
+                    start_index=start_index,
+                    profile_muted=profile_muted,
+                    profile_settings=profile_settings,
+                    playlist=playlist,
+                    mode=playback_mode,
+                )
 
             self._active_playlist_id = playlist_id
             try:

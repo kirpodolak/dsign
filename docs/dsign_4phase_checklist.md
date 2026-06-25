@@ -15,8 +15,8 @@
 |----|--------|--------|-------------|
 | **D0** | Манифест деплоя + verify/apply | ⬜ не начато | — |
 | **A0** | Сетевой playback / hung / ytdl resilience | ✅ сделано | main, PR #80 |
-| **A1** | MPV internal playlist (локальное видео) | ⬜ не начато | — |
-| **A2** | Single video `loop-file=inf` | ⬜ не начато | — |
+| **A1** | MPV internal playlist (локальное видео) | 🟡 в PR | `playlist_management.py` |
+| **A2** | Single video `loop-file=inf` | 🟡 в PR | `playlist_management.py` |
 | **A3** | Safe loadfile + ffprobe | ⬜ не начато | — |
 | **A4** | `video-sync=audio` Wayland | 🟡 в репо | `etc/…/intel-iris-xe-balanced-wayland.conf`; на плеере — сверить D0 |
 | **A5** | Tech debt | ✅ сделано | PR A5 |
@@ -146,37 +146,22 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 ### A1. Local Video Playlist → MPV Internal Playlist
 
-**Статус:** ⬜ не начато
+**Статус:** 🟡 в PR
 
 **Что меняем:**
 - В `PlaylistManager.play()` — ветка `play_local_video_playlist()` если все items — локальные видео.
 - M3U/FFconcat + один `loadfile`.
 - `prefetch-playlist=yes` в mpv.conf.
 
-**Зачем:** Сейчас каждый переход = `loadfile replace` = 50–500 ms чёрный кадр. MPV internal playlist = switch buffer ≈ 0 ms.
-
-**Логика:**
-```
-Плеер видит: [video1.mp4, video2.mp4, video3.mp4]
-Вместо: loadfile v1 → EOF → loadfile v2 → EOF → …
-Делаем: loadfile playlist.m3u → MPV предзагружает следующий
-Мониторим: playlist-pos
-```
-
-**Результат:** Video→video zero gap; ниже CPU; стабильнее memory.
-
 **Acceptance:**
 - [ ] 10 циклов [A, B] — 10/10 zero gap
 - [ ] `journalctl` — 1 `loadfile` на весь плейлист
-
-**Cursor prompt:**
-> Branch PlaylistManager.play() for all-local-video playlists: temp M3U, single loadfile, monitor playlist-pos, prefetch-playlist=yes. Keep manual loop for mixed/network/images.
 
 ---
 
 ### A2. Single Video → loop-file=inf
 
-**Статус:** ⬜ не начато
+**Статус:** 🟡 в PR
 
 **Что меняем:** 1 локальное видео → `loop-file=inf` + один `loadfile`, без outer `while` + reload.
 
