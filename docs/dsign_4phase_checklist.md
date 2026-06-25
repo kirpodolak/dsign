@@ -12,7 +12,7 @@
 
 | ID | Задача | Статус | Где сделано |
 |----|--------|--------|-------------|
-| **D0** | Манифест деплоя + verify/apply | ⬜ не начато | — |
+| **D0** | Манифест деплоя + verify/apply | 🟡 в PR | `docs/deploy-manifest.yaml`, `dsign-verify-install` |
 | **A0** | Сетевой playback / hung / ytdl resilience | ✅ сделано | main, PR #80 |
 | **A1** | MPV internal playlist (локальное видео) | ⬜ не начато | — |
 | **A2** | Single video `loop-file=inf` | ⬜ не начато | — |
@@ -91,20 +91,20 @@ flowchart LR
 
 ### D0.1. `docs/deploy-manifest.yaml`
 
-- [ ] Каждая запись: `src` (в репо) → `dest` (на системе), `mode` (`always` / `if-missing` / `never`), `post` (`daemon-reload`, `restart unit`)
-- [ ] Покрыть: `usr/local/bin/`, `etc/systemd/`, `etc/sudoers.d/`, `etc/dsign/`, `etc/tmpfiles.d/`
-- [ ] Пометить файлы, которые сегодня только в heredoc `install_dsign.sh`
+- [x] Каждая запись: `src` (в репо) → `dest` (на системе), `mode` (`always` / `if-missing` / `never`), `post` (`daemon-reload`, `restart unit`)
+- [x] Покрыть: `usr/local/bin/`, `etc/systemd/`, `etc/sudoers.d/`, `etc/dsign/`, `etc/tmpfiles.d/`
+- [x] Пометить файлы, которые сегодня только в heredoc `install_dsign.sh` (heredoc убран для `dsign-mpv`, `dsign-network-assistant`, `dsign-show-startup-ip`)
 
 ### D0.2. `dsign-verify-install`
 
-- [ ] Отчёт: `OK` / `DRIFT` / `MISSING` / `EXTRA_ON_SYSTEM`
-- [ ] Режим `--json` для скриптов/monitoring
-- [ ] Acceptance: после `git pull` сразу видно, что ещё не залито
+- [x] Отчёт: `OK` / `DRIFT` / `MISSING` / `EXTRA_ON_SYSTEM`
+- [x] Режим `--json` для скриптов/monitoring
+- [x] Acceptance: после `git pull` сразу видно, что ещё не залито
 
 ### D0.3. `dsign-apply-install`
 
-- [ ] Идемпотентный apply по манифесту (`--only drifted`)
-- [ ] `install_dsign.sh` → bootstrap (user, venv, nginx) + вызов apply
+- [x] Идемпотентный apply по манифесту (`--only drifted`)
+- [x] `install_dsign.sh` → bootstrap (user, venv, nginx) + вызов apply
 
 **Cursor prompt (D0):**
 > Add docs/deploy-manifest.yaml mapping repo paths to system paths. Implement usr/local/bin/dsign-verify-install and dsign-apply-install. Refactor install_dsign.sh to use manifest instead of duplicating heredoc units where etc/systemd files exist.
@@ -297,7 +297,7 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 - [ ] `check` / `download` / `apply` / `rollback`
 - [ ] systemd timer (например 03:00)
-- [ ] apply вызывает `dsign-apply-install`, не только `git pull`
+- [x] apply вызывает `dsign-apply-install`, не только `git pull`
 
 **Acceptance:**
 - [ ] Update downtime < 5 мин; rollback < 2 мин; fail не ломает систему
