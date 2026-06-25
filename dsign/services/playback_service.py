@@ -149,6 +149,14 @@ class PlaybackService:
         safe_extra = self._sanitize_extra_data(extra_data)
         self.logger.warning(message, extra=safe_extra)
 
+    def _log_debug(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        """Унифицированный метод для отладочных логов"""
+        extra_data = {'service_module': 'PlaybackService'}
+        if extra:
+            extra_data.update(extra)
+        safe_extra = self._sanitize_extra_data(extra_data)
+        self.logger.debug(message, extra=safe_extra)
+
     def _init_background_loop(self) -> None:
         """MPV init in background so digital-signage.service / Flask start immediately."""
         delay = 2.0
