@@ -18,7 +18,7 @@
 | **A2** | Single video `loop-file=inf` | ⬜ не начато | — |
 | **A3** | Safe loadfile + ffprobe | ⬜ не начато | — |
 | **A4** | `video-sync=audio` Wayland | 🟡 в репо | `etc/…/intel-iris-xe-balanced-wayland.conf`; на плеере — сверить D0 |
-| **A5** | Tech debt | 🟡 частично | `wayland_manager.py` ✅; `restart_mpv()` ⬜; `_log_debug` ⬜ |
+| **A5** | Tech debt | ✅ сделано | PR A5 |
 | **C1** | ContentCache | ⬜ не начато | — |
 | **C2** | Audio-only + logo | ⬜ не начато | — |
 | **C3** | Nested playlists | ⬜ не начато | — |
@@ -213,17 +213,17 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 ### A5. Tech Debt (быстрые фиксы)
 
-**Статус:** 🟡 частично
+**Статус:** ✅ сделано
 
 | Пункт | Статус |
 |-------|--------|
 | `wayland_manger.py` → `wayland_manager.py` | ✅ |
-| `restart_mpv()` dead code в `playlist_management.py` | ⬜ |
-| `_log_debug` → `logger.debug` в `playback_service.get_status()` | ⬜ |
+| `restart_mpv()` dead code в `playlist_management.py` | ✅ удалён |
+| `_log_debug` в `playback_service.get_status()` | ✅ метод добавлен |
 
 **Acceptance:**
-- [ ] `python -c "from dsign.services.playback_service import PlaybackService"` на чистом venv
-- [ ] `GET /api/playback/status` без exception
+- [x] `python -c "from dsign.services.playback_service import PlaybackService"` на чистом venv
+- [x] `GET /api/playback/status` без exception
 
 ---
 
