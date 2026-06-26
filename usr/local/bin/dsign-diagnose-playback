@@ -170,10 +170,17 @@ fi
 echo
 
 echo "--- content cache (C1) ---"
-if [ -f "$REPO/dsign/services/content_cache.py" ]; then
-  echo "  code: content_cache.py present in repo"
+_ccode=""
+for _cp in "$REPO/dsign/services/content_cache.py" "$REPO/services/content_cache.py"; do
+  if [ -f "$_cp" ]; then
+    _ccode="$_cp"
+    break
+  fi
+done
+if [ -n "$_ccode" ]; then
+  echo "  code: content_cache.py present ($_ccode)"
 else
-  echo "  code: content_cache.py MISSING in $REPO (C1 not deployed?)"
+  echo "  code: content_cache.py not in $REPO (runtime may still use installed copy)"
 fi
 _diag_env_default DSIGN_CONTENT_CACHE_ENABLED "1"
 _diag_env_default DSIGN_CONTENT_CACHE_PREFETCH "1"
