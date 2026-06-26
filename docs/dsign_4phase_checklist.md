@@ -18,9 +18,9 @@
 | **A1** | MPV internal playlist (локальное видео) | ✅ сделано | main, PR #85 |
 | **A2** | Single video `loop-file=inf` | ✅ сделано | main, PR #85 |
 | **A3** | Safe loadfile + ffprobe | ✅ сделано | main, PR #86 |
-| **A4** | `video-sync` Wayland (display-resample) | 🟡 в PR | `intel-iris-xe-balanced-wayland.conf` |
+| **A4** | `video-sync` Wayland (display-resample) | ✅ сделано | main, PR #87; подтверждено на плеере |
 | **A5** | Tech debt | ✅ сделано | PR A5 |
-| **C1** | ContentCache | ⬜ не начато | — |
+| **C1** | ContentCache | 🟡 в PR | `content_cache.py` |
 | **C2** | Audio-only + logo | ⬜ не начато | — |
 | **C3** | Nested playlists | ⬜ не начато | — |
 | **B1** | Расширить `/api/playback/status` | 🟡 частично | `network_health` ✅; остальные поля ⬜ |
@@ -198,7 +198,7 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 ### A4. video-sync в Wayland-профиле
 
-**Статус:** 🟡 в PR — `video-sync=display-resample` (было `audio`, давало slow-mo на Rutube/HLS)
+**Статус:** ✅ сделано (main, PR #87) — `video-sync=display-resample`; на плеере подтверждено 26.06
 
 **Зачем:** `audio` убирал judder, но на сетевом HLS видео «ползло» за аудио-часами при буферизации. `display-vdrop` давал микростаттер на labwc. `display-resample` — компромисс для 29.97 fps @ 60 Hz.
 
@@ -231,15 +231,25 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 | ID | Задача | Статус | Зависимости |
 |----|--------|--------|-------------|
-| C1 | ContentCache (`content_cache.py`) | ⬜ | A3, network path |
+| C1 | ContentCache (`content_cache.py`) | 🟡 в PR | A3, network path |
 | C2 | Audio-only + logo (imv) | ⬜ | — |
 | C3 | Nested playlists (DB) | ⬜ | миграция модели |
 
 ### C1. ContentCache
 
+**Статус:** 🟡 в PR — prefetch следующего `ext-*` на диск; offline / `PLAY_WHEN_READY` → local `loadfile`
+
+**Env (плеер):**
+- `DSIGN_CONTENT_CACHE_ENABLED=1` (default on)
+- `DSIGN_CONTENT_CACHE_DIR` — default `{MEDIA_ROOT}/cache`
+- `DSIGN_CONTENT_CACHE_PREFETCH=1` — фоновая загрузка следующего ролика
+- `DSIGN_CONTENT_CACHE_PLAY_WHEN_READY=1` — играть с диска, если файл готов
+- `DSIGN_CONTENT_CACHE_MAX_GB=8` — лимит, LRU eviction
+
 **Acceptance:**
 - [ ] [net1, net2, net3] — net2 предзагружен до EOF net1
 - [ ] Offline — играет из кэша, не чёрный экран
+- [ ] `/api/playback/status` → `cache_state`
 
 ### C2. Audio-Only + Logo
 
