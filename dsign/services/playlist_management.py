@@ -30,6 +30,7 @@ class PlaylistManager:
         self._active_playlist_id: Optional[int] = None
         # External media resolver is optional; attached lazily to avoid tight coupling.
         self._external_media_service = None
+        self._content_cache = None
         self._settings_service = None
         # Backoff per media key for unstable/blocked streams to avoid busy looping loadfile.
         # key -> {failures:int, next_try_monotonic:float}
@@ -81,6 +82,10 @@ class PlaylistManager:
     def set_external_media_service(self, service) -> None:
         """Attach external media resolver service (optional)."""
         self._external_media_service = service
+
+    def set_content_cache(self, service) -> None:
+        """Attach disk cache for external media (C1, optional)."""
+        self._content_cache = service
 
     def set_settings_service(self, service) -> None:
         """Attach settings service so playback can mirror volume/audio-route into MPV."""
@@ -391,6 +396,17 @@ class PlaylistManager:
             row = svc.get_by_key(str(file_name))
             if not row:
                 return None
+            page_url = str(getattr(row, "url", "") or "")
+            provider = str(getattr(row, "provider", "") or "")
+            cache = self._content_cache
+            if cache is not None:
+                cached = cache.build_playback_dict(
+                    str(file_name),
+                    page_url=page_url,
+                    provider=provider,
+                )
+                if cached is not None:
+                    return cached
             # Always re-resolve on play: CDN URLs are signed to yt-dlp's egress; cached URLs break on the Pi.
             pb = svc.ensure_fresh_playback(row, max_age_sec=0)
             return {
@@ -398,8 +414,8 @@ class PlaylistManager:
                 "path": pb.get("url") or row.resolved_url or row.url,
                 "is_video": True,
                 "http_headers": pb.get("http_headers") or {},
-                "page_url": str(getattr(row, "url", "") or ""),
-                "provider": str(getattr(row, "provider", "") or ""),
+                "page_url": page_url,
+                "provider": provider,
             }
 
         # Local file
@@ -436,6 +452,32 @@ class PlaylistManager:
             )
         return True
 
+    def _schedule_content_cache_prefetch(
+        self,
+        items: List[Dict[str, Any]],
+        current_index: int,
+    ) -> None:
+        cache = self._content_cache
+        if cache is None or not cache.prefetch_enabled() or not items:
+            return
+        n = len(items)
+        if n < 1:
+            return
+        next_index = (int(current_index) + 1) % n
+        next_item = items[next_index]
+        media_key = str(next_item.get("key") or "")
+        if not media_key.startswith("ext-"):
+            return
+        page_url = str(next_item.get("page_url") or "")
+        provider = str(next_item.get("provider") or "")
+        if not page_url and self._external_media_service:
+            row = self._external_media_service.get_by_key(media_key)
+            if row:
+                page_url = str(getattr(row, "url", "") or "")
+                provider = provider or str(getattr(row, "provider", "") or "")
+        if not page_url:
+            return
+        cache.prefetch_async(media_key=media_key, page_url=page_url, provider=provider)
 
     def _ensure_network_stream_started(
         self,
@@ -3435,6 +3477,8 @@ class PlaylistManager:
                                 )
                         elif not skip_load:
                             self._apply_post_loadfile_playback_props(muted=muted)
+                        if is_video:
+                            self._schedule_content_cache_prefetch(items, item_index)
                         if not self._wait_mpv_video_end(
                             playlist_id,
                             is_network=is_network,
@@ -3960,12 +4004,19 @@ class PlaylistManager:
         from ..models import PlaybackStatus
         
         status = self.db_session.query(PlaybackStatus).get(1) or self.db_session.query(PlaybackStatus).first()
+        cache_state: Dict[str, Any] = {}
+        if self._content_cache is not None:
+            try:
+                cache_state = self._content_cache.get_status_summary()
+            except Exception:
+                cache_state = {}
         return {
             'status': status.status if status else None,
             'playlist_id': status.playlist_id if status else None,
             'current_media': self._get_current_media_label(),
             'settings': self._mpv_manager._current_settings,
             'network_health': self.get_network_playback_health(),
+            'cache_state': cache_state,
         }
 
     def get_playback_info(self) -> Dict:

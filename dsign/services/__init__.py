@@ -248,6 +248,23 @@ class ServiceFactory:
             return None
 
     @staticmethod
+    def create_content_cache(upload_folder: str, logger=None) -> Optional[Any]:
+        logger = logger or setup_logger('ContentCache')
+        try:
+            from .content_cache import ContentCache
+            cache_dir = (os.getenv("DSIGN_CONTENT_CACHE_DIR") or "").strip()
+            if not cache_dir:
+                cache_dir = str(Path(upload_folder) / "cache")
+            logger.info('Initializing ContentCache', {'cache_dir': cache_dir})
+            return ContentCache(cache_dir=cache_dir, logger=logger)
+        except Exception as e:
+            logger.error('ContentCache initialization failed', {
+                'error': str(e),
+                'stack': True,
+            })
+            return None
+
+    @staticmethod
     def create_external_media_service(db_session, logger=None) -> Optional[Any]:
         logger = logger or setup_logger('ExternalMediaService')
         try:
@@ -467,6 +484,7 @@ def init_services(
             )),
             ('auth_service', lambda: ServiceFactory.create_auth_service(config['SECRET_KEY'], logger)),
             ('external_media_service', lambda: ServiceFactory.create_external_media_service(db.session, logger)),
+            ('content_cache', lambda: ServiceFactory.create_content_cache(config['UPLOAD_FOLDER'], logger)),
         ]
 
         for name, factory in optional_services:
@@ -503,6 +521,7 @@ def init_services(
         try:
             playback_service = services.get("playback_service")
             external_media_service = services.get("external_media_service")
+            content_cache = services.get("content_cache")
             if playback_service and external_media_service:
                 # PlaybackService -> PlaylistManager needs this to resolve keys like `ext-<id>` into real URLs.
                 try:
@@ -512,6 +531,14 @@ def init_services(
                         logger.info("ExternalMediaService wired into PlaybackService")
                 except Exception as e:
                     logger.warning("Failed wiring ExternalMediaService into PlaybackService", {"error": str(e)})
+            if playback_service and content_cache:
+                try:
+                    pm = getattr(playback_service, "_playlist_manager", None)
+                    if pm is not None and hasattr(pm, "set_content_cache"):
+                        pm.set_content_cache(content_cache)
+                        logger.info("ContentCache wired into PlaybackService")
+                except Exception as e:
+                    logger.warning("Failed wiring ContentCache into PlaybackService", {"error": str(e)})
         except Exception:
             # Best-effort only; local playback must keep working.
             pass
