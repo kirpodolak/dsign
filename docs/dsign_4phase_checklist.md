@@ -17,8 +17,8 @@
 | **A0** | Сетевой playback / hung / ytdl resilience | ✅ сделано | main, PR #80 |
 | **A1** | MPV internal playlist (локальное видео) | ✅ сделано | main, PR #85 |
 | **A2** | Single video `loop-file=inf` | ✅ сделано | main, PR #85 |
-| **A3** | Safe loadfile + ffprobe | 🟡 в PR | `playlist_management.py` |
-| **A4** | `video-sync=audio` Wayland | 🟡 в репо | `etc/…/intel-iris-xe-balanced-wayland.conf`; на плеере — сверить D0 |
+| **A3** | Safe loadfile + ffprobe | ✅ сделано | main, PR #86 |
+| **A4** | `video-sync` Wayland (display-resample) | 🟡 в PR | `intel-iris-xe-balanced-wayland.conf` |
 | **A5** | Tech debt | ✅ сделано | PR A5 |
 | **C1** | ContentCache | ⬜ не начато | — |
 | **C2** | Audio-only + logo | ⬜ не начато | — |
@@ -182,7 +182,7 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 ### A3. Safe Loadfile — валидация перед playback
 
-**Статус:** 🟡 в PR
+**Статус:** ✅ сделано (main, PR #86)
 
 **Что меняем:** `_safe_loadfile(path)`:
 1. `os.path.exists()`
@@ -196,13 +196,16 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 ---
 
-### A4. video-sync=audio в Wayland-профиле
+### A4. video-sync в Wayland-профиле
 
-**Статус:** 🟡 в репо (`video-sync=audio` в `intel-iris-xe-balanced-wayland.conf`); на плеере — **сверить через D0**
+**Статус:** 🟡 в PR — `video-sync=display-resample` (было `audio`, давало slow-mo на Rutube/HLS)
+
+**Зачем:** `audio` убирал judder, но на сетевом HLS видео «ползло» за аудио-часами при буферизации. `display-vdrop` давал микростаттер на labwc. `display-resample` — компромисс для 29.97 fps @ 60 Hz.
 
 **Acceptance:**
-- [ ] 29.97 fps @ 60 Hz — нет judder
-- [ ] Файл на устройстве: `/var/lib/dsign/mpv-minimal/profiles/intel-iris-xe-balanced-wayland.conf`
+- [ ] Rutube/HLS — нормальная скорость, без slow-mo
+- [ ] 29.97 fps @ 60 Hz — приемлемый judder (лучше vdrop)
+- [ ] Файл на устройстве: `/var/lib/dsign/mpv-minimal/profiles/intel-iris-xe-balanced-wayland.conf` (D0 apply, mode `always`)
 
 ---
 
