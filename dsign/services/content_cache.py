@@ -202,15 +202,15 @@ class ContentCache:
 
     def _download(self, media_key: str, page_url: str, provider: str) -> bool:
         out_path = self._media_path(media_key)
-        part_path = self._part_path(media_key)
         if self.is_ready(media_key):
             return True
-        part_path.unlink(missing_ok=True)
+        self._cleanup_partial_downloads(media_key)
         ytdl = self._ytdl_path()
         if not os.path.isfile(ytdl):
             self.logger.warning("Content cache: yt-dlp missing", extra={"path": ytdl})
             return False
-        tmpl = str(part_path.with_suffix(".%(ext)s"))
+        # yt-dlp appends .%(ext)s — do NOT use ext-N.mp4 as basename (becomes ext-N.mp4.mp4).
+        tmpl = str(self.cache_dir / f"{media_key}.%(ext)s")
         cmd = [
             ytdl,
             "--no-warnings",
@@ -234,10 +234,7 @@ class ContentCache:
         timeout = max(120.0, min(14400.0, timeout))
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if proc.returncode != 0:
-            part_path.unlink(missing_ok=True)
-            for stray in self.cache_dir.glob(f"{media_key}.*"):
-                if stray.suffix in (".part", ".temp", ".ytdl"):
-                    stray.unlink(missing_ok=True)
+            self._cleanup_partial_downloads(media_key)
             self.logger.warning(
                 "Content cache: yt-dlp download failed",
                 extra={
@@ -246,12 +243,7 @@ class ContentCache:
                 },
             )
             return False
-        downloaded = part_path if part_path.is_file() else None
-        if downloaded is None:
-            for cand in self.cache_dir.glob(f"{media_key}.*"):
-                if cand.suffix.lower() in (".mp4", ".mkv", ".webm") and cand.is_file():
-                    downloaded = cand
-                    break
+        downloaded = self._find_downloaded_file(media_key)
         if downloaded is None or not self._ffprobe_ok(downloaded):
             self.logger.warning(
                 "Content cache: downloaded file invalid",
@@ -276,6 +268,44 @@ class ContentCache:
             extra={"media_key": media_key, "size_mb": round(out_path.stat().st_size / (1024 * 1024), 2)},
         )
         return True
+
+    def _cleanup_partial_downloads(self, media_key: str) -> None:
+        """Remove yt-dlp partials (including legacy ext-N.mp4.mp4.* names)."""
+        patterns = (
+            f"{media_key}.*",
+            f"{media_key}.mp4.*",
+        )
+        seen: set[str] = set()
+        for pat in patterns:
+            for path in self.cache_dir.glob(pat):
+                key = str(path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                name = path.name
+                if path == self._media_path(media_key):
+                    continue
+                if name.endswith((".part", ".ytdl")) or ".part-" in name:
+                    path.unlink(missing_ok=True)
+                elif name in (f"{media_key}.mp4.mp4", f"{media_key}.webm", f"{media_key}.mkv"):
+                    path.unlink(missing_ok=True)
+
+    def _find_downloaded_file(self, media_key: str) -> Optional[Path]:
+        preferred = self._media_path(media_key)
+        if preferred.is_file():
+            return preferred
+        candidates = []
+        for cand in self.cache_dir.glob(f"{media_key}.*"):
+            if not cand.is_file():
+                continue
+            if cand.suffix.lower() not in (".mp4", ".mkv", ".webm"):
+                continue
+            if ".part" in cand.name:
+                continue
+            candidates.append(cand)
+        # Prefer mp4; accept legacy double-extension from pre-fix builds.
+        candidates.sort(key=lambda p: (p.suffix.lower() != ".mp4", len(p.name), p.name))
+        return candidates[0] if candidates else None
 
     def _enforce_size_limit(self) -> None:
         max_bytes = self._max_bytes()
