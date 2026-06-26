@@ -273,10 +273,27 @@ class PlaylistManager:
     ) -> Path:
         start_index = int(start_index or 0) % len(items)
         lines = ["#EXTM3U\n"]
+        included = 0
         for offset in range(len(items)):
             idx = (start_index + offset) % len(items)
-            path = Path(str(items[idx]["path"])).resolve()
+            path_str = str(items[idx]["path"])
+            ok, reason = self._validate_local_media_path(path_str, is_video=True)
+            if not ok:
+                self.logger.warning(
+                    "M3U: skip invalid local video",
+                    extra={
+                        "playlist_id": playlist_id,
+                        "media_key": items[idx].get("key"),
+                        "path": path_str,
+                        "reason": reason,
+                    },
+                )
+                continue
+            path = Path(path_str).resolve()
             lines.append(f"{path}\n")
+            included += 1
+        if included == 0:
+            raise ValueError(f"Playlist {playlist_id}: no valid local video files for M3U")
         dest = self.tmp_dir / f"local-playlist-{playlist_id}.m3u"
         dest.write_text("".join(lines), encoding="utf-8")
         return dest
@@ -580,6 +597,99 @@ class PlaylistManager:
         finally:
             with self._load_lock:
                 self._load_in_progress = False
+
+    def _probe_local_video_file(self, file_path: Path) -> bool:
+        """ffprobe -v error (A3): reject corrupt/unreadable local video before loadfile."""
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-i", str(file_path)],
+                capture_output=True,
+                timeout=15,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _validate_local_media_path(self, path: str, *, is_video: bool) -> tuple[bool, str]:
+        if self._is_network_stream_path(path):
+            return True, "network"
+        fp = Path(path)
+        if not fp.is_file():
+            return False, "missing"
+        if is_video and not self._probe_local_video_file(fp):
+            return False, "ffprobe"
+        return True, "ok"
+
+    def _wait_vo_configured(self, timeout_sec: float = 5.0) -> bool:
+        deadline = time.monotonic() + float(timeout_sec)
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            vo = self._mpv_manager.get_property_light("vo-configured", timeout=1.0)
+            if vo is True:
+                return True
+            self._stop_event.wait(0.2)
+        return False
+
+    def _brief_idle_logo_on_skip(self) -> None:
+        try:
+            self._logo_manager.display_idle_logo()
+        except Exception:
+            pass
+
+    def _safe_loadfile(
+        self,
+        path: str,
+        *,
+        media_key: str,
+        is_video: bool,
+        mode: str = "replace",
+        per_file_opts: Optional[Dict[str, Any]] = None,
+        timeout: float = 10.0,
+        wait_vo: bool = True,
+    ) -> bool:
+        """
+        A3: exists + ffprobe (local video) → loadfile → wait vo-configured.
+        Network/ytdl paths skip ffprobe; caller handles stream-open separately.
+        """
+        path_s = str(path or "")
+        is_network = self._is_network_stream_path(path_s)
+        if not is_network:
+            ok, reason = self._validate_local_media_path(path_s, is_video=is_video)
+            if not ok:
+                self.logger.warning(
+                    "safe_loadfile: invalid local media, skipping",
+                    extra={"path": path_s, "media_key": media_key, "reason": reason},
+                )
+                return False
+
+        load_cmd = self._mpv_loadfile_command(path_s, mode, per_file_opts=per_file_opts)
+        load_timeout = (
+            self._network_loadfile_timeout_sec(path_s, is_network=True)
+            if is_network
+            else float(timeout)
+        )
+        load_resp = self._issue_loadfile(
+            load_cmd,
+            media_key=media_key,
+            timeout=load_timeout,
+            max_attempts=1 if is_network else None,
+        )
+        if not load_resp or load_resp.get("error") != "success":
+            self.logger.warning(
+                "safe_loadfile: loadfile IPC failed",
+                extra={"path": path_s[:200], "media_key": media_key, "mpv_response": load_resp},
+            )
+            return False
+
+        if wait_vo and is_video and not is_network:
+            if not self._wait_vo_configured(5.0):
+                self.logger.warning(
+                    "safe_loadfile: vo-configured timeout",
+                    extra={"path": path_s[:200], "media_key": media_key},
+                )
+                return False
+        return True
 
     def _issue_ytdl_loadfile(self, load_cmd: List[Any], *, media_key: str) -> None:
         """Fire loadfile; mpv may not IPC-reply until ytdl_hook finishes."""
@@ -2735,14 +2845,14 @@ class PlaylistManager:
                 loop_playlist=False,
                 prefetch=False,
             )
-            load_resp = self._issue_loadfile(
-                self._mpv_loadfile_command(path, "replace"),
+            load_resp = self._safe_loadfile(
+                path,
                 media_key=media_key,
+                is_video=True,
                 timeout=10.0,
-                max_attempts=1,
             )
-            if not load_resp or load_resp.get("error") != "success":
-                raise RuntimeError(f"loadfile failed for local video: {path}")
+            if not load_resp:
+                raise RuntimeError(f"safe_loadfile failed for local video: {path}")
             self._apply_post_loadfile_playback_props(
                 muted=self._effective_playback_muted(
                     item_muted=bool(item.get("muted", False)),
@@ -2765,14 +2875,13 @@ class PlaylistManager:
                 loop_playlist=True,
                 prefetch=True,
             )
-            load_resp = self._issue_loadfile(
-                self._mpv_loadfile_command(str(m3u_path), "replace"),
+            if not self._safe_loadfile(
+                str(m3u_path),
                 media_key=media_key,
+                is_video=True,
                 timeout=15.0,
-                max_attempts=1,
-            )
-            if not load_resp or load_resp.get("error") != "success":
-                raise RuntimeError(f"loadfile failed for local M3U: {m3u_path}")
+            ):
+                raise RuntimeError(f"safe_loadfile failed for local M3U: {m3u_path}")
             self._apply_post_loadfile_playback_props(
                 muted=self._effective_playback_muted(
                     item_muted=bool(first_item.get("muted", False)),
@@ -3190,21 +3299,33 @@ class PlaylistManager:
                         # External streams: Referer/UA must be set before loadfile (and cleared between items).
                         normalized_headers, mpv_per_file_opts = self._apply_mpv_http_headers(item, stream_url=str(path))
                         self._apply_mpv_ytdl_options(item, stream_url=str(path))
-                        load_cmd = self._mpv_loadfile_command(
-                            str(path),
-                            "replace",
-                            per_file_opts=mpv_per_file_opts,
-                        )
-                        load_timeout = self._network_loadfile_timeout_sec(
-                            str(path), is_network=is_network_reload
-                        )
-                        load_timeout = max(5.0, min(180.0, float(load_timeout)))
-                        load_resp = self._issue_loadfile(
-                            load_cmd,
-                            media_key=media_key,
-                            timeout=load_timeout,
-                        )
-                        load_ok = bool(load_resp and load_resp.get("error") == "success")
+                        if is_network_reload:
+                            load_cmd = self._mpv_loadfile_command(
+                                str(path),
+                                "replace",
+                                per_file_opts=mpv_per_file_opts,
+                            )
+                            load_timeout = self._network_loadfile_timeout_sec(
+                                str(path), is_network=is_network_reload
+                            )
+                            load_timeout = max(5.0, min(180.0, float(load_timeout)))
+                            load_resp = self._issue_loadfile(
+                                load_cmd,
+                                media_key=media_key,
+                                timeout=load_timeout,
+                            )
+                            load_ok = bool(load_resp and load_resp.get("error") == "success")
+                        else:
+                            load_ok = self._safe_loadfile(
+                                str(path),
+                                media_key=media_key,
+                                is_video=is_video,
+                                per_file_opts=mpv_per_file_opts,
+                                timeout=10.0,
+                            )
+                            if not load_ok:
+                                self._brief_idle_logo_on_skip()
+                                continue
                         socket_missing = not os.path.exists(PlaybackConstants.SOCKET_PATH)
                         if not load_ok and not is_network_reload:
                             self.logger.warning(
@@ -3610,15 +3731,45 @@ class PlaylistManager:
                         )
                     except Exception:
                         pass
-                first_load_resp = self._issue_loadfile(
-                    first_load_cmd,
-                    media_key=first_media_key,
-                    timeout=first_load_timeout,
-                    max_attempts=1,
-                )
-                if first_is_network:
+                    first_load_resp = self._issue_loadfile(
+                        first_load_cmd,
+                        media_key=first_media_key,
+                        timeout=first_load_timeout,
+                        max_attempts=1,
+                    )
                     self._preloaded_load_cmd = first_load_cmd
-                if not first_is_network:
+                else:
+                    first_load_resp = None
+                    loaded_local = False
+                    for try_offset in range(len(items)):
+                        try_index = (start_index + try_offset) % len(items)
+                        candidate = items[try_index]
+                        cand_path = str(candidate.get("path") or "")
+                        if self._is_network_stream_path(cand_path):
+                            continue
+                        _, cand_mpv_opts = self._apply_mpv_http_headers(
+                            candidate, stream_url=cand_path
+                        )
+                        cand_key = str(candidate.get("key") or cand_path)
+                        if self._safe_loadfile(
+                            cand_path,
+                            media_key=cand_key,
+                            is_video=bool(candidate.get("is_video")),
+                            per_file_opts=cand_mpv_opts,
+                            timeout=10.0,
+                        ):
+                            if try_index != start_index:
+                                start_index = try_index
+                                first = candidate
+                                first_path = cand_path
+                                first_media_key = cand_key
+                                self._set_current_media_label(self._item_media_label(first))
+                                self._set_loop_position(start_index, len(items))
+                            loaded_local = True
+                            first_load_resp = {"error": "success"}
+                            break
+                    if not loaded_local:
+                        raise RuntimeError("No playable local media at playlist start")
                     self._mpv_manager._send_command(
                         {"command": ["set_property", "pause", "no"]},
                         timeout=5.0,
