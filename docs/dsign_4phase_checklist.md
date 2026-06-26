@@ -13,11 +13,11 @@
 
 | ID | Задача | Статус | Где сделано |
 |----|--------|--------|-------------|
-| **D0** | Манифест деплоя + verify/apply | ⬜ не начато | — |
+| **D0** | Манифест деплоя + verify/apply | ✅ сделано | main, PR #82 |
 | **A0** | Сетевой playback / hung / ytdl resilience | ✅ сделано | main, PR #80 |
-| **A1** | MPV internal playlist (локальное видео) | ⬜ не начато | — |
-| **A2** | Single video `loop-file=inf` | ⬜ не начато | — |
-| **A3** | Safe loadfile + ffprobe | ⬜ не начато | — |
+| **A1** | MPV internal playlist (локальное видео) | ✅ сделано | main, PR #85 |
+| **A2** | Single video `loop-file=inf` | ✅ сделано | main, PR #85 |
+| **A3** | Safe loadfile + ffprobe | 🟡 в PR | `playlist_management.py` |
 | **A4** | `video-sync=audio` Wayland | 🟡 в репо | `etc/…/intel-iris-xe-balanced-wayland.conf`; на плеере — сверить D0 |
 | **A5** | Tech debt | ✅ сделано | PR A5 |
 | **C1** | ContentCache | ⬜ не начато | — |
@@ -176,19 +176,13 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 ### A2. Single Video → loop-file=inf
 
-**Статус:** ⬜ не начато
-
-**Что меняем:** 1 локальное видео → `loop-file=inf` + один `loadfile`, без outer `while` + reload.
-
-**Acceptance:**
-- [ ] 5 минут loop — 0 `loadfile` кроме первого
-- [ ] Memory не растёт
+**Статус:** ✅ сделано (PR #85)
 
 ---
 
 ### A3. Safe Loadfile — валидация перед playback
 
-**Статус:** ⬜ не начато
+**Статус:** 🟡 в PR
 
 **Что меняем:** `_safe_loadfile(path)`:
 1. `os.path.exists()`
