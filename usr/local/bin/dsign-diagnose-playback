@@ -9,6 +9,57 @@ DB="${DSIGN_DB_PATH:-/var/lib/dsign/database.db}"
 REPO="${DSIGN_REPO:-/home/dsign/dsign}"
 JOURNAL_LINES="${DSIGN_DIAG_JOURNAL_LINES:-600}"
 SINCE="${DSIGN_DIAG_SINCE:-}"
+CACHE_DIR="${DSIGN_CONTENT_CACHE_DIR:-/var/lib/dsign/media/cache}"
+WAYLAND_PROFILE="${DSIGN_MPV_WAYLAND_PROFILE:-/var/lib/dsign/mpv-minimal/profiles/intel-iris-xe-balanced-wayland.conf}"
+
+_diag_env_default() {
+  local name="$1"
+  local default="$2"
+  if [ -n "${!name:-}" ]; then
+    printf '  %s=%s (env)\n' "$name" "${!name}"
+  else
+    printf '  %s=%s (default)\n' "$name" "$default"
+  fi
+}
+
+_diag_running_env() {
+  local prefix="$1"
+  local pid
+  pid="$(pgrep -f 'python.*(/run\.py|digital.signage)' 2>/dev/null | head -1 || true)"
+  if [ -z "$pid" ] && pgrep -f 'venv/bin/python' >/dev/null 2>&1; then
+    pid="$(pgrep -f 'venv/bin/python.*run\.py' 2>/dev/null | head -1 || true)"
+  fi
+  if [ -n "$pid" ] && [ -r "/proc/$pid/environ" ]; then
+    tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -E "^${prefix}" | sed 's/^/  runtime: /' || true
+  fi
+}
+
+_diag_human_bytes() {
+  local n="${1:-0}"
+  if command -v numfmt >/dev/null 2>&1; then
+    numfmt --to=iec-i --suffix=B "$n" 2>/dev/null || echo "${n}B"
+  else
+    echo "${n} bytes"
+  fi
+}
+
+_diag_probe_internet() {
+  local host="$1"
+  local port="${2:-443}"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$host" "$port" <<'PY'
+import socket, sys
+h, p = sys.argv[1], int(sys.argv[2])
+try:
+    socket.create_connection((h, p), timeout=2.0).close()
+    print("OK")
+except OSError as e:
+    print(f"FAIL ({e})")
+PY
+  else
+    echo "SKIP (no python3)"
+  fi
+}
 
 echo "=== dsign playback diagnostics ==="
 echo "host: $(hostname)  time: $(date -Is 2>/dev/null || date)"
@@ -89,8 +140,120 @@ if [ -S "$SOCK" ]; then
     v="$(mpv_prop "$p" 2>/dev/null || echo '?')"
     printf '  %-22s %s\n' "$p:" "$v"
   done
+  vs="$(mpv_prop "video-sync" 2>/dev/null || true)"
+  if [ -n "$vs" ] && [ "$vs" != "?" ]; then
+    printf '  %-22s %s\n' "video-sync (live):" "$vs"
+  fi
+  # Heuristic: local content cache vs network stream
+  pth="$(mpv_prop path 2>/dev/null || true)"
+  if [[ "$pth" == *"/media/cache/"* ]]; then
+    echo "  playback_source:       content_cache (local mp4)"
+  elif [[ "$pth" == ytdl://* ]] || [[ "$pth" == http://* ]] || [[ "$pth" == https://* ]]; then
+    echo "  playback_source:       network (ytdl/http)"
+  elif [ -n "$pth" ] && [ "$pth" != "?" ]; then
+    echo "  playback_source:       local file"
+  fi
 else
   echo "(no IPC)"
+fi
+echo
+
+echo "--- mpv Wayland profile (A4 video-sync) ---"
+if [ -r "$WAYLAND_PROFILE" ]; then
+  grep -E '^(video-sync|interpolation)=' "$WAYLAND_PROFILE" 2>/dev/null | sed 's/^/  /' || true
+  if ! grep -q '^video-sync=' "$WAYLAND_PROFILE" 2>/dev/null; then
+    echo "  (video-sync not set in profile)"
+  fi
+else
+  echo "  (missing $WAYLAND_PROFILE)"
+fi
+echo
+
+echo "--- content cache (C1) ---"
+if [ -f "$REPO/dsign/services/content_cache.py" ]; then
+  echo "  code: content_cache.py present in repo"
+else
+  echo "  code: content_cache.py MISSING in $REPO (C1 not deployed?)"
+fi
+_diag_env_default DSIGN_CONTENT_CACHE_ENABLED "1"
+_diag_env_default DSIGN_CONTENT_CACHE_PREFETCH "1"
+_diag_env_default DSIGN_CONTENT_CACHE_PLAY_WHEN_READY "1"
+_diag_env_default DSIGN_CONTENT_CACHE_MAX_GB "8"
+_diag_env_default DSIGN_CONTENT_CACHE_DIR "$CACHE_DIR"
+_diag_running_env 'DSIGN_CONTENT_CACHE_'
+if journalctl -u digital-signage.service -b --no-pager 2>/dev/null \
+  | grep -q 'ContentCache wired'; then
+  echo "  service: ContentCache wired (journal this boot)"
+else
+  echo "  service: ContentCache wired — not seen in journal this boot"
+fi
+if [ -d "$CACHE_DIR" ]; then
+  ready_n=0
+  partial_n=0
+  legacy_n=0
+  total_b=0
+  echo "  cache_dir: $CACHE_DIR"
+  shopt -s nullglob
+  for f in "$CACHE_DIR"/ext-*.mp4; do
+    [ -f "$f" ] || continue
+    sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
+    total_b=$((total_b + sz))
+    ok="maybe"
+    if command -v ffprobe >/dev/null 2>&1; then
+      if ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of csv=p=0 "$f" 2>/dev/null \
+        | grep -qi video; then
+        ok="ready"
+        ready_n=$((ready_n + 1))
+      else
+        ok="invalid"
+      fi
+    else
+      ready_n=$((ready_n + 1))
+    fi
+    printf '    ready  %-12s %8s  %s\n' "$(basename "$f")" "$(_diag_human_bytes "$sz")" "$ok"
+  done
+  for f in "$CACHE_DIR"/*.part "$CACHE_DIR"/*/*.part "$CACHE_DIR"/*-*-Frag*.part; do
+    [ -e "$f" ] || continue
+    partial_n=$((partial_n + 1))
+    sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
+    printf '    partial %-40s %s\n' "$(basename "$f")" "$(_diag_human_bytes "$sz")"
+  done
+  for f in "$CACHE_DIR"/*mp4.mp4*; do
+    [ -e "$f" ] || continue
+    legacy_n=$((legacy_n + 1))
+  done
+  shopt -u nullglob
+  echo "  summary: ready=$ready_n partial_files=$partial_n total_ready=$(_diag_human_bytes "$total_b")"
+  if [ "$legacy_n" -gt 0 ]; then
+    echo "  WARNING: legacy ext-N.mp4.mp4.* files ($legacy_n) — yt-dlp template bug; git pull + rm partials + restart digital-signage"
+  fi
+  if [ "$partial_n" -gt 0 ] && [ "$ready_n" -eq 0 ]; then
+    echo "  note: prefetch in progress (long Rutube videos may take 30+ min)"
+  fi
+else
+  echo "  cache_dir: MISSING ($CACHE_DIR)"
+fi
+echo "  yt-dlp: $(command -v yt-dlp 2>/dev/null || echo missing) $(yt-dlp --version 2>/dev/null | head -1 || true)"
+echo
+
+echo "--- network reachability ---"
+gw="$(ip route 2>/dev/null | awk '/^default /{print $3; exit}')"
+if [ -n "$gw" ]; then
+  if ping -c 1 -W 2 "$gw" >/dev/null 2>&1; then
+    echo "  gateway $gw: OK"
+  else
+    echo "  gateway $gw: FAIL (no ping)"
+  fi
+else
+  echo "  gateway: (no default route)"
+fi
+inet="$(_diag_probe_internet 1.1.1.1 53)"
+echo "  internet (1.1.1.1:53): $inet"
+rut="$(_diag_probe_internet rutube.ru 443)"
+echo "  rutube.ru:443: $rut"
+if command -v curl >/dev/null 2>&1; then
+  code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 https://rutube.ru/ 2>/dev/null || echo timeout)"
+  echo "  curl rutube.ru: $code"
 fi
 echo
 
@@ -116,8 +279,23 @@ else
   JARGS+=(-b)
 fi
 "${JARGS[@]}" 2>/dev/null | grep -E \
-  'Playlist item (starting|finished)|proactive_refresh|Proactive refresh|mid-stream network reload|Network stream ready|ytdl stream did not open|ytdl: retrying|MPV network stream debug|Slideshow loop paused|Resumed playlist|MPV IPC socket recreated|hung|forcing systemd restart|deferred_unpause|instant_eof|vo init|loadfile' \
+  'Playlist item (starting|finished)|proactive_refresh|Proactive refresh|mid-stream network reload|Network stream ready|ytdl stream did not open|ytdl: retrying|MPV network stream debug|Slideshow loop paused|Resumed playlist|MPV IPC socket recreated|hung|forcing systemd restart|deferred_unpause|instant_eof|vo init|loadfile|Content cache' \
   | tail -n 60 || echo "(no matching journal lines)"
+echo
+
+echo "--- content cache (journal, this boot) ---"
+journalctl -u digital-signage.service -b --no-pager 2>/dev/null \
+  | grep -iE 'Content cache|ContentCache wired' \
+  | tail -15 | sed 's/^/  /' || echo "  (no Content cache lines this boot)"
+echo
+
+echo "--- network health (journal hints) ---"
+journalctl -u digital-signage.service -b --no-pager 2>/dev/null \
+  | grep -E 'consecutive_ytdl_failures|Aborting playlist scan after consecutive|cdn_may_be_down' \
+  | tail -5 | sed 's/^/  /' || echo "  (no ytdl streak warnings this boot)"
+ytdl_fail_n="$(journalctl -u digital-signage.service -b --no-pager 2>/dev/null \
+  | grep -c 'ytdl stream did not open' || echo 0)"
+echo "  ytdl open failures (boot): $ytdl_fail_n"
 echo
 
 echo "--- recovery / hung (journal) ---"
@@ -171,4 +349,6 @@ echo "  Immediate snapshot:     bash $0"
 echo "  Last 2 hours only:      SINCE='2 hours ago' bash $0"
 echo "  Idle logo + idle-active=True: mpv not playing (check vo/drm dual mpv above)"
 echo "  Fix dual mpv on Wayland: sudo bash /usr/local/bin/dsign-disable-drm-mpv"
+echo "  Content cache API:      cache_state in GET /api/playback/status (needs login)"
+echo "  Cache partial stuck:    ls -lh $CACHE_DIR; journalctl -u digital-signage | grep 'Content cache'"
 echo "  Save full bundle:       SINCE='12 hours ago' DSIGN_DIAG_JOURNAL_LINES=3000 bash $0 | tee /tmp/dsign-playback-$(date +%Y%m%dT%H%M).txt"
