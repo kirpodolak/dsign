@@ -7,6 +7,14 @@ function thumbUrl(filename) {
   return `/api/media/thumbnail/${encodeURIComponent(filename)}`;
 }
 
+const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.oga', '.flac', '.m4a', '.aac', '.opus'];
+
+function isAudioFile(file) {
+  const fn = String(file?.filename || '');
+  if (file?.is_audio) return true;
+  return AUDIO_EXTENSIONS.some((ext) => fn.toLowerCase().endsWith(ext));
+}
+
 function isVideoFile(file) {
   const fn = String(file?.filename || '');
   if (file?.is_video || file?.is_external || fn.toLowerCase().startsWith('ext-')) return true;
@@ -286,6 +294,7 @@ export class AddToPlaylistModal {
       const inPl = this._playlistKeys.has(fn);
       const inCart = this._cartSet.has(fn);
       const vid = isVideoFile(file);
+      const aud = isAudioFile(file);
 
       const tile = document.createElement('div');
       tile.className = 'pl-add-tile';
@@ -296,7 +305,7 @@ export class AddToPlaylistModal {
       img.className = 'pl-add-tile__img';
       img.alt = '';
       img.loading = 'lazy';
-      img.src = vid ? thumbUrl(fn) : `/api/media/${encodeURIComponent(fn)}`;
+      img.src = vid ? thumbUrl(fn) : (aud ? '/static/images/placeholder.jpg' : `/api/media/${encodeURIComponent(fn)}`);
       img.onerror = () => {
         img.src = '/static/images/placeholder.jpg';
       };
