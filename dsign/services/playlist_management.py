@@ -2019,6 +2019,26 @@ class PlaylistManager:
         except Exception:
             pass
 
+    def _prepare_local_audio_after_loadfile(self, *, muted: bool, skip_load: bool) -> bool:
+        """
+        After audio loadfile, wait until the demuxer opens before EOF polling.
+        Cycle 2+ reloads can report idle-active briefly; without this wait the loop
+        treats the item as finished instantly (silent skip).
+        """
+        if not skip_load:
+            if not self._wait_mpv_leave_idle(
+                timeout_sec=30.0, poll_sec=0.4, snap_timeout=6.0
+            ):
+                if self._stop_event.is_set():
+                    return False
+                self.logger.warning(
+                    "Audio demuxer did not leave idle after loadfile",
+                    extra={"event": "audio_demuxer_idle_timeout"},
+                )
+                return False
+        self._apply_post_loadfile_playback_props(muted=muted)
+        return True
+
     def _set_playback_active_marker(self, active: bool) -> None:
         marker = Path("/run/dsign/playback-active")
         try:
@@ -2378,6 +2398,7 @@ class PlaylistManager:
         provider: Optional[str] = None,
         media_key: Optional[str] = None,
         item: Optional[Dict[str, Any]] = None,
+        is_audio: bool = False,
     ) -> bool:
         """
         End-of-playback detection that works when `eof-reached` is permanently unavailable.
@@ -2397,7 +2418,12 @@ class PlaylistManager:
         except ValueError:
             nw_grace = 25.0
         nw_grace = max(3.0, min(120.0, nw_grace))
-        grace_until = time.monotonic() + (nw_grace if is_network else 0.3)
+        if is_network:
+            grace_until = time.monotonic() + nw_grace
+        elif is_audio:
+            grace_until = time.monotonic() + 2.0
+        else:
+            grace_until = time.monotonic() + 0.3
         consecutive_idle = 0
         if is_network:
             try:
@@ -2443,7 +2469,8 @@ class PlaylistManager:
         last_time_pos_change = time.monotonic()
         last_ipc_ok = time.monotonic()
         poll_tick = 0
-        local_idle_confirm = 1
+        local_idle_confirm = 2 if is_audio else 1
+        playback_started = False
         eof_capable = is_network and self._is_external_stream_provider(
             provider=provider, stream_url=stream_url
         )
@@ -2515,6 +2542,8 @@ class PlaylistManager:
             poll_tick += 1
             tp_raw = self._mpv_get_light("time-pos", timeout=snap_timeout)
             tp = self._snap_number({"time-pos": tp_raw}, "time-pos")
+            if is_audio and tp is not None and tp > 0.05:
+                playback_started = True
 
             idle_raw: Optional[Any] = None
             if is_network:
@@ -2790,8 +2819,11 @@ class PlaylistManager:
                 else:
                     consecutive_idle += 1
                     if consecutive_idle >= local_idle_confirm:
-                        _finish_video_item("local_idle")
-                        break
+                        if is_audio and not playback_started:
+                            consecutive_idle = 0
+                        else:
+                            _finish_video_item("local_idle")
+                            break
             else:
                 consecutive_idle = 0
 
@@ -3528,14 +3560,23 @@ class PlaylistManager:
                             stall_abort = True
                             break
                     elif is_audio:
-                        if not skip_load:
-                            self._apply_post_loadfile_playback_props(muted=muted)
+                        if not self._prepare_local_audio_after_loadfile(
+                            muted=muted, skip_load=skip_load
+                        ):
+                            if not skip_load:
+                                try:
+                                    self._logo_manager.restore_after_audio_playback()
+                                except Exception:
+                                    pass
+                                self._brief_idle_logo_on_skip()
+                            continue
                         if not self._wait_mpv_video_end(
                             playlist_id,
                             is_network=False,
                             stream_ready=True,
                             poll_sec=1.0,
                             media_key=media_key,
+                            is_audio=True,
                         ):
                             stall_abort = True
                             break
