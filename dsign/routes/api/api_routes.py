@@ -710,15 +710,58 @@ def init_api_routes(api_bp, services):
         umuted = (m_mute[-1] == "off") if m_mute else None
         return (vol, umuted)
 
+    def _master_audio_state() -> dict:
+        """
+        Master volume from settings.json — single source of truth for dashboard and playback sync.
+        """
+        svc = settings_service
+        if not svc:
+            return {"available": False, "volume_percent": None, "muted": None}
+        try:
+            st = svc.load_settings()
+            vol = int(round(float(st.get("volume", 80))))
+            vol = max(0, min(100, vol))
+            muted = bool(st.get("mute", False))
+            path_ok = (
+                _mpv_manager_available()
+                or _amixer_available()
+                or _wpctl_available()
+            )
+            return {
+                "available": bool(path_ok),
+                "volume_percent": vol,
+                "muted": muted,
+            }
+        except Exception:
+            return {"available": False, "volume_percent": None, "muted": None}
+
+    def _cache_master_audio_state(state: dict) -> None:
+        if not state or state.get("volume_percent") is None:
+            return
+        try:
+            with _mpv_audio_poll_cache_lock:
+                _mpv_audio_poll_cache["payload"] = {
+                    "available": True,
+                    "volume_percent": state.get("volume_percent"),
+                    "muted": state.get("muted"),
+                }
+                _mpv_audio_poll_cache["ts"] = time.time()
+        except Exception:
+            pass
+
     def _audio_get() -> dict:
         """
         Global volume display for the dashboard:
-        - vc4hdmi ALSA simple PCM when present (true dual-HDMI hardware mixers),
-        - else MPV volume when output is direct HDMI without vc4 scontrols (do NOT read card0
-          Master — it is unrelated and sticks e.g. at 77%),
-        - else PipeWire default sink,
-        - else other ALSA picks.
+        Master volume lives in settings.json (persisted by POST /api/system/audio).
+        Playback applies the same value to MPV on each loadfile via _sync_settings_audio_to_mpv.
         """
+        master = _master_audio_state()
+        if master.get("volume_percent") is not None:
+            if not master.get("available"):
+                master = {**master, "available": True}
+            return master
+
+        # Legacy fallback when settings service is unavailable
         # 1) Real HDMI hardware mixers on Pi (rare on Bookworm; often empty)
         if _amixer_available() and _alsa_hdmi_has_simple_pcm():
             targs = _vc4hdmi_pcm_targets()
@@ -778,11 +821,17 @@ def init_api_routes(api_bp, services):
 
     def _audio_set(volume_percent: int | None = None, muted: bool | None = None) -> dict:
         """
-        Apply volume: (1) ALSA simple controls on all vc4hdmi* if they exist, else
-        (2) MPV IPC when DSIGN_PREFER_MPV_VOLUME (default on) and MPVManager exists — matches --ao=alsa,
-        (3) PipeWire @DEFAULT_AUDIO_SINK@ if DSIGN_USE_PIPEWIRE_AUDIO and wpctl, else
-        (4) MPV volume/mute as last resort.
+        Apply master volume: persist settings.json first, then hardware (MPV / ALSA / PipeWire).
         """
+        if settings_service and (volume_percent is not None or muted is not None):
+            try:
+                settings_service.set_master_audio(
+                    volume_percent=volume_percent,
+                    muted=muted,
+                )
+            except Exception:
+                pass
+
         use_pw = (os.getenv("DSIGN_USE_PIPEWIRE_AUDIO", "1").strip().lower() in ("1", "true", "yes", "on")) and _wpctl_available()
         v_pct = int(max(0, min(100, int(volume_percent)))) if volume_percent is not None else None
 
@@ -803,7 +852,9 @@ def init_api_routes(api_bp, services):
 
         if alsa_targs:
             _invalidate_system_status_cache()
-            return _audio_get()
+            state = _audio_get()
+            _cache_master_audio_state(state)
+            return state
 
         if _prefer_mpv_volume() and _mpv_manager_available():
             _audio_set_mpv(v_pct, muted)
@@ -813,7 +864,9 @@ def init_api_routes(api_bp, services):
             _audio_set_mpv(v_pct, muted)
 
         _invalidate_system_status_cache()
-        return _audio_get()
+        state = _audio_get()
+        _cache_master_audio_state(state)
+        return state
 
     def _is_nmcli_available() -> bool:
         return shutil.which("nmcli") is not None
