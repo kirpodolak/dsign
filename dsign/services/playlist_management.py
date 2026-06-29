@@ -62,6 +62,7 @@ class PlaylistManager:
         self._last_good_playlist_id: Optional[int] = None
         self._status_snapshot_cache: Dict[str, Any] = {}
         self._status_snapshot_ts: float = 0.0
+        self._audio_route_applied_for_play = False
 
     def set_slideshow_crash_callback(self, callback: Optional[Callable[[], None]]) -> None:
         self._slideshow_crash_callback = callback
@@ -118,6 +119,10 @@ class PlaylistManager:
             return
         try:
             self._mpv_manager.update_settings(updates)
+            self.logger.info(
+                "MPV audio route applied",
+                extra={"route": str(route), "ao": updates.get("ao"), "audio_device": updates.get("audio-device")},
+            )
         except Exception:
             pass
 
@@ -2027,6 +2032,9 @@ class PlaylistManager:
             )
         except Exception:
             pass
+        if not self._audio_route_applied_for_play:
+            self._sync_settings_audio_route_to_mpv()
+            self._audio_route_applied_for_play = True
         self._sync_settings_volume_to_mpv()
         try:
             self._mpv_manager._send_command(
@@ -2036,6 +2044,11 @@ class PlaylistManager:
             )
         except Exception:
             pass
+        if muted:
+            self.logger.info(
+                "Playback item muted",
+                extra={"event": "playback_item_muted", "effective_muted": True},
+            )
 
     def _prepare_local_audio_after_loadfile(self, *, muted: bool, skip_load: bool) -> bool:
         """
@@ -2925,6 +2938,11 @@ class PlaylistManager:
 
         start_index = int(start_index or 0) % len(items)
         self._active_playlist_id = playlist_id
+        self._audio_route_applied_for_play = False
+        try:
+            self._logo_manager.ensure_mpv_video_output()
+        except Exception:
+            pass
         try:
             self._mpv_manager.set_playback_session_active(True)
         except Exception:
@@ -3776,6 +3794,7 @@ class PlaylistManager:
             self._stop_play_thread(preserve_stall_tracking=preserve_stall_tracking)
             # Mark playback starting before DB/profile IPC so Wi-Fi-on-display skips.
             self._set_playback_active_marker(True)
+            self._audio_route_applied_for_play = False
 
             # Get playlist and validate
             playlist = self.db_session.query(Playlist).get(playlist_id)
@@ -3874,7 +3893,6 @@ class PlaylistManager:
             self._set_current_media_label(self._item_media_label(first))
             try:
                 self._logo_manager.ensure_mpv_video_output()
-                self._sync_settings_audio_to_mpv()
             except Exception:
                 pass
 
@@ -3976,22 +3994,11 @@ class PlaylistManager:
                             break
                     if not loaded_local:
                         raise RuntimeError("No playable local media at playlist start")
-                    self._mpv_manager._send_command(
-                        {"command": ["set_property", "pause", "no"]},
-                        timeout=5.0,
-                    )
-                self._sync_settings_volume_to_mpv()
-                try:
                     first_muted = self._effective_playback_muted(
                         item_muted=bool(first.get("muted", False)),
                         profile_muted=profile_muted,
                     )
-                    self._mpv_manager._send_command(
-                        {"command": ["set_property", "mute", "yes" if first_muted else "no"]},
-                        timeout=3.0,
-                    )
-                except Exception:
-                    pass
+                    self._apply_post_loadfile_playback_props(muted=first_muted)
             except Exception:
                 if first_is_network:
                     try:
@@ -4131,7 +4138,6 @@ class PlaylistManager:
             )
             try:
                 self._logo_manager.ensure_mpv_video_output()
-                self._sync_settings_audio_to_mpv()
             except Exception:
                 pass
             self._set_playback_active_marker(False)
