@@ -161,6 +161,24 @@ class SettingsService:
                           extra={'action': 'load_settings'})
             return self.DEFAULT_SETTINGS
 
+    def set_master_audio(
+        self,
+        *,
+        volume_percent: int | None = None,
+        muted: bool | None = None,
+    ) -> Dict[str, Any]:
+        """Persist dashboard master volume (settings.json). Playback re-applies this to MPV."""
+        settings = self.load_settings()
+        if volume_percent is not None:
+            settings["volume"] = int(max(0, min(100, int(volume_percent))))
+        if muted is not None:
+            settings["mute"] = bool(muted)
+        self.save_settings(settings)
+        return {
+            "volume": int(settings.get("volume", self.DEFAULT_SETTINGS["volume"])),
+            "mute": bool(settings.get("mute", False)),
+        }
+
     def save_settings(self, settings: Dict[str, Any]) -> None:
         """Сохранение настроек в файл"""
         try:
