@@ -32,7 +32,8 @@ function formatDate(timestamp) {
 
 // Constants
 const ALLOWED_IMAGE_TYPES = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
-const ALLOWED_VIDEO_TYPES = ['mp4', 'webm', 'ogg', 'mov', 'avi'];
+const ALLOWED_VIDEO_TYPES = ['mp4', 'webm', 'mov', 'avi'];
+const ALLOWED_AUDIO_TYPES = ['mp3', 'wav', 'ogg', 'oga', 'flac', 'm4a', 'aac', 'opus'];
 const MAX_FILE_SIZE = 1024 * 1024 * 1024; // 1 GiB, согласовано с Config.MAX_UPLOAD_BYTES / FileService
 const PLACEHOLDER_IMAGE = '/static/images/placeholder.jpg';
 
@@ -134,8 +135,9 @@ class MediaGallery {
   isValidFile(file) {
     if (!file) return false;
     const ext = getFileExtension(file.name);
-    return (ALLOWED_IMAGE_TYPES.includes(ext) || 
-            ALLOWED_VIDEO_TYPES.includes(ext)) && 
+    return (ALLOWED_IMAGE_TYPES.includes(ext) ||
+            ALLOWED_VIDEO_TYPES.includes(ext) ||
+            ALLOWED_AUDIO_TYPES.includes(ext)) &&
            file.size <= MAX_FILE_SIZE;
   }
 
