@@ -1055,6 +1055,15 @@ class MPVManager:
         except Exception:
             return None
 
+    def set_vo_property(self, vo: str, *, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
+        """Switch vo during audio-only logo transitions (bypasses playback guard)."""
+        return self._send_command(
+            {"command": ["set_property", "vo", str(vo)]},
+            timeout=timeout,
+            max_attempts=1,
+            allow_vo_during_playback=True,
+        )
+
     def _send_command(
         self,
         command: Dict[str, Any],
@@ -1062,6 +1071,7 @@ class MPVManager:
         *,
         max_attempts: Optional[int] = None,
         lock_wait: Optional[float] = None,
+        allow_vo_during_playback: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Отправка команды в MPV. Успехи — только DEBUG (слайдшоу иначе забивает journal)."""
         command_arr = command.get("command", ["unknown"])
@@ -1073,7 +1083,11 @@ class MPVManager:
 
         if command_name == "set_property" and len(command_arr) >= 2:
             prop = str(command_arr[1])
-            if prop == "vo" and self._playback_session_active:
+            if (
+                prop == "vo"
+                and self._playback_session_active
+                and not allow_vo_during_playback
+            ):
                 self.logger.error(
                     "BLOCKED: set_property 'vo' during playback",
                     extra={"operation": "MPVCommand", "command": command_name},
