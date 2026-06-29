@@ -463,6 +463,49 @@ class SettingsService:
                 db.session.rollback()
             return False
 
+    @staticmethod
+    def _parse_aplay_hdmi_pch_devices() -> list[tuple[str, str]]:
+        """Return [(dev_index, description), ...] for hdmi:CARD=PCH,DEV=N from aplay -L."""
+        try:
+            import subprocess
+
+            out = subprocess.run(
+                ["aplay", "-L"], capture_output=True, text=True, check=False
+            ).stdout or ""
+        except Exception:
+            return []
+        devices: list[tuple[str, str]] = []
+        lines = out.splitlines()
+        for i, line in enumerate(lines):
+            if not line.startswith("hdmi:CARD=PCH,DEV="):
+                continue
+            try:
+                dev = line.split("DEV=", 1)[1].strip()
+            except Exception:
+                continue
+            desc = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            devices.append((dev, desc))
+        return devices
+
+    def _pch_hdmi_mpv_device(self, *, prefer_hdmi_label: bool = True) -> Optional[str]:
+        """
+        Intel HDA PCH: DEV=0 is not always the first physical HDMI jack (often eDP/USB-C panel).
+        Prefer endpoints whose ALSA description contains 'HDMI'.
+        """
+        override = (os.getenv("DSIGN_ALSA_HDMI_DEV") or "").strip()
+        if override.isdigit():
+            return f"alsa/hdmi:CARD=PCH,DEV={override}"
+        devices = self._parse_aplay_hdmi_pch_devices()
+        if not devices:
+            return None
+        if prefer_hdmi_label:
+            for dev, desc in devices:
+                upper = desc.upper()
+                if "HDMI" in upper and "M2766" not in upper:
+                    return f"alsa/hdmi:CARD=PCH,DEV={dev}"
+        dev0, _ = devices[0]
+        return f"alsa/hdmi:CARD=PCH,DEV={dev0}"
+
     def expand_audio_route(self, route: str) -> Dict[str, str]:
         """
         Map UI audio-route to mpv ao + audio-device.
@@ -473,27 +516,35 @@ class SettingsService:
           specific ALSA device from the MPV Advanced dialog.
         """
         r = (route or "auto").strip().lower()
-        # x86/Ubuntu common: Intel HDA "PCH" with multiple HDMI/DP endpoints
-        # (ALSA names show up as hdmi:CARD=PCH,DEV=0..3). We map these deterministically so
-        # the UI buttons work without requiring /etc/asound.conf.
-        try:
-            import subprocess
-            out = subprocess.run(["aplay", "-L"], capture_output=True, text=True, check=False).stdout or ""
-            has_pch_hdmi = "hdmi:CARD=PCH,DEV=0" in out
-        except Exception:
-            has_pch_hdmi = False
+        pch_hdmi = self._pch_hdmi_mpv_device(prefer_hdmi_label=True)
         if r == "hdmi":
-            if has_pch_hdmi:
-                return {"ao": "alsa", "audio-device": "alsa/hdmi:CARD=PCH,DEV=0"}
+            if pch_hdmi:
+                return {"ao": "alsa", "audio-device": pch_hdmi}
             # Pi 4 exposes vc4hdmi0 / vc4hdmi1 (not "vc4hdmi").
             return {"ao": "alsa", "audio-device": "alsa/hdmi:CARD=vc4hdmi0,DEV=0"}
         if r in ("dp", "displayport"):
-            if has_pch_hdmi:
-                # Next digital endpoint; on many boards this is DP or a second HDMI/DP port.
-                return {"ao": "alsa", "audio-device": "alsa/hdmi:CARD=PCH,DEV=1"}
+            if pch_hdmi:
+                devices = self._parse_aplay_hdmi_pch_devices()
+                # Second digital endpoint, or first labeled HDMI if only one.
+                pick = None
+                if len(devices) >= 2:
+                    pick = devices[1][0]
+                elif devices:
+                    pick = devices[0][0]
+                if pick is not None:
+                    return {"ao": "alsa", "audio-device": f"alsa/hdmi:CARD=PCH,DEV={pick}"}
             return {"ao": "alsa", "audio-device": "auto"}
         if r in ("headphones", "jack", "analog"):
-            if has_pch_hdmi:
+            try:
+                import subprocess
+
+                out = subprocess.run(
+                    ["aplay", "-L"], capture_output=True, text=True, check=False
+                ).stdout or ""
+                has_pch = "CARD=PCH" in out
+            except Exception:
+                has_pch = False
+            if has_pch:
                 return {"ao": "alsa", "audio-device": "alsa/hw:CARD=PCH,DEV=0"}
             return {"ao": "alsa", "audio-device": "alsa/plughw:CARD=Headphones,DEV=0"}
         return {"ao": "alsa", "audio-device": "auto"}
