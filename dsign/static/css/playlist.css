@@ -179,6 +179,33 @@
     display: block;
 }
 
+.playlist-thumb-wrap--audio {
+    position: relative;
+    flex-direction: column;
+    gap: 0.15rem;
+    background: linear-gradient(145deg, #f5f3ff 0%, #ede9fe 48%, #ddd6fe 100%);
+    border-color: rgba(124, 58, 237, 0.25);
+}
+
+.playlist-audio-glyph {
+    font-size: 1.75rem;
+    line-height: 1;
+    color: #6d28d9;
+    font-weight: 700;
+    text-shadow: 0 2px 6px rgba(109, 40, 217, 0.18);
+}
+
+.playlist-audio-format {
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #4c1d95;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(237, 233, 254, 0.94);
+    border: 1px solid rgba(124, 58, 237, 0.35);
+}
+
 .playlist-table td.playlist-col-name {
     font-weight: 500;
     word-break: break-word;
@@ -508,6 +535,23 @@ body.pl-add-modal--open {
     object-fit: cover;
     display: block;
     background: #f1f5f9;
+}
+
+.pl-add-tile__preview.file-preview-container--audio {
+    width: 100%;
+    aspect-ratio: 16 / 10;
+    border-radius: 0;
+}
+
+.pl-add-tile--audio {
+    position: relative;
+}
+
+.pl-add-tile--audio .provider-badge {
+    top: 6px;
+    right: 6px;
+    font-size: 0.58rem;
+    padding: 4px 8px;
 }
 
 .pl-add-tile__meta {

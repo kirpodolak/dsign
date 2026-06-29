@@ -1,5 +1,6 @@
 import { t, getUiLang, applyI18n } from './i18n.js';
 import { AddToPlaylistModal } from './add-to-playlist-modal.js';
+import { audioFormatLabel } from './media-tile-ui.js';
 
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'oga', 'flac', 'm4a', 'aac', 'opus'];
 
@@ -374,36 +375,51 @@ export class PlaylistManager {
             const wrap = document.createElement('div');
             wrap.className = 'playlist-thumb-wrap';
 
-            const img = document.createElement('img');
-            img.src = '/static/images/default-preview.jpg';
-            img.alt = 'Preview';
-            img.className = `playlist-thumb-img${isVideo ? ' playlist-thumb-img--video' : ''}${isAudio ? ' playlist-thumb-img--audio' : ''}`;
-            img.dataset.filename = file.filename;
-            img.loading = 'lazy';
-            img.decoding = 'async';
+            let img = null;
+            let previewUrl = '';
+            if (isAudio) {
+                wrap.classList.add('playlist-thumb-wrap--audio');
+                const glyph = document.createElement('span');
+                glyph.className = 'playlist-audio-glyph';
+                glyph.setAttribute('aria-hidden', 'true');
+                glyph.textContent = '♪';
+                wrap.appendChild(glyph);
+                const fmt = document.createElement('span');
+                fmt.className = 'playlist-audio-format';
+                fmt.textContent = audioFormatLabel(file.filename);
+                wrap.appendChild(fmt);
+            } else {
+                img = document.createElement('img');
+                img.src = '/static/images/default-preview.jpg';
+                img.alt = 'Preview';
+                img.className = `playlist-thumb-img${isVideo ? ' playlist-thumb-img--video' : ''}`;
+                img.dataset.filename = file.filename;
+                img.loading = 'lazy';
+                img.decoding = 'async';
 
-            const previewUrl = this._getPreviewUrl(file);
-            img.dataset.src = previewUrl;
-            img.dataset.thumbRetries = '0';
-            img.onerror = function () {
-                const maxRetries = 6;
-                const cur = parseInt(this.dataset.thumbRetries || '0', 10) || 0;
-                if (cur >= maxRetries) {
+                previewUrl = this._getPreviewUrl(file);
+                img.dataset.src = previewUrl;
+                img.dataset.thumbRetries = '0';
+                img.onerror = function () {
+                    const maxRetries = 6;
+                    const cur = parseInt(this.dataset.thumbRetries || '0', 10) || 0;
+                    if (cur >= maxRetries) {
+                        this.src = '/static/images/default-preview.jpg';
+                        return;
+                    }
+                    this.dataset.thumbRetries = String(cur + 1);
+                    const delay = Math.min(15000, Math.round(800 * Math.pow(2, cur)));
                     this.src = '/static/images/default-preview.jpg';
-                    return;
-                }
-                this.dataset.thumbRetries = String(cur + 1);
-                const delay = Math.min(15000, Math.round(800 * Math.pow(2, cur)));
-                this.src = '/static/images/default-preview.jpg';
-                setTimeout(() => {
-                    const base = this.dataset.src || '';
-                    if (!base) return;
-                    const joiner = base.includes('?') ? '&' : '?';
-                    this.src = `${base}${joiner}r=${Date.now()}`;
-                }, delay);
-            };
+                    setTimeout(() => {
+                        const base = this.dataset.src || '';
+                        if (!base) return;
+                        const joiner = base.includes('?') ? '&' : '?';
+                        this.src = `${base}${joiner}r=${Date.now()}`;
+                    }, delay);
+                };
 
-            wrap.appendChild(img);
+                wrap.appendChild(img);
+            }
             prevTd.appendChild(wrap);
 
             const nameTd = document.createElement('td');
@@ -460,12 +476,14 @@ export class PlaylistManager {
             row.appendChild(durTd);
             this.fileListEl.appendChild(row);
 
-            if (index < 24) {
-                img.src = previewUrl;
-            } else if (this._thumbObserver) {
-                this._thumbObserver.observe(img);
-            } else {
-                img.src = previewUrl;
+            if (img) {
+                if (index < 24) {
+                    img.src = previewUrl;
+                } else if (this._thumbObserver) {
+                    this._thumbObserver.observe(img);
+                } else {
+                    img.src = previewUrl;
+                }
             }
         });
     }

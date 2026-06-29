@@ -530,6 +530,24 @@ body.page-gallery .page-title {
     border-color: rgba(239, 68, 68, 0.35);
     background: rgba(254, 226, 226, 0.92);
 }
+
+.provider-badge--audio {
+    color: #4c1d95;
+    border-color: rgba(124, 58, 237, 0.35);
+    background: rgba(237, 233, 254, 0.94);
+}
+
+.file-preview-container--audio {
+    background: linear-gradient(145deg, #f5f3ff 0%, #ede9fe 48%, #ddd6fe 100%);
+}
+
+.file-icon__glyph--audio {
+    font-size: 3.25rem;
+    line-height: 1;
+    color: #6d28d9;
+    font-weight: 700;
+    text-shadow: 0 2px 8px rgba(109, 40, 217, 0.18);
+}
 .file-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));

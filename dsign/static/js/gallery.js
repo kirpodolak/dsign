@@ -1,4 +1,10 @@
 import { t, getUiLang, applyI18n } from './i18n.js';
+import {
+  isAudioMedia,
+  audioFormatLabel,
+  createAudioNotePreview,
+  appendFormatBadge,
+} from './media-tile-ui.js';
 
 // Utility functions
 function getFileExtension(filename) {
@@ -188,6 +194,7 @@ class MediaGallery {
         mimetype: file.mimetype,
         included: file.included || false,
         is_video: file.is_video || false,
+        is_audio: file.is_audio || ALLOWED_AUDIO_TYPES.includes(getFileExtension(file.filename)),
         is_external: Boolean(file.is_external),
         external: file.external || null,
         folder_id: file.folder_id ?? null,
@@ -297,7 +304,7 @@ class MediaGallery {
       checkboxLabel.className = 'custom-checkbox-label';
       item.appendChild(checkboxLabel);
 
-      const previewContainer = document.createElement('div');
+      let previewContainer = document.createElement('div');
       
       const isExternal = this.isExternalFile(file);
       const provider = isExternal ? this.getExternalProvider(file) : null;
@@ -305,6 +312,7 @@ class MediaGallery {
         Boolean(file?.is_video) ||
         ALLOWED_VIDEO_TYPES.includes(String(file.type || '').toLowerCase()) ||
         String(file.name || '').toLowerCase().startsWith('ext-');
+      const isAudio = isAudioMedia(file);
 
       if (ALLOWED_IMAGE_TYPES.includes(file.type) && !isExternal) {
         previewContainer.classList.add('file-preview-container');
@@ -321,31 +329,28 @@ class MediaGallery {
           }
         };
         previewContainer.appendChild(img);
+      } else if (isAudio) {
+        previewContainer = createAudioNotePreview();
+      } else if (isVideo) {
+        previewContainer.classList.add('file-preview-container', 'file-preview-container--video');
+        const img = document.createElement('img');
+        img.src = this.getThumbnailUrl(file.name);
+        img.alt = file.external?.title || file.name;
+        img.classList.add('file-preview');
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.onerror = () => {
+          img.src = PLACEHOLDER_IMAGE;
+          img.style.opacity = '0.7';
+        };
+        previewContainer.appendChild(img);
       } else {
-        // Videos: always try server-side thumbnail cache first (local + external).
-        if (isVideo) {
-          previewContainer.classList.add('file-preview-container', 'file-preview-container--video');
-          const img = document.createElement('img');
-          img.src = this.getThumbnailUrl(file.name);
-          img.alt = file.external?.title || file.name;
-          img.classList.add('file-preview');
-          img.loading = 'lazy';
-          img.decoding = 'async';
-          img.onerror = () => {
-            // Fallback placeholder if thumbnail is unavailable for this video.
-            img.src = PLACEHOLDER_IMAGE;
-            img.style.opacity = '0.7';
-          };
-          previewContainer.appendChild(img);
-        } else {
-          // Other non-image files: placeholder icon.
-          previewContainer.classList.add('file-icon');
-          const icon = document.createElement('span');
-          icon.className = 'file-icon__glyph';
-          icon.setAttribute('aria-hidden', 'true');
-          icon.textContent = '📄';
-          previewContainer.appendChild(icon);
-        }
+        previewContainer.classList.add('file-icon');
+        const icon = document.createElement('span');
+        icon.className = 'file-icon__glyph';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = '📄';
+        previewContainer.appendChild(icon);
       }
 
       const folderPin = document.createElement('span');
@@ -364,6 +369,8 @@ class MediaGallery {
         badge.className = `provider-badge provider-badge--${provider.key}`;
         badge.textContent = provider.label;
         item.appendChild(badge);
+      } else if (isAudio) {
+        appendFormatBadge(item, audioFormatLabel(file.name), 'audio');
       }
 
       previewContainer.addEventListener('click', (e) => {
