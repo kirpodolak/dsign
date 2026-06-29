@@ -121,6 +121,54 @@ class LogoManager:
         )
         return True
 
+    def prepare_audio_playback(self) -> Dict[str, str]:
+        """
+        C2: audio-only item — logo visible while MPV plays audio only.
+        Wayland: vo=null so imv underneath shows through; DRM: external-file logo image.
+        """
+        opts: Dict[str, str] = {"vid": "no", "keep-open": "no"}
+        if PlaybackConstants.is_wayland_backend():
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "vo", "null"]},
+                    timeout=3.0,
+                    max_attempts=1,
+                )
+            except Exception as exc:
+                self.logger.debug(
+                    "Audio playback: vo=null failed",
+                    extra={"error": str(exc)},
+                )
+            if self._logo_viewer.is_active() is False:
+                self._logo_viewer.reload()
+            return opts
+        try:
+            logo_path = self._validate_logo_file()
+            opts["external-file"] = str(logo_path)
+        except Exception as exc:
+            self.logger.warning(
+                "Audio playback: logo unavailable for external-file",
+                extra={"error": str(exc)},
+            )
+        return opts
+
+    def restore_after_audio_playback(self) -> None:
+        """Restore MPV video output after audio-only (Wayland vo=gpu)."""
+        if not PlaybackConstants.is_wayland_backend():
+            return
+        vo = (os.getenv("DSIGN_MPV_VO") or "gpu").strip() or "gpu"
+        try:
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "vo", vo]},
+                timeout=5.0,
+                max_attempts=1,
+            )
+        except Exception as exc:
+            self.logger.debug(
+                "Audio playback: restore vo failed",
+                extra={"error": str(exc), "vo": vo},
+            )
+
     def display_idle_logo(self) -> bool:
         if PlaybackConstants.is_wayland_backend():
             try:
