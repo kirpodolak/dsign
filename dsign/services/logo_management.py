@@ -129,11 +129,7 @@ class LogoManager:
         opts: Dict[str, str] = {"vid": "no", "keep-open": "no"}
         if PlaybackConstants.is_wayland_backend():
             try:
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "vo", "null"]},
-                    timeout=3.0,
-                    max_attempts=1,
-                )
+                self._mpv_manager.set_vo_property("null", timeout=3.0)
             except Exception as exc:
                 self.logger.debug(
                     "Audio playback: vo=null failed",
@@ -158,11 +154,7 @@ class LogoManager:
             return
         vo = (os.getenv("DSIGN_MPV_VO") or "gpu").strip() or "gpu"
         try:
-            self._mpv_manager._send_command(
-                {"command": ["set_property", "vo", vo]},
-                timeout=5.0,
-                max_attempts=1,
-            )
+            self._mpv_manager.set_vo_property(vo, timeout=5.0)
         except Exception as exc:
             self.logger.debug(
                 "Audio playback: restore vo failed",
