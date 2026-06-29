@@ -21,9 +21,9 @@
 | **A4** | `video-sync` Wayland (display-resample) | ✅ сделано | main, PR #87; подтверждено на плеере |
 | **A5** | Tech debt | ✅ сделано | PR A5 |
 | **C1** | ContentCache | 🟡 в PR | `content_cache.py` |
-| **C2** | Audio-only + logo | ⬜ не начато | — |
+| **C2** | Audio-only + logo | 🟡 в PR | `logo_management.py`, manual loop |
 | **C3** | Nested playlists | ⬜ не начато | — |
-| **B1** | Расширить `/api/playback/status` | 🟡 частично | `network_health` ✅; остальные поля ⬜ |
+| **B1** | Расширить `/api/playback/status` | 🟡 в PR | `get_status()` B1 fields |
 | **B2** | `GET /api/health` | 🟡 частично | `health_check()` в коде ✅; REST endpoint ⬜ |
 | **B3** | `POST /api/playback/override` | ⬜ не начато | — |
 | **B4** | API Bearer token | ⬜ не начато | — |
@@ -253,8 +253,11 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 ### C2. Audio-Only + Logo
 
+**Статус:** 🟡 в PR — локальный audio (mp3/wav/…) + logo: Wayland `vo=null` + imv; DRM `external-file` logo
+
 **Acceptance:**
 - [ ] [video.mp4, audio.mp3, video2.mp4] — audio с logo
+- [x] Upload allowlist: mp3, wav, ogg, flac, m4a, aac, opus
 
 ### C3. Nested Playlists
 
@@ -269,7 +272,7 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 | ID | Статус | Что осталось |
 |----|--------|--------------|
-| B1 | 🟡 | `time_pos`, `duration`, `item_index`, `item_count`, `media_key`, `mpv_responsive`, `is_network`, `cache_state` |
+| B1 | 🟡 в PR | `item_index`, `item_count`, `media_key`, `time_pos`, `duration`, `is_network`, `mpv_responsive`, `cache_state` |
 | B2 | 🟡 | Вынести `health_check()` в `GET /api/health` + system/display/network aggregates |
 | B3 | ⬜ | Emergency override + return_to_previous |
 | B4 | ⬜ | `DSIGN_API_TOKEN` Bearer |
@@ -354,3 +357,4 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 | Дата | Изменение |
 |------|-----------|
 | 2026-06-17 | Добавлены: сводка прогресса, D0, A0 (PR #80), порядок реализации, деплой/drift, чекбоксы acceptance |
+| 2026-06-29 | C2 + B1 — audio+logo (imv), расширенный `/api/playback/status` |

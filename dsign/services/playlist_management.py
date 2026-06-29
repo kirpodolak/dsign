@@ -60,6 +60,8 @@ class PlaylistManager:
         self._last_good_media_key: Optional[str] = None
         self._last_good_items_count: int = 0
         self._last_good_playlist_id: Optional[int] = None
+        self._status_snapshot_cache: Dict[str, Any] = {}
+        self._status_snapshot_ts: float = 0.0
 
     def set_slideshow_crash_callback(self, callback: Optional[Callable[[], None]]) -> None:
         self._slideshow_crash_callback = callback
@@ -379,9 +381,17 @@ class PlaylistManager:
         except Exception:
             pass
 
+    @staticmethod
+    def _classify_local_media_suffix(ext: str) -> tuple[bool, bool]:
+        """Return (is_video, is_audio) for a local file suffix."""
+        suffix = str(ext or "").lower()
+        is_video = suffix in PlaybackConstants.VIDEO_EXTENSIONS
+        is_audio = suffix in PlaybackConstants.AUDIO_EXTENSIONS
+        return is_video, is_audio
+
     def _resolve_playlist_item_path(self, file_name: str) -> Optional[Dict[str, Any]]:
         """
-        Convert a playlist file_name into a playback dict: {path,is_video,duration,muted}.
+        Convert a playlist file_name into a playback dict: {path,is_video,is_audio,duration,muted}.
         Supports both local filenames and synthetic external keys ext-<id>.
         """
         if not file_name:
@@ -423,8 +433,8 @@ class PlaylistManager:
         if not file_path.exists():
             return None
         ext = file_path.suffix.lower()
-        is_video = ext in (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
-        return {"path": str(file_path), "is_video": is_video}
+        is_video, is_audio = self._classify_local_media_suffix(ext)
+        return {"path": str(file_path), "is_video": is_video, "is_audio": is_audio}
 
     def _refresh_item_playback_path(self, item: Dict[str, Any]) -> bool:
         """
@@ -652,13 +662,15 @@ class PlaylistManager:
         except Exception:
             return False
 
-    def _validate_local_media_path(self, path: str, *, is_video: bool) -> tuple[bool, str]:
+    def _validate_local_media_path(
+        self, path: str, *, is_video: bool, is_audio: bool = False
+    ) -> tuple[bool, str]:
         if self._is_network_stream_path(path):
             return True, "network"
         fp = Path(path)
         if not fp.is_file():
             return False, "missing"
-        if is_video and not self._probe_local_video_file(fp):
+        if (is_video or is_audio) and not self._probe_local_video_file(fp):
             return False, "ffprobe"
         return True, "ok"
 
@@ -685,19 +697,22 @@ class PlaylistManager:
         *,
         media_key: str,
         is_video: bool,
+        is_audio: bool = False,
         mode: str = "replace",
         per_file_opts: Optional[Dict[str, Any]] = None,
         timeout: float = 10.0,
         wait_vo: bool = True,
     ) -> bool:
         """
-        A3: exists + ffprobe (local video) → loadfile → wait vo-configured.
+        A3: exists + ffprobe (local video/audio) → loadfile → wait vo-configured.
         Network/ytdl paths skip ffprobe; caller handles stream-open separately.
         """
         path_s = str(path or "")
         is_network = self._is_network_stream_path(path_s)
         if not is_network:
-            ok, reason = self._validate_local_media_path(path_s, is_video=is_video)
+            ok, reason = self._validate_local_media_path(
+                path_s, is_video=is_video, is_audio=is_audio
+            )
             if not ok:
                 self.logger.warning(
                     "safe_loadfile: invalid local media, skipping",
@@ -3219,6 +3234,7 @@ class PlaylistManager:
 
                     path = item["path"]
                     is_video = item["is_video"]
+                    is_audio = bool(item.get("is_audio"))
                     media_key = str(item.get("key") or path)
                     self._publish_current_media(playlist_id, item)
                     self.logger.info(
@@ -3229,6 +3245,7 @@ class PlaylistManager:
                             "offset": offset,
                             "media_key": media_key,
                             "is_video": is_video,
+                            "is_audio": is_audio,
                         },
                     )
                     raw_duration = item.get("duration")
@@ -3357,6 +3374,26 @@ class PlaylistManager:
                                 timeout=load_timeout,
                             )
                             load_ok = bool(load_resp and load_resp.get("error") == "success")
+                        elif is_audio:
+                            try:
+                                audio_opts = self._logo_manager.prepare_audio_playback()
+                            except Exception:
+                                audio_opts = {"vid": "no", "keep-open": "no"}
+                            merged_opts = dict(mpv_per_file_opts or {})
+                            merged_opts.update(audio_opts)
+                            load_ok = self._safe_loadfile(
+                                str(path),
+                                media_key=media_key,
+                                is_video=False,
+                                is_audio=True,
+                                per_file_opts=merged_opts,
+                                timeout=10.0,
+                                wait_vo=False,
+                            )
+                            if not load_ok:
+                                self._logo_manager.restore_after_audio_playback()
+                                self._brief_idle_logo_on_skip()
+                                continue
                         else:
                             load_ok = self._safe_loadfile(
                                 str(path),
@@ -3477,8 +3514,7 @@ class PlaylistManager:
                                 )
                         elif not skip_load:
                             self._apply_post_loadfile_playback_props(muted=muted)
-                        if is_video:
-                            self._schedule_content_cache_prefetch(items, item_index)
+                        self._schedule_content_cache_prefetch(items, item_index)
                         if not self._wait_mpv_video_end(
                             playlist_id,
                             is_network=is_network,
@@ -3491,6 +3527,22 @@ class PlaylistManager:
                         ):
                             stall_abort = True
                             break
+                    elif is_audio:
+                        if not skip_load:
+                            self._apply_post_loadfile_playback_props(muted=muted)
+                        if not self._wait_mpv_video_end(
+                            playlist_id,
+                            is_network=False,
+                            stream_ready=True,
+                            poll_sec=1.0,
+                            media_key=media_key,
+                        ):
+                            stall_abort = True
+                            break
+                        try:
+                            self._logo_manager.restore_after_audio_playback()
+                        except Exception:
+                            pass
                     else:
                         # For still images, keep the frame open to avoid quick close/reopen churn.
                         # (Videos should not be kept open; they are EOF-driven here.)
@@ -3688,6 +3740,7 @@ class PlaylistManager:
                     continue
 
                 is_video = bool(resolved.get("is_video"))
+                is_audio = bool(resolved.get("is_audio"))
                 file_name = str(getattr(pf, "file_name", "") or "")
                 items.append(
                     {
@@ -3696,7 +3749,10 @@ class PlaylistManager:
                         "path": resolved["path"],
                         "duration": int(getattr(pf, "duration", 0) or 0),
                         "is_video": is_video,
-                        "muted": bool(getattr(pf, "muted", False)) if is_video else False,
+                        "is_audio": is_audio,
+                        "muted": bool(getattr(pf, "muted", False))
+                        if (is_video or is_audio)
+                        else False,
                         "http_headers": resolved.get("http_headers") or {},
                         "page_url": resolved.get("page_url"),
                         "provider": resolved.get("provider"),
@@ -3795,13 +3851,32 @@ class PlaylistManager:
                             candidate, stream_url=cand_path
                         )
                         cand_key = str(candidate.get("key") or cand_path)
-                        if self._safe_loadfile(
-                            cand_path,
-                            media_key=cand_key,
-                            is_video=bool(candidate.get("is_video")),
-                            per_file_opts=cand_mpv_opts,
-                            timeout=10.0,
-                        ):
+                        cand_is_audio = bool(candidate.get("is_audio"))
+                        if cand_is_audio:
+                            try:
+                                audio_opts = self._logo_manager.prepare_audio_playback()
+                            except Exception:
+                                audio_opts = {"vid": "no", "keep-open": "no"}
+                            merged_opts = dict(cand_mpv_opts or {})
+                            merged_opts.update(audio_opts)
+                            loaded_candidate = self._safe_loadfile(
+                                cand_path,
+                                media_key=cand_key,
+                                is_video=False,
+                                is_audio=True,
+                                per_file_opts=merged_opts,
+                                timeout=10.0,
+                                wait_vo=False,
+                            )
+                        else:
+                            loaded_candidate = self._safe_loadfile(
+                                cand_path,
+                                media_key=cand_key,
+                                is_video=bool(candidate.get("is_video")),
+                                per_file_opts=cand_mpv_opts,
+                                timeout=10.0,
+                            )
+                        if loaded_candidate:
                             if try_index != start_index:
                                 start_index = try_index
                                 first = candidate
@@ -3999,6 +4074,57 @@ class PlaylistManager:
             )
             return False
 
+    def _get_loop_position_snapshot(self) -> tuple[Optional[int], int]:
+        with self._loop_position_lock:
+            return self._loop_item_index, self._loop_items_count
+
+    def _get_mpv_playback_snapshot(self) -> Dict[str, Any]:
+        """Light MPV IPC snapshot for B1 status (short TTL cache)."""
+        try:
+            ttl = float((os.getenv("DSIGN_PLAYBACK_STATUS_IPC_TTL_SEC") or "2").strip())
+        except ValueError:
+            ttl = 2.0
+        ttl = max(0.0, min(15.0, ttl))
+        now = time.monotonic()
+        if ttl > 0 and (now - self._status_snapshot_ts) < ttl:
+            return dict(self._status_snapshot_cache)
+
+        snapshot: Dict[str, Any] = {
+            "time_pos": None,
+            "duration": None,
+            "is_network": False,
+            "mpv_responsive": False,
+        }
+        try:
+            health = self._mpv_manager.check_health()
+            snapshot["mpv_responsive"] = bool(health.get("responsive"))
+            if not snapshot["mpv_responsive"]:
+                self._status_snapshot_cache = snapshot
+                self._status_snapshot_ts = now
+                return dict(snapshot)
+
+            tp = self._mpv_manager.get_property_light("time-pos", timeout=1.5)
+            dur = self._mpv_manager.get_property_light("duration", timeout=1.5)
+            path_raw = self._mpv_manager.get_property_light("path", timeout=1.0)
+            if tp is not None:
+                try:
+                    snapshot["time_pos"] = float(tp)
+                except (TypeError, ValueError):
+                    pass
+            if dur is not None:
+                try:
+                    snapshot["duration"] = float(dur)
+                except (TypeError, ValueError):
+                    pass
+            if path_raw:
+                snapshot["is_network"] = self._is_network_stream_path(path_raw)
+        except Exception:
+            pass
+
+        self._status_snapshot_cache = snapshot
+        self._status_snapshot_ts = now
+        return dict(snapshot)
+
     def get_status(self) -> Dict:
         """Get current playback status"""
         from ..models import PlaybackStatus
@@ -4010,9 +4136,21 @@ class PlaylistManager:
                 cache_state = self._content_cache.get_status_summary()
             except Exception:
                 cache_state = {}
+
+        item_index, item_count = self._get_loop_position_snapshot()
+        media_key = self._last_loaded_media_key
+        mpv_snap = self._get_mpv_playback_snapshot()
+
         return {
             'status': status.status if status else None,
             'playlist_id': status.playlist_id if status else None,
+            'item_index': item_index,
+            'item_count': item_count,
+            'media_key': media_key,
+            'time_pos': mpv_snap.get("time_pos"),
+            'duration': mpv_snap.get("duration"),
+            'is_network': bool(mpv_snap.get("is_network")),
+            'mpv_responsive': bool(mpv_snap.get("mpv_responsive")),
             'current_media': self._get_current_media_label(),
             'settings': self._mpv_manager._current_settings,
             'network_health': self.get_network_playback_health(),

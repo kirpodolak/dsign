@@ -25,7 +25,7 @@ class UploadForm(FlaskForm):
     def __init__(self, allowed_extensions, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.files.validators.append(FileAllowed(
-            allowed_extensions, message="Only images and videos allowed!"
+            allowed_extensions, message="Only images, videos, and audio allowed!"
         ))
 
     files = MultipleFileField('Upload Files', validators=[

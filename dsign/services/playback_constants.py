@@ -3,6 +3,8 @@ import pwd
 from pathlib import Path
 
 class PlaybackConstants:
+    VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
+    AUDIO_EXTENSIONS = (".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".opus")
     DEFAULT_LOGO = 'idle_logo.jpg'
     SOCKET_PATH = '/var/lib/dsign/mpv/socket'
     SOCKET_DIR = os.path.dirname(SOCKET_PATH)

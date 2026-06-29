@@ -16,7 +16,11 @@ from dsign.config.config import Config
 from .logger import ServiceLogger
 
 class FileService:
-    ALLOWED_MEDIA_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif', 'mp4', 'avi', 'webm'}
+    ALLOWED_MEDIA_EXTENSIONS = {
+        'jpg', 'jpeg', 'png', 'gif',
+        'mp4', 'avi', 'webm',
+        'mp3', 'wav', 'ogg', 'oga', 'flac', 'm4a', 'aac', 'opus',
+    }
     ALLOWED_LOGO_EXTENSIONS = {'jpg', 'jpeg', 'png'}
     DEFAULT_LOGO = 'idle_logo.jpg'
     MAX_LOGO_SIZE = 2 * 1024 * 1024  # 2MB
@@ -120,8 +124,9 @@ class FileService:
                         'modified': stat.st_mtime,
                         'type': ext,
                         'mimetype': self._get_mime_type(ext),
-                        # Convenience flag for UI (and clients) so they don't have to guess by extension.
-                        'is_video': ext.lower() in {'mp4', 'avi', 'webm', 'mov', 'mkv', 'm4v'}
+                        # Convenience flags for UI (clients need not guess by extension).
+                        'is_video': ext.lower() in {'mp4', 'avi', 'webm', 'mov', 'mkv', 'm4v'},
+                        'is_audio': ext.lower() in {'mp3', 'wav', 'ogg', 'oga', 'flac', 'm4a', 'aac', 'opus'},
                     })
             return files
         except Exception as e:
