@@ -112,7 +112,8 @@ class PlaylistManager:
         if route is None or str(route).strip() == "":
             return
         try:
-            updates = svc.expand_audio_route(str(route))
+            svc.unmute_pch_digital_outputs()
+            updates = svc.expand_audio_route(str(route), settings=st)
         except Exception:
             return
         if not updates:
