@@ -2,17 +2,19 @@
  * Modal: pick warehouse media to append to the current playlist (cart + filters).
  */
 import { t, getUiLang, applyI18n } from './i18n.js';
+import {
+  isAudioMedia,
+  audioFormatLabel,
+  createAudioNotePreview,
+  appendFormatBadge,
+} from './media-tile-ui.js';
 
 function thumbUrl(filename) {
   return `/api/media/thumbnail/${encodeURIComponent(filename)}`;
 }
 
-const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.oga', '.flac', '.m4a', '.aac', '.opus'];
-
 function isAudioFile(file) {
-  const fn = String(file?.filename || '');
-  if (file?.is_audio) return true;
-  return AUDIO_EXTENSIONS.some((ext) => fn.toLowerCase().endsWith(ext));
+  return isAudioMedia(file);
 }
 
 function isVideoFile(file) {
@@ -300,15 +302,26 @@ export class AddToPlaylistModal {
       tile.className = 'pl-add-tile';
       if (inPl) tile.classList.add('pl-add-tile--in-playlist');
       if (inCart) tile.classList.add('pl-add-tile--in-cart');
+      if (aud) tile.classList.add('pl-add-tile--audio');
 
-      const img = document.createElement('img');
-      img.className = 'pl-add-tile__img';
-      img.alt = '';
-      img.loading = 'lazy';
-      img.src = vid ? thumbUrl(fn) : (aud ? '/static/images/placeholder.jpg' : `/api/media/${encodeURIComponent(fn)}`);
-      img.onerror = () => {
-        img.src = '/static/images/placeholder.jpg';
-      };
+      let previewEl;
+      if (aud) {
+        previewEl = createAudioNotePreview({ className: 'pl-add-tile__preview' });
+      } else {
+        const img = document.createElement('img');
+        img.className = 'pl-add-tile__img';
+        img.alt = '';
+        img.loading = 'lazy';
+        img.src = vid ? thumbUrl(fn) : `/api/media/${encodeURIComponent(fn)}`;
+        img.onerror = () => {
+          img.src = '/static/images/placeholder.jpg';
+        };
+        previewEl = img;
+      }
+
+      if (aud) {
+        appendFormatBadge(tile, audioFormatLabel(fn), 'audio');
+      }
 
       const meta = document.createElement('div');
       meta.className = 'pl-add-tile__meta';
@@ -347,7 +360,7 @@ export class AddToPlaylistModal {
       meta.appendChild(name);
       if (inPl || inCart) meta.appendChild(badge);
 
-      tile.appendChild(img);
+      tile.appendChild(previewEl);
       tile.appendChild(meta);
       grid.appendChild(tile);
     }
