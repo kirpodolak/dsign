@@ -93,7 +93,7 @@
         <form id="upload-form" enctype="multipart/form-data">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <div class="upload-container upload-container--stack">
-            <input type="file" id="file-upload" multiple accept=".jpg,.jpeg,.png,.gif,.mp4,.webm,.avi">
+            <input type="file" id="file-upload" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.mp4,.webm,.avi,.mov,.mkv,.m4v,.mp3,.wav,.ogg,.oga,.flac,.m4a,.aac,.opus,audio/*,image/*,video/*">
             <button type="button" id="upload-btn" class="btn primary upload-btn" aria-live="polite">
               <span class="upload-btn__track" aria-hidden="true"><span class="upload-btn__fill"></span></span>
               <span class="upload-btn__content">

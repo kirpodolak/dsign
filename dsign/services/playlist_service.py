@@ -584,6 +584,9 @@ class PlaylistService:
             lower = str(fn).lower()
             ext_part = lower.rsplit(".", 1)[-1] if "." in lower else ""
             is_video = is_ext or ext_part in {"mp4", "avi", "webm", "mov", "mkv", "m4v"}
+            is_audio = (not is_ext) and ext_part in {
+                "mp3", "wav", "ogg", "oga", "flac", "m4a", "aac", "opus"
+            }
             items.append(
                 {
                     "id": f.id,
@@ -592,6 +595,7 @@ class PlaylistService:
                     "duration": f.duration,
                     "muted": bool(getattr(f, "muted", False)),
                     "is_video": is_video,
+                    "is_audio": is_audio,
                     "is_external": is_ext,
                 }
             )
@@ -624,6 +628,8 @@ class PlaylistService:
             if ext in {"jpg", "jpeg", "png", "gif"}:
                 return 10
             if ext in {"mp4", "avi", "webm", "mov", "mkv", "m4v"}:
+                return 0
+            if ext in {"mp3", "wav", "ogg", "oga", "flac", "m4a", "aac", "opus"}:
                 return 0
             return 0
 
