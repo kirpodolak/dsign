@@ -3560,30 +3560,44 @@ class PlaylistManager:
                             stall_abort = True
                             break
                     elif is_audio:
-                        if not self._prepare_local_audio_after_loadfile(
-                            muted=muted, skip_load=skip_load
-                        ):
-                            if not skip_load:
+                        try:
+                            self._mpv_manager.set_playback_local_audio_active(True)
+                        except Exception:
+                            pass
+                        try:
+                            if not self._prepare_local_audio_after_loadfile(
+                                muted=muted, skip_load=skip_load
+                            ):
+                                if not skip_load:
+                                    try:
+                                        self._logo_manager.restore_after_audio_playback()
+                                    except Exception:
+                                        pass
+                                    self._brief_idle_logo_on_skip()
+                                continue
+                            if not self._wait_mpv_video_end(
+                                playlist_id,
+                                is_network=False,
+                                stream_ready=True,
+                                poll_sec=2.5,
+                                media_key=media_key,
+                                is_audio=True,
+                            ):
+                                stall_abort = True
                                 try:
                                     self._logo_manager.restore_after_audio_playback()
                                 except Exception:
                                     pass
-                                self._brief_idle_logo_on_skip()
-                            continue
-                        if not self._wait_mpv_video_end(
-                            playlist_id,
-                            is_network=False,
-                            stream_ready=True,
-                            poll_sec=1.0,
-                            media_key=media_key,
-                            is_audio=True,
-                        ):
-                            stall_abort = True
-                            break
-                        try:
-                            self._logo_manager.restore_after_audio_playback()
-                        except Exception:
-                            pass
+                                break
+                            try:
+                                self._logo_manager.restore_after_audio_playback()
+                            except Exception:
+                                pass
+                        finally:
+                            try:
+                                self._mpv_manager.set_playback_local_audio_active(False)
+                            except Exception:
+                                pass
                     else:
                         # For still images, keep the frame open to avoid quick close/reopen churn.
                         # (Videos should not be kept open; they are EOF-driven here.)
@@ -3670,6 +3684,14 @@ class PlaylistManager:
                     break
 
         finally:
+            try:
+                self._mpv_manager.set_playback_local_audio_active(False)
+            except Exception:
+                pass
+            try:
+                self._logo_manager.ensure_mpv_video_output()
+            except Exception:
+                pass
             self._mpv_manager.set_playback_session_active(False)
     def _register_media_failure(self, media_key: str, reason: str = "unknown") -> None:
         """Exponential backoff for media that fails to start/open."""
@@ -3831,6 +3853,10 @@ class PlaylistManager:
             self._set_loop_position(start_index, len(items))
             first = items[start_index]
             self._set_current_media_label(self._item_media_label(first))
+            try:
+                self._logo_manager.ensure_mpv_video_output()
+            except Exception:
+                pass
 
             first_path = str(first.get("path") or "")
             first_is_network = first_path.startswith(("http://", "https://", "ytdl://"))
@@ -4041,6 +4067,10 @@ class PlaylistManager:
                 pass
 
             # Fall back to idle logo
+            try:
+                self._logo_manager.ensure_mpv_video_output()
+            except Exception:
+                pass
             self._logo_manager.display_idle_logo()
             raise RuntimeError(f"Failed to start playback: {str(e)}")
 
@@ -4079,6 +4109,10 @@ class PlaylistManager:
                 preserve_stall_tracking=preserve_stall_tracking,
                 preserve_loop_position=preserve_loop_position,
             )
+            try:
+                self._logo_manager.ensure_mpv_video_output()
+            except Exception:
+                pass
             self._set_playback_active_marker(False)
             ok = True
             if show_idle_logo:
