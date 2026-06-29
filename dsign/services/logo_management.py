@@ -18,6 +18,11 @@ class LogoManager:
         self._mpv_manager = mpv_manager
         self._last_playback_state = {}
         self._logo_viewer = LogoViewer(logger=logger)
+        self._wayland_audio_vo_null_active = False
+
+    def _wayland_audio_vo_null_enabled(self) -> bool:
+        raw = (os.getenv("DSIGN_AUDIO_WAYLAND_VO_NULL") or "1").strip().lower()
+        return raw not in ("0", "false", "no", "off")
 
     def _initialize_default_logo(self):
         """Initialize default logo in background"""
@@ -126,15 +131,23 @@ class LogoManager:
         C2: audio-only item — logo visible while MPV plays audio only.
         Wayland: vo=null so imv underneath shows through; DRM: external-file logo image.
         """
-        opts: Dict[str, str] = {"vid": "no", "keep-open": "no"}
+        opts: Dict[str, str] = {"vid": "no", "keep-open": "no", "hwdec": "no"}
         if PlaybackConstants.is_wayland_backend():
-            try:
-                self._mpv_manager.set_vo_property("null", timeout=3.0)
-            except Exception as exc:
-                self.logger.debug(
-                    "Audio playback: vo=null failed",
-                    extra={"error": str(exc)},
-                )
+            if self._wayland_audio_vo_null_enabled():
+                try:
+                    resp = self._mpv_manager.set_vo_property("null", timeout=3.0)
+                    if resp and resp.get("error") == "success":
+                        self._wayland_audio_vo_null_active = True
+                    else:
+                        self.logger.warning(
+                            "Audio playback: vo=null not applied",
+                            extra={"mpv_response": resp},
+                        )
+                except Exception as exc:
+                    self.logger.debug(
+                        "Audio playback: vo=null failed",
+                        extra={"error": str(exc)},
+                    )
             if self._logo_viewer.is_active() is False:
                 self._logo_viewer.reload()
             return opts
@@ -155,14 +168,20 @@ class LogoManager:
         vo = (os.getenv("DSIGN_MPV_VO") or "gpu").strip() or "gpu"
         try:
             self._mpv_manager.set_vo_property(vo, timeout=5.0)
+            self._wayland_audio_vo_null_active = False
         except Exception as exc:
             self.logger.debug(
                 "Audio playback: restore vo failed",
                 extra={"error": str(exc), "vo": vo},
             )
 
+    def ensure_mpv_video_output(self) -> None:
+        """Idempotent restore after audio / stall / stop so the next playlist can play video."""
+        self.restore_after_audio_playback()
+
     def display_idle_logo(self) -> bool:
         if PlaybackConstants.is_wayland_backend():
+            self.ensure_mpv_video_output()
             try:
                 self._mpv_manager._send_command(
                     {"command": ["stop"]},
