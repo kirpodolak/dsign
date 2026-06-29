@@ -629,6 +629,8 @@ class PlaylistService:
                 return 10
             if ext in {"mp4", "avi", "webm", "mov", "mkv", "m4v"}:
                 return 0
+            if ext in {"mp3", "wav", "ogg", "oga", "flac", "m4a", "aac", "opus"}:
+                return 0
             return 0
 
         for raw in keys or []:
