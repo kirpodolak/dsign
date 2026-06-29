@@ -476,6 +476,10 @@ class PlaybackService:
                 extra={"action": "mpv_recover"},
             )
             return False
+        try:
+            self._playlist_manager._logo_manager.ensure_mpv_video_output()
+        except Exception:
+            pass
         self._wait_after_mpv_recover()
         self._last_socket_identity = self._mpv_socket_identity()
         if playlist_id is not None:
@@ -622,6 +626,8 @@ class PlaybackService:
                     pass
                 else:
                     status = str(row.status or "").lower()
+                    if status == "stopped":
+                        return None
                     if status == "playing":
                         return int(row.playlist_id)
                     if self._playback_active_marker_exists() or self._playlist_manager_has_active_playback():
