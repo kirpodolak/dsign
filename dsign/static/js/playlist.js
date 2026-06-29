@@ -1,1210 +1,632 @@
 import { t, getUiLang, applyI18n } from './i18n.js';
+import { AddToPlaylistModal } from './add-to-playlist-modal.js';
 
-// Utility functions
-function getFileExtension(filename) {
-  if (!filename) return '';
-  const parts = filename.split('.');
-  return parts.length > 1 ? parts.pop().toLowerCase() : '';
+const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'oga', 'flac', 'm4a', 'aac', 'opus'];
+
+function fileExtLower(filename) {
+    const fn = String(filename || '').toLowerCase();
+    return fn.includes('.') ? fn.split('.').pop() : '';
 }
 
-function formatFileSize(bytes) {
-  if (typeof bytes !== 'number' || bytes < 0) return '0 Bytes';
-  if (bytes === 0) return '0 Bytes';
-  const k = 1024;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+function isPlaylistAudioFile(file) {
+    if (file?.is_audio) return true;
+    return AUDIO_EXTENSIONS.includes(fileExtLower(file?.filename));
 }
 
-function safeDomId(prefix, name) {
-  const safe = String(name).replace(/[^a-zA-Z0-9_-]/g, '_');
-  return `${prefix}-${safe}`;
+function isPlaylistVideoFile(file) {
+    if (file?.is_video) return true;
+    if (file?.is_external) return true;
+    const fn = String(file?.filename || '');
+    if (fn.startsWith('ext-')) return true;
+    return ['mp4', 'avi', 'mov', 'mkv', 'webm', 'm4v'].includes(fileExtLower(fn));
 }
 
-function formatDate(timestamp) {
-  if (!timestamp) return 'Unknown date';
-  try {
-    return new Date(timestamp).toLocaleString();
-  } catch {
-    return 'Invalid date';
-  }
+function isPlaylistTimedMedia(file) {
+    return isPlaylistVideoFile(file) || isPlaylistAudioFile(file);
 }
 
-// Constants
-const ALLOWED_IMAGE_TYPES = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
-const ALLOWED_VIDEO_TYPES = ['mp4', 'webm', 'ogg', 'mov', 'avi'];
-const MAX_FILE_SIZE = 1024 * 1024 * 1024; // 1 GiB, согласовано с Config.MAX_UPLOAD_BYTES / FileService
-const PLACEHOLDER_IMAGE = '/static/images/placeholder.jpg';
-
-// Configuration
-const GALLERY_CONFIG = {
-  container: '#media-gallery',
-  searchInput: '#search-input',
-  sortSelect: '#sort-select',
-  groupSelect: '#group-select',
-  selectAllBtn: '#select-all',
-  deleteSelectedBtn: '#delete-selected',
-  uploadForm: '#upload-form',
-  fileUploadInput: '#file-upload',
-  uploadBtn: '#upload-btn',
-  previewModal: '#preview-modal',
-  previewContainer: '#preview-container',
-  closeModalBtn: '#preview-modal-close',
-  filenameElement: '#preview-filename',
-  previewFolderElement: '#preview-folder',
-  filesizeElement: '#preview-filesize',
-  dateElement: '#preview-date',
-  folderNav: '#gallery-folder-nav',
-  folderCard: '#gallery-folders-card',
-  newFolderNameInput: '#gallery-new-folder-name',
-  createFolderBtn: '#gallery-create-folder-btn',
-};
-
-class MediaGallery {
-  constructor(config = GALLERY_CONFIG) {
-    if (MediaGallery.instance) {
-      return MediaGallery.instance;
-    }
-    this.config = config;
-    this.elements = {};
-    this.currentFiles = [];
-    this.transcodeStatus = {};
-    this.transcodePollTimer = null;
-    this.selectedFiles = new Set();
-    this.viewMode = 'all';
-    /** In by_folder view: null = unsorted (no meta row), number = folder id */
-    this.folderTargetId = null;
-    this._searchReloadTimer = null;
-
-    this.initElements();
-    this.initEventListeners();
-    this.loadMediaFiles();
-    MediaGallery.instance = this;
-  }
-
-  /**
-   * Gallery grid should be fast: use server-side cached thumbnails.
-   * Original media is used only in the preview modal.
-   */
-  getThumbnailUrl(filename) {
-    return `/api/media/thumbnail/${encodeURIComponent(filename)}`;
-  }
-
-  getMediaUrl(filename) {
-    return `/api/media/${encodeURIComponent(filename)}`;
-  }
-
-  getExternalProvider(file) {
-    const provider = file?.external?.provider || '';
-    if (provider === 'vkvideo') return { key: 'vkvideo', label: 'VK Video' };
-    if (provider === 'rutube') return { key: 'rutube', label: 'Rutube' };
-    return provider ? { key: provider, label: provider } : null;
-  }
-
-  isExternalFile(file) {
-    return Boolean(file?.is_external || (file?.external && typeof file.external === 'object'));
-  }
-  initElements() {
-    for (const [key, selector] of Object.entries(this.config)) {
-      this.elements[key] = document.querySelector(selector);
-    }
-  }
-
-  isValidFile(file) {
-    if (!file) return false;
-    const ext = getFileExtension(file.name);
-    return (ALLOWED_IMAGE_TYPES.includes(ext) || 
-            ALLOWED_VIDEO_TYPES.includes(ext)) && 
-           file.size <= MAX_FILE_SIZE;
-  }
-
-  async loadMediaFiles() {
-    try {
-      const params = new URLSearchParams();
-      if (this.viewMode === 'by_folder') {
-        params.set('view', 'by_folder');
-        if (this.folderTargetId != null) {
-          params.set('folder_id', String(this.folderTargetId));
-        }
-      } else {
-        params.set('view', 'all');
-      }
-      const sort = this.elements.sortSelect?.value || 'name-asc';
-      params.set('sort', sort);
-      const q = (this.elements.searchInput?.value || '').trim();
-      if (q) params.set('search', q);
-
-      const url = `/api/media/files?${params.toString()}`;
-    
-      const response = await fetch(url, {
-        headers: { 'Accept': 'application/json' },
-        credentials: 'include'
-      });
-
-      if (response.redirected) {
-        window.location.href = '/api/auth/login';
-        return;
-      }
-
-      if (!response.ok) {
-        throw new Error(`Server returned ${response.status} status`);
-      }
-
-      const data = await response.json();
-    
-      if (!data?.success) {
-        throw new Error(data?.error || 'Invalid response format');
-      }
-
-      this.currentFiles = data.files.map(file => ({
-        name: file.filename,
-        type: file.type || getFileExtension(file.filename),
-        date: file.modified || Date.now(),
-        size: file.size || 0,
-        path: `/api/media/${encodeURIComponent(file.filename)}`,
-        mimetype: file.mimetype,
-        included: file.included || false,
-        is_video: file.is_video || false,
-        is_external: Boolean(file.is_external),
-        external: file.external || null,
-        folder_id: file.folder_id ?? null,
-        folder_name: file.folder_name ?? null,
-      }));
-
-      // Merge transcode status (best-effort)
-      await this.refreshTranscodeStatus({ startPolling: true });
-      this.renderGallery(this.currentFiles);
-    } catch (error) {
-      console.error('Failed to load media files:', error);
-      if (window.App?.Alerts?.show) {
-        window.App.Alerts.show(`Error loading files: ${error.message}`, 'error');
-      }
-    }
-  }
-
-  processFiles(files) {
-    if (!Array.isArray(files)) return [];
-    return [...files];
-  }
-
-  groupFiles(files) {
-    if (!Array.isArray(files)) return [];
-    const groupValue = this.elements.groupSelect?.value;
-    if (groupValue === 'none') return files;
-
-    const groups = {};
-    files.forEach(file => {
-      let key = 'Other';
-      if (groupValue === 'type') {
-        key = file.type?.toUpperCase() || 'OTHER';
-      } else if (groupValue === 'date') {
-        try {
-          const date = new Date(file.date || Date.now());
-          key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-        } catch {
-          key = 'Unknown date';
-        }
-      }
-
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(file);
-    });
-
-    return groups;
-  }
-
-  renderGallery(files) {
-    if (!this.elements.container) return;
-    
-    this.elements.container.innerHTML = '';
-    
-    if (!Array.isArray(files) || files.length === 0) {
-      this.elements.container.innerHTML = '<p class="empty-message">No media files found.</p>';
-      this.toggleDeleteButton(false);
-      this.toggleSelectAllButton(false);
-      return;
-    }
-
-    const processedFiles = this.processFiles(files);
-    const groupedFiles = this.groupFiles(processedFiles);
-
-    if (Array.isArray(groupedFiles)) {
-      this.renderFiles(groupedFiles);
-    } else {
-      Object.entries(groupedFiles).forEach(([groupName, groupFiles]) => {
-        const groupHeader = document.createElement('div');
-        groupHeader.className = 'group-header';
-        groupHeader.textContent = groupName;
-        this.elements.container.appendChild(groupHeader);
-        this.renderFiles(groupFiles);
-      });
-    }
-
-    this.toggleDeleteButton(this.selectedFiles.size > 0);
-    this.toggleSelectAllButton(processedFiles.length > 0);
-  }
-
-  renderFiles(files) {
-    if (!Array.isArray(files)) return;
-
-    files.forEach(file => {
-      if (!file) return;
-      
-      const item = document.createElement('div');
-      item.classList.add('file-item');
-      item.dataset.filename = file.name;
-      const st = this.transcodeStatus?.[file.name];
-      if (st && st.state === 'running') {
-        item.dataset.transcoding = 'true';
-      } else {
-        delete item.dataset.transcoding;
-      }
-
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.className = 'file-checkbox';
-      const cbId = safeDomId('cb', file.name);
-      checkbox.id = cbId;
-      checkbox.dataset.filename = file.name;
-      checkbox.checked = this.selectedFiles.has(file.name);
-      item.appendChild(checkbox);
-
-      const checkboxLabel = document.createElement('label');
-      checkboxLabel.htmlFor = cbId;
-      checkboxLabel.className = 'custom-checkbox-label';
-      item.appendChild(checkboxLabel);
-
-      const previewContainer = document.createElement('div');
-      
-      const isExternal = this.isExternalFile(file);
-      const provider = isExternal ? this.getExternalProvider(file) : null;
-      const isVideo =
-        Boolean(file?.is_video) ||
-        ALLOWED_VIDEO_TYPES.includes(String(file.type || '').toLowerCase()) ||
-        String(file.name || '').toLowerCase().startsWith('ext-');
-
-      if (ALLOWED_IMAGE_TYPES.includes(file.type) && !isExternal) {
-        previewContainer.classList.add('file-preview-container');
-        const img = document.createElement('img');
-        img.src = `/api/media/${encodeURIComponent(file.name)}?${Date.now()}`;
-        img.alt = file.name;
-        img.classList.add('file-preview');
-        img.loading = 'lazy';
-        img.onerror = () => {
-          img.src = PLACEHOLDER_IMAGE;
-          img.style.opacity = '0.7';
-          if (window.App?.Alerts?.show) {
-            window.App.Alerts.show('Could not load preview image', 'warning');
-          }
-        };
-        previewContainer.appendChild(img);
-      } else {
-        // Videos: always try server-side thumbnail cache first (local + external).
-        if (isVideo) {
-          previewContainer.classList.add('file-preview-container', 'file-preview-container--video');
-          const img = document.createElement('img');
-          img.src = this.getThumbnailUrl(file.name);
-          img.alt = file.external?.title || file.name;
-          img.classList.add('file-preview');
-          img.loading = 'lazy';
-          img.decoding = 'async';
-          img.onerror = () => {
-            // Fallback placeholder if thumbnail is unavailable for this video.
-            img.src = PLACEHOLDER_IMAGE;
-            img.style.opacity = '0.7';
-          };
-          previewContainer.appendChild(img);
-        } else {
-          // Other non-image files: placeholder icon.
-          previewContainer.classList.add('file-icon');
-          const icon = document.createElement('span');
-          icon.className = 'file-icon__glyph';
-          icon.setAttribute('aria-hidden', 'true');
-          icon.textContent = '📄';
-          previewContainer.appendChild(icon);
-        }
-      }
-
-      const folderPin = document.createElement('span');
-      folderPin.className =
-        'file-folder-pin' + (!file.folder_name ? ' file-folder-pin--unsorted' : '');
-      const lang = getUiLang();
-      folderPin.title = file.folder_name
-        ? `${t('gallery_folder_label', lang)}: ${file.folder_name}`
-        : `${t('gallery_folder_label', lang)}: ${t('pl_filter_unsorted', lang)}`;
-      folderPin.setAttribute('aria-hidden', 'true');
-      folderPin.innerHTML = '<span class="file-folder-pin__glyph">📁</span>';
-      previewContainer.appendChild(folderPin);
-
-      if (provider) {
-        const badge = document.createElement('div');
-        badge.className = `provider-badge provider-badge--${provider.key}`;
-        badge.textContent = provider.label;
-        item.appendChild(badge);
-      }
-
-      previewContainer.addEventListener('click', (e) => {
-        if (e.target.closest('.file-folder-pin')) return;
-        if (e.target?.tagName !== 'INPUT' && e.target?.tagName !== 'LABEL') {
-          this.showPreview({
-            ...file,
-            path: `/api/media/${encodeURIComponent(file.name)}`
-          });
-        }
-      });
-
-      item.appendChild(previewContainer);
-
-      // Transcode overlay
-      if (st && (st.state === 'queued' || st.state === 'running' || st.state === 'failed')) {
-        const overlay = document.createElement('div');
-        overlay.className = 'transcode-overlay';
-        overlay.dataset.filename = file.name;
-        const meta = document.createElement('div');
-        meta.className = 'transcode-overlay__meta';
-        const bar = document.createElement('div');
-        bar.className = 'transcode-overlay__bar';
-        const fill = document.createElement('div');
-        fill.className = 'transcode-overlay__fill';
-        bar.appendChild(fill);
-        overlay.appendChild(meta);
-        overlay.appendChild(bar);
-        item.appendChild(overlay);
-        this._applyTranscodeOverlay(overlay, st);
-      }
-
-      const fileNameDiv = document.createElement('div');
-      fileNameDiv.classList.add('file-name');
-      fileNameDiv.textContent = (file.external?.title || file.name);
-      item.appendChild(fileNameDiv);
-
-      this.elements.container.appendChild(item);
-    });
-
-    document.querySelectorAll('.file-checkbox').forEach((checkbox) => {
-      checkbox.addEventListener('change', () => {
-        const filename = checkbox.dataset.filename;
-        if (!filename) return;
-        if (checkbox.checked) {
-          this.selectedFiles.add(filename);
-        } else {
-          this.selectedFiles.delete(filename);
-        }
-        this.toggleDeleteButton(this.selectedFiles.size > 0);
-      });
-    });
-  }
-
-  _formatEta(sec) {
-    if (sec == null || !Number.isFinite(sec) || sec < 0) return '';
-    const s = Math.round(sec);
-    if (s < 60) return `${s}s`;
-    const m = Math.floor(s / 60);
-    const r = s % 60;
-    return `${m}m ${r}s`;
-  }
-
-  _applyTranscodeOverlay(overlayEl, st) {
-    if (!overlayEl || !st) return;
-    const meta = overlayEl.querySelector('.transcode-overlay__meta');
-    const fill = overlayEl.querySelector('.transcode-overlay__fill');
-    const pct = Number(st.percent || 0);
-    if (fill) fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
-    if (meta) {
-      if (st.state === 'failed') {
-        meta.innerHTML = `<strong>Transcode failed</strong>`;
-      } else if (st.state === 'queued') {
-        meta.innerHTML = `<strong>Queued for optimization…</strong>`;
-      } else {
-        const eta = this._formatEta(st.eta_sec);
-        meta.innerHTML = `<strong>Optimizing video…</strong> ${Math.round(pct)}%${eta ? ` · ETA ${eta}` : ''}`;
-      }
-    }
-  }
-
-  async refreshTranscodeStatus({ startPolling = false } = {}) {
-    try {
-      const resp = await fetch('/api/media/transcode/status', {
-        headers: { 'Accept': 'application/json' },
-        credentials: 'include'
-      });
-      if (!resp.ok) return;
-      const data = await resp.json();
-      if (!data?.success) return;
-      this.transcodeStatus = data.status || {};
-
-      // Update existing overlays without re-rendering everything.
-      document.querySelectorAll('.transcode-overlay').forEach((el) => {
-        const fn = el.dataset.filename;
-        if (!fn) return;
-        const st = this.transcodeStatus?.[fn];
-        if (!st || st.state === 'completed') {
-          el.remove();
-          const parent = el.closest('.file-item');
-          if (parent) delete parent.dataset.transcoding;
-          return;
-        }
-        const parent = el.closest('.file-item');
-        if (parent) parent.dataset.transcoding = st.state === 'running' ? 'true' : '';
-        this._applyTranscodeOverlay(el, st);
-      });
-
-      if (startPolling) {
-        const anyRunning = Object.values(this.transcodeStatus || {}).some(s => s && s.state === 'running');
-        if (anyRunning && !this.transcodePollTimer) {
-          this.transcodePollTimer = setInterval(() => {
-            if (!document.hidden) this.refreshTranscodeStatus();
-          }, 1500);
-        }
-        if (!anyRunning && this.transcodePollTimer) {
-          clearInterval(this.transcodePollTimer);
-          this.transcodePollTimer = null;
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  toggleDeleteButton(enabled) {
-    if (this.elements.deleteSelectedBtn) {
-      this.elements.deleteSelectedBtn.disabled = !enabled;
-    }
-  }
-
-  toggleSelectAllButton(enabled) {
-    if (this.elements.selectAllBtn) {
-      this.elements.selectAllBtn.disabled = !enabled;
-    }
-  }
-
-  showPreview(file) {
-    if (!file || !this.elements.previewContainer || 
-        !this.elements.filenameElement || !this.elements.filesizeElement || 
-        !this.elements.dateElement) return;
-    
-    this.elements.filenameElement.textContent = file.name || 'Unnamed file';
-    const pf = this.elements.previewFolderElement;
-    if (pf) {
-      const lang = getUiLang();
-      if (file.folder_name) {
-        pf.textContent = `${t('gallery_folder_label', lang)}: ${file.folder_name}`;
-      } else {
-        pf.textContent = `${t('gallery_folder_label', lang)}: ${t('pl_filter_unsorted', lang)}`;
-      }
-      pf.hidden = false;
-    }
-    this.elements.filesizeElement.textContent = formatFileSize(file.size);
-    this.elements.dateElement.textContent = formatDate(file.date);
-    
-    this.elements.previewContainer.innerHTML = '';
-    
-    if (ALLOWED_IMAGE_TYPES.includes(file.type)) {
-      const img = document.createElement('img');
-      img.src = `/api/media/${encodeURIComponent(file.name)}`;
-      img.alt = file.name;
-      img.classList.add('preview-modal__img');
-      img.onerror = () => {
-        img.src = PLACEHOLDER_IMAGE;
-        img.style.opacity = '0.7';
-        if (window.App?.Alerts?.show) {
-          window.App.Alerts.show('Could not load preview image', 'warning');
-        }
-      };
-      this.elements.previewContainer.appendChild(img);
-    } else if (
-      ALLOWED_VIDEO_TYPES.includes(file.type) ||
-      Boolean(file?.is_video) ||
-      this.isExternalFile(file) ||
-      String(file.name || '').toLowerCase().startsWith('ext-')
-    ) {
-      const isExternal = this.isExternalFile(file);
-      const provider = isExternal ? this.getExternalProvider(file) : null;
-
-      // Local videos can always be previewed via /api/media/<filename>.
-      // External videos: don't attempt browser playback/embeds. Show a large thumbnail preview
-      // (same as the gallery tile) and provide an "open original" action.
-      if (!isExternal) {
-        const video = document.createElement('video');
-        video.controls = true;
-        video.autoplay = true;
-        video.playsInline = true;
-        video.preload = 'metadata';
-        const source = document.createElement('source');
-        source.src = `/api/media/${encodeURIComponent(file.name)}`;
-        source.type = file.mimetype || `video/${file.type}`;
-        video.appendChild(source);
-        this.elements.previewContainer.appendChild(video);
-      } else {
-        this._renderExternalPreviewFallback(file, provider);
-      }
-    }
-    
-    if (this.elements.previewModal) {
-      this.elements.previewModal.removeAttribute('hidden');
-      document.body.style.overflow = 'hidden';
-    }
-  }
-
-  _renderExternalPreviewFallback(file, provider) {
-    const wrap = document.createElement('div');
-    wrap.className = 'preview-external-fallback';
-
-    const img = document.createElement('img');
-    img.src = this.getThumbnailUrl(file.name);
-    img.alt = file.external?.title || file.name;
-    img.classList.add('preview-modal__img');
-    img.loading = 'lazy';
-    img.decoding = 'async';
-    img.onerror = () => {
-      img.src = PLACEHOLDER_IMAGE;
-      img.style.opacity = '0.7';
-    };
-    wrap.appendChild(img);
-
-    const actions = document.createElement('div');
-    actions.className = 'preview-external-actions';
-
-    const openBtn = document.createElement('a');
-    openBtn.className = 'btn primary';
-    openBtn.href = (file?.external?.url || file?.url || '').toString();
-    openBtn.target = '_blank';
-    openBtn.rel = 'noopener noreferrer';
-    const label = provider?.label ? `Open ${provider.label}` : 'Open link';
-    openBtn.textContent = label;
-    actions.appendChild(openBtn);
-
-    wrap.appendChild(actions);
-    this.elements.previewContainer.appendChild(wrap);
-  }
-
-  _renderExternalInlineEmbed(file, provider) {
-    const rawUrl = String(file?.external?.url || file?.path || '').trim();
-    const prov = String(file?.external?.provider || provider?.key || '').toLowerCase();
-    const url = this._buildEmbedUrl(rawUrl, prov);
-    if (!url) {
-      this._renderExternalPreviewFallback(file, provider);
-      return;
-    }
-
-    const wrap = document.createElement('div');
-    wrap.className = 'preview-external-embed';
-
-    const iframe = document.createElement('iframe');
-    iframe.className = 'preview-external-embed__frame';
-    iframe.src = url;
-    iframe.loading = 'lazy';
-    iframe.referrerPolicy = 'no-referrer-when-downgrade';
-    iframe.allow =
-      prov === 'vkvideo'
-        ? 'autoplay; encrypted-media; fullscreen; picture-in-picture; screen-wake-lock;'
-        : 'clipboard-write; autoplay; fullscreen; picture-in-picture;';
-    iframe.allowFullscreen = true;
-    iframe.setAttribute('title', file.external?.title || url);
-    wrap.appendChild(iframe);
-
-    const footer = document.createElement('div');
-    footer.className = 'preview-external-embed__footer';
-    const btn = document.createElement('a');
-    btn.href = rawUrl;
-    btn.target = '_blank';
-    btn.rel = 'noopener noreferrer';
-    btn.className = 'btn secondary preview-external-embed__open';
-    btn.textContent = provider?.label ? `Open on ${provider.label}` : 'Open link';
-    footer.appendChild(btn);
-    wrap.appendChild(footer);
-
-    this.elements.previewContainer.appendChild(wrap);
-  }
-
-  /**
-   * Build provider-specific embed URL from a canonical page URL or existing embed URL.
-   * @param {string} url
-   * @param {string} provider
-   * @returns {string}
-   */
-  _buildEmbedUrl(url, provider) {
-    const u = String(url || '').trim();
-    if (!u) return '';
-    // If user already gave an embed src, keep it.
-    if (/\/play\/embed\//i.test(u) || /\/video_ext\.php/i.test(u) || /\/embed\//i.test(u)) {
-      return u;
-    }
-
-    // Rutube: https://rutube.ru/video/<id>/ -> https://rutube.ru/play/embed/<id>/
-    if (provider === 'rutube' || /rutube\.ru/i.test(u)) {
-      const m = u.match(/rutube\.ru\/video\/([0-9a-f]{16,})/i);
-      if (m && m[1]) return `https://rutube.ru/play/embed/${m[1]}/`;
-      const m2 = u.match(/rutube\.ru\/(?:play\/)?embed\/([0-9a-f]{16,})/i);
-      if (m2 && m2[1]) return `https://rutube.ru/play/embed/${m2[1]}/`;
-      return u;
-    }
-
-    // VK Video: accept both vk.com/video and vkvideo.ru/video
-    if (provider === 'vkvideo' || /vkvideo\.ru/i.test(u) || /vk\.com\/video/i.test(u)) {
-      // vkvideo.ru/video-<oid>_<id>
-      let m = u.match(/vkvideo\.ru\/video(-?\d+)_(\d+)/i);
-      if (!m) m = u.match(/vk\.com\/video(-?\d+)_(\d+)/i);
-      if (m && m[1] && m[2]) {
-        const oid = m[1];
-        const id = m[2];
-        // Use vk.com embed endpoint (works for VK Video player)
-        return `https://vk.com/video_ext.php?oid=${encodeURIComponent(oid)}&id=${encodeURIComponent(id)}&hd=2`;
-      }
-      return u;
-    }
-
-    return u;
-  }
-
-  closePreview() {
-    if (this.elements.previewModal) {
-      this.elements.previewModal.setAttribute('hidden', '');
-      document.body.style.overflow = '';
-      if (this.elements.previewFolderElement) {
-        this.elements.previewFolderElement.hidden = true;
-        this.elements.previewFolderElement.textContent = '';
-      }
-      
-      const video = this.elements.previewContainer?.querySelector('video');
-      if (video) {
-        video.pause();
-      }
-    }
-  }
-
-  selectAllFiles() {
-    const checkboxes = document.querySelectorAll('.file-checkbox');
-    if (!checkboxes.length) return;
-    
-    const allSelected = Array.from(checkboxes).every(cb => cb.checked);
-    
-    checkboxes.forEach(checkbox => {
-      checkbox.checked = !allSelected;
-      const event = new Event('change');
-      checkbox.dispatchEvent(event);
-    });
-    
-    if (this.elements.selectAllBtn) {
-      const newAll = Array.from(checkboxes).every((cb) => cb.checked);
-      const lang = getUiLang();
-      const label = newAll ? t('deselect_all', lang) : t('select_all', lang);
-      const icon = newAll ? '✕' : '✓';
-      this.elements.selectAllBtn.innerHTML = `${icon} ${label}`;
-    }
-  }
-
-  async uploadMedia() {
-    if (!this.elements.fileUploadInput?.files || this.elements.fileUploadInput.files.length === 0) {
-      if (window.App?.Alerts?.show) {
-        window.App.Alerts.show('Please select files to upload', 'warning');
-      }
-      return;
-    }
-
-    const formData = new FormData();
-    const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
-    
-    if (csrfToken) {
-        formData.append('csrf_token', csrfToken);
-    }
-    
-    let validFilesCount = 0;
-    Array.from(this.elements.fileUploadInput.files).forEach(file => {
-      if (this.isValidFile(file)) {
-        formData.append('files', file);
-        validFilesCount++;
-      } else {
-        console.warn(`Skipped invalid file: ${file.name}`);
-      }
-    });
-
-    if (validFilesCount === 0) {
-      if (window.App?.Alerts?.show) {
-        window.App.Alerts.show('No valid files to upload (allowed: images and videos up to 1 GB)', 'error');
-      }
-      return;
-    }
-
-    if (this.viewMode === 'by_folder' && this.folderTargetId != null) {
-      formData.append('folder_id', String(this.folderTargetId));
-    }
-
-    try {
-      this.setUploadButtonBusy();
-      const result = await this._xhrUploadWithProgress(
-        '/api/media/upload',
-        formData,
-        csrfToken,
-        (percent) => this.setUploadButtonProgress(percent)
-      );
-      // Upload bytes are fully sent at this point; server may still be finalizing writes.
-      this.setUploadButtonProcessing();
-      // If server returned initial transcode status, show it immediately (no refresh needed).
-      if (result && typeof result === 'object' && result.transcode_status && typeof result.transcode_status === 'object') {
-        this.transcodeStatus = { ...(this.transcodeStatus || {}), ...(result.transcode_status || {}) };
-        // Start polling if any uploaded file is queued/running.
-        const anyActive = Object.values(result.transcode_status || {}).some(s => s && (s.state === 'queued' || s.state === 'running'));
-        if (anyActive) {
-          this.refreshTranscodeStatus({ startPolling: true });
-        }
-      }
-      if (window.App?.Alerts?.show) {
-        window.App.Alerts.show(`Uploaded ${result.files?.length || 0} file(s) successfully`, 'success');
-      }
-      if (this.elements.fileUploadInput) this.elements.fileUploadInput.value = '';
-      await this.loadMediaFiles();
-      // Only now the file is visible in gallery -> we can confidently show 100%.
-      this.setUploadButtonProgress(100);
-    } catch (error) {
-      console.error('Upload error:', error);
-      if (window.App?.Alerts?.show) {
-        window.App.Alerts.show(`Upload failed: ${error.message}`, 'error');
-      }
-    } finally {
-      this.resetUploadButton();
-    }
-  }
-
-  /**
-   * POST multipart with upload progress (fetch не отдаёт progress для тела запроса).
-   */
-  _xhrUploadWithProgress(url, formData, csrfToken, onProgress) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', url);
-      xhr.withCredentials = true;
-      if (csrfToken) {
-        xhr.setRequestHeader('X-CSRFToken', csrfToken);
-      }
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable && e.total > 0) {
-          onProgress((e.loaded / e.total) * 100);
-        } else {
-          onProgress(null);
-        }
-      };
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try {
-            resolve(JSON.parse(xhr.responseText || '{}'));
-          } catch {
-            resolve({});
-          }
-          return;
-        }
-        let msg = `Upload failed (${xhr.status})`;
-        try {
-          const err = JSON.parse(xhr.responseText || '{}');
-          if (err.error) msg = err.error;
-        } catch {
-          /* ignore */
-        }
-        reject(new Error(msg));
-      };
-      xhr.onerror = () => reject(new Error('Network error'));
-      xhr.onabort = () => reject(new Error('Upload cancelled'));
-      xhr.send(formData);
-    });
-  }
-
-  setUploadButtonBusy() {
-    const btn = this.elements.uploadBtn;
-    if (!btn) return;
-    btn.disabled = true;
-    btn.setAttribute('aria-busy', 'true');
-    const icon = btn.querySelector('.upload-btn__icon');
-    const text = btn.querySelector('.upload-btn__text');
-    const fill = btn.querySelector('.upload-btn__fill');
-    if (icon) icon.textContent = '⏳';
-    if (text) text.textContent = '0%';
-    if (fill) {
-      fill.style.width = '0%';
-      fill.classList.remove('upload-btn__fill--pulse');
-      fill.style.opacity = '';
-    }
-  }
-
-  setUploadButtonProgress(percent) {
-    const btn = this.elements.uploadBtn;
-    const fill = btn?.querySelector('.upload-btn__fill');
-    const text = btn?.querySelector('.upload-btn__text');
-    if (!fill || !text) return;
-    if (percent == null || !Number.isFinite(percent)) {
-      fill.classList.add('upload-btn__fill--pulse');
-      fill.style.width = '100%';
-      text.textContent = t('upload_ellipsis', getUiLang());
-      return;
-    }
-    fill.classList.remove('upload-btn__fill--pulse');
-    fill.style.opacity = '';
-    // XHR progress reaches 100% when bytes are sent, but server can still be saving/processing.
-    // Keep at 99% until we explicitly set 100% after gallery refresh.
-    const capped = percent >= 99.5 ? 99 : percent;
-    const p = Math.min(100, Math.max(0, capped));
-    fill.style.width = `${p}%`;
-    text.textContent = `${Math.round(p)}%`;
-  }
-
-  setUploadButtonProcessing() {
-    const btn = this.elements.uploadBtn;
-    if (!btn) return;
-    const fill = btn.querySelector('.upload-btn__fill');
-    const text = btn.querySelector('.upload-btn__text');
-    const icon = btn.querySelector('.upload-btn__icon');
-    if (fill) {
-      fill.classList.add('upload-btn__fill--pulse');
-      fill.style.width = '100%';
-    }
-    if (text) text.textContent = t('processing_ellipsis', getUiLang());
-    if (icon) icon.textContent = '⏳';
-  }
-
-  resetUploadButton() {
-    const btn = this.elements.uploadBtn;
-    if (!btn) return;
-    btn.disabled = false;
-    btn.removeAttribute('aria-busy');
-    const fill = btn.querySelector('.upload-btn__fill');
-    const text = btn.querySelector('.upload-btn__text');
-    const icon = btn.querySelector('.upload-btn__icon');
-    if (fill) {
-      fill.style.width = '0%';
-      fill.classList.remove('upload-btn__fill--pulse');
-      fill.style.opacity = '';
-    }
-    if (text) text.textContent = t('btn_upload', getUiLang());
-    if (icon) icon.textContent = '⭳';
-  }
-
-  async deleteSelectedMedia() {
-    if (this.selectedFiles.size === 0) {
-      if (window.App?.Alerts?.show) {
-        window.App.Alerts.show('Please select files to delete', 'warning');
-      }
-      return;
-    }
-
-    if (!confirm(`Delete ${this.selectedFiles.size} selected file(s)? This cannot be undone.`)) {
-      return;
-    }
-
-    try {
-      this.setButtonLoading(this.elements.deleteSelectedBtn, true);
-      
-      const response = await fetch('/api/media/files', {
-        method: 'POST',
-        headers: { 
-            'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('input[name="csrf_token"]')?.value
-        },
-        body: JSON.stringify({
-            files: Array.from(this.selectedFiles),
-            csrf_token: document.querySelector('input[name="csrf_token"]')?.value
-        })
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData?.error || `Delete failed with status ${response.status}`);
-      }
-
-      if (window.App?.Alerts?.show) {
-        window.App.Alerts.show(`Deleted ${this.selectedFiles.size} file(s) successfully`, 'success');
-      }
-      this.selectedFiles.clear();
-      await this.loadMediaFiles();
-    } catch (error) {
-      console.error('Delete error:', error);
-      if (window.App?.Alerts?.show) {
-        window.App.Alerts.show(`Delete failed: ${error.message}`, 'error');
-      }
-    } finally {
-      this.setButtonLoading(this.elements.deleteSelectedBtn, false);
-    }
-  }
-
-  setButtonLoading(button, isLoading) {
+// Кэш для превью медиафайлов
+const previewCache = new Map();
+
+// Утилитные функции
+function getPlaylistId() {
+    const params = new URLSearchParams(window.location.search);
+    let id = params.get('id') || window.location.pathname.split('/').pop();
+    return id && !isNaN(id) ? id : null;
+}
+
+function getCSRFToken() {
+    return document.querySelector('meta[name="csrf-token"]')?.content || '';
+}
+
+function toggleButtonState(button, isLoading) {
     if (!button) return;
-
-    if (button.id === 'upload-btn') {
-      if (!isLoading) this.resetUploadButton();
-      return;
-    }
-
+    button.disabled = isLoading;
+    const lang = getUiLang();
     if (isLoading) {
-      button.disabled = true;
-      button.innerHTML = `⏳ ${t('deleting_ellipsis', getUiLang())}`;
+        button.innerHTML = `⏳ <span class="save-playlist__label">${t('saving_ellipsis', lang)}</span>`;
     } else {
-      button.disabled = false;
-      button.innerHTML = `🗑 ${t('delete_selected', getUiLang())}`;
+        button.innerHTML = `💾 <span class="save-playlist__label" data-i18n="btn_save_playlist">${t('btn_save_playlist', lang)}</span>`;
     }
-  }
+}
 
-  initEventListeners() {
-    if (this.elements.uploadBtn) {
-      this.elements.uploadBtn.addEventListener('click', this.uploadMedia.bind(this));
+// UI компонент для уведомлений
+class PlaylistUI {
+    constructor() {
+        this.setupStyles();
     }
 
-    const addLinkBtn = document.querySelector('#external-add-btn');
-    const linkInput = document.querySelector('#external-url');
-    if (addLinkBtn && linkInput) {
-      addLinkBtn.addEventListener('click', async () => {
-        const url = String(linkInput.value || '').trim();
-        if (!url) {
-          window.App?.Alerts?.show?.('Please paste a VK Video or Rutube link', 'warning');
-          return;
+    setupStyles() {
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes slideIn {
+                from { transform: translateX(100%); opacity: 0; }
+                to { transform: translateX(0); opacity: 1; }
+            }
+            @keyframes fadeOut {
+                to { opacity: 0; transform: translateX(100%); }
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    showAlert(message, type = 'info', duration = 5000) {
+        // Создаем контейнер для уведомлений, если его еще нет
+        let alertsContainer = document.getElementById('alerts-container');
+        if (!alertsContainer) {
+            alertsContainer = document.createElement('div');
+            alertsContainer.id = 'alerts-container';
+            alertsContainer.style.position = 'fixed';
+            alertsContainer.style.top = '20px';
+            alertsContainer.style.right = '20px';
+            alertsContainer.style.zIndex = '10000';
+            alertsContainer.style.maxWidth = '350px';
+            alertsContainer.style.width = '100%';
+            document.body.appendChild(alertsContainer);
         }
-        addLinkBtn.disabled = true;
-        try {
-          const resp = await fetch('/api/media/external', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-CSRFToken': document.querySelector('input[name="csrf_token"]')?.value
-            },
-            credentials: 'include',
-            body: JSON.stringify({ url }),
-          });
-          const data = await resp.json().catch(() => ({}));
-          if (!resp.ok || !data?.success) {
-            throw new Error(data?.error || `HTTP ${resp.status}`);
-          }
-          linkInput.value = '';
-          window.App?.Alerts?.show?.('Link added', 'success');
-          await this.loadMediaFiles();
-        } catch (e) {
-          window.App?.Alerts?.show?.(`Failed to add link: ${e.message}`, 'error');
-        } finally {
-          addLinkBtn.disabled = false;
-        }
-      });
-    }
-    
-    if (this.elements.deleteSelectedBtn) {
-      this.elements.deleteSelectedBtn.addEventListener('click', this.deleteSelectedMedia.bind(this));
-    }
 
-    if (this.elements.selectAllBtn) {
-      this.elements.selectAllBtn.addEventListener('click', this.selectAllFiles.bind(this));
-    }
+        // Создаем элемент уведомления
+        const alertDiv = document.createElement('div');
+        alertDiv.className = `alert alert-${type}`;
+        alertDiv.style.cssText = `
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 8px;
+            background: ${this.getAlertColor(type)};
+            color: white;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            animation: slideIn 0.3s ease-out forwards;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        `;
 
-    if (this.elements.searchInput) {
-      this.elements.searchInput.addEventListener('input', () => {
-        clearTimeout(this._searchReloadTimer);
-        this._searchReloadTimer = setTimeout(() => this.loadMediaFiles(), 320);
-      });
-    }
+        // Добавляем иконку в зависимости от типа
+        const icons = {
+            success: '✓',
+            error: '×',
+            warning: '!',
+            info: 'i'
+        };
 
-    if (this.elements.sortSelect) {
-      this.elements.sortSelect.addEventListener('change', () => this.loadMediaFiles());
-    }
+        const lang = getUiLang();
+        const title =
+            type === 'error' ? t('alert_error', lang) :
+            type === 'success' ? t('alert_success', lang) :
+            type === 'warning' ? t('alert_warning', lang) :
+            t('alert_info', lang);
 
-    if (this.elements.groupSelect) {
-      this.elements.groupSelect.addEventListener('change', () => this.renderGallery(this.currentFiles));
-    }
+        alertDiv.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <span aria-hidden="true" style="font-size: 1.35rem; line-height: 1;">${icons[type] || 'i'}</span>
+                <div>
+                    <div style="font-weight: bold; margin-bottom: 5px;">${title}</div>
+                    <div>${message}</div>
+                </div>
+            </div>
+            <button class="alert-close-btn" style="background: none; border: none; color: white; cursor: pointer;">
+                <span aria-hidden="true">×</span>
+            </button>
+        `;
 
-    if (this.elements.createFolderBtn && this.elements.newFolderNameInput) {
-      this.elements.createFolderBtn.addEventListener('click', () => this._createFolderFromInput());
-      this.elements.newFolderNameInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          this._createFolderFromInput();
-        }
-      });
-    }
+        // Добавляем уведомление в контейнер
+        alertsContainer.prepend(alertDiv);
 
-    this._bindViewModeRadios();
-    this._syncFolderNavVisibility();
-
-    if (this.elements.closeModalBtn) {
-      this.elements.closeModalBtn.addEventListener('click', this.closePreview.bind(this));
-    }
-
-    window.addEventListener('click', (e) => {
-      const modal = this.elements.previewModal;
-      if (modal && !modal.hasAttribute('hidden') && e.target === modal) {
-        this.closePreview();
-      }
-    });
-
-    document.addEventListener('keydown', (e) => {
-      const modal = this.elements.previewModal;
-      if (e.key === 'Escape' && modal && !modal.hasAttribute('hidden')) {
-        this.closePreview();
-      }
-    });
-
-    document.addEventListener('dsign:language-changed', () => {
-      applyI18n();
-      this._syncSelectAllLabel();
-      if (this.viewMode === 'by_folder') {
-        this._renderFolderNav();
-      }
-    });
-
-    window.addEventListener('visibilitychange', () => {
-      if (!document.hidden) this.loadMediaFiles();
-    });
-  }
-
-  _bindViewModeRadios() {
-    document.querySelectorAll('input[name="gallery-view-mode"]').forEach((r) => {
-      r.addEventListener('change', () => {
-        if (!r.checked) return;
-        this.viewMode = r.value === 'by_folder' ? 'by_folder' : 'all';
-        this._syncFolderNavVisibility();
-        if (this.viewMode === 'by_folder') {
-          this.folderTargetId = null;
-          this._renderFolderNav().then(() => this.loadMediaFiles());
-        } else {
-          this.loadMediaFiles();
-        }
-      });
-    });
-  }
-
-  _syncFolderNavVisibility() {
-    const nav = this.elements.folderNav;
-    if (nav) nav.hidden = this.viewMode !== 'by_folder';
-  }
-
-  async _renderFolderNav() {
-    const nav = this.elements.folderNav;
-    if (!nav) return;
-    nav.innerHTML = '';
-    const lang = getUiLang();
-
-    const uns = document.createElement('button');
-    uns.type = 'button';
-    uns.className =
-      'gallery-folder-nav__btn' + (this.folderTargetId === null ? ' is-active' : '');
-    uns.dataset.i18n = 'pl_filter_unsorted';
-    uns.textContent = t('pl_filter_unsorted', lang);
-    uns.addEventListener('click', () => {
-      this.folderTargetId = null;
-      this._renderFolderNav().then(() => this.loadMediaFiles());
-    });
-    nav.appendChild(uns);
-
-    try {
-      const res = await fetch('/api/media/folders', {
-        headers: { Accept: 'application/json' },
-        credentials: 'include',
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data?.success) return;
-      for (const f of data.folders || []) {
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.className =
-          'gallery-folder-nav__btn' + (this.folderTargetId === f.id ? ' is-active' : '');
-        b.textContent = f.name || `Folder ${f.id}`;
-        const fid = f.id;
-        b.addEventListener('click', () => {
-          this.folderTargetId = fid;
-          this._renderFolderNav().then(() => this.loadMediaFiles());
+        // Настраиваем закрытие по клику
+        const closeBtn = alertDiv.querySelector('.alert-close-btn');
+        closeBtn.addEventListener('click', () => {
+            this.closeAlert(alertDiv);
         });
-        nav.appendChild(b);
-      }
-    } catch (e) {
-      console.error('Failed to load folders', e);
-    }
-  }
 
-  async _createFolderFromInput() {
-    const inp = this.elements.newFolderNameInput;
-    const name = String(inp?.value || '').trim();
-    const lang = getUiLang();
-    if (!name) {
-      window.App?.Alerts?.show?.(t('gallery_new_folder_ph', lang), 'warning');
-      return;
-    }
-    const csrf = document.querySelector('input[name="csrf_token"]')?.value;
-    try {
-      const res = await fetch('/api/media/folders', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          ...(csrf ? { 'X-CSRFToken': csrf } : {}),
-        },
-        credentials: 'include',
-        body: JSON.stringify({ name }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data?.success) {
-        throw new Error(data?.error || `HTTP ${res.status}`);
-      }
-      if (inp) inp.value = '';
-      window.App?.Alerts?.show?.(t('gallery_folder_created', lang), 'success');
-      if (this.viewMode === 'by_folder') {
-        await this._renderFolderNav();
-      }
-    } catch (e) {
-      window.App?.Alerts?.show?.(`${t('gallery_folder_create_err', lang)}: ${e.message}`, 'error');
-    }
-  }
+        // Автоматическое закрытие
+        setTimeout(() => {
+            this.closeAlert(alertDiv);
+        }, duration);
 
-  _syncSelectAllLabel() {
-    if (!this.elements.selectAllBtn) return;
-    const checkboxes = document.querySelectorAll('.file-checkbox');
-    const lang = getUiLang();
-    if (!checkboxes.length) {
-      this.elements.selectAllBtn.textContent = `☑ ${t('select_all', lang)}`;
-      return;
+        return {
+            element: alertDiv,
+            close: () => this.closeAlert(alertDiv)
+        };
     }
-    const allSelected = Array.from(checkboxes).every((cb) => cb.checked);
-    const label = allSelected ? t('deselect_all', lang) : t('select_all', lang);
-    this.elements.selectAllBtn.textContent = `${allSelected ? '✖' : '☑'} ${label}`;
-  }
+
+    closeAlert(alertDiv) {
+        if (alertDiv.parentNode) {
+            alertDiv.style.animation = 'fadeOut 0.3s ease-in forwards';
+            setTimeout(() => alertDiv.remove(), 300);
+        }
+    }
+
+    getAlertColor(type) {
+        const colors = {
+            success: '#28a745',
+            error: '#dc3545',
+            warning: '#ffc107',
+            info: '#17a2b8'
+        };
+        return colors[type] || colors.info;
+    }
 }
 
-// Initialize the gallery
-function initializeGallery() {
-  try {
-    if (window.App?.MediaGallery) {
-      return window.App.MediaGallery;
+// Основной класс плейлиста
+export class PlaylistManager {
+    constructor() {
+        if (window.App?.PlaylistManager) {
+            return window.App.PlaylistManager;
+        }
+        this.playlistId = getPlaylistId();
+        this.fileListEl = document.getElementById('file-list');
+        this.saveBtn = document.getElementById('save-playlist');
+        this.addMediaBtn = document.getElementById('add-media-modal-btn');
+        this.exportBtn = document.getElementById('export-m3u');
+        this.emptyMessage = document.getElementById('empty-playlist-message');
+        this.ui = new PlaylistUI();
+        this._thumbObserver = null;
+        this._lastFiles = null;
+
+        this.init();
     }
-    const gallery = new MediaGallery();
+
+    init() {
+        if (!this.fileListEl || !this.saveBtn) {
+            console.error('Не найдены необходимые элементы DOM');
+            return;
+        }
+
+        this.saveBtn.addEventListener('click', () => this.savePlaylist());
+
+        if (this.addMediaBtn && this.playlistId) {
+            this._addModal = new AddToPlaylistModal(this.playlistId, {
+                getCSRFToken,
+                onAppended: () => {
+                    sessionStorage.removeItem(`playlist-editor-files-${this.playlistId}`);
+                    this.loadMediaFiles();
+                },
+                showMessage: (msg, type = 'info') => this.ui.showAlert(msg, type),
+            });
+            this.addMediaBtn.addEventListener('click', () => this._addModal.open());
+        }
+
+        if (this.exportBtn) {
+            this.exportBtn.addEventListener('click', () => this.exportM3U());
+        }
+        
+        this.loadMediaFiles();
+        this.fileListEl.addEventListener('click', (e) => {
+            const btn = e.target.closest('.pl-row-remove');
+            if (!btn || !this.fileListEl.contains(btn)) return;
+            e.preventDefault();
+            const tr = btn.closest('tr');
+            tr?.remove();
+            this._renumberPlaylistRows();
+            sessionStorage.removeItem(`playlist-editor-files-${this.playlistId}`);
+        });
+
+        document.addEventListener('dsign:language-changed', () => {
+            applyI18n();
+            if (this._lastFiles) {
+                this.renderFileTable(this._lastFiles);
+            }
+        });
+        
+        if (window.App?.Sockets?.socket) {
+            window.App.Sockets.socket.on('playlist_updated', (data) => {
+                if (data.playlist_id == this.playlistId) {
+                    sessionStorage.removeItem(`playlist-editor-files-${this.playlistId}`);
+                    this.loadMediaFiles();
+                    
+                    if (data.m3u_generated) {
+                        this.ui.showAlert('M3U файл был автоматически обновлен', 'info');
+                    }
+                }
+            });
+        }
+    }
+
+    _renumberPlaylistRows() {
+        if (!this.fileListEl) return;
+        this.fileListEl.querySelectorAll('tr').forEach((tr, i) => {
+            const num = tr.querySelector('.playlist-col-num');
+            if (num) num.textContent = String(i + 1);
+        });
+        if (!this.fileListEl.querySelector('tr')) {
+            if (this.emptyMessage) this.emptyMessage.style.display = 'block';
+        } else if (this.emptyMessage) {
+            this.emptyMessage.style.display = 'none';
+        }
+    }
+
+    // Загрузка медиафайлов с кэшированием
+    async loadMediaFiles() {
+        if (!this.playlistId) {
+            this.ui.showAlert('Неверный ID плейлиста', 'error');
+            return;
+        }
+
+        try {
+            const cacheKey = `playlist-editor-files-${this.playlistId}`;
+            const cachedData = sessionStorage.getItem(cacheKey);
+
+            if (cachedData) {
+                const cache = JSON.parse(cachedData);
+                if (Date.now() - cache.timestamp < 60000) {
+                    this.renderFileTable(cache.data.files);
+                    return;
+                }
+            }
+
+            const itemsRes = await fetch(`/api/playlists/${this.playlistId}/items`, {
+                headers: { 'Accept': 'application/json' },
+                credentials: 'include'
+            });
+
+            if (!itemsRes.ok) throw new Error(`Ошибка списка плейлиста: ${itemsRes.status}`);
+
+            const itemsData = await itemsRes.json();
+            if (!itemsData?.success) throw new Error(itemsData?.error || 'Неверный ответ items');
+
+            const list = (itemsData.items || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+            const files = list.map((it) => ({
+                filename: it.file_name,
+                duration: it.duration,
+                muted: Boolean(it.muted),
+                is_video: Boolean(it.is_video),
+                is_audio: Boolean(it.is_audio),
+                is_external: Boolean(it.is_external),
+            }));
+
+            sessionStorage.setItem(cacheKey, JSON.stringify({
+                timestamp: Date.now(),
+                data: { files }
+            }));
+            this.renderFileTable(files);
+        } catch (error) {
+            console.error('Ошибка загрузки файлов:', error);
+            this.ui.showAlert(`Не удалось загрузить медиафайлы: ${error.message}`, 'error');
+        }
+    }
+
+    // Предпросмотр изображений
+    _getPreviewUrl(file) {
+        if (isPlaylistAudioFile(file)) {
+            return '/static/images/placeholder.jpg';
+        }
+        return `/api/media/thumbnail/${encodeURIComponent(file.filename)}`;
+    }
+
+    _ensureThumbObserver() {
+        if (this._thumbObserver) return;
+
+        // Lazy-load thumbnails only when they become visible.
+        this._thumbObserver = new IntersectionObserver((entries) => {
+            for (const entry of entries) {
+                if (!entry.isIntersecting) continue;
+                const img = entry.target;
+                const src = img.dataset.src;
+                if (src && img.src !== src) {
+                    img.src = src;
+                }
+                this._thumbObserver.unobserve(img);
+            }
+        }, { root: null, rootMargin: '300px 0px', threshold: 0.01 });
+    }
+
+    // Рендеринг таблицы файлов
+    renderFileTable(files) {
+        if (!this.fileListEl) return;
+        this._lastFiles = files;
+
+        if (!files || files.length === 0) {
+            this.fileListEl.innerHTML = '';
+            if (this.emptyMessage) this.emptyMessage.style.display = 'block';
+            return;
+        }
+
+        if (this.emptyMessage) this.emptyMessage.style.display = 'none';
+        this.fileListEl.innerHTML = '';
+        this._ensureThumbObserver();
+        const lang = getUiLang();
+
+        files.forEach((file, index) => {
+            const row = document.createElement('tr');
+            row.dataset.filename = file.filename;
+
+            const isVideo = isPlaylistVideoFile(file);
+            const isAudio = isPlaylistAudioFile(file);
+            const isTimed = isVideo || isAudio;
+            row.dataset.isVideo = isVideo ? 'true' : 'false';
+            row.dataset.isAudio = isAudio ? 'true' : 'false';
+
+            const numTd = document.createElement('td');
+            numTd.className = 'playlist-col-num';
+            numTd.textContent = String(index + 1);
+
+            const rmTd = document.createElement('td');
+            rmTd.className = 'playlist-col-remove';
+            const rmBtn = document.createElement('button');
+            rmBtn.type = 'button';
+            rmBtn.className = 'pl-row-remove btn secondary';
+            rmBtn.setAttribute('aria-label', t('pl_row_remove_aria', lang));
+            rmBtn.innerHTML = '<span aria-hidden="true">×</span>';
+            rmTd.appendChild(rmBtn);
+
+            const prevTd = document.createElement('td');
+            prevTd.className = 'playlist-col-preview';
+            const wrap = document.createElement('div');
+            wrap.className = 'playlist-thumb-wrap';
+
+            const img = document.createElement('img');
+            img.src = '/static/images/default-preview.jpg';
+            img.alt = 'Preview';
+            img.className = `playlist-thumb-img${isVideo ? ' playlist-thumb-img--video' : ''}${isAudio ? ' playlist-thumb-img--audio' : ''}`;
+            img.dataset.filename = file.filename;
+            img.loading = 'lazy';
+            img.decoding = 'async';
+
+            const previewUrl = this._getPreviewUrl(file);
+            img.dataset.src = previewUrl;
+            img.dataset.thumbRetries = '0';
+            img.onerror = function () {
+                const maxRetries = 6;
+                const cur = parseInt(this.dataset.thumbRetries || '0', 10) || 0;
+                if (cur >= maxRetries) {
+                    this.src = '/static/images/default-preview.jpg';
+                    return;
+                }
+                this.dataset.thumbRetries = String(cur + 1);
+                const delay = Math.min(15000, Math.round(800 * Math.pow(2, cur)));
+                this.src = '/static/images/default-preview.jpg';
+                setTimeout(() => {
+                    const base = this.dataset.src || '';
+                    if (!base) return;
+                    const joiner = base.includes('?') ? '&' : '?';
+                    this.src = `${base}${joiner}r=${Date.now()}`;
+                }, delay);
+            };
+
+            wrap.appendChild(img);
+            prevTd.appendChild(wrap);
+
+            const nameTd = document.createElement('td');
+            nameTd.className = 'playlist-col-name';
+            nameTd.textContent = file.filename;
+
+            const muteTd = document.createElement('td');
+            muteTd.className = 'playlist-col-mute';
+            if (isTimed) {
+                const mc = document.createElement('input');
+                mc.type = 'checkbox';
+                mc.className = 'mute-checkbox';
+                mc.dataset.filename = file.filename;
+                if (file.muted) mc.checked = true;
+                muteTd.appendChild(mc);
+            } else {
+                const span = document.createElement('span');
+                span.className = 'playlist-video-hint';
+                span.textContent = '—';
+                muteTd.appendChild(span);
+            }
+
+            const durTd = document.createElement('td');
+            durTd.className = 'playlist-col-duration';
+            const videoFullLabel = t('pl_video_full', lang);
+            const imageSeconds = (() => {
+                const d = file.duration;
+                if (d != null && d !== '') {
+                    const n = parseInt(String(d), 10);
+                    if (Number.isFinite(n) && n >= 1) return n;
+                }
+                return 10;
+            })();
+            if (isTimed) {
+                const span = document.createElement('span');
+                span.className = 'playlist-video-hint';
+                span.textContent = videoFullLabel;
+                durTd.appendChild(span);
+            } else {
+                const inp = document.createElement('input');
+                inp.type = 'number';
+                inp.className = 'duration-input';
+                inp.dataset.filename = file.filename;
+                inp.value = String(imageSeconds);
+                inp.min = '1';
+                durTd.appendChild(inp);
+            }
+
+            row.appendChild(numTd);
+            row.appendChild(rmTd);
+            row.appendChild(prevTd);
+            row.appendChild(nameTd);
+            row.appendChild(muteTd);
+            row.appendChild(durTd);
+            this.fileListEl.appendChild(row);
+
+            if (index < 24) {
+                img.src = previewUrl;
+            } else if (this._thumbObserver) {
+                this._thumbObserver.observe(img);
+            } else {
+                img.src = previewUrl;
+            }
+        });
+    }
+
+    // Сохранение плейлиста с генерацией M3U
+    async savePlaylist() {
+        if (!this.playlistId) {
+            this.ui.showAlert('Неверный ID плейлиста', 'error');
+            return;
+        }
+
+        toggleButtonState(this.saveBtn, true);
+
+        try {
+            const rows = Array.from(document.querySelectorAll('#file-list tr'));
+            const selectedFiles = [];
+            let hasErrors = false;
+            let selectedOrder = 0;
+            const lang = getUiLang();
+
+            for (const [index, row] of rows.entries()) {
+                try {
+                    const filename = row.dataset.filename;
+                    if (!filename || typeof filename !== 'string') {
+                        throw new Error(`Некорректное имя файла в строке ${index + 1}`);
+                    }
+
+                    const lower = String(filename || '').toLowerCase();
+                    const isExternal = lower.startsWith('ext-');
+                    const fileExt = lower.includes('.') ? lower.split('.').pop() : '';
+                    const isVideo =
+                        row.dataset.isVideo === 'true' ||
+                        isExternal ||
+                        ['mp4', 'avi', 'mov', 'mkv', 'webm', 'm4v'].includes(fileExt);
+                    const isAudio =
+                        row.dataset.isAudio === 'true' ||
+                        AUDIO_EXTENSIONS.includes(fileExt);
+                    const isTimed = isVideo || isAudio;
+
+                    let duration = 10;
+                    if (!isTimed) {
+                        const durationInput = row.querySelector('.duration-input');
+                        duration = Math.max(1, parseInt(durationInput?.value || 10));
+                        
+                        if (isNaN(duration)) {
+                            throw new Error(`Некорректная длительность для файла ${filename}`);
+                        }
+                    }
+
+                    selectedFiles.push({
+                        file_name: filename,
+                        duration: isTimed ? 0 : duration,
+                        muted: isTimed ? Boolean(row.querySelector('.mute-checkbox')?.checked) : false,
+                        order: (selectedOrder += 1)
+                    });
+
+                } catch (error) {
+                    console.error(`Ошибка обработки файла: ${error.message}`);
+                    this.ui.showAlert(error.message, 'warning');
+                    hasErrors = true;
+                }
+            }
+
+            if (hasErrors) {
+                throw new Error('Обнаружены ошибки в данных файлов');
+            }
+
+            const response = await fetch(`/api/playlists/${this.playlistId}/files`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCSRFToken()
+                },
+                body: JSON.stringify({
+                    files: selectedFiles,
+                    meta: {
+                        generate_m3u: true
+                    }
+                })
+            });
+
+            const result = await response.json();
+            
+            if (!response.ok || !result.success) {
+                const errorMsg = result.error || `HTTP error ${response.status}`;
+                
+                if (errorMsg.includes('file_name') || errorMsg.includes('invalid')) {
+                    throw new Error('Ошибка данных. Пожалуйста, обновите страницу и попробуйте снова.');
+                }
+                throw new Error(errorMsg);
+            }
+
+            this.ui.showAlert(
+                selectedFiles.length ? t('playlist_save_success', lang) : t('playlist_save_cleared', lang),
+                'success'
+            );
+            sessionStorage.removeItem(`playlist-editor-files-${this.playlistId}`);
+
+            if (window.App?.Sockets) {
+                window.App.Sockets.emit('playlist_updated', {
+                    playlist_id: this.playlistId,
+                    updated_files: selectedFiles.length,
+                    m3u_generated: true
+                });
+            }
+
+            setTimeout(() => {
+                window.location.href = '/';
+            }, 400);
+
+        } catch (error) {
+            console.error('Ошибка сохранения:', error);
+            
+            let errorMessage = error.message;
+            if (error.message.includes('недостаточно места')) {
+                errorMessage = 'Недостаточно места на сервере';
+            } else if (error.message.includes('validation')) {
+                errorMessage = 'Ошибка валидации данных';
+            }
+            
+            this.ui.showAlert(errorMessage || 'Не удалось сохранить плейлист', 'error');
+
+        } finally {
+            toggleButtonState(this.saveBtn, false);
+        }
+    }
+
+    // Экспорт M3U
+    async exportM3U() {
+        if (!this.playlistId) return;
+        
+        try {
+            const response = await fetch(`/api/playlists/${this.playlistId}/export-m3u`, {
+                method: 'POST',
+                headers: {
+                    'X-CSRFToken': getCSRFToken()
+                }
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                this.ui.showAlert(`M3U файл успешно экспортирован: ${result.filename}`, 'success');
+            } else {
+                throw new Error(result.error || 'Ошибка экспорта');
+            }
+        } catch (error) {
+            console.error('Ошибка экспорта:', error);
+            this.ui.showAlert(error.message || 'Не удалось экспортировать M3U', 'error');
+        }
+    }
+}
+
+// Инициализация при загрузке DOM
+document.addEventListener('DOMContentLoaded', () => {
     window.App = window.App || {};
-    window.App.MediaGallery = gallery;
-    console.log('MediaGallery initialized successfully');
-    return gallery;
-  } catch (error) {
-    console.error('Failed to initialize MediaGallery:', error);
-    if (window.App?.Alerts?.show) {
-      window.App.Alerts.show(
-        'Gallery Error', 
-        'Failed to initialize media gallery. Please try again later.',
-        'error'
-      );
-    }
-    return null;
-  }
-}
+    if (window.App.PlaylistManager) return;
+    const playlistManager = new PlaylistManager();
+    
+    // Для обратной совместимости
+    window.App.PlaylistManager = playlistManager;
+}, { once: true });
 
-// Smart initialization handler
-function initGalleryWhenReady() {
-  // First try standard DOM ready check
-  if (document.readyState === 'complete' || document.readyState === 'interactive') {
-    initializeGallery();
-  } 
-  // Fallback to DOMContentLoaded
-  else {
-    document.addEventListener('DOMContentLoaded', initializeGallery);
-  }
-}
-
-// Main entry point
-(function() {
-  // Check if App.onReady exists
-  if (window.App && typeof window.App.onReady === 'function') {
-    window.App.onReady(initializeGallery);
-  } else {
-    // Use standard initialization
-    initGalleryWhenReady();
-  }
-})();
-
-export { MediaGallery, initializeGallery };
+export default PlaylistManager;
