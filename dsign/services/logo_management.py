@@ -19,10 +19,19 @@ class LogoManager:
         self._last_playback_state = {}
         self._logo_viewer = LogoViewer(logger=logger)
         self._wayland_audio_vo_null_active = False
+        self._audio_resync_callback = None
+
+    def set_audio_resync_callback(self, callback) -> None:
+        """Called after vo=null→gpu restore to re-apply volume/route (mpv ao can go silent)."""
+        self._audio_resync_callback = callback
+
+    def clear_wayland_audio_vo_state(self) -> None:
+        """After mpv systemd restart the process is fresh — drop stale vo=null tracking."""
+        self._wayland_audio_vo_null_active = False
 
     def _wayland_audio_vo_null_enabled(self) -> bool:
-        raw = (os.getenv("DSIGN_AUDIO_WAYLAND_VO_NULL") or "1").strip().lower()
-        return raw not in ("0", "false", "no", "off")
+        raw = (os.getenv("DSIGN_AUDIO_WAYLAND_VO_NULL") or "0").strip().lower()
+        return raw in ("1", "true", "yes", "on")
 
     def _initialize_default_logo(self):
         """Initialize default logo in background"""
@@ -161,27 +170,62 @@ class LogoManager:
             )
         return opts
 
-    def restore_after_audio_playback(self) -> None:
-        """Restore MPV video output after audio-only (Wayland vo=gpu)."""
+    def _reopen_audio_output(self) -> None:
+        """vo=null→gpu can leave ALSA silent on Wayland; re-bind ao and master volume."""
+        ao = (os.getenv("DSIGN_MPV_AO") or "alsa").strip() or "alsa"
+        adev = (os.getenv("DSIGN_MPV_AUDIO_DEVICE") or "auto").strip() or "auto"
+        for prop, val in (("ao", ao), ("audio-device", adev)):
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", prop, val]},
+                    timeout=2.0,
+                    max_attempts=1,
+                )
+            except Exception:
+                pass
+        cb = self._audio_resync_callback
+        if cb is not None:
+            try:
+                cb()
+            except Exception as exc:
+                self.logger.debug(
+                    "Audio resync callback failed after vo restore",
+                    extra={"error": str(exc)},
+                )
+
+    def restore_after_audio_playback(self) -> bool:
+        """Restore MPV video output after audio-only (Wayland vo=gpu). Returns True if vo was restored."""
         if not PlaybackConstants.is_wayland_backend():
-            return
+            return False
+        if not self._wayland_audio_vo_null_active:
+            return False
         vo = (os.getenv("DSIGN_MPV_VO") or "gpu").strip() or "gpu"
+        restored = False
         try:
-            self._mpv_manager.set_vo_property(vo, timeout=5.0)
+            resp = self._mpv_manager.set_vo_property(vo, timeout=5.0)
+            restored = bool(resp and resp.get("error") == "success")
             self._wayland_audio_vo_null_active = False
+            if restored:
+                self._reopen_audio_output()
+                self.logger.debug(
+                    "Audio playback: restored vo after audio-only",
+                    extra={"vo": vo},
+                )
         except Exception as exc:
             self.logger.debug(
                 "Audio playback: restore vo failed",
                 extra={"error": str(exc), "vo": vo},
             )
+        return restored
 
-    def ensure_mpv_video_output(self) -> None:
-        """Idempotent restore after audio / stall / stop so the next playlist can play video."""
-        self.restore_after_audio_playback()
+    def ensure_mpv_video_output(self) -> bool:
+        """Restore vo=gpu only when audio playback had switched it to null."""
+        return self.restore_after_audio_playback()
 
     def display_idle_logo(self) -> bool:
         if PlaybackConstants.is_wayland_backend():
-            self.ensure_mpv_video_output()
+            if self.ensure_mpv_video_output():
+                pass
             try:
                 self._mpv_manager._send_command(
                     {"command": ["stop"]},

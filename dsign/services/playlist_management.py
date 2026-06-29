@@ -92,6 +92,10 @@ class PlaylistManager:
     def set_settings_service(self, service) -> None:
         """Attach settings service so playback can mirror volume/audio-route into MPV."""
         self._settings_service = service
+        try:
+            self._logo_manager.set_audio_resync_callback(self._sync_settings_audio_to_mpv)
+        except Exception:
+            pass
 
     def _sync_settings_audio_to_mpv(self) -> None:
         """
@@ -3689,7 +3693,8 @@ class PlaylistManager:
             except Exception:
                 pass
             try:
-                self._logo_manager.ensure_mpv_video_output()
+                if self._logo_manager.ensure_mpv_video_output():
+                    self._sync_settings_audio_to_mpv()
             except Exception:
                 pass
             self._mpv_manager.set_playback_session_active(False)
@@ -3855,6 +3860,7 @@ class PlaylistManager:
             self._set_current_media_label(self._item_media_label(first))
             try:
                 self._logo_manager.ensure_mpv_video_output()
+                self._sync_settings_audio_to_mpv()
             except Exception:
                 pass
 
@@ -4111,6 +4117,7 @@ class PlaylistManager:
             )
             try:
                 self._logo_manager.ensure_mpv_video_output()
+                self._sync_settings_audio_to_mpv()
             except Exception:
                 pass
             self._set_playback_active_marker(False)

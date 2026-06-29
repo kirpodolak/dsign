@@ -477,7 +477,8 @@ class PlaybackService:
             )
             return False
         try:
-            self._playlist_manager._logo_manager.ensure_mpv_video_output()
+            self._playlist_manager._logo_manager.clear_wayland_audio_vo_state()
+            self._playlist_manager._sync_settings_audio_to_mpv()
         except Exception:
             pass
         self._wait_after_mpv_recover()
