@@ -97,13 +97,8 @@ class PlaylistManager:
         except Exception:
             pass
 
-    def _sync_settings_audio_to_mpv(self) -> None:
-        """
-        Apply audio-route + volume from settings.json to MPV.
-
-        On Pi/direct HDMI the dashboard often adjusts ALSA only while audible level is mpv's
-        ``volume`` property — leaving mpv at 0 after loadfile otherwise.
-        """
+    def _sync_settings_audio_route_to_mpv(self) -> None:
+        """Apply ao/audio-device from settings (expensive — can interrupt ALSA; call sparingly)."""
         svc = self._settings_service
         if not svc:
             return
@@ -113,28 +108,47 @@ class PlaylistManager:
             return
         mpv_cfg = st.get("mpv") if isinstance(st.get("mpv"), dict) else {}
         route = mpv_cfg.get("audio-route")
-        updates: Dict[str, Any] = {}
-        if route is not None and str(route).strip() != "":
-            try:
-                updates.update(svc.expand_audio_route(str(route)))
-            except Exception:
-                pass
-        if updates:
-            try:
-                self._mpv_manager.update_settings(updates)
-            except Exception:
-                pass
+        if route is None or str(route).strip() == "":
+            return
         try:
-            vol_raw = st.get("volume")
-            if vol_raw is not None:
-                v = float(max(0, min(100, int(vol_raw))))
-                self._mpv_manager._send_command(
-                    {"command": ["set_property", "volume", v]},
-                    timeout=2.0,
-                    max_attempts=1,
-                )
+            updates = svc.expand_audio_route(str(route))
+        except Exception:
+            return
+        if not updates:
+            return
+        try:
+            self._mpv_manager.update_settings(updates)
         except Exception:
             pass
+
+    def _sync_settings_volume_to_mpv(self) -> None:
+        """Re-apply master volume from settings.json (safe after each loadfile)."""
+        svc = self._settings_service
+        if not svc:
+            return
+        try:
+            st = svc.load_settings()
+            vol_raw = st.get("volume")
+            if vol_raw is None:
+                return
+            v = float(max(0, min(100, int(vol_raw))))
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "volume", v]},
+                timeout=2.0,
+                max_attempts=1,
+            )
+        except Exception:
+            pass
+
+    def _sync_settings_audio_to_mpv(self) -> None:
+        """
+        Apply audio-route + volume from settings.json to MPV.
+
+        On Pi/direct HDMI the dashboard often adjusts ALSA only while audible level is mpv's
+        ``volume`` property — leaving mpv at 0 after loadfile otherwise.
+        """
+        self._sync_settings_audio_route_to_mpv()
+        self._sync_settings_volume_to_mpv()
 
     def _effective_playback_muted(self, *, item_muted: bool, profile_muted: bool) -> bool:
         """Global UI mute OR playlist-profile mute OR per-file mute."""
@@ -2013,7 +2027,7 @@ class PlaylistManager:
             )
         except Exception:
             pass
-        self._sync_settings_audio_to_mpv()
+        self._sync_settings_volume_to_mpv()
         try:
             self._mpv_manager._send_command(
                 {"command": ["set_property", "mute", "yes" if muted else "no"]},
@@ -2952,7 +2966,6 @@ class PlaylistManager:
                     profile_muted=profile_muted,
                 )
             )
-            self._sync_settings_audio_to_mpv()
             self._apply_item_mute_property(item, profile_muted=profile_muted)
             self._set_last_good_playback(playlist_id, start_index, media_key, len(items))
             thread_target = self._run_single_local_video_loop
@@ -2981,7 +2994,6 @@ class PlaylistManager:
                     profile_muted=profile_muted,
                 )
             )
-            self._sync_settings_audio_to_mpv()
             self._apply_item_mute_property(first_item, profile_muted=profile_muted)
             self._set_last_good_playback(
                 playlist_id,
@@ -3694,7 +3706,9 @@ class PlaylistManager:
                 pass
             try:
                 if self._logo_manager.ensure_mpv_video_output():
-                    self._sync_settings_audio_to_mpv()
+                    pass
+                else:
+                    self._sync_settings_volume_to_mpv()
             except Exception:
                 pass
             self._mpv_manager.set_playback_session_active(False)
@@ -3966,7 +3980,7 @@ class PlaylistManager:
                         {"command": ["set_property", "pause", "no"]},
                         timeout=5.0,
                     )
-                self._sync_settings_audio_to_mpv()
+                self._sync_settings_volume_to_mpv()
                 try:
                     first_muted = self._effective_playback_muted(
                         item_muted=bool(first.get("muted", False)),

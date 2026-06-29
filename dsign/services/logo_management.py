@@ -171,7 +171,17 @@ class LogoManager:
         return opts
 
     def _reopen_audio_output(self) -> None:
-        """vo=null→gpu can leave ALSA silent on Wayland; re-bind ao and master volume."""
+        """vo=null→gpu can leave ALSA silent on Wayland; re-apply route + volume from settings."""
+        cb = self._audio_resync_callback
+        if cb is not None:
+            try:
+                cb()
+            except Exception as exc:
+                self.logger.debug(
+                    "Audio resync callback failed after vo restore",
+                    extra={"error": str(exc)},
+                )
+            return
         ao = (os.getenv("DSIGN_MPV_AO") or "alsa").strip() or "alsa"
         adev = (os.getenv("DSIGN_MPV_AUDIO_DEVICE") or "auto").strip() or "auto"
         for prop, val in (("ao", ao), ("audio-device", adev)):
@@ -183,15 +193,6 @@ class LogoManager:
                 )
             except Exception:
                 pass
-        cb = self._audio_resync_callback
-        if cb is not None:
-            try:
-                cb()
-            except Exception as exc:
-                self.logger.debug(
-                    "Audio resync callback failed after vo restore",
-                    extra={"error": str(exc)},
-                )
 
     def restore_after_audio_playback(self) -> bool:
         """Restore MPV video output after audio-only (Wayland vo=gpu). Returns True if vo was restored."""
