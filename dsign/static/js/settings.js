@@ -87,6 +87,8 @@ export class SettingsManager {
             initialized: false,
             /** Local audio state during drag (0–100, muted) */
             audioLocal: { volume: null, muted: null },
+            /** After user sets volume, ignore polled audio for this many ms */
+            audioUiHoldUntil: 0,
             _overrideSaveTimers: new Map(),
             _globalSaveTimer: null,
         };
@@ -317,26 +319,28 @@ export class SettingsManager {
     async _flushAudioPost() {
         const vol = this.state.audioLocal.volume;
         const muted = this.state.audioLocal.muted;
+        const savedDisplay = {
+            available: true,
+            volume_percent: vol != null ? Math.round(vol) : null,
+            muted: muted != null ? Boolean(muted) : null,
+        };
         try {
             const resp = await fetch('/api/system/audio', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCSRFToken() },
                 credentials: 'include',
                 body: JSON.stringify({
-                    volume_percent: vol != null ? Math.round(vol) : null,
-                    muted: muted != null ? Boolean(muted) : null,
+                    volume_percent: savedDisplay.volume_percent,
+                    muted: savedDisplay.muted,
                 }),
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok || !data.success) throw new Error(data.error || `HTTP ${resp.status}`);
-            if (data.audio) {
-                this.state.systemStatus = this.state.systemStatus || {};
-                this.state.systemStatus.audio = data.audio;
-                this._applyAudioToDashboard(data.audio);
-            }
+            this.state.audioUiHoldUntil = Date.now() + 15000;
+            this.state.systemStatus = this.state.systemStatus || {};
+            this.state.systemStatus.audio = data.audio || savedDisplay;
             this.state.audioLocal = { volume: null, muted: null };
-            // Re-fetch status so the donut matches server truth (avoids stale cached /api/system/status audio).
-            await this.refreshSystemStatus().catch(() => {});
+            this._applyAudioToDashboard(this.state.systemStatus.audio);
         } catch (err) {
             console.error('Audio save failed:', err);
         }
@@ -381,7 +385,9 @@ export class SettingsManager {
             this.state.systemStatus = data.status || null;
             this.applyNonAudioStatusToDashboard();
             const audioIdle =
-                this.state.audioLocal.volume == null && this.state.audioLocal.muted == null;
+                this.state.audioLocal.volume == null
+                && this.state.audioLocal.muted == null
+                && Date.now() >= (this.state.audioUiHoldUntil || 0);
             if (audioIdle) {
                 this._applyAudioToDashboard(this.state.systemStatus?.audio || {});
             }
