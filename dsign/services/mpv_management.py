@@ -58,6 +58,7 @@ class MPVManager:
         self._playback_session_active = False
         self._playback_stream_opening = False
         self._playback_network_active = False
+        self._playback_local_audio_active = False
         self._playback_ipc_fail_streak = 0
         self._playback_ipc_fail_lock = Lock()
         self._watchdog_ipc_fail_streak = 0
@@ -192,6 +193,13 @@ class MPVManager:
         if active:
             self._reset_playback_ipc_fail_streak()
 
+    def set_playback_local_audio_active(self, active: bool) -> None:
+        """Local audio (vo=null / vid=no) — mpv IPC can lag without being hung."""
+        self._playback_local_audio_active = bool(active)
+        if active:
+            self._reset_playback_ipc_fail_streak()
+            self._reset_watchdog_ipc_fail_streak()
+
     def set_post_restart_callback(self, callback: Optional[Callable[[], None]]) -> None:
         """PlaybackService registers to resume playlist after app-initiated mpv restart."""
         self._post_restart_callback = callback
@@ -211,6 +219,7 @@ class MPVManager:
             self._playback_session_active
             or self._playback_stream_opening
             or self._playback_network_active
+            or self._playback_local_audio_active
         )
 
 
@@ -306,6 +315,9 @@ class MPVManager:
         if self._playback_network_active:
             self._reset_watchdog_ipc_fail_streak()
             return
+        if self._playback_local_audio_active:
+            self._reset_watchdog_ipc_fail_streak()
+            return
         if self._hung_recovery_running:
             return
         if self.was_recent_app_initiated_restart(within_sec=45.0):
@@ -380,7 +392,11 @@ class MPVManager:
         return max(3, min(120, n))
 
     def _ipc_failure_counts_toward_hung(self, exc: BaseException) -> bool:
-        if self._playback_stream_opening or self._playback_network_active:
+        if (
+            self._playback_stream_opening
+            or self._playback_network_active
+            or self._playback_local_audio_active
+        ):
             return False
         if isinstance(exc, MPVIPCTimeoutError) and "IPC lock busy" in str(exc):
             return False
@@ -1323,7 +1339,9 @@ class MPVManager:
 
             except Exception as e:
                 busy_ipc = (
-                    self._playback_stream_opening or self._playback_network_active
+                    self._playback_stream_opening
+                    or self._playback_network_active
+                    or self._playback_local_audio_active
                 ) and command_name in ("set_property", "loadfile")
                 if busy_ipc and isinstance(e, (MPVIPCTimeoutError, MPVIPCClosedError)):
                     log_level = self.logger.debug
@@ -1357,6 +1375,7 @@ class MPVManager:
         busy_timeout = (
             self._playback_stream_opening
             or self._playback_network_active
+            or self._playback_local_audio_active
         ) and command_name in ("set_property", "loadfile")
         log_fn = self.logger.debug if busy_timeout else self.logger.error
         log_fn(
