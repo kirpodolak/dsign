@@ -20,7 +20,7 @@
 | **A3** | Safe loadfile + ffprobe | ✅ сделано | main, PR #86 |
 | **A4** | `video-sync` Wayland (display-resample) | ✅ сделано | main, PR #87; подтверждено на плеере |
 | **A5** | Tech debt | ✅ сделано | PR A5 |
-| **C1** | ContentCache | 🟡 в PR | `content_cache.py` |
+| **C1** | ContentCache | ✅ сделано | main `a263e05`; поле 29.06 — prefetch + play с диска |
 | **C2** | Audio-only + logo | ⬜ не начато | — |
 | **C3** | Nested playlists | ⬜ не начато | — |
 | **B1** | Расширить `/api/playback/status` | 🟡 частично | `network_health` ✅; остальные поля ⬜ |
@@ -231,13 +231,13 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 | ID | Задача | Статус | Зависимости |
 |----|--------|--------|-------------|
-| C1 | ContentCache (`content_cache.py`) | 🟡 в PR | A3, network path |
+| C1 | ContentCache (`content_cache.py`) | ✅ сделано | A3, network path |
 | C2 | Audio-only + logo (imv) | ⬜ | — |
 | C3 | Nested playlists (DB) | ⬜ | миграция модели |
 
 ### C1. ContentCache
 
-**Статус:** 🟡 в PR — prefetch следующего `ext-*` на диск; offline / `PLAY_WHEN_READY` → local `loadfile`
+**Статус:** ✅ сделано (main `a263e05`) — prefetch следующего `ext-*` на диск; `PLAY_WHEN_READY` → local `loadfile`. Полевая проверка **29.06**: `playback_source: content_cache`, `ext-8.mp4`/`ext-9.mp4` ready, LRU eviction, `local_idle` finish reason.
 
 **Env (плеер):**
 - `DSIGN_CONTENT_CACHE_ENABLED=1` (default on)
@@ -247,9 +247,9 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 - `DSIGN_CONTENT_CACHE_MAX_GB=8` — лимит, LRU eviction
 
 **Acceptance:**
-- [ ] [net1, net2, net3] — net2 предзагружен до EOF net1
-- [ ] Offline — играет из кэша, не чёрный экран
-- [ ] `/api/playback/status` → `cache_state`
+- [x] [net1, net2, net3] — net2 предзагружен до EOF net1 (журнал 28–29.06: download started/ready/evicted)
+- [ ] Offline — играет из кэша, не чёрный экран (явный тест WAN-down ещё не делали)
+- [x] `/api/playback/status` → `cache_state` (код в `get_status()`; API требует login)
 
 ### C2. Audio-Only + Logo
 
@@ -354,3 +354,4 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 | Дата | Изменение |
 |------|-----------|
 | 2026-06-17 | Добавлены: сводка прогресса, D0, A0 (PR #80), порядок реализации, деплой/drift, чекбоксы acceptance |
+| 2026-06-29 | C1 ✅ — полевая валидация на dsign: cache playback, prefetch/evict, `display-resample` |
