@@ -20,6 +20,7 @@ from dsign.models import (
     MediaItemMeta,
 )
 from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
+from dsign.services.playback_constants import PlaybackConstants
 from PIL import Image
 from dsign.config.config import THUMBNAIL_FOLDER, THUMBNAIL_URL
 import re
@@ -88,6 +89,10 @@ def init_api_routes(api_bp, services):
     _network_status_cache: dict = {"ts": 0.0, "payload": None}
     _network_status_cache_lock = Lock()
     _network_status_cache_ttl_sec: float = 5.0
+
+    _health_cache: dict = {"ts": 0.0, "payload": None}
+    _health_cache_lock = Lock()
+    _health_cache_ttl_sec: float = 3.0
 
     # ======================
     # System services status / restart (Settings page)
@@ -1059,6 +1064,110 @@ def init_api_routes(api_bp, services):
         ok, out, err = _run_nmcli(command, timeout_sec=45)
         message = out or err or "Failed to connect Wi-Fi network"
         return ok, message
+
+    def _health_service_units() -> dict[str, str]:
+        units = {
+            "digital-signage": "digital-signage.service",
+            "mpv": PlaybackConstants.mpv_systemd_unit(),
+            "network-assistant": "dsign-network-assistant.service",
+        }
+        if PlaybackConstants.is_wayland_backend():
+            units["compositor"] = PlaybackConstants.COMPOSITOR_SYSTEMD_UNIT
+            units["logo"] = PlaybackConstants.LOGO_SYSTEMD_UNIT
+        return units
+
+    def _compute_overall_healthy(
+        playback: dict,
+        display: dict,
+        services: dict[str, dict],
+    ) -> bool:
+        if not playback.get("socket_ok"):
+            return False
+        if not display.get("connected"):
+            return False
+        signage = services.get("digital-signage") or {}
+        if signage.get("active_state") != "active":
+            return False
+        mpv = services.get("mpv") or {}
+        if mpv.get("active_state") != "active":
+            return False
+        if playback.get("playback_session_active") and playback.get("vo_configured") is False:
+            return False
+        return True
+
+    @api_bp.route('/health', methods=['GET'])
+    @login_required
+    def get_health():
+        """
+        Fleet/monitoring aggregate: playback IPC health + system/display/network/services.
+        """
+        try:
+            now = time.time()
+            with _health_cache_lock:
+                cached = _health_cache.get("payload")
+                ts = float(_health_cache.get("ts") or 0.0)
+                if cached is not None and (now - ts) < _health_cache_ttl_sec:
+                    return jsonify(cached)
+
+            playback: dict = {}
+            if playback_service is not None and hasattr(playback_service, "health_check"):
+                try:
+                    playback = playback_service.health_check() or {}
+                except Exception as e:
+                    playback = {"error": str(e)}
+
+            display = _read_display_status()
+            network = _collect_network_status()
+            upload_folder = current_app.config.get("UPLOAD_FOLDER", "/var/lib/dsign/media")
+
+            services_payload: dict[str, dict] = {}
+            for short, unit in _health_service_units().items():
+                st = _systemctl_unit_state(unit)
+                services_payload[short] = {**st, "unit": unit}
+
+            cache_state: dict = {}
+            content_cache = services.get("content_cache")
+            if content_cache is not None and hasattr(content_cache, "get_status_summary"):
+                try:
+                    cache_state = content_cache.get_status_summary() or {}
+                except Exception:
+                    cache_state = {}
+
+            network_health = playback.pop("network_playback", None)
+            if not isinstance(network_health, dict):
+                network_health = {}
+
+            payload = {
+                "success": True,
+                "healthy": _compute_overall_healthy(playback, display, services_payload),
+                "timestamp": int(now),
+                "display_backend": PlaybackConstants.display_backend(),
+                "playback": playback,
+                "network_health": network_health,
+                "system": {
+                    "os": _os_linux_status(),
+                    "cpu": {
+                        "temp_c": _read_cpu_temp_c(),
+                        "usage_percent": _read_cpu_percent_procstat(),
+                        "load_percent": _read_cpu_load_percent(),
+                    },
+                    "storage": {
+                        "root": _disk_usage("/"),
+                        "media": _disk_usage(upload_folder),
+                    },
+                },
+                "display": display,
+                "network": network,
+                "services": services_payload,
+                "cache_state": cache_state,
+            }
+            with _health_cache_lock:
+                _health_cache["payload"] = payload
+                _health_cache["ts"] = now
+            return jsonify(payload)
+        except Exception as e:
+            current_app.logger.error(f"Error getting health: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/system/status', methods=['GET'])
     @login_required

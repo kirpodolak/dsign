@@ -24,7 +24,7 @@
 | **C2** | Audio-only + logo | 🟡 в PR | `logo_management.py`, manual loop |
 | **C3** | Nested playlists | ⬜ не начато | — |
 | **B1** | Расширить `/api/playback/status` | 🟡 в PR | `get_status()` B1 fields |
-| **B2** | `GET /api/health` | 🟡 частично | `health_check()` в коде ✅; REST endpoint ⬜ |
+| **B2** | `GET /api/health` | 🟡 в PR | `GET /api/health` + aggregates |
 | **B3** | `POST /api/playback/override` | ⬜ не начато | — |
 | **B4** | API Bearer token | ⬜ не начато | — |
 | **B5** | Remote control (REST, не WS stub) | ⬜ не начато | WS = `pass` |
@@ -273,7 +273,7 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 | ID | Статус | Что осталось |
 |----|--------|--------------|
 | B1 | 🟡 в PR | `item_index`, `item_count`, `media_key`, `time_pos`, `duration`, `is_network`, `mpv_responsive`, `cache_state` |
-| B2 | 🟡 | Вынести `health_check()` в `GET /api/health` + system/display/network aggregates |
+| B2 | 🟡 в PR | `GET /api/health`: playback + system/display/network/services aggregates |
 | B3 | ⬜ | Emergency override + return_to_previous |
 | B4 | ⬜ | `DSIGN_API_TOKEN` Bearer |
 | B5 | ⬜ | **REST** seek/pause/skip (рекомендация: не чинить WS stub) |
@@ -357,4 +357,5 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 | Дата | Изменение |
 |------|-----------|
 | 2026-06-17 | Добавлены: сводка прогресса, D0, A0 (PR #80), порядок реализации, деплой/drift, чекбоксы acceptance |
+| 2026-06-30 | B2 — `GET /api/health` (playback + system/display/network/services) |
 | 2026-06-29 | C2 + B1 — audio+logo (imv), расширенный `/api/playback/status` |
