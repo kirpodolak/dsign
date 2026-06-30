@@ -308,6 +308,13 @@ def _connected_dri_card() -> str:
     return "/dev/dri/card0"
 
 
+def _pick_wlr_renderer() -> str:
+    for base in (Path("/usr/share/vulkan/icd.d"), Path("/etc/vulkan/icd.d")):
+        if base.is_dir() and any(base.glob("*.json")):
+            return "vulkan"
+    return "pixman"
+
+
 def _patch_wayland_env(dest: Path) -> None:
     if not dest.is_file():
         return
@@ -326,7 +333,9 @@ def _patch_wayland_env(dest: Path) -> None:
         if line.startswith("WLR_DRM_DEVICES="):
             out.append(f"WLR_DRM_DEVICES={use_dri}")
         elif line.startswith("WLR_RENDERER=") and "gles2" in line:
-            out.append("WLR_RENDERER=pixman")
+            out.append(f"WLR_RENDERER={_pick_wlr_renderer()}")
+        elif line.startswith("WLR_RENDERER=") and "pixman" in line:
+            out.append(f"WLR_RENDERER={_pick_wlr_renderer()}")
         else:
             out.append(line)
     dest.write_text("\n".join(out) + "\n", encoding="utf-8")

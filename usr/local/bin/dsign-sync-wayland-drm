@@ -94,13 +94,34 @@ write_wayland_key() {
   printf '%s\n' "${out[@]}" >"$WL_ENV"
 }
 
-maybe_fix_gles2_renderer() {
-  local renderer
+vulkan_renderer_available() {
+  local icd
+  for icd in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do
+    [ -r "$icd" ] && return 0
+  done
+  return 1
+}
+
+pick_wlr_renderer() {
+  if vulkan_renderer_available; then
+    echo "vulkan"
+  else
+    echo "pixman"
+  fi
+}
+
+maybe_fix_renderer() {
+  local renderer target
   renderer="$(read_wayland_key WLR_RENDERER || true)"
-  [ "$renderer" = "gles2" ] || return 0
-  # Intel DP: gles2 often crashes labwc (swapchain); pixman is stable.
-  write_wayland_key WLR_RENDERER pixman
-  echo "$LOG_TAG: WLR_RENDERER gles2 -> pixman (Intel-safe default)" >&2
+  target="$(pick_wlr_renderer)"
+  case "$renderer" in
+    gles2|pixman|"")
+      if [ "$renderer" != "$target" ]; then
+        write_wayland_key WLR_RENDERER "$target"
+        echo "$LOG_TAG: WLR_RENDERER ${renderer:-<unset>} -> $target" >&2
+      fi
+      ;;
+  esac
 }
 
 main() {
@@ -126,7 +147,7 @@ main() {
     echo "$LOG_TAG: keep WLR_DRM_DEVICES=$current (${conns:-connected})" >&2
   fi
 
-  maybe_fix_gles2_renderer
+  maybe_fix_renderer
 
   exit 0
 }
