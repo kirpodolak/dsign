@@ -642,17 +642,36 @@ class SettingsService:
             return None
         return None
 
-    def unmute_pch_digital_outputs(self) -> None:
+    def unmute_pch_digital_outputs(self, *, dev: Optional[str] = None) -> None:
         """
         Intel HDA: mpv ``volume`` is software gain; IEC958/HDMI ALSA controls may stay muted.
         Best-effort unmute for signage PCs where ``_alsa_hdmi_has_simple_pcm`` is false.
         """
-        import re
         import subprocess
 
         card = self._pch_card_index()
         if card is None:
             return
+        dev_idx: Optional[int] = None
+        if dev is not None and str(dev).strip().isdigit():
+            dev_idx = int(str(dev).strip())
+
+        touched: list[str] = []
+        for idx in range(8):
+            for ctl in (f"IEC958,{idx}", f"HDMI,{idx}"):
+                for args in ("unmute", "100%"):
+                    try:
+                        subprocess.run(
+                            ["amixer", "-c", str(card), "sset", ctl, args],
+                            check=False,
+                            timeout=2.0,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except Exception:
+                        pass
+                touched.append(ctl)
+
         try:
             out = subprocess.check_output(
                 ["amixer", "-c", str(card), "scontrols"],
@@ -662,17 +681,13 @@ class SettingsService:
             )
             names = re.findall(r"Simple mixer control '([^']+)'", out)
         except Exception:
-            return
+            names = []
         keywords = ("IEC958", "HDMI", "DP", "DIGITAL", "S/PDIF", "PCM")
-        touched = []
         for name in names:
             upper = name.upper()
             if not any(k in upper for k in keywords):
                 continue
-            for args in (
-                [name, "unmute"],
-                [name, "100%"],
-            ):
+            for args in ([name, "unmute"], [name, "100%"]):
                 try:
                     subprocess.run(
                         ["amixer", "-c", str(card), "sset", *args],
@@ -684,10 +699,56 @@ class SettingsService:
                 except Exception:
                     pass
             touched.append(name)
+
+        try:
+            contents = subprocess.check_output(
+                ["amixer", "-c", str(card), "contents"],
+                text=True,
+                stderr=subprocess.STDOUT,
+                timeout=4.0,
+            )
+            for m in re.finditer(r"numid=(\d+),iface=MIXER,name='([^']+)'", contents):
+                numid, name = m.group(1), m.group(2)
+                upper = name.upper()
+                if "PLAYBACK SWITCH" not in upper and "IEC958" not in upper and "HDMI" not in upper:
+                    continue
+                if dev_idx is not None and f",{dev_idx}" not in name and f"={dev_idx}" not in name:
+                    if "IEC958" in upper or "HDMI" in upper:
+                        pass
+                    else:
+                        continue
+                try:
+                    subprocess.run(
+                        ["amixer", "-c", str(card), "cset", f"numid={numid}", "on"],
+                        check=False,
+                        timeout=2.0,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    touched.append(f"numid={numid}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        if dev_idx is not None:
+            for ctl in (f"IEC958,{dev_idx}", f"HDMI,{dev_idx}"):
+                for args in ("unmute", "100%"):
+                    try:
+                        subprocess.run(
+                            ["amixer", "-c", str(card), "sset", ctl, args],
+                            check=False,
+                            timeout=2.0,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except Exception:
+                        pass
+
         if touched:
             self._log_info(
                 "ALSA PCH digital outputs unmuted",
-                extra={"card": card, "controls": touched[:8]},
+                extra={"card": card, "dev": dev_idx, "controls": touched[:12]},
             )
 
     def expand_audio_route(self, route: str, *, settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
@@ -739,6 +800,14 @@ class SettingsService:
                 return {"ao": "alsa", "audio-device": pch_hdmi}
         return {"ao": "alsa", "audio-device": "auto"}
 
+    @staticmethod
+    def _alsa_dev_index_from_mpv_device(adev: str) -> Optional[str]:
+        s = str(adev or "")
+        if "DEV=" not in s:
+            return None
+        dev = s.rsplit("DEV=", 1)[-1].strip()
+        return dev if dev.isdigit() else None
+
     def build_mpv_audio_updates(self, *, settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
         """Unmute Intel PCH ALSA mixers and resolve mpv ao/audio-device from settings."""
         if settings is None:
@@ -750,8 +819,11 @@ class SettingsService:
             if route is not None and str(route).strip()
             else "auto"
         )
-        self.unmute_pch_digital_outputs()
-        return self.expand_audio_route(route_s, settings=settings)
+        updates = self.expand_audio_route(route_s, settings=settings)
+        self.unmute_pch_digital_outputs(
+            dev=self._alsa_dev_index_from_mpv_device(str(updates.get("audio-device") or ""))
+        )
+        return updates
 
     def save_global_mpv_and_apply(self, raw: Dict[str, Any], mpv_manager=None) -> bool:
         """

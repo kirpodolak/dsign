@@ -98,7 +98,7 @@ class PlaylistManager:
         except Exception:
             pass
 
-    def _sync_settings_audio_route_to_mpv(self, *, cycle_ao: bool = True) -> bool:
+    def _sync_settings_audio_route_to_mpv(self, *, cycle_ao: bool = False) -> bool:
         """Apply ao/audio-device from settings (expensive — can interrupt ALSA; call sparingly)."""
         svc = self._settings_service
         if not svc:
@@ -148,13 +148,58 @@ class PlaylistManager:
             )
             return False
 
+    def _alsa_dev_index_from_mpv_device(self, adev: Optional[str]) -> Optional[str]:
+        s = str(adev or "")
+        if "DEV=" not in s:
+            return None
+        dev = s.rsplit("DEV=", 1)[-1].strip()
+        return dev if dev.isdigit() else None
+
+    def _kick_alsa_hardware_after_demuxer(self) -> None:
+        """Re-unmute IEC958 for the active DEV and nudge mpv audio-device after the stream opens."""
+        adev = self._resolved_audio_device_for_loadfile()
+        svc = self._settings_service
+        if svc:
+            try:
+                svc.unmute_pch_digital_outputs(
+                    dev=self._alsa_dev_index_from_mpv_device(adev)
+                )
+            except Exception:
+                pass
+        if adev:
+            try:
+                self._mpv_manager._send_command(
+                    {"command": ["set_property", "audio-device", adev]},
+                    timeout=2.0,
+                    max_attempts=1,
+                )
+            except Exception:
+                pass
+
+    def _alsa_pcm_status_hint(self) -> Optional[str]:
+        try:
+            card = 0
+            if self._settings_service:
+                idx = self._settings_service._pch_card_index()
+                if idx is not None:
+                    card = idx
+            root = Path(f"/proc/asound/card{card}")
+            if not root.is_dir():
+                return None
+            for st in sorted(root.glob("pcm*p/sub0/status")):
+                txt = st.read_text(encoding="utf-8", errors="ignore").strip()
+                if txt:
+                    return f"{st.parent.parent.name}:{txt.split(chr(10), 1)[0]}"
+        except Exception:
+            return None
+        return None
+
     def _prepare_mpv_audio_before_loadfile(self) -> None:
-        """Bind ALSA output before open — mpv --audio-device=auto may pick a silent jack."""
+        """Unmute ALSA for the upcoming loadfile; device binding is in loadfile options."""
         if not self._audio_route_applied_for_play:
-            if self._sync_settings_audio_route_to_mpv(cycle_ao=True):
-                self._audio_route_applied_for_play = True
-        else:
-            self._sync_settings_volume_to_mpv()
+            self._kick_alsa_hardware_after_demuxer()
+            self._audio_route_applied_for_play = True
+        self._sync_settings_volume_to_mpv()
 
     def _resolved_audio_device_for_loadfile(self) -> Optional[str]:
         """ALSA device string to pass into mpv loadfile per-file options."""
@@ -194,6 +239,9 @@ class PlaylistManager:
             extra: Dict[str, Any] = {"event": event, **snap}
             if settings_volume is not None:
                 extra["settings_volume"] = settings_volume
+            pcm = self._alsa_pcm_status_hint()
+            if pcm:
+                extra["alsa_pcm_status"] = pcm
             self.logger.warning("MPV audio state", extra=extra)
         except Exception:
             pass
@@ -2123,6 +2171,7 @@ class PlaylistManager:
                 "Playback item muted",
                 extra={"event": "playback_item_muted", "effective_muted": True},
             )
+        self._kick_alsa_hardware_after_demuxer()
         self._log_mpv_audio_state(event="post_loadfile_audio_state")
 
     def _prepare_local_audio_after_loadfile(self, *, muted: bool, skip_load: bool) -> bool:
