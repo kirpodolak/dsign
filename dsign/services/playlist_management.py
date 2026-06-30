@@ -186,13 +186,63 @@ class PlaylistManager:
             root = Path(f"/proc/asound/card{card}")
             if not root.is_dir():
                 return None
+            parts: list[str] = []
             for st in sorted(root.glob("pcm*p/sub0/status")):
+                pcm = st.parent.parent.name
                 txt = st.read_text(encoding="utf-8", errors="ignore").strip()
-                if txt:
-                    return f"{st.parent.parent.name}:{txt.split(chr(10), 1)[0]}"
+                state = "unknown"
+                for line in txt.splitlines():
+                    line = line.strip()
+                    if line.startswith("state:"):
+                        state = line.split(":", 1)[1].strip()
+                        break
+                parts.append(f"{pcm}:{state}")
+            return ";".join(parts) if parts else None
         except Exception:
             return None
-        return None
+
+    def _alsa_pcm_has_running_playback(self) -> bool:
+        hint = (self._alsa_pcm_status_hint() or "").upper()
+        return ":RUNNING" in hint or "STATE: RUNNING" in hint
+
+    def _ensure_mpv_alsa_pcm_open(self) -> None:
+        """If mpv decodes audio but ALSA PCM is closed, force ao to open the sink."""
+        if self._alsa_pcm_has_running_playback():
+            return
+        try:
+            codec = self._mpv_manager.get_property_light("audio-codec-name", timeout=1.0)
+            tp = self._mpv_manager.get_property_light("time-pos", timeout=1.0)
+        except Exception:
+            codec, tp = None, None
+        if not codec:
+            return
+        try:
+            tp_f = float(tp) if tp is not None else 0.0
+        except (TypeError, ValueError):
+            tp_f = 0.0
+        if tp_f <= 0.0 and tp is None:
+            return
+        adev = self._resolved_audio_device_for_loadfile() or ""
+        self.logger.warning(
+            "ALSA PCM closed while mpv decodes audio; forcing ao reopen",
+            extra={
+                "event": "alsa_pcm_force_open",
+                "audio_codec": str(codec),
+                "time_pos": tp,
+                "alsa_pcm_status": self._alsa_pcm_status_hint(),
+                "audio_device": adev,
+            },
+        )
+        try:
+            self._mpv_manager.force_alsa_ao_open("alsa", adev)
+        except Exception as exc:
+            self.logger.warning(
+                "ALSA PCM force open failed",
+                extra={"event": "alsa_pcm_force_open_fail", "error": str(exc)},
+            )
+            return
+        self._kick_alsa_hardware_after_demuxer()
+        self._sync_settings_volume_to_mpv()
 
     def _prepare_mpv_audio_before_loadfile(self) -> None:
         """Unmute ALSA for the upcoming loadfile; device binding is in loadfile options."""
@@ -2172,6 +2222,7 @@ class PlaylistManager:
                 extra={"event": "playback_item_muted", "effective_muted": True},
             )
         self._kick_alsa_hardware_after_demuxer()
+        self._ensure_mpv_alsa_pcm_open()
         self._log_mpv_audio_state(event="post_loadfile_audio_state")
 
     def _prepare_local_audio_after_loadfile(self, *, muted: bool, skip_load: bool) -> bool:

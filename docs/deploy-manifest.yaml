@@ -33,6 +33,7 @@ entries:
   - { src: usr/local/bin/dsign-disable-drm-mpv, dest: /usr/local/bin/dsign-disable-drm-mpv, mode: always, perm: "0755", strip_crlf: true }
   - { src: usr/local/bin/dsign-display-apply, dest: /usr/local/bin/dsign-display-apply, mode: always, perm: "0755", strip_crlf: true }
   - { src: usr/local/bin/dsign-diagnose-playback, dest: /usr/local/bin/dsign-diagnose-playback, mode: always, perm: "0755", strip_crlf: true }
+  - { src: usr/local/bin/dsign-diagnose-audio, dest: /usr/local/bin/dsign-diagnose-audio, mode: always, perm: "0755", strip_crlf: true }
   - { src: usr/local/bin/dsign-diagnose-compositor, dest: /usr/local/bin/dsign-diagnose-compositor, mode: always, perm: "0755", strip_crlf: true }
   - { src: usr/local/bin/dsign-diagnose-wifi-on-display, dest: /usr/local/bin/dsign-diagnose-wifi-on-display, mode: always, perm: "0755", strip_crlf: true }
   - { src: usr/local/bin/dsign-deploy-manifest.py, dest: /usr/local/bin/dsign-deploy-manifest.py, mode: always, perm: "0755", strip_crlf: true }
