@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# ALSA / MPV audio diagnostics for Intel PCH + HDMI/DP signage (dsign).
+set -u
+
+SOCK="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
+SETTINGS="${DSIGN_SETTINGS_FILE:-/var/lib/dsign/settings.json}"
+CARD="${DSIGN_ALSA_CARD:-0}"
+
+mpv_prop() {
+  local prop="$1"
+  if ! command -v python3 >/dev/null 2>&1 || [ ! -S "$SOCK" ]; then
+    echo "?"
+    return 1
+  fi
+  python3 <<PY
+import json, socket
+s = "${SOCK}"
+prop = "${prop}"
+try:
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(2)
+    c.connect(s)
+    c.sendall((json.dumps({"command":["get_property",prop],"request_id":1})+"\\n").encode())
+    d = json.loads(c.recv(8192).decode().split("\\n",1)[0])
+    print(d.get("data",""))
+except Exception as e:
+    print("?", e)
+PY
+}
+
+echo "=== dsign audio diagnostics ==="
+echo "host: $(hostname)  time: $(date -Is 2>/dev/null || date)"
+echo
+
+echo "--- settings.json (volume / mpv audio) ---"
+if [ -r "$SETTINGS" ]; then
+  python3 - "$SETTINGS" <<'PY' 2>/dev/null || grep -E '"volume"|audio-route|audio-device|audio-hdmi' "$SETTINGS"
+import json, sys
+p = sys.argv[1]
+with open(p) as f:
+    d = json.load(f)
+print("  volume:", d.get("volume"))
+print("  mute:", d.get("mute"))
+mpv = d.get("mpv") or {}
+for k in ("audio-route", "audio-device", "audio-hdmi-dev"):
+    if k in mpv:
+        print(f"  mpv.{k}:", mpv.get(k))
+PY
+else
+  echo "  (missing $SETTINGS)"
+fi
+echo
+
+echo "--- DRM connector (video output) ---"
+for f in /sys/class/drm/card*-*; do
+  [ -d "$f" ] || continue
+  [ -f "$f/status" ] || continue
+  st="$(cat "$f/status" 2>/dev/null || echo "?")"
+  [ "$st" = connected ] || continue
+  name="$(basename "$f")"
+  mode="$(cat "$f/mode" 2>/dev/null || echo "?")"
+  echo "  $name  mode=$mode"
+done
+echo
+
+echo "--- ALSA cards ---"
+cat /proc/asound/cards 2>/dev/null | sed 's/^/  /' || echo "  (no /proc/asound/cards)"
+echo
+
+echo "--- aplay -l (device N often = pcmNp) ---"
+aplay -l 2>/dev/null | sed 's/^/  /' || echo "  (aplay -l failed)"
+echo
+
+echo "--- ELD (monitor name per digital port) ---"
+for f in /proc/asound/card${CARD}/eld#*; do
+  [ -f "$f" ] || continue
+  echo "  $(basename "$f"):"
+  grep -E 'monitor_name|connection_type|eld_valid' "$f" 2>/dev/null | sed 's/^/    /' || true
+done
+echo
+
+echo "--- aplay HDMI/DP devices (PCH) ---"
+aplay -L 2>/dev/null | awk '
+/^hdmi:CARD=PCH,DEV=/ { dev=$0; getline; print "  " dev; print "    " $0 }
+' || echo "  (aplay -L failed)"
+echo
+
+echo "--- PCM playback status (card $CARD) ---"
+if [ -d "/proc/asound/card${CARD}" ]; then
+  for st in /proc/asound/card${CARD}/pcm*p/sub0/status; do
+    [ -f "$st" ] || continue
+    pcm="$(echo "$st" | sed -n 's|.*/card[0-9]*/\(pcm[^/]*\)/.*|\1|p')"
+    state="$(grep '^state:' "$st" 2>/dev/null | awk '{print $2}' || echo unknown)"
+    echo "  $pcm: $state"
+    if [ "$state" = "RUNNING" ] || [ "$state" = "PREPARED" ]; then
+      hp="$(cat "${st%/status}/hw_params" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g' || true)"
+      [ -n "$hp" ] && [ "$hp" != "closed" ] && echo "    hw_params: $hp"
+    fi
+  done
+else
+  echo "  (no /proc/asound/card${CARD})"
+fi
+echo
+
+echo "--- /dev/snd users (who holds ALSA) ---"
+if command -v fuser >/dev/null 2>&1; then
+  fuser -v /dev/snd/* 2>&1 | sed 's/^/  /' || echo "  (none)"
+else
+  ls -la /dev/snd/ 2>/dev/null | sed 's/^/  /' || true
+fi
+echo
+
+echo "--- IEC958 / HDMI mixer (card $CARD) ---"
+if command -v amixer >/dev/null 2>&1; then
+  for i in 0 1 2 3; do
+    amixer -c "$CARD" sget "IEC958,$i" 2>/dev/null | grep -E 'Simple mixer|Mono:|Playback \[' | sed 's/^/  /' || true
+  done
+else
+  echo "  (amixer missing)"
+fi
+echo
+
+echo "--- mpv audio IPC ---"
+if [ -S "$SOCK" ]; then
+  for p in ao audio-device volume mute pause idle-active time-pos audio-codec-name aid audio-out-bitrate; do
+    v="$(mpv_prop "$p" 2>/dev/null || echo '?')"
+    printf '  %-20s %s\n' "$p:" "$v"
+  done
+else
+  echo "  (no IPC socket: $SOCK)"
+fi
+echo
+
+echo "--- diagnosis hint ---"
+if [ -S "$SOCK" ]; then
+  codec="$(mpv_prop audio-codec-name 2>/dev/null || true)"
+  tp="$(mpv_prop time-pos 2>/dev/null || true)"
+  running="$(grep -c ':RUNNING' /proc/asound/card${CARD}/pcm*p/sub0/status 2>/dev/null || echo 0)"
+  if [ -n "$codec" ] && [ "$codec" != "?" ] && [ "$codec" != "None" ]; then
+    if [ "${running:-0}" -eq 0 ] 2>/dev/null; then
+      echo "  PROBLEM: mpv decodes audio ($codec, time-pos=$tp) but NO ALSA PCM is RUNNING."
+      echo "  => mpv ao=alsa did not open the hardware sink (software decode only)."
+      echo "  => deploy latest dsign fix (alsa_pcm_force_open) or restart mpv after setting audio-device."
+    else
+      run_pcm="$(grep -l '^state: RUNNING' /proc/asound/card${CARD}/pcm*p/sub0/status 2>/dev/null | sed 's|.*/\(pcm[^/]*\)/.*|\1|' | tr '\n' ' ')"
+      echo "  mpv decodes and ALSA PCM is active: ${run_pcm:-?}"
+      echo "  audio-device=$(mpv_prop audio-device 2>/dev/null || echo '?')"
+      echo "  If still silent: wrong physical jack (try DEV=0..3) OR monitor DP audio off."
+      echo "  Compare: stop playlist, run speaker-test on DEV=0 — same pcm RUNNING + audible?"
+    fi
+  else
+    echo "  mpv idle or no audio track — start a playlist with sound, then re-run."
+  fi
+else
+  echo "  start dsign-mpv-wayland.service first"
+fi
+echo
+
+echo "--- manual speaker-test (stop playlist first) ---"
+echo "  speaker-test -D hdmi:CARD=PCH,DEV=0 -c 2"
+echo "  speaker-test -D hdmi:CARD=PCH,DEV=1 -c 2"
+echo
+
+echo "=== end ==="
