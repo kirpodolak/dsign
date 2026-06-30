@@ -29,6 +29,19 @@ pick_connected_dri_card() {
   return 1
 }
 
+card_has_connected_output() {
+  local card="$1" base st
+  [ -n "$card" ] || return 1
+  base="$(basename "$card")"
+  for st in /sys/class/drm/"${base}"-*/status; do
+    [ -r "$st" ] || continue
+    if [ "$(cat "$st" 2>/dev/null | tr -d '\r\n')" = "connected" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 check_rc_xml() {
   local rc="/var/lib/dsign/labwc/rc.xml"
   [ -r "$rc" ] || return 0
@@ -191,14 +204,25 @@ if [ -r /var/lib/dsign/config/wayland.env ]; then
   if [ -n "$wlr_dev" ] && [ ! -e "$wlr_dev" ]; then
     suggested="$(pick_connected_dri_card || echo /dev/dri/card0)"
     echo "WLR_DRM_DEVICES=$wlr_dev does not exist — use a connected card, e.g.:"
-    echo "  sudo sed -i 's|^WLR_DRM_DEVICES=.*|WLR_DRM_DEVICES=${suggested}|' /var/lib/dsign/config/wayland.env"
+    echo "  sudo dsign-sync-wayland-drm"
+    echo "  sudo systemctl restart dsign-compositor.service dsign-logo.service dsign-mpv-wayland.service"
   elif [ -n "$wlr_dev" ] && [ ! -r "$wlr_dev" ]; then
     echo "WLR_DRM_DEVICES=$wlr_dev is not readable for this user — add dsign to video group or fix permissions"
+  elif [ -n "$wlr_dev" ] && ! card_has_connected_output "$wlr_dev"; then
+    suggested="$(pick_connected_dri_card || echo /dev/dri/card0)"
+    echo "WLR_DRM_DEVICES=$wlr_dev has no connected monitor (DP/HDMI unplugged or wrong card)."
+    echo "  Connected outputs are on: $suggested"
+    echo "  Fix (auto-pick port with cable):"
+    echo "    sudo dsign-sync-wayland-drm"
+    echo "    sudo systemctl restart dsign-compositor.service dsign-logo.service dsign-mpv-wayland.service"
+  elif command -v dsign-sync-wayland-drm >/dev/null 2>&1; then
+    echo "If picture is missing after project start, sync DRM card to the port with cable:"
+    echo "  sudo dsign-sync-wayland-drm"
   fi
   if grep -q '^WLR_RENDERER=gles2' /var/lib/dsign/config/wayland.env 2>/dev/null; then
-    echo "If labwc crashes with gles2 (swapchain/EGL), try vulkan before pixman:"
-    echo "  sudo sed -i 's/^WLR_RENDERER=.*/WLR_RENDERER=vulkan/' /var/lib/dsign/config/wayland.env"
-    echo "  Last resort (slow playback): WLR_RENDERER=pixman"
+    echo "WLR_RENDERER=gles2 often black-screens Intel DP — sync fixes to pixman automatically:"
+    echo "  sudo dsign-sync-wayland-drm"
+    echo "  Or try vulkan: sudo sed -i 's/^WLR_RENDERER=.*/WLR_RENDERER=vulkan/' /var/lib/dsign/config/wayland.env"
   fi
 fi
 if grep -q 'labwc -c /var/lib/dsign/labwc$' /etc/systemd/system/dsign-compositor.service 2>/dev/null; then
