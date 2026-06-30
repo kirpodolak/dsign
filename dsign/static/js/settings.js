@@ -300,6 +300,8 @@ export class SettingsManager {
             const dy = drag.y0 - e.clientY;
             const v = Math.max(0, Math.min(100, drag.v0 + dy * 0.35));
             this.state.audioLocal.volume = v;
+            // Clears global mute in settings; backend re-applies per-file playlist mute if needed.
+            if (v > 0) this.state.audioLocal.muted = false;
             applyLocalToUi();
             scheduleAudioPost();
         });

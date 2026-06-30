@@ -65,6 +65,7 @@ class PlaylistManager:
         self._playback_mute_lock = Lock()
         self._playback_item_muted = False
         self._playback_profile_muted = False
+        self._playback_current_media_key: Optional[str] = None
         self._audio_route_applied_for_play = False
 
     def set_slideshow_crash_callback(self, callback: Optional[Callable[[], None]]) -> None:
@@ -362,11 +363,70 @@ class PlaylistManager:
             self._playback_item_muted = bool(item_muted)
             self._playback_profile_muted = bool(profile_muted)
 
+    def _fresh_playback_mute_flags(self) -> tuple[bool, bool]:
+        """Current per-file/profile mute flags (refresh per-file from DB when possible)."""
+        with self._playback_mute_lock:
+            profile_muted = self._playback_profile_muted
+            key = self._playback_current_media_key
+            cached_item = self._playback_item_muted
+        item_muted = cached_item
+        pid = self._active_playlist_id
+        if pid and key:
+            try:
+                from ..models import PlaylistFiles
+
+                with self._app_context():
+                    row = (
+                        self.db_session.query(PlaylistFiles)
+                        .filter_by(playlist_id=int(pid), file_name=str(key))
+                        .first()
+                    )
+                    if row is not None:
+                        item_muted = bool(getattr(row, "muted", False))
+            except Exception:
+                item_muted = cached_item
+        with self._playback_mute_lock:
+            self._playback_item_muted = bool(item_muted)
+        return bool(item_muted), bool(profile_muted)
+
+    def _maybe_clear_global_mute_on_item_start(
+        self, *, item_muted: bool, profile_muted: bool
+    ) -> None:
+        """Global dashboard mute is per-item; unmuted playlist files should not inherit it."""
+        if item_muted or profile_muted:
+            return
+        svc = self._settings_service
+        if not svc:
+            return
+        try:
+            st = svc.load_settings()
+            if not bool(st.get("mute", False)):
+                return
+            svc.set_master_audio(muted=False)
+        except Exception:
+            pass
+
+    def try_clear_global_mute_on_volume(self, volume_percent: int | None) -> None:
+        """Volume knob clears global mute only (not per-file playlist mute)."""
+        if volume_percent is None or int(volume_percent) <= 0:
+            return
+        item_muted, profile_muted = self._fresh_playback_mute_flags()
+        if item_muted or profile_muted:
+            return
+        svc = self._settings_service
+        if not svc:
+            return
+        try:
+            st = svc.load_settings()
+            if not bool(st.get("mute", False)):
+                return
+            svc.set_master_audio(muted=False)
+        except Exception:
+            pass
+
     def reapply_effective_mute_to_mpv(self) -> None:
         """Re-apply playlist/profile/global mute after volume API may have cleared mpv mute."""
-        with self._playback_mute_lock:
-            item_muted = self._playback_item_muted
-            profile_muted = self._playback_profile_muted
+        item_muted, profile_muted = self._fresh_playback_mute_flags()
         muted = self._effective_playback_muted(
             item_muted=item_muted,
             profile_muted=profile_muted,
@@ -398,6 +458,29 @@ class PlaylistManager:
                     item["muted"] = bool(getattr(row, "muted", False))
         except Exception:
             pass
+
+    def _on_playlist_item_start(
+        self,
+        playlist_id: int,
+        item: Dict[str, Any],
+        *,
+        profile_muted: bool,
+    ) -> None:
+        """Shared hook when a playlist item becomes active."""
+        self._refresh_item_mute_from_db(playlist_id, item)
+        media_key = str(item.get("key") or item.get("path") or "")
+        with self._playback_mute_lock:
+            self._playback_current_media_key = media_key or None
+        item_muted_flag = bool(item.get("muted", False))
+        self._set_playback_mute_context(
+            item_muted=item_muted_flag,
+            profile_muted=profile_muted,
+        )
+        self._maybe_clear_global_mute_on_item_start(
+            item_muted=item_muted_flag,
+            profile_muted=profile_muted,
+        )
+        self._publish_current_media(playlist_id, item)
 
     def _media_label_for_file_name(self, file_name: str) -> str:
         """Human-readable label for a playlist file entry (local name or external title)."""
@@ -3386,7 +3469,9 @@ class PlaylistManager:
                     item_index = ordered_indices[pos]
                     item = items[item_index]
                     self._set_loop_position(item_index, len(items))
-                    self._publish_current_media(playlist_id, item)
+                    self._on_playlist_item_start(
+                        playlist_id, item, profile_muted=profile_muted
+                    )
                     self._apply_item_mute_property(item, profile_muted=profile_muted)
                     self._set_last_good_playback(
                         playlist_id,
@@ -3571,8 +3656,9 @@ class PlaylistManager:
                     is_video = item["is_video"]
                     is_audio = bool(item.get("is_audio"))
                     media_key = str(item.get("key") or path)
-                    self._refresh_item_mute_from_db(playlist_id, item)
-                    self._publish_current_media(playlist_id, item)
+                    self._on_playlist_item_start(
+                        playlist_id, item, profile_muted=profile_muted
+                    )
                     self.logger.info(
                         "Playlist item starting",
                         extra={

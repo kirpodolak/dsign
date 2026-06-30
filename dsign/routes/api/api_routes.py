@@ -570,8 +570,9 @@ def init_api_routes(api_bp, services):
                     {"command": ["set_property", "mute", "yes" if bool(muted) else "no"]},
                     timeout=2.0,
                 )
-            # Volume/mute API must not override per-file playlist mute.
             pm = getattr(playback_service, "_playlist_manager", None) if playback_service else None
+            if pm is not None and volume_percent is not None and hasattr(pm, "try_clear_global_mute_on_volume"):
+                pm.try_clear_global_mute_on_volume(volume_percent)
             if pm is not None and hasattr(pm, "reapply_effective_mute_to_mpv"):
                 pm.reapply_effective_mute_to_mpv()
         except Exception:
