@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# Manage DSIGN_API_TOKEN for GET /api/health (Bearer auth).
+set -euo pipefail
+
+API_ENV="${DSIGN_API_ENV:-/etc/dsign/api.env}"
+DSIGN_USER="${DSIGN_USER:-dsign}"
+SIGNAGE_UNIT="${DSIGN_SIGNAGE_UNIT:-digital-signage.service}"
+API_URL="${DSIGN_HEALTH_URL:-http://127.0.0.1:5000/api/health}"
+
+log() { echo "dsign-api-token: $*" >&2; }
+
+require_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    log "run as root: sudo dsign-api-token $*"
+    exit 1
+  fi
+}
+
+read_token() {
+  if [ ! -f "$API_ENV" ]; then
+    return 1
+  fi
+  local line
+  line="$(grep -E '^[[:space:]]*DSIGN_API_TOKEN=' "$API_ENV" 2>/dev/null | tail -n 1 || true)"
+  line="${line#DSIGN_API_TOKEN=}"
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  if [ -z "$line" ]; then
+    return 1
+  fi
+  printf '%s' "$line"
+}
+
+write_token() {
+  local token="$1"
+  local tmp dir
+  dir="$(dirname "$API_ENV")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "${dir}/.api.env.XXXXXX")"
+  chmod 600 "$tmp"
+  chown "${DSIGN_USER}:${DSIGN_USER}" "$tmp"
+  printf 'DSIGN_API_TOKEN=%s\n' "$token" >"$tmp"
+  chown "${DSIGN_USER}:${DSIGN_USER}" "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$API_ENV"
+  chown "${DSIGN_USER}:${DSIGN_USER}" "$API_ENV"
+  chmod 600 "$API_ENV"
+}
+
+generate_token() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32
+    return
+  fi
+  if [ -r /dev/urandom ]; then
+    tr -dc 'a-f0-9' </dev/urandom | head -c 64
+    echo
+    return
+  fi
+  log "openssl or /dev/urandom required to generate a token"
+  exit 1
+}
+
+restart_signage_if_active() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+  if systemctl is-active --quiet "$SIGNAGE_UNIT" 2>/dev/null; then
+    log "restarting $SIGNAGE_UNIT"
+    systemctl restart "$SIGNAGE_UNIT"
+  fi
+}
+
+cmd_install() {
+  require_root install
+  local quiet=0 token
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -q|--quiet) quiet=1 ;;
+      -h|--help)
+        echo "Usage: dsign-api-token install [-q|--quiet]"
+        exit 0
+        ;;
+      *)
+        log "unknown option: $1"
+        exit 2
+        ;;
+    esac
+    shift
+  done
+
+  if token="$(read_token 2>/dev/null)"; then
+    [ "$quiet" -eq 0 ] && log "token already exists at $API_ENV (use: sudo dsign-api-token rotate)"
+    return 0
+  fi
+
+  token="$(generate_token)"
+  write_token "$token"
+  restart_signage_if_active
+
+  if [ "$quiet" -eq 0 ]; then
+    log "created $API_ENV"
+    echo "DSIGN_API_TOKEN=$token"
+    echo
+    echo "Save this token for monitoring. Test:"
+    echo "  curl -s -H \"Authorization: Bearer $token\" $API_URL | jq .healthy"
+  fi
+}
+
+cmd_rotate() {
+  require_root rotate
+  local yes=0 token
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -y|--yes) yes=1 ;;
+      -h|--help)
+        echo "Usage: dsign-api-token rotate [-y|--yes]"
+        exit 0
+        ;;
+      *)
+        log "unknown option: $1"
+        exit 2
+        ;;
+    esac
+    shift
+  done
+
+  if [ "$yes" -ne 1 ]; then
+    echo -n "Replace API token in $API_ENV? Old token will stop working. [y/N] " >&2
+    local answer
+    read -r answer || answer=""
+    case "${answer,,}" in
+      y|yes) ;;
+      *)
+        log "cancelled"
+        exit 0
+        ;;
+    esac
+  fi
+
+  token="$(generate_token)"
+  write_token "$token"
+  restart_signage_if_active
+
+  log "token rotated"
+  echo "DSIGN_API_TOKEN=$token"
+  echo
+  echo "Update monitoring scripts with the new token. Test:"
+  echo "  curl -s -H \"Authorization: Bearer $token\" $API_URL | jq .healthy"
+}
+
+cmd_show() {
+  require_root show
+  local token
+  if ! token="$(read_token)"; then
+    log "no token in $API_ENV — run: sudo dsign-api-token install"
+    exit 1
+  fi
+  echo "DSIGN_API_TOKEN=$token"
+}
+
+cmd_status() {
+  local token=""
+  echo "api_env: $API_ENV"
+  if [ -f "$API_ENV" ]; then
+    ls -la "$API_ENV"
+    if token="$(read_token 2>/dev/null)"; then
+      echo "token: set (${#token} chars)"
+    else
+      echo "token: missing or empty"
+    fi
+  else
+    echo "token: file missing (run: sudo dsign-api-token install)"
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl show "$SIGNAGE_UNIT" -p Environment --value 2>/dev/null | tr ' ' '\n' | grep -q '^DSIGN_API_TOKEN='; then
+      echo "service_env: DSIGN_API_TOKEN loaded"
+    else
+      echo "service_env: DSIGN_API_TOKEN not visible (restart $SIGNAGE_UNIT after install/rotate)"
+    fi
+    systemctl is-active "$SIGNAGE_UNIT" 2>/dev/null | sed 's/^/signage: /' || true
+  fi
+
+  if [ -n "$token" ]; then
+    echo "test: curl -s -H \"Authorization: Bearer <token>\" $API_URL | jq .healthy"
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+Usage: sudo dsign-api-token <command>
+
+Commands:
+  install [-q]   Create /etc/dsign/api.env if missing (safe for reinstall)
+  rotate [-y]    Generate a new token (invalidates the old one)
+  show           Print current token (root only)
+  status         File/service status without printing the token
+
+Environment:
+  DSIGN_API_ENV, DSIGN_HEALTH_URL, DSIGN_SIGNAGE_UNIT
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+  shift || true
+  case "$cmd" in
+    install) cmd_install "$@" ;;
+    rotate) cmd_rotate "$@" ;;
+    show) cmd_show "$@" ;;
+    status) cmd_status "$@" ;;
+    -h|--help|help|"") usage ;;
+    *)
+      log "unknown command: $cmd"
+      usage
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"

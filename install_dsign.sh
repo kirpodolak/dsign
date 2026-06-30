@@ -138,6 +138,15 @@ if ! dsign-apply-install -q; then
     echo "WARN: dsign-apply-install finished with warnings — run: dsign-verify-install" >&2
 fi
 
+# API monitoring token (/etc/dsign/api.env) — create once, never overwrite on reinstall
+if command -v dsign-api-token >/dev/null 2>&1; then
+    dsign-api-token install -q
+else
+    install -m 0755 "$PROJECT_DIR/usr/local/bin/dsign-api-token" /usr/local/bin/dsign-api-token
+    sed -i 's/\r$//' /usr/local/bin/dsign-api-token
+    dsign-api-token install -q
+fi
+
 # Настройка прав на DRI устройства
 cat > /etc/udev/rules.d/99-dsign.rules <<EOL
 KERNEL=="card[0-9]*", GROUP="video", MODE="0660"
@@ -205,6 +214,7 @@ echo "База данных: $DB_FILE"
 echo "Администратор: admin/admin123"
 echo "Сервисы:"
 echo "  Веб-интерфейс: systemctl status digital-signage.service"
+echo "  API token:     sudo dsign-api-token show   # GET /api/health Bearer auth"
 if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
     echo "  Compositor:    systemctl status dsign-compositor.service"
     echo "  Logo (imv):    systemctl status dsign-logo.service"
