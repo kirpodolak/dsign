@@ -156,30 +156,42 @@ class PlaylistManager:
         else:
             self._sync_settings_volume_to_mpv()
 
+    def _resolved_audio_device_for_loadfile(self) -> Optional[str]:
+        """ALSA device string to pass into mpv loadfile per-file options."""
+        svc = self._settings_service
+        if not svc:
+            return None
+        try:
+            updates = svc.build_mpv_audio_updates(settings=svc.load_settings())
+            adev = str(updates.get("audio-device") or "").strip()
+            if adev and adev.lower() != "auto":
+                return adev
+        except Exception:
+            pass
+        return None
+
+    def _augment_per_file_audio_opts(
+        self, per_file_opts: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        opts = dict(per_file_opts or {})
+        adev = self._resolved_audio_device_for_loadfile()
+        if adev:
+            opts["audio-device"] = adev
+        return opts
+
     def _log_mpv_audio_state(self, *, event: str, settings_volume: Optional[float] = None) -> None:
         """Best-effort readback for field diagnostics."""
         try:
-            adev = self._mpv_manager._send_command(
-                {"command": ["get_property", "audio-device"]},
-                timeout=1.5,
-                max_attempts=1,
-            )
-            mute = self._mpv_manager._send_command(
-                {"command": ["get_property", "mute"]},
-                timeout=1.5,
-                max_attempts=1,
-            )
-            vol = self._mpv_manager._send_command(
-                {"command": ["get_property", "volume"]},
-                timeout=1.5,
-                max_attempts=1,
-            )
-            extra: Dict[str, Any] = {
-                "event": event,
-                "audio_device": (adev or {}).get("data"),
-                "mute": (mute or {}).get("data"),
-                "volume": (vol or {}).get("data"),
-            }
+            props = ("audio-device", "mute", "volume", "ao", "pause", "time-pos", "audio-codec-name", "aid")
+            snap: Dict[str, Any] = {}
+            for prop in props:
+                resp = self._mpv_manager._send_command(
+                    {"command": ["get_property", prop]},
+                    timeout=1.5,
+                    max_attempts=1,
+                )
+                snap[prop] = (resp or {}).get("data")
+            extra: Dict[str, Any] = {"event": event, **snap}
             if settings_volume is not None:
                 extra["settings_volume"] = settings_volume
             self.logger.warning("MPV audio state", extra=extra)
@@ -2021,6 +2033,7 @@ class PlaylistManager:
         When non-empty, pass `-1` as the insertion index placeholder and supply options as the 4th arg
         (mpv expects `MPV_FORMAT_NODE_MAP` with string values).
         """
+        per_file_opts = self._augment_per_file_audio_opts(per_file_opts)
         if not per_file_opts:
             return ["loadfile", url, mode]
 
@@ -2129,7 +2142,7 @@ class PlaylistManager:
                     extra={"event": "audio_demuxer_idle_timeout"},
                 )
                 return False
-        self._apply_post_loadfile_playback_props(muted=muted, rebind_audio=True)
+        self._apply_post_loadfile_playback_props(muted=muted, rebind_audio=False)
         return True
 
     def _set_playback_active_marker(self, active: bool) -> None:
