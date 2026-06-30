@@ -309,6 +309,9 @@ class PlaylistManager:
             pcm = self._alsa_pcm_status_hint()
             if pcm:
                 extra["alsa_pcm_status"] = pcm
+            with self._playback_mute_lock:
+                extra["item_muted"] = self._playback_item_muted
+                extra["profile_muted"] = self._playback_profile_muted
             self.logger.warning("MPV audio state", extra=extra)
         except Exception:
             pass
@@ -374,6 +377,25 @@ class PlaylistManager:
                 timeout=2.0,
                 max_attempts=1,
             )
+        except Exception:
+            pass
+
+    def _refresh_item_mute_from_db(self, playlist_id: int, item: Dict[str, Any]) -> None:
+        """Re-read per-file muted from DB (playlist editor may save while playback runs)."""
+        key = str(item.get("key") or "").strip()
+        if not key:
+            return
+        try:
+            from ..models import PlaylistFiles
+
+            with self._app_context():
+                row = (
+                    self.db_session.query(PlaylistFiles)
+                    .filter_by(playlist_id=int(playlist_id), file_name=key)
+                    .first()
+                )
+                if row is not None:
+                    item["muted"] = bool(getattr(row, "muted", False))
         except Exception:
             pass
 
@@ -3549,6 +3571,7 @@ class PlaylistManager:
                     is_video = item["is_video"]
                     is_audio = bool(item.get("is_audio"))
                     media_key = str(item.get("key") or path)
+                    self._refresh_item_mute_from_db(playlist_id, item)
                     self._publish_current_media(playlist_id, item)
                     self.logger.info(
                         "Playlist item starting",
@@ -3559,6 +3582,7 @@ class PlaylistManager:
                             "media_key": media_key,
                             "is_video": is_video,
                             "is_audio": is_audio,
+                            "item_muted": bool(item.get("muted", False)),
                         },
                     )
                     raw_duration = item.get("duration")
