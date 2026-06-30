@@ -62,6 +62,9 @@ class PlaylistManager:
         self._last_good_playlist_id: Optional[int] = None
         self._status_snapshot_cache: Dict[str, Any] = {}
         self._status_snapshot_ts: float = 0.0
+        self._playback_mute_lock = Lock()
+        self._playback_item_muted = False
+        self._playback_profile_muted = False
         self._audio_route_applied_for_play = False
 
     def set_slideshow_crash_callback(self, callback: Optional[Callable[[], None]]) -> None:
@@ -351,6 +354,29 @@ class PlaylistManager:
             pass
         return g or bool(profile_muted) or bool(item_muted)
 
+    def _set_playback_mute_context(self, *, item_muted: bool, profile_muted: bool) -> None:
+        with self._playback_mute_lock:
+            self._playback_item_muted = bool(item_muted)
+            self._playback_profile_muted = bool(profile_muted)
+
+    def reapply_effective_mute_to_mpv(self) -> None:
+        """Re-apply playlist/profile/global mute after volume API may have cleared mpv mute."""
+        with self._playback_mute_lock:
+            item_muted = self._playback_item_muted
+            profile_muted = self._playback_profile_muted
+        muted = self._effective_playback_muted(
+            item_muted=item_muted,
+            profile_muted=profile_muted,
+        )
+        try:
+            self._mpv_manager._send_command(
+                {"command": ["set_property", "mute", "yes" if muted else "no"]},
+                timeout=2.0,
+                max_attempts=1,
+            )
+        except Exception:
+            pass
+
     def _media_label_for_file_name(self, file_name: str) -> str:
         """Human-readable label for a playlist file entry (local name or external title)."""
         name = str(file_name or "").strip()
@@ -514,8 +540,10 @@ class PlaylistManager:
         return dest
 
     def _apply_item_mute_property(self, item: Dict[str, Any], *, profile_muted: bool) -> None:
+        item_muted = bool(item.get("muted", False))
+        self._set_playback_mute_context(item_muted=item_muted, profile_muted=profile_muted)
         muted = self._effective_playback_muted(
-            item_muted=bool(item.get("muted", False)),
+            item_muted=item_muted,
             profile_muted=profile_muted,
         )
         try:
@@ -2208,8 +2236,20 @@ class PlaylistManager:
             return 45.0
         return 20.0
 
-    def _apply_post_loadfile_playback_props(self, *, muted: bool, rebind_audio: bool = False) -> None:
+    def _apply_post_loadfile_playback_props(
+        self,
+        *,
+        muted: bool,
+        item_muted: Optional[bool] = None,
+        profile_muted: Optional[bool] = None,
+        rebind_audio: bool = False,
+    ) -> None:
         """Pause/volume/mute after the demuxer is ready (mpv may ignore IPC while opening ytdl)."""
+        if item_muted is not None:
+            self._set_playback_mute_context(
+                item_muted=bool(item_muted),
+                profile_muted=bool(profile_muted),
+            )
         try:
             self._mpv_manager._send_command(
                 {"command": ["set_property", "pause", "no"]},
@@ -2239,7 +2279,14 @@ class PlaylistManager:
         self._ensure_mpv_alsa_pcm_open()
         self._log_mpv_audio_state(event="post_loadfile_audio_state")
 
-    def _prepare_local_audio_after_loadfile(self, *, muted: bool, skip_load: bool) -> bool:
+    def _prepare_local_audio_after_loadfile(
+        self,
+        *,
+        muted: bool,
+        skip_load: bool,
+        item_muted: Optional[bool] = None,
+        profile_muted: Optional[bool] = None,
+    ) -> bool:
         """
         After audio loadfile, wait until the demuxer opens before EOF polling.
         Cycle 2+ reloads can report idle-active briefly; without this wait the loop
@@ -2256,7 +2303,12 @@ class PlaylistManager:
                     extra={"event": "audio_demuxer_idle_timeout"},
                 )
                 return False
-        self._apply_post_loadfile_playback_props(muted=muted, rebind_audio=False)
+        self._apply_post_loadfile_playback_props(
+            muted=muted,
+            item_muted=item_muted,
+            profile_muted=profile_muted,
+            rebind_audio=False,
+        )
         return True
 
     def _set_playback_active_marker(self, active: bool) -> None:
@@ -3172,7 +3224,9 @@ class PlaylistManager:
                 muted=self._effective_playback_muted(
                     item_muted=bool(item.get("muted", False)),
                     profile_muted=profile_muted,
-                )
+                ),
+                item_muted=bool(item.get("muted", False)),
+                profile_muted=profile_muted,
             )
             self._apply_item_mute_property(item, profile_muted=profile_muted)
             self._set_last_good_playback(playlist_id, start_index, media_key, len(items))
@@ -3201,7 +3255,9 @@ class PlaylistManager:
                 muted=self._effective_playback_muted(
                     item_muted=bool(first_item.get("muted", False)),
                     profile_muted=profile_muted,
-                )
+                ),
+                item_muted=bool(first_item.get("muted", False)),
+                profile_muted=profile_muted,
             )
             self._apply_item_mute_property(first_item, profile_muted=profile_muted)
             self._set_last_good_playback(
@@ -3762,7 +3818,11 @@ class PlaylistManager:
                                     self._stop_event.wait(timeout=5.0)
                                 continue
                             stream_ready = True
-                            self._apply_post_loadfile_playback_props(muted=muted)
+                            self._apply_post_loadfile_playback_props(
+                                muted=muted,
+                                item_muted=bool(item.get("muted", False)),
+                                profile_muted=profile_muted,
+                            )
                             if is_network:
                                 self._record_ytdl_open_success()
                                 self._set_last_good_playback(
@@ -3772,7 +3832,11 @@ class PlaylistManager:
                                     len(items),
                                 )
                         elif not skip_load:
-                            self._apply_post_loadfile_playback_props(muted=muted)
+                            self._apply_post_loadfile_playback_props(
+                                muted=muted,
+                                item_muted=bool(item.get("muted", False)),
+                                profile_muted=profile_muted,
+                            )
                         self._schedule_content_cache_prefetch(items, item_index)
                         if not self._wait_mpv_video_end(
                             playlist_id,
@@ -3793,7 +3857,10 @@ class PlaylistManager:
                             pass
                         try:
                             if not self._prepare_local_audio_after_loadfile(
-                                muted=muted, skip_load=skip_load
+                                muted=muted,
+                                skip_load=skip_load,
+                                item_muted=bool(item.get("muted", False)),
+                                profile_muted=profile_muted,
                             ):
                                 if not skip_load:
                                     try:
@@ -4193,7 +4260,11 @@ class PlaylistManager:
                         item_muted=bool(first.get("muted", False)),
                         profile_muted=profile_muted,
                     )
-                    self._apply_post_loadfile_playback_props(muted=first_muted)
+                    self._apply_post_loadfile_playback_props(
+                        muted=first_muted,
+                        item_muted=bool(first.get("muted", False)),
+                        profile_muted=profile_muted,
+                    )
             except Exception:
                 if first_is_network:
                     try:
