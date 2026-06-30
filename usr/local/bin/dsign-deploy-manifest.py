@@ -283,6 +283,17 @@ def _patch_digital_signage_unit(dest: Path) -> None:
     dest.write_text(text, encoding="utf-8")
 
 
+def _card_has_connected_output(card_path: str) -> bool:
+    base = Path(card_path).name
+    for status in Path("/sys/class/drm").glob(f"{base}-*/status"):
+        try:
+            if status.read_text(encoding="utf-8").strip() == "connected":
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _connected_dri_card() -> str:
     for card in sorted(Path("/dev/dri").glob("card[0-9]*")):
         base = card.name
@@ -303,9 +314,17 @@ def _patch_wayland_env(dest: Path) -> None:
     dri = _connected_dri_card()
     lines = dest.read_text(encoding="utf-8").splitlines()
     out: List[str] = []
+    current_dri = ""
     for line in lines:
         if line.startswith("WLR_DRM_DEVICES="):
-            out.append(f"WLR_DRM_DEVICES={dri}")
+            current_dri = line.split("=", 1)[1].strip()
+            break
+    use_dri = dri
+    if current_dri and Path(current_dri).exists() and _card_has_connected_output(current_dri):
+        use_dri = current_dri
+    for line in lines:
+        if line.startswith("WLR_DRM_DEVICES="):
+            out.append(f"WLR_DRM_DEVICES={use_dri}")
         elif line.startswith("WLR_RENDERER=") and "gles2" in line:
             out.append("WLR_RENDERER=pixman")
         else:

@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# Pick the DRM card with a connected monitor (DP/HDMI) and update wayland.env.
+# Run before labwc (dsign-compositor ExecStartPre) or manually: sudo dsign-sync-wayland-drm
+# After manual copy from Windows: sudo sed -i 's/\r$//' /usr/local/bin/dsign-sync-wayland-drm
+set -u
+
+WL_ENV="${DSIGN_WAYLAND_ENV:-/var/lib/dsign/config/wayland.env}"
+LOG_TAG="dsign-sync-wayland-drm"
+
+strip_crlf() {
+  printf '%s' "${1:-}" | tr -d '\r'
+}
+
+drm_connector_status() {
+  local st
+  st="$(cat "$1" 2>/dev/null | tr -d '\r\n')"
+  printf '%s' "${st:-unknown}"
+}
+
+card_has_connected_output() {
+  local card="$1" base st
+  [ -n "$card" ] || return 1
+  base="$(basename "$card")"
+  for st in /sys/class/drm/"${base}"-*/status; do
+    [ -r "$st" ] || continue
+    if [ "$(drm_connector_status "$st")" = "connected" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+connected_connectors_for_card() {
+  local card="$1" base st conn
+  [ -n "$card" ] || return 0
+  base="$(basename "$card")"
+  for st in /sys/class/drm/"${base}"-*/status; do
+    [ -r "$st" ] || continue
+    if [ "$(drm_connector_status "$st")" = "connected" ]; then
+      conn="${st%/status}"
+      conn="${conn##*/}"
+      printf '%s ' "$conn"
+    fi
+  done
+}
+
+pick_connected_dri_card() {
+  local card
+  for card in /dev/dri/card[0-9]*; do
+    [ -e "$card" ] || continue
+    if card_has_connected_output "$card"; then
+      echo "$card"
+      return 0
+    fi
+  done
+  for card in /dev/dri/card[0-9]*; do
+    [ -e "$card" ] && echo "$card" && return 0
+  done
+  return 1
+}
+
+read_wayland_key() {
+  local key="$1" line val
+  [ -r "$WL_ENV" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(strip_crlf "$line")"
+    case "$line" in
+      "${key}"=*) val="${line#*=}"; printf '%s' "$(strip_crlf "$val")"; return 0 ;;
+    esac
+  done <"$WL_ENV"
+  return 1
+}
+
+write_wayland_key() {
+  local key="$1" val="$2" line found=0 out=()
+  val="$(strip_crlf "$val")"
+  if [ ! -f "$WL_ENV" ]; then
+    echo "ERROR: $WL_ENV missing" >&2
+    return 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(strip_crlf "$line")"
+    case "$line" in
+      "${key}"=*)
+        out+=("${key}=${val}")
+        found=1
+        ;;
+      *) out+=("$line") ;;
+    esac
+  done <"$WL_ENV"
+  if [ "$found" -eq 0 ]; then
+    out+=("${key}=${val}")
+  fi
+  printf '%s\n' "${out[@]}" >"$WL_ENV"
+}
+
+maybe_fix_gles2_renderer() {
+  local renderer
+  renderer="$(read_wayland_key WLR_RENDERER || true)"
+  [ "$renderer" = "gles2" ] || return 0
+  # Intel DP: gles2 often crashes labwc (swapchain); pixman is stable.
+  write_wayland_key WLR_RENDERER pixman
+  echo "$LOG_TAG: WLR_RENDERER gles2 -> pixman (Intel-safe default)" >&2
+}
+
+main() {
+  local current suggested conns changed=0
+  if [ ! -f "$WL_ENV" ]; then
+    echo "$LOG_TAG: skip — $WL_ENV not found" >&2
+    exit 0
+  fi
+
+  suggested="$(pick_connected_dri_card || echo /dev/dri/card0)"
+  current="$(read_wayland_key WLR_DRM_DEVICES || true)"
+  current="${current:-}"
+
+  if [ -z "$current" ] || [ ! -e "$current" ] || ! card_has_connected_output "$current"; then
+    if [ "$current" != "$suggested" ]; then
+      write_wayland_key WLR_DRM_DEVICES "$suggested"
+      changed=1
+      conns="$(connected_connectors_for_card "$suggested")"
+      echo "$LOG_TAG: WLR_DRM_DEVICES ${current:-<unset>} -> $suggested (${conns:-no sysfs connectors})" >&2
+    fi
+  else
+    conns="$(connected_connectors_for_card "$current")"
+    echo "$LOG_TAG: keep WLR_DRM_DEVICES=$current (${conns:-connected})" >&2
+  fi
+
+  maybe_fix_gles2_renderer
+
+  exit 0
+}
+
+main "$@"

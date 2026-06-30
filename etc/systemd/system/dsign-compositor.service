@@ -14,6 +14,7 @@ EnvironmentFile=-/var/lib/dsign/config/wayland.env
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=WLR_BACKENDS=drm
 Environment=LIBSEAT_BACKEND=seatd
+ExecStartPre=/bin/bash /usr/local/bin/dsign-sync-wayland-drm
 ExecStartPre=/bin/mkdir -p /run/user/1000 /var/lib/dsign/labwc
 ExecStartPre=/bin/chown dsign:dsign /run/user/1000
 ExecStartPre=/bin/chmod 700 /run/user/1000
