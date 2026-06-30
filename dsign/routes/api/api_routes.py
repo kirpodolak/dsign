@@ -1077,24 +1077,35 @@ def init_api_routes(api_bp, services):
             units["logo"] = PlaybackConstants.LOGO_SYSTEMD_UNIT
         return units
 
-    def _compute_overall_healthy(
+    def _is_audio_playback_path(path: object) -> bool:
+        if not path:
+            return False
+        ext = Path(str(path)).suffix.lower()
+        return ext in PlaybackConstants.AUDIO_EXTENSIONS
+
+    def _evaluate_health(
         playback: dict,
         display: dict,
         services: dict[str, dict],
-    ) -> bool:
+    ) -> tuple[bool, list[str]]:
+        issues: list[str] = []
         if not playback.get("socket_ok"):
-            return False
+            issues.append("mpv_socket_unavailable")
         if not display.get("connected"):
-            return False
+            issues.append("display_not_connected")
         signage = services.get("digital-signage") or {}
         if signage.get("active_state") != "active":
-            return False
+            issues.append("digital_signage_not_active")
         mpv = services.get("mpv") or {}
         if mpv.get("active_state") != "active":
-            return False
-        if playback.get("playback_session_active") and playback.get("vo_configured") is False:
-            return False
-        return True
+            issues.append("mpv_not_active")
+        if (
+            playback.get("playback_session_active")
+            and playback.get("vo_configured") is False
+            and not _is_audio_playback_path(playback.get("path"))
+        ):
+            issues.append("vo_not_configured_during_playback")
+        return (len(issues) == 0, issues)
 
     @api_bp.route('/health', methods=['GET'])
     @api_session_or_token_required
@@ -1138,9 +1149,12 @@ def init_api_routes(api_bp, services):
             if not isinstance(network_health, dict):
                 network_health = {}
 
+            healthy, health_issues = _evaluate_health(playback, display, services_payload)
+
             payload = {
                 "success": True,
-                "healthy": _compute_overall_healthy(playback, display, services_payload),
+                "healthy": healthy,
+                "health_issues": health_issues,
                 "timestamp": int(now),
                 "display_backend": PlaybackConstants.display_backend(),
                 "playback": playback,
