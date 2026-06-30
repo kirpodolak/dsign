@@ -67,6 +67,18 @@ echo "--- ALSA cards ---"
 cat /proc/asound/cards 2>/dev/null | sed 's/^/  /' || echo "  (no /proc/asound/cards)"
 echo
 
+echo "--- aplay -l (device N often = pcmNp) ---"
+aplay -l 2>/dev/null | sed 's/^/  /' || echo "  (aplay -l failed)"
+echo
+
+echo "--- ELD (monitor name per digital port) ---"
+for f in /proc/asound/card${CARD}/eld#*; do
+  [ -f "$f" ] || continue
+  echo "  $(basename "$f"):"
+  grep -E 'monitor_name|connection_type|eld_valid' "$f" 2>/dev/null | sed 's/^/    /' || true
+done
+echo
+
 echo "--- aplay HDMI/DP devices (PCH) ---"
 aplay -L 2>/dev/null | awk '
 /^hdmi:CARD=PCH,DEV=/ { dev=$0; getline; print "  " dev; print "    " $0 }
@@ -80,9 +92,9 @@ if [ -d "/proc/asound/card${CARD}" ]; then
     pcm="$(echo "$st" | sed -n 's|.*/card[0-9]*/\(pcm[^/]*\)/.*|\1|p')"
     state="$(grep '^state:' "$st" 2>/dev/null | awk '{print $2}' || echo unknown)"
     echo "  $pcm: $state"
-    if [ -f "${st%/status}/hw_params" ]; then
-      hp="$(head -1 "${st%/status}/hw_params" 2>/dev/null || true)"
-      [ -n "$hp" ] && echo "    hw_params: $hp"
+    if [ "$state" = "RUNNING" ] || [ "$state" = "PREPARED" ]; then
+      hp="$(cat "${st%/status}/hw_params" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g' || true)"
+      [ -n "$hp" ] && [ "$hp" != "closed" ] && echo "    hw_params: $hp"
     fi
   done
 else
@@ -130,7 +142,11 @@ if [ -S "$SOCK" ]; then
       echo "  => mpv ao=alsa did not open the hardware sink (software decode only)."
       echo "  => deploy latest dsign fix (alsa_pcm_force_open) or restart mpv after setting audio-device."
     else
-      echo "  OK: mpv decodes and at least one ALSA PCM is RUNNING."
+      run_pcm="$(grep -l '^state: RUNNING' /proc/asound/card${CARD}/pcm*p/sub0/status 2>/dev/null | sed 's|.*/\(pcm[^/]*\)/.*|\1|' | tr '\n' ' ')"
+      echo "  mpv decodes and ALSA PCM is active: ${run_pcm:-?}"
+      echo "  audio-device=$(mpv_prop audio-device 2>/dev/null || echo '?')"
+      echo "  If still silent: wrong physical jack (try DEV=0..3) OR monitor DP audio off."
+      echo "  Compare: stop playlist, run speaker-test on DEV=0 — same pcm RUNNING + audible?"
     fi
   else
     echo "  mpv idle or no audio track — start a playlist with sound, then re-run."

@@ -197,6 +197,20 @@ class PlaylistManager:
                         state = line.split(":", 1)[1].strip()
                         break
                 parts.append(f"{pcm}:{state}")
+                if state in ("RUNNING", "PREPARED"):
+                    hp_path = st.parent / "hw_params"
+                    try:
+                        hp = hp_path.read_text(encoding="utf-8", errors="ignore").strip()
+                        if hp and hp != "closed":
+                            rate_m = re.search(r"rate:\s*(\d+)", hp)
+                            fmt_m = re.search(r"format:\s*(\S+)", hp)
+                            if rate_m or fmt_m:
+                                parts.append(
+                                    f"{pcm}_hw={fmt_m.group(1) if fmt_m else '?'}"
+                                    f"@{rate_m.group(1) if rate_m else '?'}Hz"
+                                )
+                    except Exception:
+                        pass
             return ";".join(parts) if parts else None
         except Exception:
             return None
