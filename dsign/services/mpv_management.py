@@ -1514,6 +1514,82 @@ class MPVManager:
         )
         return success
 
+    def rebind_audio_output(
+        self, ao: str = "alsa", audio_device: str = "", *, cycle_ao: bool = True
+    ) -> bool:
+        """
+        Apply ao/audio-device. Optionally cycle ao when mpv is idle (never during playback —
+        touching ``ao`` mid-stream silences output even if audio-device reads back correctly).
+        """
+        ao_val = (ao or "alsa").strip() or "alsa"
+        adev = (audio_device or "").strip()
+        try:
+            if not cycle_ao:
+                if adev and adev.lower() != "auto":
+                    resp = self._send_command(
+                        {"command": ["set_property", "audio-device", adev]},
+                        timeout=2.0,
+                        max_attempts=1,
+                    )
+                    return bool(resp and resp.get("error") == "success")
+                return True
+
+            props: Dict[str, Any] = {"ao": ao_val}
+            if adev and adev.lower() != "auto":
+                props["audio-device"] = adev
+            ok = self.update_settings(props)
+            idle_raw = self.get_property_light("idle-active", timeout=1.0)
+            if idle_raw is True:
+                self._send_command(
+                    {"command": ["set_property", "ao", ""]},
+                    timeout=2.0,
+                    max_attempts=1,
+                )
+                self._send_command(
+                    {"command": ["set_property", "ao", ao_val]},
+                    timeout=2.0,
+                    max_attempts=1,
+                )
+                if adev and adev.lower() != "auto":
+                    resp = self._send_command(
+                        {"command": ["set_property", "audio-device", adev]},
+                        timeout=2.0,
+                        max_attempts=1,
+                    )
+                    ok = ok and bool(resp and resp.get("error") == "success")
+            return ok
+        except Exception:
+            return False
+
+    def force_alsa_ao_open(self, ao: str = "alsa", audio_device: str = "") -> bool:
+        """
+        Re-open ALSA when mpv decodes audio but /proc/asound PCM stays closed.
+        Safe to call during playback — there is no audible output to interrupt yet.
+        """
+        ao_val = (ao or "alsa").strip() or "alsa"
+        adev = (audio_device or "").strip()
+        try:
+            self._send_command(
+                {"command": ["set_property", "ao", ""]},
+                timeout=2.0,
+                max_attempts=1,
+            )
+            self._send_command(
+                {"command": ["set_property", "ao", ao_val]},
+                timeout=2.0,
+                max_attempts=1,
+            )
+            if adev and adev.lower() != "auto":
+                resp = self._send_command(
+                    {"command": ["set_property", "audio-device", adev]},
+                    timeout=2.0,
+                    max_attempts=1,
+                )
+                return bool(resp and resp.get("error") == "success")
+            return True
+        except Exception:
+            return False
+
     def verify_settings_support(self) -> Dict[str, bool]:
         """Проверка поддерживаемых настроек"""
         self._log_operation("VerifySettings", "started")
