@@ -1514,9 +1514,12 @@ class MPVManager:
         )
         return success
 
-    def rebind_audio_output(self, ao: str = "alsa", audio_device: str = "") -> bool:
+    def rebind_audio_output(
+        self, ao: str = "alsa", audio_device: str = "", *, cycle_ao: bool = True
+    ) -> bool:
         """
-        Apply ao/audio-device and cycle ao so mpv reopens ALSA (idle ``auto`` may stay silent).
+        Apply ao/audio-device. Optionally cycle ao when mpv is idle (never during playback —
+        ``ao=""`` mid-stream silences output even if audio-device looks correct).
         """
         ao_val = (ao or "alsa").strip() or "alsa"
         adev = (audio_device or "").strip()
@@ -1525,16 +1528,19 @@ class MPVManager:
             props["audio-device"] = adev
         ok = self.update_settings(props)
         try:
-            self._send_command(
-                {"command": ["set_property", "ao", ""]},
-                timeout=2.0,
-                max_attempts=1,
-            )
-            self._send_command(
-                {"command": ["set_property", "ao", ao_val]},
-                timeout=2.0,
-                max_attempts=1,
-            )
+            idle_raw = self.get_property_light("idle-active", timeout=1.0)
+            is_idle = idle_raw is True
+            if cycle_ao and is_idle:
+                self._send_command(
+                    {"command": ["set_property", "ao", ""]},
+                    timeout=2.0,
+                    max_attempts=1,
+                )
+                self._send_command(
+                    {"command": ["set_property", "ao", ao_val]},
+                    timeout=2.0,
+                    max_attempts=1,
+                )
             if adev and adev.lower() != "auto":
                 resp = self._send_command(
                     {"command": ["set_property", "audio-device", adev]},

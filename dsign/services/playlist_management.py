@@ -98,7 +98,7 @@ class PlaylistManager:
         except Exception:
             pass
 
-    def _sync_settings_audio_route_to_mpv(self) -> bool:
+    def _sync_settings_audio_route_to_mpv(self, *, cycle_ao: bool = True) -> bool:
         """Apply ao/audio-device from settings (expensive — can interrupt ALSA; call sparingly)."""
         svc = self._settings_service
         if not svc:
@@ -128,6 +128,7 @@ class PlaylistManager:
             self._mpv_manager.rebind_audio_output(
                 str(updates.get("ao") or "alsa"),
                 str(updates.get("audio-device") or ""),
+                cycle_ao=cycle_ao,
             )
             self.logger.warning(
                 "MPV audio route applied",
@@ -136,6 +137,7 @@ class PlaylistManager:
                     "route": str(route),
                     "ao": updates.get("ao"),
                     "audio_device": updates.get("audio-device"),
+                    "cycle_ao": cycle_ao,
                 },
             )
             return True
@@ -149,12 +151,12 @@ class PlaylistManager:
     def _prepare_mpv_audio_before_loadfile(self) -> None:
         """Bind ALSA output before open — mpv --audio-device=auto may pick a silent jack."""
         if not self._audio_route_applied_for_play:
-            if self._sync_settings_audio_route_to_mpv():
+            if self._sync_settings_audio_route_to_mpv(cycle_ao=True):
                 self._audio_route_applied_for_play = True
         else:
             self._sync_settings_volume_to_mpv()
 
-    def _log_mpv_audio_state(self, *, event: str) -> None:
+    def _log_mpv_audio_state(self, *, event: str, settings_volume: Optional[float] = None) -> None:
         """Best-effort readback for field diagnostics."""
         try:
             adev = self._mpv_manager._send_command(
@@ -172,15 +174,15 @@ class PlaylistManager:
                 timeout=1.5,
                 max_attempts=1,
             )
-            self.logger.warning(
-                "MPV audio state",
-                extra={
-                    "event": event,
-                    "audio_device": (adev or {}).get("data"),
-                    "mute": (mute or {}).get("data"),
-                    "volume": (vol or {}).get("data"),
-                },
-            )
+            extra: Dict[str, Any] = {
+                "event": event,
+                "audio_device": (adev or {}).get("data"),
+                "mute": (mute or {}).get("data"),
+                "volume": (vol or {}).get("data"),
+            }
+            if settings_volume is not None:
+                extra["settings_volume"] = settings_volume
+            self.logger.warning("MPV audio state", extra=extra)
         except Exception:
             pass
 
@@ -200,6 +202,7 @@ class PlaylistManager:
                 timeout=2.0,
                 max_attempts=1,
             )
+            self._log_mpv_audio_state(event="volume_synced", settings_volume=v)
         except Exception:
             pass
 
@@ -2091,7 +2094,7 @@ class PlaylistManager:
         except Exception:
             pass
         if rebind_audio or not self._audio_route_applied_for_play:
-            if self._sync_settings_audio_route_to_mpv():
+            if self._sync_settings_audio_route_to_mpv(cycle_ao=False):
                 self._audio_route_applied_for_play = True
         self._sync_settings_volume_to_mpv()
         try:

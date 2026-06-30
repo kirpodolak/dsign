@@ -488,11 +488,89 @@ class SettingsService:
             devices.append((dev, desc))
         return devices
 
+    def _read_drm_connected_connector(self) -> Optional[str]:
+        """Active DRM connector name (e.g. card0-DP-1) from sysfs."""
+        try:
+            drm_root = Path("/sys/class/drm")
+            if not drm_root.exists():
+                return None
+            connectors = [
+                p for p in drm_root.glob("card*-*")
+                if p.is_dir() and (p / "status").exists()
+            ]
+            for conn in sorted(connectors, key=lambda p: p.name):
+                try:
+                    status = (conn / "status").read_text(encoding="utf-8", errors="ignore").strip().lower()
+                except Exception:
+                    status = ""
+                if status == "connected":
+                    return conn.name
+        except Exception:
+            return None
+        return None
+
+    def _parse_pch_eld_endpoints(self) -> list[tuple[str, str, str]]:
+        """Return [(alsa_dev, monitor_name, conn_type), ...] for valid PCH ELD endpoints."""
+        card = self._pch_card_index()
+        if card is None:
+            return []
+        card_dir = Path(f"/proc/asound/card{card}")
+        if not card_dir.is_dir():
+            return []
+        out: list[tuple[str, str, str]] = []
+        for eld_path in sorted(card_dir.glob("eld#*")):
+            try:
+                text = eld_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            valid_m = re.search(r"eld_valid\s*\|\s*(\d+)", text)
+            if valid_m and valid_m.group(1).strip() != "1":
+                continue
+            monitor_m = re.search(r"monitor_name\s*\|\s*(.+)", text)
+            monitor = (monitor_m.group(1).strip() if monitor_m else "") or ""
+            conn_m = re.search(r"(?:conn_type|connection_type)\s*\|\s*(.+)", text, re.I)
+            conn = (conn_m.group(1).strip() if conn_m else "") or ""
+            eld_id = eld_path.name.replace("eld#", "", 1)
+            dev = eld_id.split(".", 1)[0].strip()
+            if dev.isdigit():
+                out.append((dev, monitor, conn))
+        return out
+
+    def _pch_active_display_audio_dev(self) -> Optional[str]:
+        """
+        ALSA DEV index for audio on the monitor behind the active DRM connector (DP or HDMI).
+        Intel HDA exposes DP audio as ``hdmi:CARD=PCH,DEV=N`` in aplay -L.
+        """
+        connector = self._read_drm_connected_connector() or ""
+        upper_conn = connector.upper()
+        want_dp = "DP-" in upper_conn or upper_conn.endswith("-DP")
+        want_hdmi = "HDMI" in upper_conn
+        elds = self._parse_pch_eld_endpoints()
+        aplay = self._parse_aplay_hdmi_pch_devices()
+        if elds:
+            if want_dp:
+                for dev, _monitor, conn in elds:
+                    cu = conn.upper()
+                    if "DP" in cu or "DISPLAYPORT" in cu:
+                        return dev
+            if want_hdmi:
+                for dev, _monitor, conn in elds:
+                    if "HDMI" in conn.upper():
+                        return dev
+            for dev, monitor, _conn in elds:
+                for adev, desc in aplay:
+                    if adev != dev:
+                        continue
+                    if monitor and (monitor.upper() in desc.upper() or desc.upper() in monitor.upper()):
+                        return dev
+            return elds[0][0]
+        return aplay[0][0] if aplay else None
+
     def _pch_hdmi_mpv_device(self, *, hdmi_dev: Optional[str] = None) -> Optional[str]:
         """
-        Intel HDA PCH hdmi endpoint for mpv.
+        Intel HDA PCH digital endpoint for mpv (HDMI or DisplayPort — same ALSA namespace).
 
-        Default DEV=0 (often the connected panel/DP path, e.g. M2766UPB). Override with
+        Picks the ALSA DEV behind the connected DRM output. Override with
         settings.json → mpv.audio-hdmi-dev or env DSIGN_ALSA_HDMI_DEV.
         """
         for candidate in (hdmi_dev, os.getenv("DSIGN_ALSA_HDMI_DEV")):
@@ -502,12 +580,21 @@ class SettingsService:
         devices = self._parse_aplay_hdmi_pch_devices()
         if not devices:
             return None
-        dev0, desc0 = devices[0]
+        pick = self._pch_active_display_audio_dev()
+        desc = ""
+        if pick is not None:
+            for dev, d in devices:
+                if dev == pick:
+                    desc = d
+                    break
+        else:
+            pick, desc = devices[0]
+        drm = self._read_drm_connected_connector()
         self._log_info(
-            "PCH default HDMI audio endpoint",
-            extra={"dev": dev0, "description": desc0},
+            "PCH active display audio endpoint",
+            extra={"dev": pick, "description": desc, "drm_connector": drm},
         )
-        return f"alsa/hdmi:CARD=PCH,DEV={dev0}"
+        return f"alsa/hdmi:CARD=PCH,DEV={pick}"
 
     def _pch_card_index(self) -> Optional[int]:
         try:
@@ -599,15 +686,7 @@ class SettingsService:
             return {"ao": "alsa", "audio-device": "alsa/hdmi:CARD=vc4hdmi0,DEV=0"}
         if r in ("dp", "displayport"):
             if pch_hdmi:
-                devices = self._parse_aplay_hdmi_pch_devices()
-                # Second digital endpoint, or first labeled HDMI if only one.
-                pick = None
-                if len(devices) >= 2:
-                    pick = devices[1][0]
-                elif devices:
-                    pick = devices[0][0]
-                if pick is not None:
-                    return {"ao": "alsa", "audio-device": f"alsa/hdmi:CARD=PCH,DEV={pick}"}
+                return {"ao": "alsa", "audio-device": pch_hdmi}
             return {"ao": "alsa", "audio-device": "auto"}
         if r in ("headphones", "jack", "analog"):
             try:
