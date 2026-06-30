@@ -1514,6 +1514,38 @@ class MPVManager:
         )
         return success
 
+    def rebind_audio_output(self, ao: str = "alsa", audio_device: str = "") -> bool:
+        """
+        Apply ao/audio-device and cycle ao so mpv reopens ALSA (idle ``auto`` may stay silent).
+        """
+        ao_val = (ao or "alsa").strip() or "alsa"
+        adev = (audio_device or "").strip()
+        props: Dict[str, Any] = {"ao": ao_val}
+        if adev and adev.lower() != "auto":
+            props["audio-device"] = adev
+        ok = self.update_settings(props)
+        try:
+            self._send_command(
+                {"command": ["set_property", "ao", ""]},
+                timeout=2.0,
+                max_attempts=1,
+            )
+            self._send_command(
+                {"command": ["set_property", "ao", ao_val]},
+                timeout=2.0,
+                max_attempts=1,
+            )
+            if adev and adev.lower() != "auto":
+                resp = self._send_command(
+                    {"command": ["set_property", "audio-device", adev]},
+                    timeout=2.0,
+                    max_attempts=1,
+                )
+                ok = ok and bool(resp and resp.get("error") == "success")
+        except Exception:
+            pass
+        return ok
+
     def verify_settings_support(self) -> Dict[str, bool]:
         """Проверка поддерживаемых настроек"""
         self._log_operation("VerifySettings", "started")

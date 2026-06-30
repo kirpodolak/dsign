@@ -204,6 +204,11 @@ class PlaybackService:
 
                 if not self._mpv_manager.initialize():
                     raise RuntimeError("MPV initialization failed")
+
+                try:
+                    self._playlist_manager._sync_settings_audio_to_mpv()
+                except Exception:
+                    pass
                 
                 if self._should_resume_playback_after_boot():
                     Thread(target=self._resume_playback_after_boot, daemon=True).start()

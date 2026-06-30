@@ -622,7 +622,24 @@ class SettingsService:
             if has_pch:
                 return {"ao": "alsa", "audio-device": "alsa/hw:CARD=PCH,DEV=0"}
             return {"ao": "alsa", "audio-device": "alsa/plughw:CARD=Headphones,DEV=0"}
+        if r in ("auto", ""):
+            if pch_hdmi:
+                return {"ao": "alsa", "audio-device": pch_hdmi}
         return {"ao": "alsa", "audio-device": "auto"}
+
+    def build_mpv_audio_updates(self, *, settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+        """Unmute Intel PCH ALSA mixers and resolve mpv ao/audio-device from settings."""
+        if settings is None:
+            settings = self.load_settings()
+        mpv_cfg = settings.get("mpv") if isinstance(settings.get("mpv"), dict) else {}
+        route = mpv_cfg.get("audio-route")
+        route_s = (
+            str(route).strip().lower()
+            if route is not None and str(route).strip()
+            else "auto"
+        )
+        self.unmute_pch_digital_outputs()
+        return self.expand_audio_route(route_s, settings=settings)
 
     def save_global_mpv_and_apply(self, raw: Dict[str, Any], mpv_manager=None) -> bool:
         """
@@ -672,7 +689,7 @@ class SettingsService:
                 route = apply_map.pop("audio-route", None)
                 if route is not None:
                     self.unmute_pch_digital_outputs()
-                    apply_map.update(self.expand_audio_route(str(route), settings=settings))
+                    apply_map.update(self.build_mpv_audio_updates(settings=settings))
                 mpv_manager.update_settings(apply_map)
 
             return True

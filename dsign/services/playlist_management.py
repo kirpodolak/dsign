@@ -102,30 +102,55 @@ class PlaylistManager:
         """Apply ao/audio-device from settings (expensive — can interrupt ALSA; call sparingly)."""
         svc = self._settings_service
         if not svc:
+            self.logger.warning(
+                "MPV audio route skipped: settings service unavailable",
+                extra={"event": "audio_route_skip"},
+            )
             return
         try:
             st = svc.load_settings()
-        except Exception:
-            return
-        mpv_cfg = st.get("mpv") if isinstance(st.get("mpv"), dict) else {}
-        route = mpv_cfg.get("audio-route")
-        if route is None or str(route).strip() == "":
-            return
-        try:
-            svc.unmute_pch_digital_outputs()
-            updates = svc.expand_audio_route(str(route), settings=st)
-        except Exception:
+            updates = svc.build_mpv_audio_updates(settings=st)
+        except Exception as exc:
+            self.logger.warning(
+                "MPV audio route resolution failed",
+                extra={"event": "audio_route_error", "error": str(exc)},
+            )
             return
         if not updates:
-            return
-        try:
-            self._mpv_manager.update_settings(updates)
-            self.logger.info(
-                "MPV audio route applied",
-                extra={"route": str(route), "ao": updates.get("ao"), "audio_device": updates.get("audio-device")},
+            self.logger.warning(
+                "MPV audio route: nothing to apply",
+                extra={"event": "audio_route_empty"},
             )
-        except Exception:
-            pass
+            return
+        mpv_cfg = st.get("mpv") if isinstance(st.get("mpv"), dict) else {}
+        route = mpv_cfg.get("audio-route", "auto")
+        try:
+            self._mpv_manager.rebind_audio_output(
+                str(updates.get("ao") or "alsa"),
+                str(updates.get("audio-device") or ""),
+            )
+            self.logger.warning(
+                "MPV audio route applied",
+                extra={
+                    "event": "audio_route_applied",
+                    "route": str(route),
+                    "ao": updates.get("ao"),
+                    "audio_device": updates.get("audio-device"),
+                },
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "MPV audio route IPC failed",
+                extra={"event": "audio_route_ipc_error", "error": str(exc)},
+            )
+
+    def _prepare_mpv_audio_before_loadfile(self) -> None:
+        """Bind ALSA output before open — mpv --audio-device=auto may pick a silent jack."""
+        if not self._audio_route_applied_for_play:
+            self._sync_settings_audio_route_to_mpv()
+            self._audio_route_applied_for_play = True
+        else:
+            self._sync_settings_volume_to_mpv()
 
     def _sync_settings_volume_to_mpv(self) -> None:
         """Re-apply master volume from settings.json (safe after each loadfile)."""
@@ -2971,6 +2996,7 @@ class PlaylistManager:
                 loop_playlist=False,
                 prefetch=False,
             )
+            self._prepare_mpv_audio_before_loadfile()
             load_resp = self._safe_loadfile(
                 path,
                 media_key=media_key,
@@ -3000,6 +3026,7 @@ class PlaylistManager:
                 loop_playlist=True,
                 prefetch=True,
             )
+            self._prepare_mpv_audio_before_loadfile()
             if not self._safe_loadfile(
                 str(m3u_path),
                 media_key=media_key,
@@ -3442,6 +3469,7 @@ class PlaylistManager:
                             )
                             load_ok = bool(load_resp and load_resp.get("error") == "success")
                         elif is_audio:
+                            self._prepare_mpv_audio_before_loadfile()
                             try:
                                 audio_opts = self._logo_manager.prepare_audio_playback()
                             except Exception:
@@ -3462,6 +3490,7 @@ class PlaylistManager:
                                 self._brief_idle_logo_on_skip()
                                 continue
                         else:
+                            self._prepare_mpv_audio_before_loadfile()
                             load_ok = self._safe_loadfile(
                                 str(path),
                                 media_key=media_key,
@@ -3959,6 +3988,7 @@ class PlaylistManager:
                         cand_key = str(candidate.get("key") or cand_path)
                         cand_is_audio = bool(candidate.get("is_audio"))
                         if cand_is_audio:
+                            self._prepare_mpv_audio_before_loadfile()
                             try:
                                 audio_opts = self._logo_manager.prepare_audio_playback()
                             except Exception:
@@ -3975,6 +4005,7 @@ class PlaylistManager:
                                 wait_vo=False,
                             )
                         else:
+                            self._prepare_mpv_audio_before_loadfile()
                             loaded_candidate = self._safe_loadfile(
                                 cand_path,
                                 media_key=cand_key,
