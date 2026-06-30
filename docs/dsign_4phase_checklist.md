@@ -26,7 +26,7 @@
 | **B1** | Расширить `/api/playback/status` | 🟡 в PR | `get_status()` B1 fields |
 | **B2** | `GET /api/health` | 🟡 в PR | `GET /api/health` + aggregates |
 | **B3** | `POST /api/playback/override` | ⬜ не начато | — |
-| **B4** | API Bearer token | ⬜ не начато | — |
+| **B4** | API Bearer token | 🟡 частично | `DSIGN_API_TOKEN` для `/api/health` |
 | **B5** | Remote control (REST, не WS stub) | ⬜ не начато | WS = `pass` |
 | **D1** | `dsign-update` OTA | ⬜ не начато | зависит от **D0** |
 | **D2** | Local schedule (SQLite) | ⬜ не начато | после B3 |
@@ -275,7 +275,7 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 | B1 | 🟡 в PR | `item_index`, `item_count`, `media_key`, `time_pos`, `duration`, `is_network`, `mpv_responsive`, `cache_state` |
 | B2 | 🟡 в PR | `GET /api/health`: playback + system/display/network/services aggregates |
 | B3 | ⬜ | Emergency override + return_to_previous |
-| B4 | ⬜ | `DSIGN_API_TOKEN` Bearer |
+| B4 | 🟡 частично | `DSIGN_API_TOKEN` Bearer для `/api/health` |
 | B5 | ⬜ | **REST** seek/pause/skip (рекомендация: не чинить WS stub) |
 
 ### B1 — целевой ответ `/api/playback/status`

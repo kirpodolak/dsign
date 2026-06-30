@@ -21,6 +21,7 @@ from dsign.models import (
 )
 from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
 from dsign.services.playback_constants import PlaybackConstants
+from dsign.services.api_token_auth import api_session_or_token_required
 from PIL import Image
 from dsign.config.config import THUMBNAIL_FOLDER, THUMBNAIL_URL
 import re
@@ -1096,7 +1097,7 @@ def init_api_routes(api_bp, services):
         return True
 
     @api_bp.route('/health', methods=['GET'])
-    @login_required
+    @api_session_or_token_required
     def get_health():
         """
         Fleet/monitoring aggregate: playback IPC health + system/display/network/services.
