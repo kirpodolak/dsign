@@ -510,7 +510,7 @@ class SettingsService:
         return None
 
     def _parse_pch_eld_endpoints(self) -> list[tuple[str, str, str]]:
-        """Return [(alsa_dev, monitor_name, conn_type), ...] for valid PCH ELD endpoints."""
+        """Return [(eld_pin, monitor_name, conn_type), ...] for valid PCH ELD endpoints."""
         card = self._pch_card_index()
         if card is None:
             return []
@@ -530,41 +530,59 @@ class SettingsService:
             monitor = (monitor_m.group(1).strip() if monitor_m else "") or ""
             conn_m = re.search(r"(?:conn_type|connection_type)\s*\|\s*(.+)", text, re.I)
             conn = (conn_m.group(1).strip() if conn_m else "") or ""
-            eld_id = eld_path.name.replace("eld#", "", 1)
-            dev = eld_id.split(".", 1)[0].strip()
-            if dev.isdigit():
-                out.append((dev, monitor, conn))
+            eld_pin = eld_path.name.replace("eld#", "", 1)
+            out.append((eld_pin, monitor, conn))
         return out
+
+    @staticmethod
+    def _aplay_desc_is_generic_hdmi(desc: str) -> bool:
+        d = (desc or "").strip().upper()
+        if not d:
+            return True
+        if re.search(r"HDMI\s*\d+\s*$", d):
+            return True
+        return d in ("HDA INTEL PCH", "DEFAULT")
 
     def _pch_active_display_audio_dev(self) -> Optional[str]:
         """
         ALSA DEV index for audio on the monitor behind the active DRM connector (DP or HDMI).
-        Intel HDA exposes DP audio as ``hdmi:CARD=PCH,DEV=N`` in aplay -L.
+
+        ELD pin numbers (``eld#2.0``) are **not** ALSA ``DEV=N`` indices — match by monitor
+        name from ELD to ``aplay -L`` descriptions (e.g. M2766UPB → DEV=0).
         """
+        aplay = self._parse_aplay_hdmi_pch_devices()
+        if not aplay:
+            return None
+
         connector = self._read_drm_connected_connector() or ""
         upper_conn = connector.upper()
-        want_dp = "DP-" in upper_conn or upper_conn.endswith("-DP")
-        want_hdmi = "HDMI" in upper_conn
+        want_dp = "-DP-" in upper_conn or upper_conn.endswith("-DP-1") or "-DP-" in upper_conn
+        want_hdmi = "HDMI" in upper_conn and not want_dp
+
         elds = self._parse_pch_eld_endpoints()
-        aplay = self._parse_aplay_hdmi_pch_devices()
-        if elds:
-            if want_dp:
-                for dev, _monitor, conn in elds:
-                    cu = conn.upper()
-                    if "DP" in cu or "DISPLAYPORT" in cu:
-                        return dev
-            if want_hdmi:
-                for dev, _monitor, conn in elds:
-                    if "HDMI" in conn.upper():
-                        return dev
-            for dev, monitor, _conn in elds:
-                for adev, desc in aplay:
-                    if adev != dev:
-                        continue
-                    if monitor and (monitor.upper() in desc.upper() or desc.upper() in monitor.upper()):
-                        return dev
-            return elds[0][0]
-        return aplay[0][0] if aplay else None
+        ranked_elds: list[tuple[str, str, str]] = []
+        for eld_pin, monitor, conn in elds:
+            cu = conn.upper()
+            if want_dp and ("DP" in cu or "DISPLAYPORT" in cu):
+                ranked_elds.insert(0, (eld_pin, monitor, conn))
+            elif want_hdmi and "HDMI" in cu:
+                ranked_elds.insert(0, (eld_pin, monitor, conn))
+            else:
+                ranked_elds.append((eld_pin, monitor, conn))
+
+        for _eld_pin, monitor, _conn in ranked_elds:
+            mon = monitor.strip()
+            if not mon or mon.upper() in ("HDMI", "DP", "DISPLAYPORT"):
+                continue
+            for adev, desc in aplay:
+                if mon.upper() in desc.upper():
+                    return adev
+
+        for adev, desc in aplay:
+            if not self._aplay_desc_is_generic_hdmi(desc):
+                return adev
+
+        return aplay[0][0]
 
     def _pch_hdmi_mpv_device(self, *, hdmi_dev: Optional[str] = None) -> Optional[str]:
         """
@@ -590,9 +608,24 @@ class SettingsService:
         else:
             pick, desc = devices[0]
         drm = self._read_drm_connected_connector()
+        elds = self._parse_pch_eld_endpoints()
+        eld_match = next(
+            (
+                {"eld_pin": p, "monitor": m, "conn": c}
+                for p, m, c in elds
+                if m and pick is not None
+                and m.upper() in (desc or "").upper()
+            ),
+            None,
+        )
         self._log_info(
             "PCH active display audio endpoint",
-            extra={"dev": pick, "description": desc, "drm_connector": drm},
+            extra={
+                "dev": pick,
+                "description": desc,
+                "drm_connector": drm,
+                "eld_match": eld_match,
+            },
         )
         return f"alsa/hdmi:CARD=PCH,DEV={pick}"
 
