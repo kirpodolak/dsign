@@ -1,5 +1,6 @@
 # settings_service.py
 import os
+import re
 import json
 import logging
 import traceback
@@ -463,7 +464,294 @@ class SettingsService:
                 db.session.rollback()
             return False
 
-    def expand_audio_route(self, route: str) -> Dict[str, str]:
+    @staticmethod
+    def _parse_aplay_hdmi_pch_devices() -> list[tuple[str, str]]:
+        """Return [(dev_index, description), ...] for hdmi:CARD=PCH,DEV=N from aplay -L."""
+        try:
+            import subprocess
+
+            out = subprocess.run(
+                ["aplay", "-L"], capture_output=True, text=True, check=False
+            ).stdout or ""
+        except Exception:
+            return []
+        devices: list[tuple[str, str]] = []
+        lines = out.splitlines()
+        for i, line in enumerate(lines):
+            if not line.startswith("hdmi:CARD=PCH,DEV="):
+                continue
+            try:
+                dev = line.split("DEV=", 1)[1].strip()
+            except Exception:
+                continue
+            desc = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            devices.append((dev, desc))
+        return devices
+
+    def _read_drm_connected_connector(self) -> Optional[str]:
+        """Active DRM connector name (e.g. card0-DP-1) from sysfs."""
+        try:
+            drm_root = Path("/sys/class/drm")
+            if not drm_root.exists():
+                return None
+            connectors = [
+                p for p in drm_root.glob("card*-*")
+                if p.is_dir() and (p / "status").exists()
+            ]
+            for conn in sorted(connectors, key=lambda p: p.name):
+                try:
+                    status = (conn / "status").read_text(encoding="utf-8", errors="ignore").strip().lower()
+                except Exception:
+                    status = ""
+                if status == "connected":
+                    return conn.name
+        except Exception:
+            return None
+        return None
+
+    def _parse_pch_eld_endpoints(self) -> list[tuple[str, str, str]]:
+        """Return [(eld_pin, monitor_name, conn_type), ...] for valid PCH ELD endpoints."""
+        card = self._pch_card_index()
+        if card is None:
+            return []
+        card_dir = Path(f"/proc/asound/card{card}")
+        if not card_dir.is_dir():
+            return []
+        out: list[tuple[str, str, str]] = []
+        for eld_path in sorted(card_dir.glob("eld#*")):
+            try:
+                text = eld_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            valid_m = re.search(r"eld_valid\s*\|\s*(\d+)", text)
+            if valid_m and valid_m.group(1).strip() != "1":
+                continue
+            monitor_m = re.search(r"monitor_name\s*\|\s*(.+)", text)
+            monitor = (monitor_m.group(1).strip() if monitor_m else "") or ""
+            conn_m = re.search(r"(?:conn_type|connection_type)\s*\|\s*(.+)", text, re.I)
+            conn = (conn_m.group(1).strip() if conn_m else "") or ""
+            eld_pin = eld_path.name.replace("eld#", "", 1)
+            out.append((eld_pin, monitor, conn))
+        return out
+
+    @staticmethod
+    def _aplay_desc_is_generic_hdmi(desc: str) -> bool:
+        d = (desc or "").strip().upper()
+        if not d:
+            return True
+        if re.search(r"HDMI\s*\d+\s*$", d):
+            return True
+        return d in ("HDA INTEL PCH", "DEFAULT")
+
+    def _pch_active_display_audio_dev(self) -> Optional[str]:
+        """
+        ALSA DEV index for audio on the monitor behind the active DRM connector (DP or HDMI).
+
+        ELD pin numbers (``eld#2.0``) are **not** ALSA ``DEV=N`` indices — match by monitor
+        name from ELD to ``aplay -L`` descriptions (e.g. M2766UPB → DEV=0).
+        """
+        aplay = self._parse_aplay_hdmi_pch_devices()
+        if not aplay:
+            return None
+
+        connector = self._read_drm_connected_connector() or ""
+        upper_conn = connector.upper()
+        want_dp = "-DP-" in upper_conn or upper_conn.endswith("-DP-1") or "-DP-" in upper_conn
+        want_hdmi = "HDMI" in upper_conn and not want_dp
+
+        elds = self._parse_pch_eld_endpoints()
+        ranked_elds: list[tuple[str, str, str]] = []
+        for eld_pin, monitor, conn in elds:
+            cu = conn.upper()
+            if want_dp and ("DP" in cu or "DISPLAYPORT" in cu):
+                ranked_elds.insert(0, (eld_pin, monitor, conn))
+            elif want_hdmi and "HDMI" in cu:
+                ranked_elds.insert(0, (eld_pin, monitor, conn))
+            else:
+                ranked_elds.append((eld_pin, monitor, conn))
+
+        for _eld_pin, monitor, _conn in ranked_elds:
+            mon = monitor.strip()
+            if not mon or mon.upper() in ("HDMI", "DP", "DISPLAYPORT"):
+                continue
+            for adev, desc in aplay:
+                if mon.upper() in desc.upper():
+                    return adev
+
+        for adev, desc in aplay:
+            if not self._aplay_desc_is_generic_hdmi(desc):
+                return adev
+
+        return aplay[0][0]
+
+    def _pch_hdmi_mpv_device(self, *, hdmi_dev: Optional[str] = None) -> Optional[str]:
+        """
+        Intel HDA PCH digital endpoint for mpv (HDMI or DisplayPort — same ALSA namespace).
+
+        Picks the ALSA DEV behind the connected DRM output. Override with
+        settings.json → mpv.audio-hdmi-dev or env DSIGN_ALSA_HDMI_DEV.
+        """
+        for candidate in (hdmi_dev, os.getenv("DSIGN_ALSA_HDMI_DEV")):
+            s = str(candidate or "").strip()
+            if s.isdigit():
+                return f"alsa/hdmi:CARD=PCH,DEV={s}"
+        devices = self._parse_aplay_hdmi_pch_devices()
+        if not devices:
+            return None
+        pick = self._pch_active_display_audio_dev()
+        desc = ""
+        if pick is not None:
+            for dev, d in devices:
+                if dev == pick:
+                    desc = d
+                    break
+        else:
+            pick, desc = devices[0]
+        drm = self._read_drm_connected_connector()
+        elds = self._parse_pch_eld_endpoints()
+        eld_match = next(
+            (
+                {"eld_pin": p, "monitor": m, "conn": c}
+                for p, m, c in elds
+                if m and pick is not None
+                and m.upper() in (desc or "").upper()
+            ),
+            None,
+        )
+        self._log_info(
+            "PCH active display audio endpoint",
+            extra={
+                "dev": pick,
+                "description": desc,
+                "drm_connector": drm,
+                "eld_match": eld_match,
+            },
+        )
+        return f"alsa/hdmi:CARD=PCH,DEV={pick}"
+
+    def _pch_card_index(self) -> Optional[int]:
+        try:
+            p = Path("/proc/asound/cards")
+            if not p.exists():
+                return None
+            for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                m = re.match(r"^\s*(\d+)\s+\[([^\]]+)\]", line)
+                if m and "PCH" in (m.group(2) or "").upper():
+                    return int(m.group(1))
+        except Exception:
+            return None
+        return None
+
+    def unmute_pch_digital_outputs(self, *, dev: Optional[str] = None) -> None:
+        """
+        Intel HDA: mpv ``volume`` is software gain; IEC958/HDMI ALSA controls may stay muted.
+        Best-effort unmute for signage PCs where ``_alsa_hdmi_has_simple_pcm`` is false.
+        """
+        import subprocess
+
+        card = self._pch_card_index()
+        if card is None:
+            return
+        dev_idx: Optional[int] = None
+        if dev is not None and str(dev).strip().isdigit():
+            dev_idx = int(str(dev).strip())
+
+        touched: list[str] = []
+        for idx in range(8):
+            for ctl in (f"IEC958,{idx}", f"HDMI,{idx}"):
+                for args in ("unmute", "100%"):
+                    try:
+                        subprocess.run(
+                            ["amixer", "-c", str(card), "sset", ctl, args],
+                            check=False,
+                            timeout=2.0,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except Exception:
+                        pass
+                touched.append(ctl)
+
+        try:
+            out = subprocess.check_output(
+                ["amixer", "-c", str(card), "scontrols"],
+                text=True,
+                stderr=subprocess.STDOUT,
+                timeout=3.0,
+            )
+            names = re.findall(r"Simple mixer control '([^']+)'", out)
+        except Exception:
+            names = []
+        keywords = ("IEC958", "HDMI", "DP", "DIGITAL", "S/PDIF", "PCM")
+        for name in names:
+            upper = name.upper()
+            if not any(k in upper for k in keywords):
+                continue
+            for args in ([name, "unmute"], [name, "100%"]):
+                try:
+                    subprocess.run(
+                        ["amixer", "-c", str(card), "sset", *args],
+                        check=False,
+                        timeout=2.0,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
+            touched.append(name)
+
+        try:
+            contents = subprocess.check_output(
+                ["amixer", "-c", str(card), "contents"],
+                text=True,
+                stderr=subprocess.STDOUT,
+                timeout=4.0,
+            )
+            for m in re.finditer(r"numid=(\d+),iface=MIXER,name='([^']+)'", contents):
+                numid, name = m.group(1), m.group(2)
+                upper = name.upper()
+                if "PLAYBACK SWITCH" not in upper and "IEC958" not in upper and "HDMI" not in upper:
+                    continue
+                if dev_idx is not None and f",{dev_idx}" not in name and f"={dev_idx}" not in name:
+                    if "IEC958" in upper or "HDMI" in upper:
+                        pass
+                    else:
+                        continue
+                try:
+                    subprocess.run(
+                        ["amixer", "-c", str(card), "cset", f"numid={numid}", "on"],
+                        check=False,
+                        timeout=2.0,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    touched.append(f"numid={numid}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        if dev_idx is not None:
+            for ctl in (f"IEC958,{dev_idx}", f"HDMI,{dev_idx}"):
+                for args in ("unmute", "100%"):
+                    try:
+                        subprocess.run(
+                            ["amixer", "-c", str(card), "sset", ctl, args],
+                            check=False,
+                            timeout=2.0,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except Exception:
+                        pass
+
+        if touched:
+            self._log_info(
+                "ALSA PCH digital outputs unmuted",
+                extra={"card": card, "dev": dev_idx, "controls": touched[:12]},
+            )
+
+    def expand_audio_route(self, route: str, *, settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
         """
         Map UI audio-route to mpv ao + audio-device.
 
@@ -471,32 +759,71 @@ class SettingsService:
         - Keep defaults conservative: `dsign-mpv.service` forces `--ao=alsa` for headless reliability.
         - On non-Pi (x86), users may set a working default via `/etc/asound.conf` or select a
           specific ALSA device from the MPV Advanced dialog.
+        - ``settings["mpv"]["audio-device"]`` overrides route mapping; ``audio-hdmi-dev`` picks PCH DEV.
         """
+        mpv_cfg: Dict[str, Any] = {}
+        if isinstance(settings, dict) and isinstance(settings.get("mpv"), dict):
+            mpv_cfg = settings["mpv"]
+        explicit = str(mpv_cfg.get("audio-device") or "").strip()
+        if explicit and explicit.lower() not in ("", "auto"):
+            return {"ao": "alsa", "audio-device": explicit}
+        hdmi_dev = mpv_cfg.get("audio-hdmi-dev")
+        hdmi_dev_s = str(hdmi_dev).strip() if hdmi_dev is not None else None
         r = (route or "auto").strip().lower()
-        # x86/Ubuntu common: Intel HDA "PCH" with multiple HDMI/DP endpoints
-        # (ALSA names show up as hdmi:CARD=PCH,DEV=0..3). We map these deterministically so
-        # the UI buttons work without requiring /etc/asound.conf.
-        try:
-            import subprocess
-            out = subprocess.run(["aplay", "-L"], capture_output=True, text=True, check=False).stdout or ""
-            has_pch_hdmi = "hdmi:CARD=PCH,DEV=0" in out
-        except Exception:
-            has_pch_hdmi = False
+        pch_hdmi = self._pch_hdmi_mpv_device(
+            hdmi_dev=hdmi_dev_s if hdmi_dev_s and hdmi_dev_s.isdigit() else None
+        )
         if r == "hdmi":
-            if has_pch_hdmi:
-                return {"ao": "alsa", "audio-device": "alsa/hdmi:CARD=PCH,DEV=0"}
+            if pch_hdmi:
+                return {"ao": "alsa", "audio-device": pch_hdmi}
             # Pi 4 exposes vc4hdmi0 / vc4hdmi1 (not "vc4hdmi").
             return {"ao": "alsa", "audio-device": "alsa/hdmi:CARD=vc4hdmi0,DEV=0"}
         if r in ("dp", "displayport"):
-            if has_pch_hdmi:
-                # Next digital endpoint; on many boards this is DP or a second HDMI/DP port.
-                return {"ao": "alsa", "audio-device": "alsa/hdmi:CARD=PCH,DEV=1"}
+            if pch_hdmi:
+                return {"ao": "alsa", "audio-device": pch_hdmi}
             return {"ao": "alsa", "audio-device": "auto"}
         if r in ("headphones", "jack", "analog"):
-            if has_pch_hdmi:
+            try:
+                import subprocess
+
+                out = subprocess.run(
+                    ["aplay", "-L"], capture_output=True, text=True, check=False
+                ).stdout or ""
+                has_pch = "CARD=PCH" in out
+            except Exception:
+                has_pch = False
+            if has_pch:
                 return {"ao": "alsa", "audio-device": "alsa/hw:CARD=PCH,DEV=0"}
             return {"ao": "alsa", "audio-device": "alsa/plughw:CARD=Headphones,DEV=0"}
+        if r in ("auto", ""):
+            if pch_hdmi:
+                return {"ao": "alsa", "audio-device": pch_hdmi}
         return {"ao": "alsa", "audio-device": "auto"}
+
+    @staticmethod
+    def _alsa_dev_index_from_mpv_device(adev: str) -> Optional[str]:
+        s = str(adev or "")
+        if "DEV=" not in s:
+            return None
+        dev = s.rsplit("DEV=", 1)[-1].strip()
+        return dev if dev.isdigit() else None
+
+    def build_mpv_audio_updates(self, *, settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+        """Unmute Intel PCH ALSA mixers and resolve mpv ao/audio-device from settings."""
+        if settings is None:
+            settings = self.load_settings()
+        mpv_cfg = settings.get("mpv") if isinstance(settings.get("mpv"), dict) else {}
+        route = mpv_cfg.get("audio-route")
+        route_s = (
+            str(route).strip().lower()
+            if route is not None and str(route).strip()
+            else "auto"
+        )
+        updates = self.expand_audio_route(route_s, settings=settings)
+        self.unmute_pch_digital_outputs(
+            dev=self._alsa_dev_index_from_mpv_device(str(updates.get("audio-device") or ""))
+        )
+        return updates
 
     def save_global_mpv_and_apply(self, raw: Dict[str, Any], mpv_manager=None) -> bool:
         """
@@ -545,7 +872,8 @@ class SettingsService:
                 apply_map: Dict[str, Any] = dict(out)
                 route = apply_map.pop("audio-route", None)
                 if route is not None:
-                    apply_map.update(self.expand_audio_route(str(route)))
+                    self.unmute_pch_digital_outputs()
+                    apply_map.update(self.build_mpv_audio_updates(settings=settings))
                 mpv_manager.update_settings(apply_map)
 
             return True
