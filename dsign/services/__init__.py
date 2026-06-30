@@ -98,7 +98,8 @@ class ServiceFactory:
         upload_folder: str, 
         db, 
         socketio=None, 
-        logger=None
+        logger=None,
+        settings_service=None,
     ) -> Optional[Any]:
         """
         Создание сервиса воспроизведения
@@ -139,7 +140,8 @@ class ServiceFactory:
                 upload_folder=upload_folder,
                 db_session=db,
                 socketio=socketio,
-                logger=logger
+                logger=logger,
+                settings_service=settings_service,
             )
         except Exception as e:
             # Do not swallow the exception silently: playback_service is mandatory.
@@ -452,9 +454,26 @@ def init_services(
                 upload_folder=config['UPLOAD_FOLDER'],
                 db=db,
                 socketio=socketio,
-                logger=logger
+                logger=logger,
+                settings_service=services.get('settings_service'),
             ))
         ]
+
+        # Settings before playback — background MPV init applies audio route on startup.
+        try:
+            settings_service = ServiceFactory.create_settings_service(
+                config.get('SETTINGS_FILE', 'settings.json'),
+                config['UPLOAD_FOLDER'],
+                logger,
+            )
+            if settings_service:
+                services['settings_service'] = settings_service
+                logger.info("settings_service успешно инициализирован (early)")
+        except Exception as e:
+            logger.error("Ошибка ранней инициализации settings_service", {
+                'error': str(e),
+                'stack': traceback.format_exc()
+            })
 
         for name, factory in mandatory_services:
             try:
@@ -477,7 +496,7 @@ def init_services(
         # Инициализация опциональных сервисов
         optional_services = [
             ('playlist_service', lambda: ServiceFactory.create_playlist_service(db.session, logger)),
-            ('settings_service', lambda: ServiceFactory.create_settings_service(
+            ('settings_service', lambda: services.get('settings_service') or ServiceFactory.create_settings_service(
                 config.get('SETTINGS_FILE', 'settings.json'),
                 config['UPLOAD_FOLDER'],
                 logger
