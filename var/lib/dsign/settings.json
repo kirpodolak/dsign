@@ -1,0 +1,27 @@
+{
+    "resolution": "1024x600",
+    "aspect_ratio": "16:9",
+    "rotation": 0,
+    "overscan": false,
+    "volume": 24,
+    "mute": false,
+    "mpv": {
+        "audio-route": "hdmi"
+		"audio-hdmi-dev": 0
+    },
+    "display": {
+        "theme": "light",
+        "refresh_rate": 30,
+        "logo": "default.png",
+        "hdmi_mode_preset": "1080p60",
+        "preview_auto_interval_sec": 300,
+        "auto_transcode_videos": false,
+        "transcode_target_resolution": "1920x1080",
+        "transcode_target_fps": 30,
+        "idle_logo_rotate": 0
+    },
+    "default_volume": 50,
+    "default_duration": 10,
+    "auto_play": true,
+    "idle_timeout": 300
+}
