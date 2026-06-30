@@ -39,6 +39,7 @@ entries:
   - { src: usr/local/bin/dsign-deploy-manifest.py, dest: /usr/local/bin/dsign-deploy-manifest.py, mode: always, perm: "0755", strip_crlf: true }
   - { src: usr/local/bin/dsign-verify-install, dest: /usr/local/bin/dsign-verify-install, mode: always, perm: "0755", strip_crlf: true }
   - { src: usr/local/bin/dsign-apply-install, dest: /usr/local/bin/dsign-apply-install, mode: always, perm: "0755", strip_crlf: true }
+  - { src: usr/local/bin/dsign-api-token, dest: /usr/local/bin/dsign-api-token, mode: always, perm: "0755", strip_crlf: true }
 
   # --- systemd units (canonical from etc/, not install_dsign.sh heredoc) ---
   - { src: etc/systemd/system/digital-signage.service, dest: /etc/systemd/system/digital-signage.service, mode: always, perm: "0644", post: [patch-digital-signage-unit] }
