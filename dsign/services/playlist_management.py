@@ -98,7 +98,7 @@ class PlaylistManager:
         except Exception:
             pass
 
-    def _sync_settings_audio_route_to_mpv(self) -> None:
+    def _sync_settings_audio_route_to_mpv(self) -> bool:
         """Apply ao/audio-device from settings (expensive — can interrupt ALSA; call sparingly)."""
         svc = self._settings_service
         if not svc:
@@ -106,7 +106,7 @@ class PlaylistManager:
                 "MPV audio route skipped: settings service unavailable",
                 extra={"event": "audio_route_skip"},
             )
-            return
+            return False
         try:
             st = svc.load_settings()
             updates = svc.build_mpv_audio_updates(settings=st)
@@ -115,13 +115,13 @@ class PlaylistManager:
                 "MPV audio route resolution failed",
                 extra={"event": "audio_route_error", "error": str(exc)},
             )
-            return
+            return False
         if not updates:
             self.logger.warning(
                 "MPV audio route: nothing to apply",
                 extra={"event": "audio_route_empty"},
             )
-            return
+            return False
         mpv_cfg = st.get("mpv") if isinstance(st.get("mpv"), dict) else {}
         route = mpv_cfg.get("audio-route", "auto")
         try:
@@ -138,19 +138,51 @@ class PlaylistManager:
                     "audio_device": updates.get("audio-device"),
                 },
             )
+            return True
         except Exception as exc:
             self.logger.warning(
                 "MPV audio route IPC failed",
                 extra={"event": "audio_route_ipc_error", "error": str(exc)},
             )
+            return False
 
     def _prepare_mpv_audio_before_loadfile(self) -> None:
         """Bind ALSA output before open — mpv --audio-device=auto may pick a silent jack."""
         if not self._audio_route_applied_for_play:
-            self._sync_settings_audio_route_to_mpv()
-            self._audio_route_applied_for_play = True
+            if self._sync_settings_audio_route_to_mpv():
+                self._audio_route_applied_for_play = True
         else:
             self._sync_settings_volume_to_mpv()
+
+    def _log_mpv_audio_state(self, *, event: str) -> None:
+        """Best-effort readback for field diagnostics."""
+        try:
+            adev = self._mpv_manager._send_command(
+                {"command": ["get_property", "audio-device"]},
+                timeout=1.5,
+                max_attempts=1,
+            )
+            mute = self._mpv_manager._send_command(
+                {"command": ["get_property", "mute"]},
+                timeout=1.5,
+                max_attempts=1,
+            )
+            vol = self._mpv_manager._send_command(
+                {"command": ["get_property", "volume"]},
+                timeout=1.5,
+                max_attempts=1,
+            )
+            self.logger.warning(
+                "MPV audio state",
+                extra={
+                    "event": event,
+                    "audio_device": (adev or {}).get("data"),
+                    "mute": (mute or {}).get("data"),
+                    "volume": (vol or {}).get("data"),
+                },
+            )
+        except Exception:
+            pass
 
     def _sync_settings_volume_to_mpv(self) -> None:
         """Re-apply master volume from settings.json (safe after each loadfile)."""
@@ -2048,7 +2080,7 @@ class PlaylistManager:
             return 45.0
         return 20.0
 
-    def _apply_post_loadfile_playback_props(self, *, muted: bool) -> None:
+    def _apply_post_loadfile_playback_props(self, *, muted: bool, rebind_audio: bool = False) -> None:
         """Pause/volume/mute after the demuxer is ready (mpv may ignore IPC while opening ytdl)."""
         try:
             self._mpv_manager._send_command(
@@ -2058,9 +2090,9 @@ class PlaylistManager:
             )
         except Exception:
             pass
-        if not self._audio_route_applied_for_play:
-            self._sync_settings_audio_route_to_mpv()
-            self._audio_route_applied_for_play = True
+        if rebind_audio or not self._audio_route_applied_for_play:
+            if self._sync_settings_audio_route_to_mpv():
+                self._audio_route_applied_for_play = True
         self._sync_settings_volume_to_mpv()
         try:
             self._mpv_manager._send_command(
@@ -2075,6 +2107,7 @@ class PlaylistManager:
                 "Playback item muted",
                 extra={"event": "playback_item_muted", "effective_muted": True},
             )
+        self._log_mpv_audio_state(event="post_loadfile_audio_state")
 
     def _prepare_local_audio_after_loadfile(self, *, muted: bool, skip_load: bool) -> bool:
         """
@@ -2093,7 +2126,7 @@ class PlaylistManager:
                     extra={"event": "audio_demuxer_idle_timeout"},
                 )
                 return False
-        self._apply_post_loadfile_playback_props(muted=muted)
+        self._apply_post_loadfile_playback_props(muted=muted, rebind_audio=True)
         return True
 
     def _set_playback_active_marker(self, active: bool) -> None:

@@ -18,7 +18,14 @@ from .wayland_manager import WaylandManager
 from .logger import ServiceLogger
 
 class PlaybackService:
-    def __init__(self, upload_folder: str, db_session, socketio, logger: Optional[Union[logging.Logger, ServiceLogger]] = None):
+    def __init__(
+        self,
+        upload_folder: str,
+        db_session,
+        socketio,
+        logger: Optional[Union[logging.Logger, ServiceLogger]] = None,
+        settings_service=None,
+    ):
         self.logger = logger or ServiceLogger(self.__class__.__name__)
         self.upload_folder = Path(upload_folder)
         self.db_session = db_session
@@ -52,6 +59,9 @@ class PlaybackService:
             self._mpv_manager, 
             self._logo_manager
         )
+
+        if settings_service is not None:
+            self._playlist_manager.set_settings_service(settings_service)
         
         self.logo_manager = LogoManager(
             logger=self.logger,
