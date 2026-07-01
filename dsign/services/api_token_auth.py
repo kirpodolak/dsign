@@ -2,7 +2,7 @@ import os
 import secrets
 from functools import wraps
 
-from flask import jsonify, request
+from flask import g, jsonify, request
 from flask_login import current_user
 from flask_wtf.csrf import validate_csrf
 
@@ -23,6 +23,14 @@ def api_token_authorized() -> bool:
     if not provided:
         return False
     return secrets.compare_digest(provided, expected)
+
+
+def _api_bearer_should_skip_csrf() -> bool:
+    if request.method in ("GET", "HEAD", "OPTIONS", "TRACE"):
+        return False
+    if not (request.path or "").startswith("/api/"):
+        return False
+    return api_token_authorized()
 
 
 def _validate_session_csrf() -> tuple[bool, str | None]:
@@ -69,11 +77,63 @@ def api_session_or_token_required(f):
     return wrapped
 
 
-def register_api_csrf_exemptions(app) -> None:
-    """Mark Bearer-capable API views CSRF-exempt; session calls validate CSRF manually."""
-    csrf = app.extensions.get("csrf")
-    if csrf is None:
+def _register_csrf_json_errors(app) -> None:
+    if getattr(app, "_dsign_csrf_json_handler", False):
         return
+    from flask_wtf.csrf import CSRFError
+
+    @app.errorhandler(CSRFError)
+    def _handle_csrf_error(exc):
+        if (request.path or "").startswith("/api/"):
+            return jsonify({
+                "success": False,
+                "error": "Bad Request",
+                "message": getattr(exc, "description", None) or str(exc) or "The CSRF token is missing.",
+            }), 400
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+    app._dsign_csrf_json_handler = True
+
+
+def configure_api_csrf_auth(app) -> None:
+    """
+    Wire Bearer-token API auth with Flask-WTF CSRF.
+
+    Production create_app() may register CSRFProtect twice (extensions + create_app),
+    leaving two before_request handlers. Patch CSRFProtect.protect at class level so
+    every handler skips CSRF for valid Bearer on /api/*. Session UI calls still
+    validate X-CSRFToken inside api_session_or_token_required.
+    """
+    csrf_ext = app.extensions.get("csrf")
+    if csrf_ext is None:
+        return
+
+    _register_csrf_json_errors(app)
+    _patch_csrf_protect_for_bearer()
+
     for view in app.view_functions.values():
         if getattr(view, "csrf_exempt", False):
-            csrf.exempt(view)
+            csrf_ext.exempt(view)
+
+
+def _patch_csrf_protect_for_bearer() -> None:
+    from flask_wtf.csrf import CSRFProtect
+
+    if getattr(CSRFProtect, "_dsign_bearer_patched", False):
+        return
+
+    original_protect = CSRFProtect.protect
+
+    def protect(self, apply_exemptions=False):
+        if _api_bearer_should_skip_csrf():
+            g.csrf_valid = True
+            return
+        return original_protect(self, apply_exemptions)
+
+    CSRFProtect.protect = protect
+    CSRFProtect._dsign_bearer_patched = True
+
+
+def register_api_csrf_exemptions(app) -> None:
+    """Backward-compatible alias."""
+    configure_api_csrf_auth(app)
