@@ -2253,10 +2253,10 @@ def init_api_routes(api_bp, services):
             return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/playback/play', methods=['POST'])
-    @login_required
+    @api_session_or_token_required
     def playback_play():
         try:
-            data = request.get_json()
+            data = request.get_json(silent=True) or {}
             if not data or 'playlist_id' not in data:
                 return jsonify({
                     "success": False,
@@ -2280,7 +2280,7 @@ def init_api_routes(api_bp, services):
             }), 500
 
     @api_bp.route('/playback/stop', methods=['POST'])
-    @login_required
+    @api_session_or_token_required
     def playback_stop():
         try:
             result = playback_service.stop()
