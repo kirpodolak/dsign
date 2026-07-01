@@ -63,9 +63,6 @@ def init_extensions(app) -> Dict[str, Any]:
                 app.logger.error("db.create_all() failed: %s", e, exc_info=True)
                 raise
         bcrypt.init_app(app)
-        if "csrf" not in app.extensions:
-            csrf.init_app(app)
-            _configure_csrf_json_errors(app)
         
         # Настройка SocketIO
         socketio.init_app(
@@ -97,20 +94,6 @@ def init_extensions(app) -> Dict[str, Any]:
             f"Failed to initialize extensions: {str(e)}", exc_info=True
         )
         raise RuntimeError(f"Extensions initialization failed: {str(e)}")
-
-def _configure_csrf_json_errors(app) -> None:
-    from flask_wtf.csrf import CSRFError
-
-    @app.errorhandler(CSRFError)
-    def _handle_csrf_error(exc):
-        if (request.path or "").startswith("/api/"):
-            return jsonify({
-                "success": False,
-                "error": "Bad Request",
-                "message": str(exc) or "The CSRF token is missing.",
-            }), 400
-        return jsonify({"success": False, "error": str(exc)}), 400
-
 
 def _configure_auth(app) -> None:
     """Настройка системы аутентификации"""
