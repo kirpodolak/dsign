@@ -20,13 +20,13 @@
 | **A3** | Safe loadfile + ffprobe | ✅ сделано | main, PR #86 |
 | **A4** | `video-sync` Wayland (display-resample) | ✅ сделано | main, PR #87; подтверждено на плеере |
 | **A5** | Tech debt | ✅ сделано | PR A5 |
-| **C1** | ContentCache | 🟡 в PR | `content_cache.py` |
-| **C2** | Audio-only + logo | 🟡 в PR | `logo_management.py`, manual loop |
+| **C1** | ContentCache | ✅ сделано | main; плеер ~7.9 GiB cache |
+| **C2** | Audio-only + logo | ✅ сделано | main; Wayland vo=null + imv |
 | **C3** | Nested playlists | ⬜ не начато | — |
-| **B1** | Расширить `/api/playback/status` | 🟡 в PR | `get_status()` B1 fields |
-| **B2** | `GET /api/health` | 🟡 в PR | `GET /api/health` + aggregates |
-| **B3** | `POST /api/playback/override` | ⬜ не начато | — |
-| **B4** | API Bearer token | 🟡 в PR | `dsign-api-token` + `/api/health` |
+| **B1** | Расширить `/api/playback/status` | ✅ сделано | main, `get_status()` B1 fields |
+| **B2** | `GET /api/health` | ✅ сделано | main, PR #96; плеер подтверждён |
+| **B3** | `POST /api/playback/override` | 🟡 в PR | emergency + `return_to_previous` |
+| **B4** | API Bearer token | 🟡 частично | `dsign-api-token` + `/api/health` |
 | **B5** | Remote control (REST, не WS stub) | ⬜ не начато | WS = `pass` |
 | **D1** | `dsign-update` OTA | ⬜ не начато | зависит от **D0** |
 | **D2** | Local schedule (SQLite) | ⬜ не начато | после B3 |
@@ -231,13 +231,13 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 | ID | Задача | Статус | Зависимости |
 |----|--------|--------|-------------|
-| C1 | ContentCache (`content_cache.py`) | 🟡 в PR | A3, network path |
-| C2 | Audio-only + logo (imv) | ⬜ | — |
+| C1 | ContentCache (`content_cache.py`) | ✅ сделано | A3, network path; плеер |
+| C2 | Audio-only + logo (imv) | ✅ сделано | main |
 | C3 | Nested playlists (DB) | ⬜ | миграция модели |
 
 ### C1. ContentCache
 
-**Статус:** 🟡 в PR — prefetch следующего `ext-*` на диск; offline / `PLAY_WHEN_READY` → local `loadfile`
+**Статус:** ✅ сделано — prefetch, offline `PLAY_WHEN_READY`, `cache_state` в API
 
 **Env (плеер):**
 - `DSIGN_CONTENT_CACHE_ENABLED=1` (default on)
@@ -248,15 +248,15 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 **Acceptance:**
 - [ ] [net1, net2, net3] — net2 предзагружен до EOF net1
-- [ ] Offline — играет из кэша, не чёрный экран
-- [ ] `/api/playback/status` → `cache_state`
+- [x] Offline — играет из кэша, не чёрный экран
+- [x] `/api/playback/status` → `cache_state`
 
 ### C2. Audio-Only + Logo
 
-**Статус:** 🟡 в PR — локальный audio (mp3/wav/…) + logo: Wayland `vo=null` + imv; DRM `external-file` logo
+**Статус:** ✅ сделано — локальный audio (mp3/wav/…) + logo: Wayland `vo=null` + imv; DRM `external-file` logo
 
 **Acceptance:**
-- [ ] [video.mp4, audio.mp3, video2.mp4] — audio с logo
+- [x] [video.mp4, audio.mp3, video2.mp4] — audio с logo
 - [x] Upload allowlist: mp3, wav, ogg, flac, m4a, aac, opus
 
 ### C3. Nested Playlists
@@ -272,10 +272,10 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 | ID | Статус | Что осталось |
 |----|--------|--------------|
-| B1 | 🟡 в PR | `item_index`, `item_count`, `media_key`, `time_pos`, `duration`, `is_network`, `mpv_responsive`, `cache_state` |
-| B2 | 🟡 в PR | `GET /api/health`: playback + system/display/network/services aggregates |
-| B3 | ⬜ | Emergency override + return_to_previous |
-| B4 | 🟡 в PR | `dsign-api-token` install/rotate/show + Bearer `/api/health` |
+| B1 | ✅ | `item_index`, `item_count`, `media_key`, `time_pos`, `duration`, `is_network`, `mpv_responsive`, `cache_state` |
+| B2 | ✅ | `GET /api/health` + aggregates; `health_issues` |
+| B3 | 🟡 в PR | `POST /api/playback/override` + auto `return_to_previous` |
+| B4 | 🟡 | `dsign-api-token` Bearer для `/api/health` (и override) |
 | B5 | ⬜ | **REST** seek/pause/skip (рекомендация: не чинить WS stub) |
 
 ### B1 — целевой ответ `/api/playback/status`
@@ -295,6 +295,19 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
   "cache_state": { "cached_items": 2, "cache_size_mb": 150 }
 }
 ```
+
+### B3 — `POST /api/playback/override`
+
+```json
+{
+  "playlist_id": 5,
+  "return_to_previous": true,
+  "start_index": 0
+}
+```
+
+Ответ: `override.previous` — куда вернётся после одного цикла emergency-плейлиста.  
+Auth: сессия или `Authorization: Bearer` (`DSIGN_API_TOKEN`).
 
 ---
 
@@ -357,5 +370,6 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 | Дата | Изменение |
 |------|-----------|
 | 2026-06-17 | Добавлены: сводка прогресса, D0, A0 (PR #80), порядок реализации, деплой/drift, чекбоксы acceptance |
+| 2026-06-30 | B3 — `POST /api/playback/override`; закрыты C1/C2/B1/B2 в main |
 | 2026-06-30 | B2 — `GET /api/health` (playback + system/display/network/services) |
 | 2026-06-29 | C2 + B1 — audio+logo (imv), расширенный `/api/playback/status` |

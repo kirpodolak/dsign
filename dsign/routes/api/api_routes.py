@@ -2117,6 +2117,56 @@ def init_api_routes(api_bp, services):
     # ======================
     # Playback Control (/api/playback)
     # ======================
+    @api_bp.route('/playback/override', methods=['POST'])
+    @api_session_or_token_required
+    def playback_override():
+        """
+        B3: emergency playlist — play one cycle, then resume previous playlist if requested.
+        """
+        try:
+            data = request.get_json(silent=True) or {}
+            if not data or 'playlist_id' not in data:
+                return jsonify({
+                    "success": False,
+                    "error": "Missing playlist_id",
+                }), 400
+
+            playlist_id = int(data['playlist_id'])
+            raw_return = data.get('return_to_previous', True)
+            if isinstance(raw_return, bool):
+                return_to_previous = raw_return
+            else:
+                return_to_previous = str(raw_return).strip().lower() in ("1", "true", "yes", "on")
+            start_index = int(data.get('start_index') or 0)
+
+            result = playback_service.play_override(
+                playlist_id=playlist_id,
+                return_to_previous=return_to_previous,
+                start_index=start_index,
+            )
+            if not result.get("success"):
+                return jsonify({
+                    "success": False,
+                    "error": result.get("error") or "Override failed",
+                    "details": result,
+                }), 500
+
+            return jsonify({
+                "success": True,
+                "override": result,
+            })
+        except ValueError:
+            return jsonify({
+                "success": False,
+                "error": "Invalid playlist_id or start_index",
+            }), 400
+        except Exception as e:
+            current_app.logger.error(f"Error in playback override: {str(e)}", exc_info=True)
+            return jsonify({
+                "success": False,
+                "error": str(e),
+            }), 500
+
     @api_bp.route('/playback/play', methods=['POST'])
     @login_required
     def playback_play():
