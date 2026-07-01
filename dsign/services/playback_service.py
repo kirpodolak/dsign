@@ -843,6 +843,39 @@ class PlaybackService:
             )
             return {"success": False, "error": str(e)}
 
+    def remote_pause(self, paused: Optional[bool] = None) -> Dict[str, Any]:
+        """Pause or resume current playlist playback via MPV."""
+        try:
+            return self._playlist_manager.remote_pause(paused=paused)
+        except Exception as e:
+            self._log_error(
+                "Error pausing playback",
+                extra={"action": "remote_pause", "error": str(e)},
+            )
+            return {"success": False, "error": str(e)}
+
+    def remote_seek(self, position_sec: float) -> Dict[str, Any]:
+        """Seek within the current media item."""
+        try:
+            return self._playlist_manager.remote_seek(position_sec)
+        except Exception as e:
+            self._log_error(
+                "Error seeking playback",
+                extra={"action": "remote_seek", "error": str(e)},
+            )
+            return {"success": False, "error": str(e)}
+
+    def remote_skip(self, direction: str = "next") -> Dict[str, Any]:
+        """Skip to next/previous item in the active playlist loop."""
+        try:
+            return self._playlist_manager.remote_skip(direction=direction)
+        except Exception as e:
+            self._log_error(
+                "Error skipping playback item",
+                extra={"action": "remote_skip", "error": str(e)},
+            )
+            return {"success": False, "error": str(e)}
+
     def stop(self) -> bool:
         """Stop playback and return to idle state"""
         try:
