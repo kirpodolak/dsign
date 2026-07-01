@@ -70,6 +70,10 @@ class PlaylistManager:
         self._playback_profile_muted = False
         self._playback_current_media_key: Optional[str] = None
         self._audio_route_applied_for_play = False
+        self._item_skip_lock = Lock()
+        self._item_skip_event = Event()
+        self._item_skip_direction = "next"
+        self._active_playback_mode: Optional[str] = None
 
     def set_slideshow_crash_callback(self, callback: Optional[Callable[[], None]]) -> None:
         self._slideshow_crash_callback = callback
@@ -1318,7 +1322,7 @@ class PlaylistManager:
         """Sleep until deadline or stop event; returns True if reached deadline."""
         step = max(0.05, float(step))
         while True:
-            if self._stop_event.is_set():
+            if self._stop_event.is_set() or self._item_skip_event.is_set():
                 return False
             now = time.monotonic()
             remaining = deadline_monotonic - now
@@ -2893,6 +2897,8 @@ class PlaylistManager:
             )
 
         while not self._stop_event.is_set() and self._active_playlist_id == playlist_id:
+            if self._item_skip_event.is_set():
+                break
             if time.time() - start > 6 * 3600:
                 break
 
@@ -3287,6 +3293,7 @@ class PlaylistManager:
 
         start_index = int(start_index or 0) % len(items)
         self._active_playlist_id = playlist_id
+        self._active_playback_mode = mode
         self._audio_route_applied_for_play = False
         try:
             self._logo_manager.ensure_mpv_video_output()
@@ -3533,6 +3540,10 @@ class PlaylistManager:
                 pass
         self._play_thread = None
         self._stop_event.clear()
+        self._item_skip_event.clear()
+        with self._item_skip_lock:
+            self._item_skip_direction = "next"
+        self._active_playback_mode = None
         self._clear_stall_restart_pending()
         if not preserve_stall_tracking:
             self._reset_stall_tracking()
@@ -3969,6 +3980,10 @@ class PlaylistManager:
                         ):
                             stall_abort = True
                             break
+                        skip_start = self._apply_remote_skip_after_item(item_index, len(items))
+                        if skip_start is not None:
+                            start_index = skip_start
+                            break
                     elif is_audio:
                         try:
                             self._mpv_manager.set_playback_local_audio_active(True)
@@ -4001,6 +4016,10 @@ class PlaylistManager:
                                     self._logo_manager.restore_after_audio_playback()
                                 except Exception:
                                     pass
+                                break
+                            skip_start = self._apply_remote_skip_after_item(item_index, len(items))
+                            if skip_start is not None:
+                                start_index = skip_start
                                 break
                             try:
                                 self._logo_manager.restore_after_audio_playback()
@@ -4054,6 +4073,14 @@ class PlaylistManager:
                             },
                         )
                         reached = self._sleep_until(switch_at, step=0.2)
+                        skip_start = self._apply_remote_skip_after_item(item_index, len(items))
+                        if skip_start is not None:
+                            start_index = skip_start
+                            break
+                        if not reached:
+                            if self._stop_event.is_set():
+                                break
+                            continue
                         if reached:
                             fired_at = time.monotonic()
                             drift_sec = round(fired_at - (base_t + dur_sec), 3)
@@ -4354,6 +4381,7 @@ class PlaylistManager:
                 )
 
             self._active_playlist_id = playlist_id
+            self._active_playback_mode = "manual"
             try:
                 self._mpv_manager.set_playback_session_active(True)
             except Exception:
@@ -4703,6 +4731,189 @@ class PlaylistManager:
         self._status_snapshot_cache = snapshot
         self._status_snapshot_ts = now
         return dict(snapshot)
+
+    def _consume_item_skip(self) -> Optional[str]:
+        if not self._item_skip_event.is_set():
+            return None
+        with self._item_skip_lock:
+            if not self._item_skip_event.is_set():
+                return None
+            self._item_skip_event.clear()
+            return self._item_skip_direction
+
+    def _remote_playback_snapshot(self) -> Dict[str, Any]:
+        from ..models import PlaybackStatus
+
+        row = self.db_session.query(PlaybackStatus).first()
+        thread_alive = bool(self._play_thread and self._play_thread.is_alive())
+        return {
+            "thread_alive": thread_alive,
+            "active_playlist_id": self._active_playlist_id,
+            "playback_mode": self._active_playback_mode,
+            "db_status": getattr(row, "status", None) if row else None,
+            "db_playlist_id": getattr(row, "playlist_id", None) if row else None,
+            "mpv_session": bool(self._mpv_manager._playback_session_active),
+            "mpv_idle": self._mpv_get_light("idle-active", timeout=2.0),
+        }
+
+    def _mpv_has_active_media(self) -> bool:
+        idle = self._mpv_get_light("idle-active", timeout=2.0)
+        if idle is True:
+            return False
+        path = self._mpv_get_light("path", timeout=2.0)
+        return bool(path and str(path).strip())
+
+    def _remote_playback_controllable(self) -> tuple[bool, Dict[str, Any]]:
+        snap = self._remote_playback_snapshot()
+        thread_ok = bool(
+            snap["thread_alive"]
+            and snap["active_playlist_id"] is not None
+        )
+        db_ok = snap["db_status"] == "playing" and snap["db_playlist_id"] is not None
+        mpv_ok = bool(snap["mpv_session"] or self._mpv_has_active_media())
+        return (thread_ok or (db_ok and mpv_ok) or mpv_ok), snap
+
+    def _remote_not_playing(self, snap: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "success": False,
+            "error": "not_playing",
+            "hint": (
+                "Start a playlist first (UI or POST /api/playback/play). "
+                "If content is on screen after a service restart, wait for boot "
+                "resume or start the playlist again."
+            ),
+            "playback": snap,
+        }
+
+    def _remote_playback_active(self) -> bool:
+        ok, _snap = self._remote_playback_controllable()
+        return ok
+
+    def _mpv_command_ok(self, response: Optional[Dict[str, Any]]) -> bool:
+        return bool(response and response.get("error") == "success")
+
+    def remote_pause(self, paused: Optional[bool] = None) -> Dict[str, Any]:
+        """Pause or resume current MPV playback (video/audio; images keep timer)."""
+        ok, snap = self._remote_playback_controllable()
+        if not ok:
+            return self._remote_not_playing(snap)
+        try:
+            if paused is None:
+                current = self._mpv_get_light("pause", timeout=2.0)
+                paused = not bool(current)
+            target = bool(paused)
+            response = self._mpv_manager._send_command(
+                {"command": ["set_property", "pause", "yes" if target else "no"]},
+                timeout=3.0,
+            )
+            if not self._mpv_command_ok(response):
+                return {
+                    "success": False,
+                    "error": "mpv_pause_failed",
+                    "paused": target,
+                }
+            return {"success": True, "paused": target}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def remote_seek(self, position_sec: float) -> Dict[str, Any]:
+        """Seek to absolute position in the current media file."""
+        ok, snap = self._remote_playback_controllable()
+        if not ok:
+            return self._remote_not_playing(snap)
+        try:
+            position = max(0.0, float(position_sec))
+            response = self._mpv_manager._send_command(
+                {"command": ["seek", position, "absolute"]},
+                timeout=5.0,
+            )
+            if not self._mpv_command_ok(response):
+                return {
+                    "success": False,
+                    "error": "mpv_seek_failed",
+                    "position": position,
+                }
+            return {"success": True, "position": position}
+        except (TypeError, ValueError):
+            return {"success": False, "error": "invalid position"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def remote_skip(self, direction: str = "next") -> Dict[str, Any]:
+        """Skip to next/previous playlist item."""
+        snap = self._remote_playback_snapshot()
+        normalized = (direction or "next").strip().lower()
+        if normalized in ("prev", "back", "backward"):
+            normalized = "previous"
+        if normalized not in ("next", "previous"):
+            return {"success": False, "error": "invalid direction"}
+
+        mode = snap.get("playback_mode") or "manual"
+        if mode == "local_playlist":
+            if not (snap["thread_alive"] or snap["mpv_session"] or self._mpv_has_active_media()):
+                return self._remote_not_playing(snap)
+            mpv_cmd = "playlist-next" if normalized == "next" else "playlist-prev"
+            response = self._mpv_manager._send_command(
+                {"command": [mpv_cmd, "force"]},
+                timeout=5.0,
+            )
+            if not self._mpv_command_ok(response):
+                return {
+                    "success": False,
+                    "error": "mpv_skip_failed",
+                    "direction": normalized,
+                    "playback_mode": mode,
+                }
+            item_index, item_count = self._get_loop_position_snapshot()
+            return {
+                "success": True,
+                "direction": normalized,
+                "playback_mode": mode,
+                "item_index": item_index,
+                "item_count": item_count,
+            }
+
+        if mode == "local_single":
+            if not (snap["thread_alive"] or snap["mpv_session"] or self._mpv_has_active_media()):
+                return self._remote_not_playing(snap)
+            return {
+                "success": True,
+                "direction": normalized,
+                "playback_mode": mode,
+                "note": "single_item_playlist",
+                "item_index": 0,
+                "item_count": 1,
+            }
+
+        thread_ok = bool(
+            snap["thread_alive"] and snap["active_playlist_id"] is not None
+        )
+        if not thread_ok:
+            return self._remote_not_playing(snap)
+
+        with self._item_skip_lock:
+            self._item_skip_direction = normalized
+            self._item_skip_event.set()
+        item_index, item_count = self._get_loop_position_snapshot()
+        return {
+            "success": True,
+            "direction": normalized,
+            "playback_mode": mode,
+            "item_index": item_index,
+            "item_count": item_count,
+        }
+
+    def _apply_remote_skip_after_item(self, item_index: int, items_count: int) -> Optional[int]:
+        """
+        After interrupting the current item, return a new loop start_index for
+        'previous', or None to continue the inner item loop normally.
+        """
+        skip_dir = self._consume_item_skip()
+        if not skip_dir:
+            return None
+        if skip_dir == "previous" and items_count > 0:
+            return (int(item_index) - 1) % int(items_count)
+        return None
 
     def get_status(self) -> Dict:
         """Get current playback status"""
