@@ -26,7 +26,7 @@
 | **B1** | Расширить `/api/playback/status` | ✅ сделано | main, `get_status()` B1 fields |
 | **B2** | `GET /api/health` | ✅ сделано | main, PR #96; плеер подтверждён |
 | **B3** | `POST /api/playback/override` | ✅ сделано | main; плеер EMERG-001 OK |
-| **B4** | API Bearer token | 🟡 частично | `dsign-api-token` + health/override/B5 |
+| **B4** | API Bearer token | ✅ сделано | fleet: health, status, play, stop, override, pause/seek/skip |
 | **B5** | Remote control (REST, не WS stub) | 🟡 в PR | pause/seek/skip + Bearer |
 | **D1** | `dsign-update` OTA | ⬜ не начато | зависит от **D0** |
 | **D2** | Local schedule (SQLite) | ⬜ не начато | после B3 |
@@ -275,7 +275,7 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 | B1 | ✅ | `item_index`, `item_count`, `media_key`, `time_pos`, `duration`, `is_network`, `mpv_responsive`, `cache_state` |
 | B2 | ✅ | `GET /api/health` + aggregates; `health_issues` |
 | B3 | ✅ | `POST /api/playback/override` + auto `return_to_previous` |
-| B4 | 🟡 | `dsign-api-token` Bearer для health/override/B5 |
+| B4 | ✅ | `dsign-api-token` Bearer на fleet playback API (см. ниже) |
 | B5 | 🟡 в PR | `POST /api/playback/pause|seek|skip` + Bearer |
 
 ### B1 — целевой ответ `/api/playback/status`
@@ -309,6 +309,33 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 Ответ: `override.previous` — куда вернётся после одного цикла emergency-плейлиста.  
 Auth: сессия или `Authorization: Bearer` (`DSIGN_API_TOKEN`).
 
+### B4 — Bearer auth (`DSIGN_API_TOKEN`)
+
+Скрипт: `sudo dsign-api-token show` → `Authorization: Bearer <token>`.
+
+| Method | Endpoint |
+|--------|----------|
+| GET | `/api/health` |
+| GET | `/api/playback/status` |
+| POST | `/api/playback/play` |
+| POST | `/api/playback/stop` |
+| POST | `/api/playback/override` |
+| POST | `/api/playback/pause` |
+| POST | `/api/playback/seek` |
+| POST | `/api/playback/skip` |
+
+Остальные `/api/*` (галерея, плейлисты, настройки): сессия + `X-CSRFToken`.
+
+```bash
+TOKEN=$(sudo dsign-api-token show | cut -d= -f2-)
+H="Authorization: Bearer $TOKEN"
+
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' \
+  http://127.0.0.1:5000/api/playback/play -d '{"playlist_id":9}' | jq .
+
+curl -s -X POST -H "$H" http://127.0.0.1:5000/api/playback/stop | jq .
+```
+
 ### B5 — remote control (REST)
 
 | Method | Endpoint | Body |
@@ -318,8 +345,9 @@ Auth: сессия или `Authorization: Bearer` (`DSIGN_API_TOKEN`).
 | POST | `/api/playback/skip` | `{"direction": "next"}` — `next` or `previous` |
 
 Auth: сессия + `X-CSRFToken` или `Authorization: Bearer`.  
-`409 not_playing` when no active playlist loop.  
-Pause/seek affect MPV directly; skip interrupts the manual slideshow loop (images included).
+`409 not_playing` when no active playlist loop (response includes `playback` snapshot + `hint`).  
+Pause/seek also work when MPV session is active after service restart (before thread respawns).  
+`GET /api/playback/status` now accepts Bearer token for fleet diagnostics.
 
 ---
 
@@ -381,6 +409,7 @@ Pause/seek affect MPV directly; skip interrupts the manual slideshow loop (image
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-06-17 | B4 — Bearer на `POST /api/playback/play` и `/stop`; fleet playback API complete |
 | 2026-06-17 | B5 — REST `pause`/`seek`/`skip` + Bearer auth |
 | 2026-06-17 | Добавлены: сводка прогресса, D0, A0 (PR #80), порядок реализации, деплой/drift, чекбоксы acceptance |
 | 2026-06-30 | B3 — `POST /api/playback/override`; закрыты C1/C2/B1/B2 в main |
