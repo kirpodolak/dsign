@@ -109,6 +109,9 @@ def init_routes(app, services: Dict[str, Any]) -> None:
             if bp.name not in app.blueprints:
                 app.register_blueprint(bp, url_prefix=url_prefix)
 
+        from dsign.services.api_token_auth import register_api_csrf_exemptions
+        register_api_csrf_exemptions(app)
+
     # Проверка обязательных сервисов
     required_services = ['file_service', 'playback_service', 'socket_service']
     for svc in required_services:

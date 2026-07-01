@@ -2,6 +2,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from flask_login import LoginManager
 from flask_socketio import SocketIO
+from flask_wtf.csrf import CSRFProtect
 from flask import request, jsonify, redirect, url_for
 import os
 import logging
@@ -12,6 +13,7 @@ db = SQLAlchemy()
 bcrypt = Bcrypt()
 login_manager = LoginManager()
 socketio = SocketIO()
+csrf = CSRFProtect()
 
 def init_extensions(app) -> Dict[str, Any]:
     """
@@ -61,6 +63,9 @@ def init_extensions(app) -> Dict[str, Any]:
                 app.logger.error("db.create_all() failed: %s", e, exc_info=True)
                 raise
         bcrypt.init_app(app)
+        if "csrf" not in app.extensions:
+            csrf.init_app(app)
+            _configure_csrf_json_errors(app)
         
         # Настройка SocketIO
         socketio.init_app(
@@ -93,6 +98,20 @@ def init_extensions(app) -> Dict[str, Any]:
         )
         raise RuntimeError(f"Extensions initialization failed: {str(e)}")
 
+def _configure_csrf_json_errors(app) -> None:
+    from flask_wtf.csrf import CSRFError
+
+    @app.errorhandler(CSRFError)
+    def _handle_csrf_error(exc):
+        if (request.path or "").startswith("/api/"):
+            return jsonify({
+                "success": False,
+                "error": "Bad Request",
+                "message": str(exc) or "The CSRF token is missing.",
+            }), 400
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+
 def _configure_auth(app) -> None:
     """Настройка системы аутентификации"""
     login_manager.login_view = 'auth.login'
@@ -110,7 +129,7 @@ def _configure_auth(app) -> None:
                 'authenticated': False,
             }), 401
         return redirect(url_for(login_manager.login_view, next=request.url))
-    
+
     # Импорт модели User только внутри функции
     from .models import User
     
@@ -174,4 +193,4 @@ def configure_static_cache(app):
             response.cache_control.public = True
         return response
 
-__all__ = ['db', 'bcrypt', 'login_manager', 'socketio', 'init_extensions', 'configure_static_cache']
+__all__ = ['db', 'bcrypt', 'login_manager', 'socketio', 'csrf', 'init_extensions', 'configure_static_cache']
