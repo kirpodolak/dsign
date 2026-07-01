@@ -27,7 +27,7 @@
 | **B2** | `GET /api/health` | ✅ сделано | main, PR #96; плеер подтверждён |
 | **B3** | `POST /api/playback/override` | ✅ сделано | main; плеер EMERG-001 OK |
 | **B4** | API Bearer token | ✅ сделано | fleet: health, status, play, stop, override, pause/seek/skip |
-| **B5** | Remote control (REST, не WS stub) | 🟡 в PR | pause/seek/skip + Bearer |
+| **B5** | Remote control (REST, не WS stub) | ✅ сделано | main; pause/seek/skip на плеере |
 | **D1** | `dsign-update` OTA | ⬜ не начато | зависит от **D0** |
 | **D2** | Local schedule (SQLite) | ⬜ не начато | после B3 |
 
@@ -276,7 +276,7 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 | B2 | ✅ | `GET /api/health` + aggregates; `health_issues` |
 | B3 | ✅ | `POST /api/playback/override` + auto `return_to_previous` |
 | B4 | ✅ | `dsign-api-token` Bearer на fleet playback API (см. ниже) |
-| B5 | 🟡 в PR | `POST /api/playback/pause|seek|skip` + Bearer |
+| B5 | ✅ | `POST /api/playback/pause|seek|skip` + Bearer |
 
 ### B1 — целевой ответ `/api/playback/status`
 
