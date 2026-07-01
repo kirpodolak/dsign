@@ -2,6 +2,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from flask_login import LoginManager
 from flask_socketio import SocketIO
+from flask_wtf.csrf import CSRFProtect
 from flask import request, jsonify, redirect, url_for
 import os
 import logging
@@ -12,6 +13,7 @@ db = SQLAlchemy()
 bcrypt = Bcrypt()
 login_manager = LoginManager()
 socketio = SocketIO()
+csrf = CSRFProtect()
 
 def init_extensions(app) -> Dict[str, Any]:
     """
@@ -110,7 +112,7 @@ def _configure_auth(app) -> None:
                 'authenticated': False,
             }), 401
         return redirect(url_for(login_manager.login_view, next=request.url))
-    
+
     # Импорт модели User только внутри функции
     from .models import User
     
@@ -174,4 +176,4 @@ def configure_static_cache(app):
             response.cache_control.public = True
         return response
 
-__all__ = ['db', 'bcrypt', 'login_manager', 'socketio', 'init_extensions', 'configure_static_cache']
+__all__ = ['db', 'bcrypt', 'login_manager', 'socketio', 'csrf', 'init_extensions', 'configure_static_cache']

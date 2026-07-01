@@ -43,6 +43,9 @@ class PlaylistManager:
         self._loop_item_index: Optional[int] = None
         self._loop_items_count: int = 0
         self._loop_position_lock = Lock()
+        self._override_lock = Lock()
+        self._override_return_ctx: Optional[Dict[str, Any]] = None
+        self._playlist_single_pass: bool = False
         self._stall_restart_lock = Lock()
         self._stall_restart_pending = False
         self._stall_count_lock = Lock()
@@ -3553,6 +3556,7 @@ class PlaylistManager:
         *,
         first_item_preloaded: bool = False,
         profile_muted: bool = False,
+        single_pass: bool = False,
     ) -> None:
         """Thread entry: push Flask app context before DB-backed external media refresh."""
         try:
@@ -3563,6 +3567,7 @@ class PlaylistManager:
                     start_index,
                     first_item_preloaded=first_item_preloaded,
                     profile_muted=profile_muted,
+                    single_pass=single_pass,
                 )
         except Exception as e:
             self.logger.error(
@@ -3588,6 +3593,9 @@ class PlaylistManager:
                         },
                     )
 
+        finally:
+            self._maybe_return_after_override()
+
     def _manual_slideshow_loop(
         self,
         playlist_id: int,
@@ -3596,6 +3604,7 @@ class PlaylistManager:
         *,
         first_item_preloaded: bool = False,
         profile_muted: bool = False,
+        single_pass: bool = False,
     ):
         """
         Manual playback loop that enforces per-item durations for images and plays videos to EOF.
@@ -4087,6 +4096,13 @@ class PlaylistManager:
                     )
                     break
 
+                if single_pass:
+                    self.logger.info(
+                        "Playback override: single-pass cycle complete",
+                        extra={"playlist_id": playlist_id, "cycle": loop_cycle},
+                    )
+                    break
+
         finally:
             try:
                 self._mpv_manager.set_playback_local_audio_active(False)
@@ -4144,10 +4160,93 @@ class PlaylistManager:
     ) -> bool:
         """Play playlist with profile support"""
         with self._app_context():
+            with self._override_lock:
+                self._override_return_ctx = None
+                self._playlist_single_pass = False
             return self._play_impl(
                 playlist_id,
                 start_index=start_index,
                 preserve_stall_tracking=preserve_stall_tracking,
+                single_pass=False,
+            )
+
+    def play_override(
+        self,
+        playlist_id: int,
+        *,
+        return_to_previous: bool = True,
+        start_index: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        B3: emergency playlist — play once, then optionally resume the previous playlist.
+        """
+        previous: Optional[Dict[str, Any]] = None
+        with self._override_lock:
+            if return_to_previous and self._active_playlist_id is not None:
+                item_index, _item_count = self._get_loop_position_snapshot()
+                previous = {
+                    "playlist_id": int(self._active_playlist_id),
+                    "item_index": int(item_index or 0),
+                }
+                self._override_return_ctx = dict(previous)
+            else:
+                self._override_return_ctx = None
+            self._playlist_single_pass = True
+
+        self.logger.info(
+            "Playback override requested",
+            extra={
+                "override_playlist_id": int(playlist_id),
+                "return_to_previous": bool(return_to_previous),
+                "previous": previous,
+                "start_index": int(start_index or 0),
+            },
+        )
+
+        with self._app_context():
+            ok = self._play_impl(
+                int(playlist_id),
+                start_index=int(start_index or 0),
+                preserve_stall_tracking=True,
+                single_pass=True,
+            )
+
+        return {
+            "success": bool(ok),
+            "playlist_id": int(playlist_id),
+            "return_to_previous": bool(return_to_previous),
+            "previous": previous,
+        }
+
+    def _maybe_return_after_override(self) -> None:
+        """Resume pre-override playlist after a single-pass emergency loop ends."""
+        ctx: Optional[Dict[str, Any]] = None
+        with self._override_lock:
+            if self._playlist_single_pass and self._override_return_ctx:
+                ctx = dict(self._override_return_ctx)
+            self._override_return_ctx = None
+            self._playlist_single_pass = False
+
+        if not ctx:
+            return
+
+        self.logger.info("Playback override: auto-return to previous playlist", extra=ctx)
+        try:
+            with self._app_context():
+                self._play_impl(
+                    int(ctx["playlist_id"]),
+                    start_index=int(ctx.get("item_index") or 0),
+                    preserve_stall_tracking=True,
+                    single_pass=False,
+                )
+        except Exception as e:
+            self.logger.error(
+                "Playback override: auto-return failed",
+                extra={
+                    "error": str(e),
+                    "type": type(e).__name__,
+                    "previous": ctx,
+                },
             )
 
     def _play_impl(
@@ -4156,6 +4255,7 @@ class PlaylistManager:
         *,
         start_index: int = 0,
         preserve_stall_tracking: bool = False,
+        single_pass: bool = False,
     ) -> bool:
         from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
 
@@ -4242,7 +4342,7 @@ class PlaylistManager:
                 start_index = 0
 
             playback_mode = self._playlist_playback_mode(items)
-            if playback_mode in ("local_single", "local_playlist"):
+            if not single_pass and playback_mode in ("local_single", "local_playlist"):
                 return self._play_local_video_engine(
                     playlist_id=playlist_id,
                     items=items,
@@ -4411,6 +4511,7 @@ class PlaylistManager:
                 kwargs={
                     "first_item_preloaded": True,
                     "profile_muted": profile_muted,
+                    "single_pass": single_pass,
                 },
                 daemon=True,
             )
@@ -4618,6 +4719,11 @@ class PlaylistManager:
         item_index, item_count = self._get_loop_position_snapshot()
         media_key = self._last_loaded_media_key
         mpv_snap = self._get_mpv_playback_snapshot()
+        with self._override_lock:
+            override_active = bool(self._playlist_single_pass)
+            override_return = (
+                dict(self._override_return_ctx) if self._override_return_ctx else None
+            )
 
         return {
             'status': status.status if status else None,
@@ -4633,6 +4739,10 @@ class PlaylistManager:
             'settings': self._mpv_manager._current_settings,
             'network_health': self.get_network_playback_health(),
             'cache_state': cache_state,
+            'override': {
+                'active': override_active,
+                'return_to': override_return,
+            },
         }
 
     def get_playback_info(self) -> Dict:
