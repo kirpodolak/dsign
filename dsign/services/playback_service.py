@@ -805,6 +805,44 @@ class PlaybackService:
             )
             return False
 
+    def play_override(
+        self,
+        playlist_id: int,
+        *,
+        return_to_previous: bool = True,
+        start_index: int = 0,
+    ) -> Dict[str, Any]:
+        """Emergency override: play playlist once, then resume previous if requested."""
+        try:
+            start_time = time.time()
+            result = self._playlist_manager.play_override(
+                playlist_id,
+                return_to_previous=return_to_previous,
+                start_index=start_index,
+            )
+            self._log_info(
+                "Playback override",
+                extra={
+                    "playlist_id": playlist_id,
+                    "return_to_previous": return_to_previous,
+                    "action": "play_override",
+                    "duration_sec": round(time.time() - start_time, 3),
+                    **(result if isinstance(result, dict) else {}),
+                },
+            )
+            return result if isinstance(result, dict) else {"success": bool(result)}
+        except Exception as e:
+            self._log_error(
+                "Error in playback override",
+                extra={
+                    "playlist_id": playlist_id,
+                    "action": "play_override",
+                    "error": str(e),
+                    "type": type(e).__name__,
+                },
+            )
+            return {"success": False, "error": str(e)}
+
     def stop(self) -> bool:
         """Stop playback and return to idle state"""
         try:
