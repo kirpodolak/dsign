@@ -2181,6 +2181,77 @@ def init_api_routes(api_bp, services):
                 "error": str(e),
             }), 500
 
+    @api_bp.route('/playback/pause', methods=['POST'])
+    @api_session_or_token_required
+    def playback_pause():
+        """B5: pause or resume current media (MPV pause property)."""
+        try:
+            data = request.get_json(silent=True) or {}
+            paused_raw = data.get('paused')
+            paused = None
+            if paused_raw is not None:
+                if isinstance(paused_raw, bool):
+                    paused = paused_raw
+                else:
+                    paused = str(paused_raw).strip().lower() in ("1", "true", "yes", "on")
+
+            result = playback_service.remote_pause(paused=paused)
+            if not result.get("success"):
+                code = 409 if result.get("error") == "not_playing" else 500
+                return jsonify({"success": False, **result}), code
+            return jsonify({"success": True, **result})
+        except Exception as e:
+            current_app.logger.error(f"Error in playback pause: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/playback/seek', methods=['POST'])
+    @api_session_or_token_required
+    def playback_seek():
+        """B5: seek to absolute position (seconds) in the current media."""
+        try:
+            data = request.get_json(silent=True) or {}
+            position_raw = data.get('position', data.get('seconds'))
+            if position_raw is None:
+                return jsonify({
+                    "success": False,
+                    "error": "Missing position",
+                }), 400
+            position = float(position_raw)
+            result = playback_service.remote_seek(position)
+            if not result.get("success"):
+                if result.get("error") == "not_playing":
+                    return jsonify({"success": False, **result}), 409
+                if result.get("error") == "invalid position":
+                    return jsonify({"success": False, **result}), 400
+                return jsonify({"success": False, **result}), 500
+            return jsonify({"success": True, **result})
+        except (TypeError, ValueError):
+            return jsonify({
+                "success": False,
+                "error": "Invalid position",
+            }), 400
+        except Exception as e:
+            current_app.logger.error(f"Error in playback seek: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/playback/skip', methods=['POST'])
+    @api_session_or_token_required
+    def playback_skip():
+        """B5: skip to next/previous item in the active playlist loop."""
+        try:
+            data = request.get_json(silent=True) or {}
+            direction = str(data.get('direction') or 'next').strip().lower()
+            result = playback_service.remote_skip(direction=direction)
+            if not result.get("success"):
+                code = 409 if result.get("error") == "not_playing" else 400
+                if result.get("error") not in ("not_playing", "invalid direction"):
+                    code = 500
+                return jsonify({"success": False, **result}), code
+            return jsonify({"success": True, **result})
+        except Exception as e:
+            current_app.logger.error(f"Error in playback skip: {str(e)}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
     @api_bp.route('/playback/play', methods=['POST'])
     @login_required
     def playback_play():
@@ -2225,7 +2296,7 @@ def init_api_routes(api_bp, services):
             }), 500
 
     @api_bp.route('/playback/status', methods=['GET'])
-    @login_required
+    @api_session_or_token_required
     def playback_status():
         try:
             status = playback_service.get_status()
