@@ -25,9 +25,9 @@
 | **C3** | Nested playlists | ⬜ не начато | — |
 | **B1** | Расширить `/api/playback/status` | ✅ сделано | main, `get_status()` B1 fields |
 | **B2** | `GET /api/health` | ✅ сделано | main, PR #96; плеер подтверждён |
-| **B3** | `POST /api/playback/override` | 🟡 в PR | emergency + `return_to_previous` |
-| **B4** | API Bearer token | 🟡 частично | `dsign-api-token` + `/api/health` |
-| **B5** | Remote control (REST, не WS stub) | ⬜ не начато | WS = `pass` |
+| **B3** | `POST /api/playback/override` | ✅ сделано | main; плеер EMERG-001 OK |
+| **B4** | API Bearer token | 🟡 частично | `dsign-api-token` + health/override/B5 |
+| **B5** | Remote control (REST, не WS stub) | 🟡 в PR | pause/seek/skip + Bearer |
 | **D1** | `dsign-update` OTA | ⬜ не начато | зависит от **D0** |
 | **D2** | Local schedule (SQLite) | ⬜ не начато | после B3 |
 
@@ -274,9 +274,9 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 |----|--------|--------------|
 | B1 | ✅ | `item_index`, `item_count`, `media_key`, `time_pos`, `duration`, `is_network`, `mpv_responsive`, `cache_state` |
 | B2 | ✅ | `GET /api/health` + aggregates; `health_issues` |
-| B3 | 🟡 в PR | `POST /api/playback/override` + auto `return_to_previous` |
-| B4 | 🟡 | `dsign-api-token` Bearer для `/api/health` (и override) |
-| B5 | ⬜ | **REST** seek/pause/skip (рекомендация: не чинить WS stub) |
+| B3 | ✅ | `POST /api/playback/override` + auto `return_to_previous` |
+| B4 | 🟡 | `dsign-api-token` Bearer для health/override/B5 |
+| B5 | 🟡 в PR | `POST /api/playback/pause|seek|skip` + Bearer |
 
 ### B1 — целевой ответ `/api/playback/status`
 
@@ -308,6 +308,18 @@ mixed / network / images → _manual_slideshow_loop() (как сейчас)
 
 Ответ: `override.previous` — куда вернётся после одного цикла emergency-плейлиста.  
 Auth: сессия или `Authorization: Bearer` (`DSIGN_API_TOKEN`).
+
+### B5 — remote control (REST)
+
+| Method | Endpoint | Body |
+|--------|----------|------|
+| POST | `/api/playback/pause` | `{"paused": true}` — omit `paused` to toggle |
+| POST | `/api/playback/seek` | `{"position": 12.5}` — seconds, absolute |
+| POST | `/api/playback/skip` | `{"direction": "next"}` — `next` or `previous` |
+
+Auth: сессия + `X-CSRFToken` или `Authorization: Bearer`.  
+`409 not_playing` when no active playlist loop.  
+Pause/seek affect MPV directly; skip interrupts the manual slideshow loop (images included).
 
 ---
 
@@ -369,6 +381,7 @@ Auth: сессия или `Authorization: Bearer` (`DSIGN_API_TOKEN`).
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-06-17 | B5 — REST `pause`/`seek`/`skip` + Bearer auth |
 | 2026-06-17 | Добавлены: сводка прогресса, D0, A0 (PR #80), порядок реализации, деплой/drift, чекбоксы acceptance |
 | 2026-06-30 | B3 — `POST /api/playback/override`; закрыты C1/C2/B1/B2 в main |
 | 2026-06-30 | B2 — `GET /api/health` (playback + system/display/network/services) |
