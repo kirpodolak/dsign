@@ -700,6 +700,33 @@ class SettingsService:
                     pass
             touched.append(name)
 
+        # ALC897: Auto-Mute can silence digital outputs when the jack is empty.
+        for ctl, val in (
+            ("Auto-Mute Mode", "Disabled"),
+            ("Master", "80%"),
+            ("Headphone", "80%"),
+            ("Speaker", "80%"),
+        ):
+            if ctl in names:
+                try:
+                    subprocess.run(
+                        ["amixer", "-c", str(card), "sset", ctl, val],
+                        check=False,
+                        timeout=2.0,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    subprocess.run(
+                        ["amixer", "-c", str(card), "sset", ctl, "unmute"],
+                        check=False,
+                        timeout=2.0,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    touched.append(ctl)
+                except Exception:
+                    pass
+
         try:
             contents = subprocess.check_output(
                 ["amixer", "-c", str(card), "contents"],
