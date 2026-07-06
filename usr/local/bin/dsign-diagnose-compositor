@@ -238,6 +238,13 @@ if [ "$wlr_renderer" = "pixman" ] && systemctl is-active --quiet dsign-composito
 elif systemctl is-active --quiet dsign-compositor.service 2>/dev/null; then
   echo "Compositor looks healthy — no mandatory fixes."
 else
+  if journalctl -u dsign-compositor.service -b --no-pager 2>/dev/null \
+    | grep -q 'ExecStartPre=/bin/mkdir -p /run/user/1000'; then
+    echo "Cold-boot hint: compositor mkdir failed — /run/user/1000 needs root (update unit: ExecStartPre=+/bin/mkdir ...)."
+    echo "  Quick recovery:"
+    echo "    sudo mkdir -p /run/user/1000 && sudo chown dsign:dsign /run/user/1000 && sudo chmod 700 /run/user/1000"
+    echo "    sudo loginctl enable-linger dsign"
+  fi
   echo "After fixes:"
   echo "  sudo systemctl reset-failed dsign-compositor.service"
   echo "  sudo systemctl restart dsign-compositor.service dsign-logo.service dsign-mpv-wayland.service"
