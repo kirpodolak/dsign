@@ -161,6 +161,17 @@ systemctl enable screenshot.service screenshot.timer 2>/dev/null || true
 systemctl start screenshot.timer 2>/dev/null || true
 if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
     systemctl enable seatd.service 2>/dev/null || true
+    # Headless signage: logind creates /run/user/UID at boot (compositor also pre-creates it as root).
+    loginctl enable-linger dsign 2>/dev/null || true
+    # Kiosk: labwc owns the monitor — no GNOME/Ubuntu login greeter or graphical.target.
+    for dm in gdm3.service gdm.service lightdm.service sddm.service; do
+        systemctl stop "$dm" 2>/dev/null || true
+        systemctl disable "$dm" 2>/dev/null || true
+    done
+    systemctl set-default multi-user.target 2>/dev/null || true
+    # Signage monitor is labwc on VT1 — hide console login (SSH/tty2+ still available).
+    systemctl stop getty@tty1.service 2>/dev/null || true
+    systemctl mask getty@tty1.service 2>/dev/null || true
     systemctl enable dsign-compositor.service dsign-logo.service dsign-mpv-wayland.service
     systemctl disable dsign-mpv.service 2>/dev/null || true
     systemctl stop dsign-mpv.service 2>/dev/null || true
@@ -220,6 +231,7 @@ if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
     echo "  Logo (imv):    systemctl status dsign-logo.service"
     echo "  MPV (Wayland): systemctl status dsign-mpv-wayland.service"
     echo "  Screenshot:    systemctl status screenshot.timer  (grim + MPV IPC fallback)"
+    echo "  Boot target:   multi-user.target (GDM/getty@tty1 disabled for kiosk)"
 else
     echo "  MPV плеер:     systemctl status dsign-mpv.service"
     echo "  Wayland pilot: DSIGN_DISPLAY_BACKEND=wayland $0"
