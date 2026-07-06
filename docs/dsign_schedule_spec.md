@@ -1,16 +1,28 @@
 # D2 Schedule Engine — Спецификация
 
-**Версия:** 1.1 (review-amended)  
+**Версия:** 1.2 (code-review-amended)  
 **Статус:** Готово к реализации D2.1–D2.4  
 **Репозиторий:** `kirpodolak/dsign` (Flask + SQLite + MPV + Wayland/labwc)  
 **Прототип UI:** `docs/Расписание протип.html` (demo 08:00–22:00; production — 00:00–23:59)
+
+### Changelog 1.1 → 1.2
+
+- **PlaybackStatus:** уточнено по коду — запись `playlist_id`/`status`/`source`/`rule_id` только в `PlaylistManager` (`_play_impl`, `_play_local_video_engine`, `_stop_impl`); `PlaybackService.play()`/`stop()` — делегаты без записи в БД.
+- **Wiring:** `PlaylistManager.set_override_return_handler()` (не `set_playback_service`); callback из `init_services` → `PlaybackService.handle_override_return`.
+- **Override return:** при `previous_source=='schedule'` всегда `evaluate_now()` (актуальный слот), не replay `previous_rule_id`.
+- **`PlaybackStatus.timestamp`:** legacy Unix-секунды при создании строки; при play/stop сегодня не обновляется.
+- **`GET /week`:** комментарий — `days_of_week`/`repeat_type` в instance для UI day-transfer (`popcount`).
+- **`is_playing_now`:** явно `now = local_now(settings_service)`.
+- **`evaluate_and_apply()`:** публичная обёртка над `_evaluate()`.
+- **`return-to-schedule`:** убран из D2.1; endpoint только в D2.2.
+- **SIGTERM:** комментарий про `python run.py` + systemd; MVP — `daemon=True` timer.
+- **NTP:** цепочка `timedatectl` → `chronyc` → `ntpdate` (legacy).
 
 ### Changelog 1.0 → 1.1
 
 - Пути файлов приведены к реальному layout репозитория (`extensions.py`, `routes/api/`).
 - Inline-миграция — по образцу `_ensure_playlist_sort_order_column`.
-- `GET /week`: поля для day-transfer UI, disabled rules на сетке, timezone через `_local_now()`.
-- `source` / `rule_id` — propagation через `PlaylistManager._play_impl`.
+- `GET /week`: поля для day-transfer UI, disabled rules на сетке, timezone через `local_now()`.
 - D2.1: `evaluate_now()` — stub; полная wiring в D2.2.
 - D2.3: CSRF, i18n, empty-click, context menu в чеклисте.
 - Graceful shutdown, `schedule_conflict_resolved`, запрет слотов через полночь.
@@ -30,18 +42,24 @@
 │  ├─ /api/schedule/rules — CRUD                            │
 │  ├─ /api/schedule/week — развёрнутые инстансы             │
 │  ├─ /api/schedule/now — активное правило + следующее      │
-│  └─ /api/playback/return-to-schedule                      │
+│  └─ /api/playback/return-to-schedule (D2.2+)              │
 ├─────────────────────────────────────────────────────────────┤
 │  ScheduleEngine (singleton, daemon timer, 30 с)            │
 │  ├─ _evaluate() → find active rule → play/stop             │
-│  ├─ evaluate_now() — boot, override return, post-mutate    │
-│  └─ _local_now() — timezone-aware (settings.timezone)      │
+│  ├─ evaluate_now() / evaluate_and_apply() — hooks          │
+│  └─ local_now() — timezone-aware (settings.timezone)       │
 ├─────────────────────────────────────────────────────────────┤
-│  PlaybackService                                           │
-│  ├─ play(playlist_id, source, rule_id)                    │
-│  ├─ stop(source)                                          │
-│  ├─ play_override() → сохраняет previous_* в PlaybackStatus│
-│  └─ boot resume: schedule-first, не last manual            │
+│  PlaybackService (оркестрация, без записи PlaybackStatus)  │
+│  ├─ play(playlist_id, source, rule_id) → PlaylistManager   │
+│  ├─ stop(source) → PlaylistManager                        │
+│  ├─ play_override() → previous_* + override play            │
+│  ├─ handle_override_return() — матрица §3                  │
+│  └─ boot resume: schedule-first (evaluate_now)            │
+├─────────────────────────────────────────────────────────────┤
+│  PlaylistManager (MPV + единственная запись PlaybackStatus)  │
+│  ├─ play/stop → _play_impl / _stop_impl / local video path │
+│  ├─ on_override_return callback → PlaybackService         │
+│  └─ _maybe_return_after_override → callback (не _play_impl)│
 ├─────────────────────────────────────────────────────────────┤
 │  MPV + Wayland (imv logo underneath)                       │
 └─────────────────────────────────────────────────────────────┘
@@ -59,6 +77,17 @@
 | UI | `dsign/templates/index.html`, `static/js/schedule.js`, `static/css/schedule.css` |
 
 **Нет Alembic** — только `db.create_all()` + `ALTER TABLE` при старте (как `sort_order`).
+
+### 1.2. Кто пишет PlaybackStatus (факт кода, v1.2)
+
+| Поле | Где пишется сегодня | После D2 |
+|------|---------------------|----------|
+| `playlist_id`, `status` | `PlaylistManager._play_impl`, `_play_local_video_engine`, `_stop_impl` | то же |
+| `source`, `rule_id` | — (новые колонки) | **там же**, в том же `commit` |
+| `previous_*` | — | `PlaybackService.play_override()` **до** вызова `PlaylistManager.play_override` |
+| `timestamp` | default при `PlaybackStatus(id=1)` create | не трогать в MVP (см. §2.2) |
+
+`PlaybackService.play()` / `stop()` — только логирование и делегирование; **не** `db.session.commit()` для `PlaybackStatus`.
 
 ---
 
@@ -99,7 +128,7 @@ class PlaybackStatus(db.Model):
     id           = Column(Integer, primary_key=True)      # always 1
     status       = Column(String(16))                     # playing | stopped | idle
     playlist_id  = Column(Integer, ForeignKey('playlists.id'))
-    timestamp    = Column(Integer, ...)                   # existing
+    timestamp    = Column(Integer, default=lambda: int(time.time()))  # legacy — см. ниже
 
     source              = Column(String(16), default='idle')  # manual|schedule|override|idle
     rule_id             = Column(Integer, ForeignKey('schedule_rules.id'), nullable=True)
@@ -107,6 +136,12 @@ class PlaybackStatus(db.Model):
     previous_rule_id    = Column(Integer, ForeignKey('schedule_rules.id'), nullable=True)
     previous_playlist_id = Column(Integer, ForeignKey('playlists.id'), nullable=True)
 ```
+
+**`timestamp` (existing):**
+
+- Unix time (секунды), выставляется **только** при создании строки (`default=`).
+- При play/stop в текущем коде **не обновляется**; используется в `to_dict()` для API.
+- Schedule **не зависит** от `timestamp`. Опционально D2.4: обновлять при смене `status` (не блокер).
 
 ### 2.3. Inline-миграция
 
@@ -164,24 +199,49 @@ def _ensure_schedule_schema(app) -> None:
 **Правила:**
 
 - ScheduleEngine **не трогает** playback при `source in ('override', 'manual')`.
-- Manual play блокирует расписание до Stop или `POST /api/playback/return-to-schedule`.
-- `play_override()` выставляет `source='override'` и сохраняет `previous_*` в **PlaybackStatus** (и в `_override_return_ctx` для item_index).
-- Override return по `previous_source`:
-  - `schedule` → `evaluate_now()` → play или idle;
-  - `manual` → play previous playlist + `source='manual'`;
+- Manual play блокирует расписание до Stop или `POST /api/playback/return-to-schedule` (D2.2+).
+- `play_override()` выставляет `previous_*` в **PlaybackStatus** (и `_override_return_ctx` для `item_index`); play с `source='override'`.
+- **Override return** (через `handle_override_return`, не прямой `_play_impl`):
+  - `previous_source == 'schedule'` → **`evaluate_now()`** → play активного слота или idle (**не** replay `previous_rule_id` — время могло смениться за override);
+  - `previous_source == 'manual'` → `play(previous_playlist_id, source='manual')`;
   - иначе → `stop(source='schedule')` → idle.
 
-**Propagation `source` (обязательно):**
+**Propagation `source` / `rule_id`:**
 
-| Entry point | source |
-|-------------|--------|
-| `POST /api/playback/play` | `manual` |
-| `POST /api/playback/stop` | `manual` → status `stopped` |
-| `play_override()` | `override` |
-| `ScheduleEngine._evaluate` | `schedule` |
-| Конец слота / нет правила | `stop(source='schedule')` → `idle` |
+| Entry point | source | rule_id |
+|-------------|--------|---------|
+| `POST /api/playback/play` | `manual` | `None` |
+| `POST /api/playback/stop` | → status `stopped`; source остаётся или `manual` | — |
+| `play_override()` | `override` | `None` |
+| `ScheduleEngine._evaluate` | `schedule` | `active_rule.id` |
+| Конец слота / нет правила | `stop(source='schedule')` → `idle` | `None` |
 
-Запись в БД — в **`PlaylistManager._play_impl`** и **`_stop_impl`** (не только в обёртке `PlaybackService`).
+**Цепочка вызовов (сигнатуры):**
+
+```python
+# PlaybackService — протащить kwargs, без commit PlaybackStatus
+def play(self, playlist_id, *, source='manual', rule_id=None, start_index=0, ...):
+    return self._playlist_manager.play(
+        playlist_id, source=source, rule_id=rule_id, start_index=start_index, ...
+    )
+
+def stop(self, *, source='manual', ...):
+    return self._playlist_manager.stop(source=source, ...)
+
+# PlaylistManager — записать в БД в _play_impl / _play_local_video_engine / _stop_impl
+def play(self, playlist_id, *, source='manual', rule_id=None, ...):
+    return self._play_impl(playlist_id, source=source, rule_id=rule_id, ...)
+
+def _play_impl(..., source='manual', rule_id=None):
+    ...
+    playback.source = source
+    playback.rule_id = rule_id
+    playback.playlist_id = playlist_id
+    playback.status = 'playing'
+    db.session.commit()
+```
+
+Запись **`playlist_id` / `status` / `source` / `rule_id`** — в **`PlaylistManager._play_impl`**, **`_play_local_video_engine`**, **`_stop_impl`** (один `commit` на операцию).
 
 ---
 
@@ -208,7 +268,7 @@ def local_now(settings_service=None) -> datetime:
         return datetime.now()
 ```
 
-- Engine и **все** schedule API (`/week`, `/now`, `is_playing_now`) используют **один** helper.
+- Engine и **все** schedule API (`/week`, `/now`, `is_playing_now`) используют **один** helper — **`local_now()`**, не `datetime.now()` naive.
 - Default в `settings_service.DEFAULT_SETTINGS`: `"timezone": "Europe/Moscow"`.
 - UI timezone — **D2.4**; engine работает с default до появления UI.
 
@@ -224,7 +284,7 @@ def local_now(settings_service=None) -> datetime:
 - `start()` — в `_init_background_loop` **после** `set_app` (нужен `app.app_context()`).
 - `stop()` — `self._running = False` + `timer.cancel()`.
 - Timer: **`daemon=True`** (как остальные фоновые потоки dsign).
-- **Graceful shutdown (опционально D2.2):** `signal.SIGTERM` / `SIGINT` → `engine.stop()`. Для MVP достаточно `daemon=True`; отдельного shutdown hook в проекте сейчас нет.
+- **Graceful shutdown:** `digital-signage.service` запускает `python run.py` (Flask dev server). При `systemctl stop` процесс получает SIGTERM; отдельного shutdown hook в проекте **нет**. Для MVP: `daemon=True` timer завершится с процессом — **acceptable**. Явный `SIGTERM → engine.stop()` — **D2.4 / v2** (не блокер).
 
 ### 5.2. `_evaluate()` (псевдокод)
 
@@ -241,17 +301,19 @@ def _evaluate(self):
         if active_rule:
             current_rule_id = self._get_current_rule_id()
             current_playlist = self._get_current_playlist_id()
-            # Не рестартить, если уже играет тот же playlist по тому же rule
-            if current_rule_id != active_rule.id:
-                if current_rule_id == active_rule.id and current_playlist == active_rule.playlist_id:
-                    return
-                self.playback.play(
-                    active_rule.playlist_id,
-                    source='schedule',
-                    rule_id=active_rule.id,
-                )
+            # Уже играет тот же rule + playlist — не рестартить
+            if (
+                current_rule_id == active_rule.id
+                and current_playlist == active_rule.playlist_id
+            ):
+                return
+            self.playback.play(
+                active_rule.playlist_id,
+                source='schedule',
+                rule_id=active_rule.id,
+            )
         else:
-            if self._get_current_rule_id() is not None:
+            if self._get_current_source() == 'schedule':
                 self.playback.stop(source='schedule')
 ```
 
@@ -263,37 +325,84 @@ def _evaluate(self):
 
 **Лог `schedule_conflict_resolved`:** если кандидатов > 1, INFO с `chosen_rule_id`, `skipped_rule_ids`, `now`.
 
-### 5.4. `evaluate_now()` hooks
+### 5.4. `evaluate_now()` / `evaluate_and_apply()`
+
+```python
+def evaluate_now(self) -> None:
+    """Immediate evaluation (boot, override return, return-to-schedule)."""
+    self.evaluate_and_apply()
+
+def evaluate_and_apply(self) -> None:
+    """Public entry: timer tick + post-mutate hooks. Same as _evaluate() under app_context."""
+    with self._app.app_context():
+        self._evaluate()
+```
 
 | Событие | Действие |
 |---------|----------|
 | D2.1 API mutate | stub / no-op (engine ещё нет) |
 | D2.2+ POST/PUT/toggle/archive | `engine.evaluate_and_apply()` |
 | Boot resume | `evaluate_now()` |
-| Override return | `evaluate_now()` если `previous_source == 'schedule'` |
-| `return-to-schedule` | `evaluate_now()` + play/stop |
+| Override return (`previous_source=='schedule'`) | `evaluate_now()` |
+| `return-to-schedule` (D2.2+) | `evaluate_now()` |
 
 ---
 
 ## 6. PlaybackService / PlaylistManager
 
-### 6.1. `play()` / `stop()`
+### 6.1. `play()` / `stop()` — делегирование + kwargs
 
-Параметры `source`, `rule_id` протащить:  
-`PlaybackService.play` → `PlaylistManager.play` → `_play_impl` (+ local video path).
+Параметры `source`, `rule_id` протащить по цепочке:
+
+`PlaybackService.play` → `PlaylistManager.play` → `_play_impl`  
+`PlaybackService.play` → `PlaylistManager.play` → `_play_local_video_engine` (local video path)  
+`PlaybackService.stop` → `PlaylistManager.stop` → `_stop_impl`
+
+`PlaybackService` **не** делает отдельный `commit` для `PlaybackStatus`.
 
 ### 6.2. Boot resume — schedule-first
 
-Заменить текущий `_resume_playback_after_boot_impl`: сначала `evaluate_now()`, иначе idle (не last manual playlist).
+Заменить `_resume_playback_after_boot_impl`: сначала `evaluate_now()`, иначе idle (не last manual playlist из `PlaybackStatus.playlist_id`).
 
 Пересмотреть `_should_resume_playback_after_boot()` — не возобновлять manual playlist при отсутствии активного слота.
 
-### 6.3. Override
+### 6.3. Override + wiring
 
-`play_override`: читать `source`/`rule_id`/`playlist_id` из PlaybackStatus; писать `previous_*`; `_play_impl` с `source='override'`.
+**`play_override` (PlaybackService):**
 
-`_maybe_return_after_override`: матрица из §3.  
-**Wiring:** `PlaylistManager.set_playback_service(pb)` или callback при `init_services` — в коде **нет** `self.playback_service`.
+1. Прочитать `source` / `rule_id` / `playlist_id` из `PlaybackStatus`.
+2. Записать `previous_source`, `previous_rule_id`, `previous_playlist_id` (+ `item_index` в `_override_return_ctx` как сейчас).
+3. Вызвать `PlaylistManager.play_override(...)` → `_play_impl(..., source='override', rule_id=None)`.
+
+**`_maybe_return_after_override` (PlaylistManager):**
+
+- **Не** вызывать `_play_impl` напрямую для schedule-return.
+- Вызвать `self._on_override_return()` если задан.
+
+**Wiring (D2.2, `init_services`):**
+
+```python
+# PlaylistManager создаётся внутри PlaybackService.__init__ — обратной ссылки нет.
+# После создания engine:
+playback_service._playlist_manager.set_override_return_handler(
+    playback_service.handle_override_return
+)
+
+# D2.1: поле _on_override_return = None (stub); поведение B3 без schedule — как сейчас.
+```
+
+```python
+# PlaybackService
+def handle_override_return(self) -> None:
+    row = ...  # PlaybackStatus id=1
+    prev = row.previous_source
+    if prev == 'schedule':
+        self._schedule_engine.evaluate_now()
+    elif prev == 'manual' and row.previous_playlist_id:
+        self.play(row.previous_playlist_id, source='manual')
+    else:
+        self.stop(source='schedule')
+```
 
 ### 6.4. `get_status()`
 
@@ -322,16 +431,16 @@ UI badge: `data.status.schedule.source` (не корень ответа).
 
 ### 7.1. Schedule CRUD
 
-| Method | Path | Описание |
-|--------|------|----------|
-| GET | `/api/schedule/rules` | Все не-archived |
-| GET | `/api/schedule/week?date=YYYY-MM-DD` | 7 дней instances |
-| GET | `/api/schedule/now` | active + next |
-| POST | `/api/schedule/rules` | create |
-| PUT | `/api/schedule/rules/<id>` | update (partial OK для day transfer) |
-| PATCH | `/api/schedule/rules/<id>/archive` | soft delete |
-| PATCH | `/api/schedule/rules/<id>/toggle` | enable/disable |
-| POST | `/api/playback/return-to-schedule` | manual → schedule |
+| Method | Path | Описание | Фаза |
+|--------|------|----------|------|
+| GET | `/api/schedule/rules` | Все не-archived | D2.1 |
+| GET | `/api/schedule/week?date=YYYY-MM-DD` | 7 дней instances | D2.1 |
+| GET | `/api/schedule/now` | active + next | D2.1 |
+| POST | `/api/schedule/rules` | create | D2.1 |
+| PUT | `/api/schedule/rules/<id>` | update (partial OK для day transfer) | D2.1 |
+| PATCH | `/api/schedule/rules/<id>/archive` | soft delete | D2.1 |
+| PATCH | `/api/schedule/rules/<id>/toggle` | enable/disable | D2.1 |
+| POST | `/api/playback/return-to-schedule` | manual → schedule | **D2.2** |
 
 ### 7.2. Валидация
 
@@ -367,11 +476,22 @@ UI badge: `data.status.schedule.source` (не корень ответа).
 }
 ```
 
+**`days_of_week` / `repeat_type` в instance:** копируются из **rule** (не свойство инстанса). Нужны UI для day-transfer: `popcount(days_of_week)==1` → диалог «Перенести»; иначе только «Дублировать».
+
 **Отображение на сетке:**
 
 - `archived_at IS NOT NULL` — **не** включать в `/week`.
 - `enabled=false` — **включать** (`is_active: false`), стиль «выключено».
-- `is_playing_now` — только если `source=='schedule'`, `rule_id` совпадает, дата = сегодня (по `local_now()`).
+- `is_playing_now` — только если текущий playback `source=='schedule'`, `rule_id` совпадает, **`instance.date == local_now(settings_service).date()`** (для прошлой/будущей недели всегда `false`).
+
+```python
+now = local_now(settings_service)
+is_playing_now = (
+    playback.source == 'schedule'
+    and playback.rule_id == rule.id
+    and instance_date == now.date()
+)
+```
 
 ### 7.4. D2.1 stub для post-mutate
 
@@ -417,7 +537,7 @@ const OVERLAP_THRESHOLD = 4;
 
 Poll `GET /api/playback/status` каждые 5 с:
 
-- `manual` → бейдж + кнопка «Вернуться к расписанию».
+- `manual` → бейдж + кнопка «Вернуться к расписанию» (disabled до D2.2, если endpoint нет).
 - `schedule` / `override` / `idle` — по §3.
 
 ### 8.5. CSRF (обязательно)
@@ -456,7 +576,16 @@ credentials: 'include',
 
 UI: select timezone + NTP server + кнопка «Синхронизировать».
 
-**NTP optional:** `ntpdate` + `sudo` может отсутствовать на плеере — кнопка best-effort, не блокер MVP. Acceptance offline 24 ч — **timezone + локальные часы**, без обязательного NTP.
+**NTP sync (best-effort, не блокер MVP):**
+
+```python
+# Порядок попыток на плеере:
+# 1. timedatectl set-ntp true  (systemd-timesyncd)
+# 2. chronyc -a makestep       (если chrony установлен)
+# 3. ntpdate -u <server>       (legacy, может отсутствовать)
+```
+
+Кнопка не должна падать, если `sudo` / `ntpdate` недоступны. Acceptance offline 24 ч — **timezone + локальные часы**, без обязательного NTP.
 
 ---
 
@@ -467,28 +596,30 @@ UI: select timezone + NTP server + кнопка «Синхронизироват
 - [ ] `ScheduleRule` в `dsign/models.py` (или import из submodule)
 - [ ] Расширить `PlaybackStatus` (`source`, `rule_id`, `previous_*`)
 - [ ] `_ensure_schedule_schema()` в `dsign/extensions.py`
-- [ ] Endpoints в `dsign/routes/api/api_routes.py` (или blueprint + `init_routes`)
+- [ ] Endpoints в `dsign/routes/api/api_routes.py` (кроме `return-to-schedule`)
 - [ ] `schedule_time.local_now()` helper
 - [ ] Валидация §7.2
-- [ ] `GET /week` с полями §7.3 (включая disabled, без archived)
+- [ ] `GET /week` с полями §7.3 (включая disabled, без archived; `days_of_week` для day-transfer)
 - [ ] `_trigger_schedule_evaluate()` stub
-- [ ] `POST /api/playback/return-to-schedule` (stub 501 или no-op до D2.2)
+- [ ] `PlaylistManager._on_override_return = None` (поле stub; без handler — legacy B3 `_play_impl` return)
 - [ ] **Acceptance:** POST rule → GET rules; invalid `start>=end` → 400
 
 ### D2.2 — ScheduleEngine + playback
 
 - [ ] `dsign/services/schedule_engine.py`
 - [ ] Singleton на `PlaybackService`; `start()` после app ready
+- [ ] `evaluate_and_apply()` / `evaluate_now()`
 - [ ] `app.app_context()` в tick/evaluate
-- [ ] `source`/`rule_id` в `_play_impl`, `_stop_impl`, local video path
+- [ ] `source`/`rule_id` kwargs: `PlaybackService` → `PlaylistManager` → `_play_impl` / `_play_local_video_engine` / `_stop_impl`
 - [ ] API play/stop → `source='manual'`
-- [ ] `play_override` → `override` + `previous_*`
-- [ ] `PlaylistManager.set_playback_service()` + override return matrix
-- [ ] Boot schedule-first
+- [ ] `play_override` → `override` + `previous_*` в PlaybackStatus
+- [ ] `set_override_return_handler` + `handle_override_return` (матрица §3)
+- [ ] Boot schedule-first (`evaluate_now`)
 - [ ] `get_status()` + block `schedule`
+- [ ] `POST /api/playback/return-to-schedule`
 - [ ] `evaluate_and_apply()` после mutate + return-to-schedule
 - [ ] Log `schedule_conflict_resolved`
-- [ ] (optional) SIGTERM → `engine.stop()`
+- [ ] (optional D2.4) SIGTERM → `engine.stop()`
 - [ ] **Acceptance:** 09:00 rule ±30 с; manual blocks schedule; reboot off-slot → idle
 
 ### D2.3 — UI: вкладка Расписание
@@ -510,9 +641,10 @@ UI: select timezone + NTP server + кнопка «Синхронизироват
 ### D2.4 — Polish
 
 - [ ] Timezone в Settings UI
-- [ ] NTP sync (optional, best-effort)
+- [ ] NTP sync (optional, best-effort; §9 fallback chain)
 - [ ] Monthly hidden в repeat select
 - [ ] Offline 24 ч test
+- [ ] (optional) SIGTERM shutdown hook
 - [ ] **Acceptance:** чеклист `docs/dsign_4phase_checklist.md` D2
 
 ### D2.5 — v2 (не MVP)
@@ -546,13 +678,15 @@ Repo facts:
 - Migrations: dsign/extensions.py (_ensure_schedule_schema)
 - API: dsign/routes/api/api_routes.py, @login_required
 - Time: dsign/services/schedule_time.py (zoneinfo)
+- PlaybackStatus DB writes: PlaylistManager only (not PlaybackService.play)
+- Do NOT register POST /api/playback/return-to-schedule (D2.2)
 
 Deliverables: ScheduleRule, PlaybackStatus columns, CRUD + /week + /now,
-validation, _trigger_schedule_evaluate stub.
+validation, _trigger_schedule_evaluate stub, _on_override_return stub field.
 
 Do NOT implement ScheduleEngine (D2.2) or UI (D2.3).
 ```
 
 ---
 
-*End of spec v1.1.*
+*End of spec v1.2.*
