@@ -1,9 +1,18 @@
 # D2 Schedule Engine — Спецификация
 
-**Версия:** 1.2 (code-review-amended)  
+**Версия:** 1.3 (review-amended)  
 **Статус:** Готово к реализации D2.1–D2.4  
 **Репозиторий:** `kirpodolak/dsign` (Flask + SQLite + MPV + Wayland/labwc)  
 **Прототип UI:** `docs/Расписание протип.html` (demo 08:00–22:00; production — 00:00–23:59)
+
+### Changelog 1.2 → 1.3
+
+- **`evaluate_now()` vs `evaluate_and_apply()`:** разделены — `evaluate_now()` → `Optional[ScheduleRule]` без side effects; `evaluate_and_apply()` → `_evaluate()` с play/stop. Boot resume, override return, `return-to-schedule` используют **`evaluate_and_apply()`**.
+- **Wiring:** `set_override_return_handler` в `init_services()` (wire-блок); `ScheduleEngine` создаётся и `start()` в `PlaybackService._init_background_loop()` после `set_app`.
+- **`_trigger_schedule_evaluate`:** `playback_service` из closure `init_api_routes(api_bp, services)` (не `current_app.playback_service`).
+- **`GET /week`:** `if playback is None: is_playing_now = False`.
+- **`GET /now` / `_find_next_rule`:** сравнение через `datetime.time.min`, не `datetime.min.time()`.
+- **NTP:** уточнены force-sync шаги (`systemctl restart systemd-timesyncd`, `chronyc makestep`).
 
 ### Changelog 1.1 → 1.2
 
@@ -46,15 +55,16 @@
 ├─────────────────────────────────────────────────────────────┤
 │  ScheduleEngine (singleton, daemon timer, 30 с)            │
 │  ├─ _evaluate() → find active rule → play/stop             │
-│  ├─ evaluate_now() / evaluate_and_apply() — hooks          │
-│  └─ local_now() — timezone-aware (settings.timezone)       │
+│  ├─ evaluate_now() — read-only active rule                       │
+│  ├─ evaluate_and_apply() — _evaluate() + play/stop               │
+│  └─ local_now() — timezone-aware (settings.timezone)           │
 ├─────────────────────────────────────────────────────────────┤
 │  PlaybackService (оркестрация, без записи PlaybackStatus)  │
 │  ├─ play(playlist_id, source, rule_id) → PlaylistManager   │
 │  ├─ stop(source) → PlaylistManager                        │
 │  ├─ play_override() → previous_* + override play            │
 │  ├─ handle_override_return() — матрица §3                  │
-│  └─ boot resume: schedule-first (evaluate_now)            │
+│  └─ boot resume: schedule-first (evaluate_and_apply)        │
 ├─────────────────────────────────────────────────────────────┤
 │  PlaylistManager (MPV + единственная запись PlaybackStatus)  │
 │  ├─ play/stop → _play_impl / _stop_impl / local video path │
@@ -141,7 +151,7 @@ class PlaybackStatus(db.Model):
 
 - Unix time (секунды), выставляется **только** при создании строки (`default=`).
 - При play/stop в текущем коде **не обновляется**; используется в `to_dict()` для API.
-- Schedule **не зависит** от `timestamp`. Опционально D2.4: обновлять при смене `status` (не блокер).
+- Schedule **не зависит** от `timestamp`. `to_dict()` может отдавать устаревшее время — legacy, не блокер MVP. Опционально D2.4: обновлять при смене `status`.
 
 ### 2.3. Inline-миграция
 
@@ -202,7 +212,7 @@ def _ensure_schedule_schema(app) -> None:
 - Manual play блокирует расписание до Stop или `POST /api/playback/return-to-schedule` (D2.2+).
 - `play_override()` выставляет `previous_*` в **PlaybackStatus** (и `_override_return_ctx` для `item_index`); play с `source='override'`.
 - **Override return** (через `handle_override_return`, не прямой `_play_impl`):
-  - `previous_source == 'schedule'` → **`evaluate_now()`** → play активного слота или idle (**не** replay `previous_rule_id` — время могло смениться за override);
+  - `previous_source == 'schedule'` → **`evaluate_and_apply()`** → play активного слота или idle (**не** replay `previous_rule_id` — время могло смениться за override);
   - `previous_source == 'manual'` → `play(previous_playlist_id, source='manual')`;
   - иначе → `stop(source='schedule')` → idle.
 
@@ -328,12 +338,13 @@ def _evaluate(self):
 ### 5.4. `evaluate_now()` / `evaluate_and_apply()`
 
 ```python
-def evaluate_now(self) -> None:
-    """Immediate evaluation (boot, override return, return-to-schedule)."""
-    self.evaluate_and_apply()
+def evaluate_now(self) -> Optional[ScheduleRule]:
+    """Read-only: active rule at local_now. No play/stop side effects."""
+    with self._app.app_context():
+        return self._find_active_rule(local_now(self.settings_service))
 
 def evaluate_and_apply(self) -> None:
-    """Public entry: timer tick + post-mutate hooks. Same as _evaluate() under app_context."""
+    """Public entry: evaluate schedule and apply play/stop (side effects)."""
     with self._app.app_context():
         self._evaluate()
 ```
@@ -342,9 +353,23 @@ def evaluate_and_apply(self) -> None:
 |---------|----------|
 | D2.1 API mutate | stub / no-op (engine ещё нет) |
 | D2.2+ POST/PUT/toggle/archive | `engine.evaluate_and_apply()` |
-| Boot resume | `evaluate_now()` |
-| Override return (`previous_source=='schedule'`) | `evaluate_now()` |
-| `return-to-schedule` (D2.2+) | `evaluate_now()` |
+| Boot resume | `engine.evaluate_and_apply()` (не `evaluate_now`) |
+| Override return (`previous_source=='schedule'`) | `evaluate_and_apply()` |
+| `return-to-schedule` (D2.2+) | `evaluate_and_apply()` |
+| `GET /api/schedule/now` (peek active) | `evaluate_now()` |
+
+### 5.5. `_find_next_rule` (для `/now`, D2.1+)
+
+При поиске следующего слота сегодня/в будущем — сравнение `Time` только с **naive** `datetime.time`:
+
+```python
+from datetime import time as dt_time
+
+def _time_cutoff(now, *, same_day: bool) -> dt_time:
+    return now.time() if same_day else dt_time.min  # НЕ datetime.min.time()
+```
+
+`local_now()` возвращает **aware** datetime; для SQLAlchemy `Time` и Python-сравнений использовать только `.time()` (naive) или `dt_time.min`.
 
 ---
 
@@ -362,7 +387,9 @@ def evaluate_and_apply(self) -> None:
 
 ### 6.2. Boot resume — schedule-first
 
-Заменить `_resume_playback_after_boot_impl`: сначала `evaluate_now()`, иначе idle (не last manual playlist из `PlaybackStatus.playlist_id`).
+Заменить `_resume_playback_after_boot_impl`: вызвать **`self._schedule_engine.evaluate_and_apply()`** (D2.2+), иначе idle. **Не** восстанавливать last manual playlist из `PlaybackStatus.playlist_id`.
+
+`evaluate_now()` здесь **не** использовать — он без side effects.
 
 Пересмотреть `_should_resume_playback_after_boot()` — не возобновлять manual playlist при отсутствии активного слота.
 
@@ -379,17 +406,31 @@ def evaluate_and_apply(self) -> None:
 - **Не** вызывать `_play_impl` напрямую для schedule-return.
 - Вызвать `self._on_override_return()` если задан.
 
-**Wiring (D2.2, `init_services`):**
+**Wiring (D2.2):**
+
+1. **`init_services()`** — после создания `playback_service` (wire-блок, рядом с ContentCache / SettingsService):
 
 ```python
-# PlaylistManager создаётся внутри PlaybackService.__init__ — обратной ссылки нет.
-# После создания engine:
-playback_service._playlist_manager.set_override_return_handler(
-    playback_service.handle_override_return
-)
-
-# D2.1: поле _on_override_return = None (stub); поведение B3 без schedule — как сейчас.
+# dsign/services/__init__.py — init_services()
+pb = services.get("playback_service")
+if pb:
+    pm = getattr(pb, "_playlist_manager", None)
+    if pm is not None and hasattr(pm, "set_override_return_handler"):
+        pm.set_override_return_handler(pb.handle_override_return)
 ```
+
+Handler можно зарегистрировать **до** создания `ScheduleEngine` — `handle_override_return` обращается к `self._schedule_engine`, который появится позже.
+
+2. **`PlaybackService._init_background_loop()`** — после `set_app` / `app.app_context()`:
+
+```python
+self._schedule_engine = ScheduleEngine(self, settings_service=...)
+self._schedule_engine.start()  # daemon timer
+```
+
+`PlaylistManager` создаётся в `PlaybackService.__init__` **раньше** engine — handler вешается из `init_services`, не из `__init__`.
+
+D2.1: поле `_on_override_return = None` (stub); без handler — legacy B3 `_play_impl` return.
 
 ```python
 # PlaybackService
@@ -397,7 +438,7 @@ def handle_override_return(self) -> None:
     row = ...  # PlaybackStatus id=1
     prev = row.previous_source
     if prev == 'schedule':
-        self._schedule_engine.evaluate_now()
+        self._schedule_engine.evaluate_and_apply()
     elif prev == 'manual' and row.previous_playlist_id:
         self.play(row.previous_playlist_id, source='manual')
     else:
@@ -486,21 +527,34 @@ UI badge: `data.status.schedule.source` (не корень ответа).
 
 ```python
 now = local_now(settings_service)
-is_playing_now = (
-    playback.source == 'schedule'
-    and playback.rule_id == rule.id
-    and instance_date == now.date()
-)
+playback = PlaybackStatus.query.get(1)  # или .first()
+is_playing_now = False
+if playback is not None:
+    is_playing_now = (
+        playback.source == 'schedule'
+        and playback.rule_id == rule.id
+        and instance_date == now.date()
+    )
 ```
 
 ### 7.4. D2.1 stub для post-mutate
 
+`playback_service` доступен в API через **closure** при регистрации маршрутов (как сегодня):
+
 ```python
-def _trigger_schedule_evaluate(playback_service):
+# dsign/routes/api/api_routes.py
+def init_api_routes(api_bp, services):
+    playback_service = services.get('playback_service')
+    ...
+
+def _trigger_schedule_evaluate():
+    # вызывать из route handler внутри init_api_routes — playback_service в closure
     engine = getattr(playback_service, '_schedule_engine', None)
     if engine is not None and hasattr(engine, 'evaluate_and_apply'):
         engine.evaluate_and_apply()
 ```
+
+**Нет** `current_app.playback_service` — не добавлять без отдельного `app.extensions`.
 
 ---
 
@@ -579,11 +633,14 @@ UI: select timezone + NTP server + кнопка «Синхронизироват
 **NTP sync (best-effort, не блокер MVP):**
 
 ```python
-# Порядок попыток на плеере:
-# 1. timedatectl set-ntp true  (systemd-timesyncd)
-# 2. chronyc -a makestep       (если chrony установлен)
-# 3. ntpdate -u <server>       (legacy, может отсутствовать)
+# Одноразовый force sync (не только «включить NTP»):
+# 1. timedatectl status                    — проверка (уже sync?)
+# 2. systemctl restart systemd-timesyncd   — force sync (Ubuntu/RPi)
+# 3. chronyc -a makestep                 — если chrony установлен
+# 4. ntpdate -u <server>                 — legacy, может отсутствовать
 ```
+
+`timedatectl set-ntp true` — **включение** автосинхронизации, не разовый шаг.
 
 Кнопка не должна падать, если `sudo` / `ntpdate` недоступны. Acceptance offline 24 ч — **timezone + локальные часы**, без обязательного NTP.
 
@@ -608,13 +665,13 @@ UI: select timezone + NTP server + кнопка «Синхронизироват
 
 - [ ] `dsign/services/schedule_engine.py`
 - [ ] Singleton на `PlaybackService`; `start()` после app ready
-- [ ] `evaluate_and_apply()` / `evaluate_now()`
+- [ ] `evaluate_now()` (read-only) / `evaluate_and_apply()` (side effects)
 - [ ] `app.app_context()` в tick/evaluate
 - [ ] `source`/`rule_id` kwargs: `PlaybackService` → `PlaylistManager` → `_play_impl` / `_play_local_video_engine` / `_stop_impl`
 - [ ] API play/stop → `source='manual'`
 - [ ] `play_override` → `override` + `previous_*` в PlaybackStatus
-- [ ] `set_override_return_handler` + `handle_override_return` (матрица §3)
-- [ ] Boot schedule-first (`evaluate_now`)
+- [ ] `set_override_return_handler` в `init_services()`; engine `start()` в `_init_background_loop()`
+- [ ] Boot schedule-first (`evaluate_and_apply`, не `evaluate_now`)
 - [ ] `get_status()` + block `schedule`
 - [ ] `POST /api/playback/return-to-schedule`
 - [ ] `evaluate_and_apply()` после mutate + return-to-schedule
@@ -689,4 +746,4 @@ Do NOT implement ScheduleEngine (D2.2) or UI (D2.3).
 
 ---
 
-*End of spec v1.2.*
+*End of spec v1.3.*
