@@ -1,9 +1,14 @@
 # D2 Schedule Engine — Спецификация
 
-**Версия:** 1.3 (review-amended)  
+**Версия:** 1.4 (final — ready for D2.1)  
 **Статус:** Готово к реализации D2.1–D2.4  
 **Репозиторий:** `kirpodolak/dsign` (Flask + SQLite + MPV + Wayland/labwc)  
 **Прототип UI:** `docs/Расписание протип.html` (demo 08:00–22:00; production — 00:00–23:59)
+
+### Changelog 1.3 → 1.4
+
+- **`handle_override_return`:** guard `if row is None` и `if self._schedule_engine is None` — handler регистрируется в `init_services()` раньше, чем engine создаётся в `_init_background_loop()`.
+- **`PlaybackService.__init__` (D2.2):** `self._schedule_engine = None` до фоновой инициализации.
 
 ### Changelog 1.2 → 1.3
 
@@ -419,7 +424,7 @@ if pb:
         pm.set_override_return_handler(pb.handle_override_return)
 ```
 
-Handler можно зарегистрировать **до** создания `ScheduleEngine` — `handle_override_return` обращается к `self._schedule_engine`, который появится позже.
+Handler регистрируется в `init_services()` **до** создания `ScheduleEngine` в `_init_background_loop()`. Поэтому `handle_override_return` **обязан** проверять `self._schedule_engine is not None` (редкий gap между стартом Flask и фоновым init — override до engine).
 
 2. **`PlaybackService._init_background_loop()`** — после `set_app` / `app.app_context()`:
 
@@ -428,21 +433,32 @@ self._schedule_engine = ScheduleEngine(self, settings_service=...)
 self._schedule_engine.start()  # daemon timer
 ```
 
+В `PlaybackService.__init__` (D2.2): `self._schedule_engine = None`.
+
 `PlaylistManager` создаётся в `PlaybackService.__init__` **раньше** engine — handler вешается из `init_services`, не из `__init__`.
 
 D2.1: поле `_on_override_return = None` (stub); без handler — legacy B3 `_play_impl` return.
 
 ```python
-# PlaybackService
+# PlaybackService (D2.2)
 def handle_override_return(self) -> None:
-    row = ...  # PlaybackStatus id=1
-    prev = row.previous_source
-    if prev == 'schedule':
-        self._schedule_engine.evaluate_and_apply()
-    elif prev == 'manual' and row.previous_playlist_id:
-        self.play(row.previous_playlist_id, source='manual')
-    else:
-        self.stop(source='schedule')
+    with self._app_context():
+        row = self.db_session.query(PlaybackStatus).get(1)
+        if row is None:
+            self.stop(source='schedule')
+            return
+
+        prev = row.previous_source
+        if prev == 'schedule':
+            if self._schedule_engine is not None:
+                self._schedule_engine.evaluate_and_apply()
+            else:
+                # Engine not ready yet — safe fallback
+                self.stop(source='schedule')
+        elif prev == 'manual' and row.previous_playlist_id:
+            self.play(row.previous_playlist_id, source='manual')
+        else:
+            self.stop(source='schedule')
 ```
 
 ### 6.4. `get_status()`
@@ -670,7 +686,7 @@ UI: select timezone + NTP server + кнопка «Синхронизироват
 - [ ] `source`/`rule_id` kwargs: `PlaybackService` → `PlaylistManager` → `_play_impl` / `_play_local_video_engine` / `_stop_impl`
 - [ ] API play/stop → `source='manual'`
 - [ ] `play_override` → `override` + `previous_*` в PlaybackStatus
-- [ ] `set_override_return_handler` в `init_services()`; engine `start()` в `_init_background_loop()`
+- [ ] `handle_override_return` с guard `row is None` / `_schedule_engine is None` (§6.3)
 - [ ] Boot schedule-first (`evaluate_and_apply`, не `evaluate_now`)
 - [ ] `get_status()` + block `schedule`
 - [ ] `POST /api/playback/return-to-schedule`
@@ -746,4 +762,4 @@ Do NOT implement ScheduleEngine (D2.2) or UI (D2.3).
 
 ---
 
-*End of spec v1.3.*
+*End of spec v1.4.*
