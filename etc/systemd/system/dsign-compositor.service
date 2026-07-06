@@ -1,9 +1,11 @@
 [Unit]
 Description=Wayland compositor for Digital Signage (labwc)
 Documentation=file:/home/dsign/dsign/etc/dsign/labwc/rc.xml
-Before=dsign-logo.service dsign-mpv-wayland.service dsign-show-startup-ip.service
+Before=dsign-logo.service dsign-mpv-wayland.service dsign-show-startup-ip.service getty@tty1.service
 After=network.target seatd.service
 Wants=seatd.service
+# Kiosk: no login prompt on the signage monitor (getty@tty1 fights labwc for VT1).
+Conflicts=getty@tty1.service
 
 [Service]
 Type=simple
@@ -19,6 +21,7 @@ ExecStartPre=+/bin/bash /usr/local/bin/dsign-sync-wayland-drm
 ExecStartPre=+/bin/mkdir -p /run/user/1000 /var/lib/dsign/labwc
 ExecStartPre=+/bin/chown dsign:dsign /run/user/1000
 ExecStartPre=+/bin/chmod 700 /run/user/1000
+ExecStartPre=+/bin/chvt 1
 ExecStartPre=+/bin/sh -c 'install -d -o dsign -g dsign -m 0755 /var/lib/dsign/labwc; for f in rc.xml autostart; do if [ -e "/var/lib/dsign/labwc/$$f" ]; then chown dsign:dsign "/var/lib/dsign/labwc/$$f" || true; fi; done'
 # -C = config directory (rc.xml, autostart, environment). Do NOT pass a directory to -c (Bad address).
 ExecStart=/usr/bin/labwc -C /var/lib/dsign/labwc

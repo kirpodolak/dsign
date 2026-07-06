@@ -163,6 +163,9 @@ if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
     systemctl enable seatd.service 2>/dev/null || true
     # Headless signage: logind creates /run/user/UID at boot (compositor also pre-creates it as root).
     loginctl enable-linger dsign 2>/dev/null || true
+    # Signage monitor is labwc on VT1 — hide console login (SSH/tty2+ still available).
+    systemctl stop getty@tty1.service 2>/dev/null || true
+    systemctl mask getty@tty1.service 2>/dev/null || true
     systemctl enable dsign-compositor.service dsign-logo.service dsign-mpv-wayland.service
     systemctl disable dsign-mpv.service 2>/dev/null || true
     systemctl stop dsign-mpv.service 2>/dev/null || true
