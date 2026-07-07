@@ -1,7 +1,7 @@
 import logging
 from flask_login import UserMixin
 from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime
+from datetime import datetime, date, time as dt_time
 from typing import List, Dict, Optional
 from .extensions import db, bcrypt
 import time
@@ -201,6 +201,33 @@ class Playlist(db.Model):
             
         return result
 
+class ScheduleRule(db.Model):
+    """Расписание воспроизведения плейлиста по времени."""
+    __tablename__ = 'schedule_rules'
+
+    id = db.Column(db.Integer, primary_key=True)
+    playlist_id = db.Column(db.Integer, db.ForeignKey('playlists.id'), nullable=False)
+    enabled = db.Column(db.Boolean, default=True)
+    archived_at = db.Column(db.DateTime, nullable=True)
+
+    days_of_week = db.Column(db.Integer, default=0)
+    start_time = db.Column(db.Time, nullable=False)
+    end_time = db.Column(db.Time, nullable=False)
+
+    repeat_type = db.Column(db.String(16), default='weekly')
+    valid_from = db.Column(db.Date, nullable=True)
+    valid_until = db.Column(db.Date, nullable=True)
+
+    priority = db.Column(db.Integer, default=5)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    playlist = db.relationship('Playlist', backref='schedule_rules')
+
+    def __repr__(self) -> str:
+        return f'<ScheduleRule {self.id} playlist={self.playlist_id}>'
+
 class PlaybackStatus(db.Model):
     """Модель статуса воспроизведения"""
     __tablename__ = 'playback_status'
@@ -209,13 +236,20 @@ class PlaybackStatus(db.Model):
     playlist_id = db.Column(db.Integer, db.ForeignKey('playlists.id'))
     status = db.Column(db.String(20), default='stopped')
     timestamp = db.Column(db.Integer, default=lambda: int(time.time()))
+
+    source = db.Column(db.String(16), default='idle')
+    rule_id = db.Column(db.Integer, db.ForeignKey('schedule_rules.id'), nullable=True)
+    previous_source = db.Column(db.String(16), nullable=True)
+    previous_rule_id = db.Column(db.Integer, db.ForeignKey('schedule_rules.id'), nullable=True)
+    previous_playlist_id = db.Column(db.Integer, db.ForeignKey('playlists.id'), nullable=True)
     
     @property
     def timestamp_dt(self):
         """Временная метка как datetime"""
         return datetime.fromtimestamp(self.timestamp) if self.timestamp else None
         
-    playlist = db.relationship('Playlist', backref='playback_statuses')
+    playlist = db.relationship('Playlist', foreign_keys=[playlist_id], backref='playback_statuses')
+    previous_playlist = db.relationship('Playlist', foreign_keys=[previous_playlist_id])
     
     def __repr__(self) -> str:
         return f'<PlaybackStatus {self.status}>'
@@ -224,7 +258,12 @@ class PlaybackStatus(db.Model):
         return {
             'status': self.status,
             'playlist_id': self.playlist_id,
-            'timestamp': self.timestamp_dt.isoformat() if self.timestamp_dt else None
+            'timestamp': self.timestamp_dt.isoformat() if self.timestamp_dt else None,
+            'source': self.source or 'idle',
+            'rule_id': self.rule_id,
+            'previous_source': self.previous_source,
+            'previous_rule_id': self.previous_rule_id,
+            'previous_playlist_id': self.previous_playlist_id,
         }
 
 class PlaybackProfile(db.Model):

@@ -182,6 +182,20 @@ class ServiceFactory:
             return None
 
     @staticmethod
+    def create_schedule_service(db_session, settings_service=None, logger=None) -> Optional[Any]:
+        logger = logger or setup_logger('ScheduleService')
+        try:
+            logger.info('Initializing ScheduleService')
+            from .schedule_service import ScheduleService
+            return ScheduleService(db_session, settings_service=settings_service, logger=logger)
+        except Exception as e:
+            logger.error('ScheduleService initialization failed', {
+                'error': str(e),
+                'stack': True
+            })
+            return None
+
+    @staticmethod
     def create_settings_service(
         settings_file: str, 
         upload_folder: str, 
@@ -504,6 +518,11 @@ def init_services(
             ('auth_service', lambda: ServiceFactory.create_auth_service(config['SECRET_KEY'], logger)),
             ('external_media_service', lambda: ServiceFactory.create_external_media_service(db.session, logger)),
             ('content_cache', lambda: ServiceFactory.create_content_cache(config['UPLOAD_FOLDER'], logger)),
+            ('schedule_service', lambda: ServiceFactory.create_schedule_service(
+                db.session,
+                settings_service=services.get('settings_service'),
+                logger=logger,
+            )),
         ]
 
         for name, factory in optional_services:

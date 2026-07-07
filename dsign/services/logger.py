@@ -88,17 +88,37 @@ class ServiceLogger:
             message_data.update(extra)
         return json.dumps(message_data, ensure_ascii=False)
 
-    def debug(self, msg: str, extra: Optional[Dict[str, Any]] = None, **kwargs):
-        # kwargs accepted for compatibility with logging.Logger
+    def _prepare_log(self, msg: str, args: tuple, extra: Optional[Dict[str, Any]], kwargs: dict) -> tuple[str, Optional[Dict[str, Any]]]:
+        """
+        Accept both ServiceLogger style (msg, extra_dict) and logging.Logger style (msg, *args, exc_info=...).
+        """
+        if args and extra is None:
+            if len(args) == 1 and isinstance(args[0], dict):
+                extra = args[0]
+                args = ()
+        if args:
+            try:
+                msg = msg % args
+            except (TypeError, ValueError):
+                msg = f"{msg} {', '.join(str(a) for a in args)}"
+        if kwargs.get("exc_info"):
+            extra = dict(extra or {})
+            extra.setdefault("traceback", traceback.format_exc())
+        return msg, extra
+
+    def debug(self, msg: str, *args, extra: Optional[Dict[str, Any]] = None, **kwargs):
+        msg, extra = self._prepare_log(msg, args, extra, kwargs)
         self.logger.debug(self._format_message(msg, extra))
 
-    def info(self, msg: str, extra: Optional[Dict[str, Any]] = None, **kwargs):
+    def info(self, msg: str, *args, extra: Optional[Dict[str, Any]] = None, **kwargs):
+        msg, extra = self._prepare_log(msg, args, extra, kwargs)
         self.logger.info(self._format_message(msg, extra))
 
-    def warning(self, msg: str, extra: Optional[Dict[str, Any]] = None, **kwargs):
+    def warning(self, msg: str, *args, extra: Optional[Dict[str, Any]] = None, **kwargs):
+        msg, extra = self._prepare_log(msg, args, extra, kwargs)
         self.logger.warning(self._format_message(msg, extra))
 
-    def error(self, msg: str, extra: Optional[Dict[str, Any]] = None, **kwargs):
+    def error(self, msg: str, *args, extra: Optional[Dict[str, Any]] = None, **kwargs):
         """
         Compatible with logging.Logger.error(..., exc_info=True).
 
@@ -106,18 +126,14 @@ class ServiceLogger:
         we attach a best-effort formatted traceback into the JSON payload.
         """
         try:
-            if kwargs.get("exc_info"):
-                extra = dict(extra or {})
-                extra.setdefault("traceback", traceback.format_exc())
+            msg, extra = self._prepare_log(msg, args, extra, kwargs)
         except Exception:
             pass
         self.logger.error(self._format_message(msg, extra))
 
-    def critical(self, msg: str, extra: Optional[Dict[str, Any]] = None, **kwargs):
+    def critical(self, msg: str, *args, extra: Optional[Dict[str, Any]] = None, **kwargs):
         try:
-            if kwargs.get("exc_info"):
-                extra = dict(extra or {})
-                extra.setdefault("traceback", traceback.format_exc())
+            msg, extra = self._prepare_log(msg, args, extra, kwargs)
         except Exception:
             pass
         self.logger.critical(self._format_message(msg, extra))
