@@ -353,7 +353,10 @@ class ScheduleService:
             "instances": instances,
         }
 
-    def find_active_rule(self, now: Optional[datetime] = None) -> Optional[ScheduleRule]:
+    def find_active_rule_candidates(
+        self,
+        now: Optional[datetime] = None,
+    ) -> List[ScheduleRule]:
         now = now or local_now(self.settings_service)
         candidates: List[ScheduleRule] = []
         for rule in self.list_rules():
@@ -363,10 +366,12 @@ class ScheduleService:
                 continue
             if rule.start_time <= now.time() < rule.end_time:
                 candidates.append(rule)
-        if not candidates:
-            return None
         candidates.sort(key=lambda r: (int(r.priority or 5), int(r.id)))
-        return candidates[0]
+        return candidates
+
+    def find_active_rule(self, now: Optional[datetime] = None) -> Optional[ScheduleRule]:
+        candidates = self.find_active_rule_candidates(now)
+        return candidates[0] if candidates else None
 
     def find_next_rule(self, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
         now = now or local_now(self.settings_service)
