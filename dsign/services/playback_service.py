@@ -63,6 +63,10 @@ class PlaybackService:
         if settings_service is not None:
             self._playlist_manager.set_settings_service(settings_service)
         
+        self._settings_service = settings_service
+        self._schedule_service = None
+        self._schedule_engine = None
+        
         self.logo_manager = LogoManager(
             logger=self.logger,
             socketio=self.socketio,
@@ -102,6 +106,32 @@ class PlaybackService:
         pm = getattr(self, "_playlist_manager", None)
         if pm is not None and hasattr(pm, "set_app"):
             pm.set_app(app)
+        self._ensure_schedule_engine()
+
+    def set_schedule_service(self, schedule_service) -> None:
+        self._schedule_service = schedule_service
+        self._ensure_schedule_engine()
+
+    def _ensure_schedule_engine(self) -> None:
+        if self._schedule_engine is not None:
+            return
+        if self._app is None or self._schedule_service is None:
+            return
+        try:
+            from .schedule_engine import ScheduleEngine
+            self._schedule_engine = ScheduleEngine(
+                self,
+                self._schedule_service,
+                settings_service=self._settings_service,
+                logger=self.logger,
+            )
+            self._schedule_engine.start()
+            self._log_info("ScheduleEngine attached", extra={"action": "schedule_engine_start"})
+        except Exception as e:
+            self._log_warning(
+                "ScheduleEngine start failed",
+                extra={"error": str(e), "type": type(e).__name__},
+            )
 
     def _ensure_app_wired(self, timeout: float = 90.0) -> bool:
         """Background MPV init can finish before init_routes calls set_app."""
@@ -219,11 +249,11 @@ class PlaybackService:
                     self._playlist_manager._sync_settings_audio_to_mpv()
                 except Exception:
                     pass
+
+                self._ensure_app_wired(timeout=90.0)
+                self._ensure_schedule_engine()
                 
-                if self._should_resume_playback_after_boot():
-                    Thread(target=self._resume_playback_after_boot, daemon=True).start()
-                else:
-                    Thread(target=self._preload_resources).start()
+                Thread(target=self._resume_playback_after_boot, daemon=True).start()
                 return
                     
             except Exception as e:
@@ -679,9 +709,6 @@ class PlaybackService:
 
     def _resume_playback_after_boot_impl(self) -> None:
         try:
-            playlist_id = self._resolve_playlist_id_for_recovery()
-            if playlist_id is None:
-                return
             if PlaybackConstants.is_wayland_backend():
                 if not self._wayland_manager.wait_for_compositor(timeout_sec=60.0):
                     self._log_warning(
@@ -694,16 +721,12 @@ class PlaybackService:
             except ValueError:
                 settle = 3.0
             time.sleep(max(0.0, min(15.0, settle)))
-            if self.play(playlist_id):
-                self._log_info(
-                    "Resumed playlist after boot",
-                    extra={"playlist_id": playlist_id, "action": "boot_resume"},
-                )
+            engine = self._schedule_engine
+            if engine is not None:
+                engine.evaluate_and_apply(ignore_manual=True)
+                self._log_info("Boot schedule evaluate completed", extra={"action": "boot_resume"})
             else:
-                self._log_warning(
-                    "Boot playback resume: play() returned false",
-                    extra={"playlist_id": playlist_id, "action": "boot_resume"},
-                )
+                self._transition_to_idle()
         except Exception as e:
             self._log_warning(
                 "Boot playback resume failed",
@@ -773,6 +796,8 @@ class PlaybackService:
         *,
         start_index: int = 0,
         preserve_stall_tracking: bool = False,
+        source: str = "manual",
+        rule_id: Optional[int] = None,
     ) -> bool:
         """Play specified playlist"""
         try:
@@ -781,12 +806,16 @@ class PlaybackService:
                 playlist_id,
                 start_index=start_index,
                 preserve_stall_tracking=preserve_stall_tracking,
+                source=source,
+                rule_id=rule_id,
             )
             self._log_info(
                 "Playing playlist", 
                 extra={
                     'playlist_id': playlist_id,
                     'start_index': start_index,
+                    'source': source,
+                    'rule_id': rule_id,
                     'action': 'play',
                     'duration_sec': round(time.time() - start_time, 3),
                     'success': result
@@ -815,6 +844,16 @@ class PlaybackService:
         """Emergency override: play playlist once, then resume previous if requested."""
         try:
             start_time = time.time()
+            with self._app_context():
+                from ..models import PlaybackStatus
+                session = getattr(self.db_session, "session", self.db_session)
+                row = session.query(PlaybackStatus).get(1)
+                if row is not None:
+                    row.previous_source = row.source or "idle"
+                    row.previous_rule_id = row.rule_id
+                    row.previous_playlist_id = row.playlist_id
+                    session.add(row)
+                    session.commit()
             result = self._playlist_manager.play_override(
                 playlist_id,
                 return_to_previous=return_to_previous,
@@ -842,6 +881,42 @@ class PlaybackService:
                 },
             )
             return {"success": False, "error": str(e)}
+
+    def handle_override_return(self) -> None:
+        """Resume playback after override single-pass ends (§6.3)."""
+        with self._app_context():
+            from ..models import PlaybackStatus
+            session = getattr(self.db_session, "session", self.db_session)
+            row = session.query(PlaybackStatus).get(1)
+            if row is None:
+                self.stop(source="schedule")
+                return
+
+            prev = row.previous_source
+            if prev == "schedule":
+                if self._schedule_engine is not None:
+                    self._schedule_engine.evaluate_and_apply()
+                else:
+                    self.stop(source="schedule")
+            elif prev == "manual" and row.previous_playlist_id:
+                self.play(int(row.previous_playlist_id), source="manual")
+            else:
+                self.stop(source="schedule")
+
+    def return_to_schedule(self) -> bool:
+        """Clear manual lock and apply current schedule slot (D2.2)."""
+        with self._app_context():
+            from ..models import PlaybackStatus
+            session = getattr(self.db_session, "session", self.db_session)
+            row = session.query(PlaybackStatus).get(1)
+            if row is not None and (row.source or "idle") == "manual":
+                row.source = "idle"
+                session.add(row)
+                session.commit()
+            if self._schedule_engine is None:
+                return False
+            self._schedule_engine.evaluate_and_apply(ignore_manual=True)
+            return True
 
     def remote_pause(self, paused: Optional[bool] = None) -> Dict[str, Any]:
         """Pause or resume current playlist playback via MPV."""
@@ -876,15 +951,16 @@ class PlaybackService:
             )
             return {"success": False, "error": str(e)}
 
-    def stop(self) -> bool:
+    def stop(self, *, source: str = "manual") -> bool:
         """Stop playback and return to idle state"""
         try:
             start_time = time.time()
-            result = self._playlist_manager.stop()
+            result = self._playlist_manager.stop(source=source)
             self._log_info(
                 "Playback stopped", 
                 extra={
                     'action': 'stop',
+                    'source': source,
                     'duration_sec': round(time.time() - start_time, 3),
                     'success': result
                 }
@@ -932,6 +1008,21 @@ class PlaybackService:
         try:
             start_time = time.time()
             status = self._playlist_manager.get_status()
+            nxt = None
+            if self._schedule_service is not None:
+                try:
+                    with self._app_context():
+                        nxt = self._schedule_service.find_next_rule()
+                except Exception:
+                    nxt = None
+            status["schedule"] = {
+                "source": status.get("source") or "idle",
+                "active_rule_id": status.get("rule_id"),
+                "next_rule_at": nxt.get("at") if isinstance(nxt, dict) else None,
+                "next_rule_id": (
+                    (nxt.get("rule") or {}).get("id") if isinstance(nxt, dict) else None
+                ),
+            }
             # This endpoint is frequently polled by the UI (fallback mode / page open).
             # Keep it at DEBUG to avoid flooding journal in idle.
             try:
