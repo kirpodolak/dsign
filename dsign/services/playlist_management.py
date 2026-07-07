@@ -114,6 +114,29 @@ class PlaylistManager:
         """Schedule engine hook after override single-pass ends (wired in D2.2)."""
         self._on_override_return = handler
 
+    def _persist_playback_status(
+        self,
+        *,
+        playlist_id: Optional[int],
+        status: str,
+        source: Optional[str] = None,
+        rule_id: Optional[int] = None,
+        clear_rule: bool = False,
+    ) -> None:
+        from ..models import PlaybackStatus
+
+        playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
+        playback.playlist_id = playlist_id
+        playback.status = status
+        if source is not None:
+            playback.source = source
+        if clear_rule:
+            playback.rule_id = None
+        elif rule_id is not None:
+            playback.rule_id = rule_id
+        self.db_session.add(playback)
+        self.db_session.commit()
+
     def _sync_settings_audio_route_to_mpv(self, *, cycle_ao: bool = False) -> bool:
         """Apply ao/audio-device from settings (expensive — can interrupt ALSA; call sparingly)."""
         svc = self._settings_service
@@ -3292,10 +3315,10 @@ class PlaylistManager:
         profile_settings: Dict[str, Any],
         playlist: Any,
         mode: str,
+        source: str = "manual",
+        rule_id: Optional[int] = None,
     ) -> bool:
         """A2 single local video (loop-file=inf) or A1 mpv internal M3U playlist."""
-        from ..models import PlaybackStatus
-
         start_index = int(start_index or 0) % len(items)
         self._active_playlist_id = playlist_id
         self._active_playback_mode = mode
@@ -3389,11 +3412,12 @@ class PlaylistManager:
             thread_target = self._run_local_mpv_playlist_loop
             thread_args = (playlist_id, items, ordered_indices, profile_muted)
 
-        playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
-        playback.playlist_id = playlist_id
-        playback.status = "playing"
-        self.db_session.add(playback)
-        self.db_session.commit()
+        self._persist_playback_status(
+            playlist_id=playlist_id,
+            status="playing",
+            source=source,
+            rule_id=rule_id,
+        )
 
         self._play_thread = Thread(target=thread_target, args=thread_args, daemon=True)
         self._play_thread.start()
@@ -4189,6 +4213,8 @@ class PlaylistManager:
         *,
         start_index: int = 0,
         preserve_stall_tracking: bool = False,
+        source: str = "manual",
+        rule_id: Optional[int] = None,
     ) -> bool:
         """Play playlist with profile support"""
         with self._app_context():
@@ -4200,6 +4226,8 @@ class PlaylistManager:
                 start_index=start_index,
                 preserve_stall_tracking=preserve_stall_tracking,
                 single_pass=False,
+                source=source,
+                rule_id=rule_id,
             )
 
     def play_override(
@@ -4241,6 +4269,8 @@ class PlaylistManager:
                 start_index=int(start_index or 0),
                 preserve_stall_tracking=True,
                 single_pass=True,
+                source="override",
+                rule_id=None,
             )
 
         return {
@@ -4304,6 +4334,8 @@ class PlaylistManager:
         start_index: int = 0,
         preserve_stall_tracking: bool = False,
         single_pass: bool = False,
+        source: str = "manual",
+        rule_id: Optional[int] = None,
     ) -> bool:
         from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
 
@@ -4399,6 +4431,8 @@ class PlaylistManager:
                     profile_settings=profile_settings,
                     playlist=playlist,
                     mode=playback_mode,
+                    source=source,
+                    rule_id=rule_id,
                 )
 
             self._active_playlist_id = playlist_id
@@ -4545,12 +4579,12 @@ class PlaylistManager:
                     },
                 )
 
-            # Update playback status (single-row table; keep id=1 stable)
-            playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
-            playback.playlist_id = playlist_id
-            playback.status = 'playing'
-            self.db_session.add(playback)
-            self.db_session.commit()
+            self._persist_playback_status(
+                playlist_id=playlist_id,
+                status="playing",
+                source=source,
+                rule_id=rule_id,
+            )
 
             # Start background loop to enforce durations and EOF waits.
             # play() loadfile'd items[start_index]; loop walks from there, skips reload on first offset once.
@@ -4601,12 +4635,12 @@ class PlaylistManager:
 
             # Best-effort: persist non-playing state so UI doesn't show green when we fell back to idle
             try:
-                from ..models import PlaybackStatus
-                playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
-                playback.status = 'idle'
-                playback.playlist_id = None
-                self.db_session.add(playback)
-                self.db_session.commit()
+                self._persist_playback_status(
+                    playlist_id=None,
+                    status="idle",
+                    source="idle",
+                    clear_rule=True,
+                )
             except Exception:
                 try:
                     self.db_session.rollback()
@@ -4634,6 +4668,7 @@ class PlaylistManager:
         update_status: bool = True,
         preserve_stall_tracking: bool = False,
         preserve_loop_position: bool = False,
+        source: str = "manual",
     ) -> bool:
         """Stop playback and persist stopped state so UI/API match MPV (idle logo)."""
         with self._app_context():
@@ -4642,6 +4677,7 @@ class PlaylistManager:
                 update_status=update_status,
                 preserve_stall_tracking=preserve_stall_tracking,
                 preserve_loop_position=preserve_loop_position,
+                source=source,
             )
 
     def _stop_impl(
@@ -4651,6 +4687,7 @@ class PlaylistManager:
         update_status: bool = True,
         preserve_stall_tracking: bool = False,
         preserve_loop_position: bool = False,
+        source: str = "manual",
     ) -> bool:
         from ..models import PlaybackStatus
 
@@ -4672,19 +4709,30 @@ class PlaylistManager:
                 ok = self._logo_manager.display_idle_logo()
 
             if update_status:
-                playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
-                playback.status = "stopped"
-                playback.playlist_id = last_playlist_id
-                self.db_session.add(playback)
-                self.db_session.commit()
+                if source == "schedule":
+                    self._persist_playback_status(
+                        playlist_id=None,
+                        status="idle",
+                        source="idle",
+                        clear_rule=True,
+                    )
+                else:
+                    self._persist_playback_status(
+                        playlist_id=last_playlist_id,
+                        status="stopped",
+                        source="manual",
+                        clear_rule=True,
+                    )
 
                 try:
                     if self.socketio:
+                        emit_status = "idle" if source == "schedule" else "stopped"
+                        emit_playlist = None if source == "schedule" else last_playlist_id
                         self.socketio.emit(
                             'playback_update',
                             {
-                                'status': 'stopped',
-                                'playlist_id': last_playlist_id,
+                                'status': emit_status,
+                                'playlist_id': emit_playlist,
                                 'current_media': None,
                             },
                         )
@@ -4960,6 +5008,11 @@ class PlaylistManager:
         return {
             'status': status.status if status else None,
             'playlist_id': status.playlist_id if status else None,
+            'source': (status.source or 'idle') if status else 'idle',
+            'rule_id': status.rule_id if status else None,
+            'previous_source': status.previous_source if status else None,
+            'previous_rule_id': status.previous_rule_id if status else None,
+            'previous_playlist_id': status.previous_playlist_id if status else None,
             'item_index': item_index,
             'item_count': item_count,
             'media_key': media_key,
