@@ -419,6 +419,10 @@ async function onDragEnd() {
             start_time: startTime.str,
             end_time: endTimeStr,
         };
+        if (!isVisible) {
+            dismissScheduleOverlays();
+            return;
+        }
         const canTransfer = popcount(state.daysOfWeek) === 1;
         if (els.dayTransferBtn) els.dayTransferBtn.hidden = !canTransfer;
         if (els.dayDialog) els.dayDialog.hidden = false;
@@ -747,10 +751,24 @@ async function commitDayTransfer(mode) {
     }
 }
 
-function cancelDayDialog() {
+function dismissDayDialog({ reload = true } = {}) {
     pendingDayMove = null;
     if (els.dayDialog) els.dayDialog.hidden = true;
-    loadWeek().catch(() => {});
+    if (reload && isVisible) {
+        loadWeek().catch(() => {});
+    }
+}
+
+function dismissScheduleOverlays() {
+    dragState = null;
+    resizeState = null;
+    dismissDayDialog({ reload: false });
+    closePanel();
+    hideContextMenu();
+}
+
+function cancelDayDialog() {
+    dismissDayDialog({ reload: true });
 }
 
 function bindPanelInputs() {
@@ -927,8 +945,7 @@ export async function showScheduleView() {
 export function hideScheduleView() {
     isVisible = false;
     stopProgressTimer();
-    closePanel();
-    hideContextMenu();
+    dismissScheduleOverlays();
 }
 
 export function refreshScheduleIfVisible() {

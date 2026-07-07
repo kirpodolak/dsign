@@ -133,6 +133,99 @@
                     <div class="timeline-slots" id="timeline-slots"></div>
                 </div>
             </div>
+
+            <!-- Schedule overlays (scoped to schedule tab — must not block playlists) -->
+            <div class="schedule-slide-overlay" id="schedule-slide-overlay" hidden></div>
+            <aside class="schedule-slide-panel" id="schedule-slide-panel" aria-labelledby="schedule-panel-title" hidden>
+                <div class="schedule-slide-panel__header">
+                    <h3 id="schedule-panel-title" data-i18n="schedule_panel_edit">Edit slot</h3>
+                    <button type="button" class="schedule-panel-close" id="schedule-panel-close" aria-label="Close">✕</button>
+                </div>
+                <div class="schedule-slide-panel__body">
+                    <div class="schedule-form-row">
+                        <label for="slot-playlist" data-i18n="schedule_field_playlist">Playlist</label>
+                        <select id="slot-playlist"></select>
+                    </div>
+                    <div class="schedule-form-row">
+                        <label data-i18n="schedule_field_days">Days of week</label>
+                        <div class="schedule-day-toggles" id="slot-day-toggles">
+                            <button type="button" class="schedule-day-btn" data-day="1">Пн</button>
+                            <button type="button" class="schedule-day-btn" data-day="2">Вт</button>
+                            <button type="button" class="schedule-day-btn" data-day="4">Ср</button>
+                            <button type="button" class="schedule-day-btn" data-day="8">Чт</button>
+                            <button type="button" class="schedule-day-btn" data-day="16">Пт</button>
+                            <button type="button" class="schedule-day-btn" data-day="32">Сб</button>
+                            <button type="button" class="schedule-day-btn" data-day="64">Вс</button>
+                        </div>
+                    </div>
+                    <div class="schedule-form-row schedule-form-row--2col">
+                        <div>
+                            <label for="slot-start" data-i18n="schedule_field_start">Start</label>
+                            <input type="time" id="slot-start" step="900">
+                        </div>
+                        <div>
+                            <label for="slot-end" data-i18n="schedule_field_end">End</label>
+                            <input type="time" id="slot-end" step="900">
+                        </div>
+                    </div>
+                    <div class="schedule-form-row">
+                        <label for="slot-repeat" data-i18n="schedule_field_repeat">Repeat</label>
+                        <select id="slot-repeat">
+                            <option value="once" data-i18n="schedule_repeat_once">Once</option>
+                            <option value="weekly" data-i18n="schedule_repeat_weekly">Weekly</option>
+                        </select>
+                    </div>
+                    <div class="schedule-form-row">
+                        <label for="slot-valid-from" data-i18n="schedule_field_valid_from">Active from</label>
+                        <input type="date" id="slot-valid-from">
+                    </div>
+                    <div class="schedule-form-row">
+                        <label for="slot-valid-until" data-i18n="schedule_field_valid_until">Active until</label>
+                        <input type="date" id="slot-valid-until">
+                        <small data-i18n="schedule_field_valid_until_hint">Leave empty for no end date.</small>
+                    </div>
+                    <div class="schedule-form-row">
+                        <label for="slot-priority" data-i18n="schedule_field_priority">Conflict priority</label>
+                        <input type="range" id="slot-priority" min="1" max="10" value="5">
+                        <div class="schedule-range-labels">
+                            <span data-i18n="schedule_priority_high">1 — High (wins)</span>
+                            <span data-i18n="schedule_priority_low">10 — Low (yields)</span>
+                        </div>
+                        <div id="slot-priority-value" class="schedule-priority-value">5</div>
+                    </div>
+                    <div class="schedule-form-row" id="schedule-conflict-warning" hidden>
+                        <div class="schedule-warning-box">
+                            <strong data-i18n="schedule_conflict_title">Schedule conflict</strong>
+                            <p><span data-i18n="schedule_conflict_body">Another slot overlaps:</span> <span id="schedule-conflict-name"></span></p>
+                        </div>
+                    </div>
+                </div>
+                <div class="schedule-slide-panel__footer">
+                    <button type="button" class="btn secondary" id="schedule-panel-cancel" data-i18n="btn_cancel">Cancel</button>
+                    <button type="button" class="btn danger" id="schedule-panel-archive" data-i18n="schedule_btn_archive">Archive</button>
+                    <button type="button" class="btn primary" id="schedule-panel-save" data-i18n="btn_save">Save</button>
+                </div>
+            </aside>
+
+            <div class="schedule-context-menu" id="schedule-context-menu" role="menu" hidden>
+                <button type="button" class="schedule-context-item" data-action="edit" data-i18n="schedule_ctx_edit">Edit</button>
+                <button type="button" class="schedule-context-item" data-action="toggle" data-i18n="schedule_ctx_toggle">Pause / resume</button>
+                <div class="schedule-context-divider" role="separator"></div>
+                <button type="button" class="schedule-context-item schedule-context-item--danger" data-action="archive" data-i18n="schedule_ctx_archive">Archive</button>
+            </div>
+
+            <div class="schedule-modal" id="schedule-day-dialog" hidden>
+                <div class="schedule-modal__backdrop" data-close="1"></div>
+                <div class="schedule-modal__card" role="dialog" aria-labelledby="schedule-day-dialog-title">
+                    <h3 id="schedule-day-dialog-title" data-i18n="schedule_day_dialog_title">Move to another day</h3>
+                    <p data-i18n="schedule_day_dialog_body">This slot belongs to a recurring rule. What should happen?</p>
+                    <div class="schedule-modal__actions">
+                        <button type="button" class="btn secondary" id="schedule-day-cancel" data-i18n="btn_cancel">Cancel</button>
+                        <button type="button" class="btn secondary" id="schedule-day-duplicate" data-i18n="schedule_day_duplicate">Duplicate</button>
+                        <button type="button" class="btn primary" id="schedule-day-transfer" data-i18n="schedule_day_transfer">Move</button>
+                    </div>
+                </div>
+            </div>
         </div>
     </main>
 </div>
@@ -153,101 +246,6 @@
             </div>
             <button type="submit" class="btn primary" data-i18n="btn_create">Create</button>
         </form>
-    </div>
-</div>
-
-<!-- Schedule slide panel -->
-<div class="schedule-slide-overlay" id="schedule-slide-overlay" hidden></div>
-<aside class="schedule-slide-panel" id="schedule-slide-panel" aria-labelledby="schedule-panel-title" hidden>
-    <div class="schedule-slide-panel__header">
-        <h3 id="schedule-panel-title" data-i18n="schedule_panel_edit">Edit slot</h3>
-        <button type="button" class="schedule-panel-close" id="schedule-panel-close" aria-label="Close">✕</button>
-    </div>
-    <div class="schedule-slide-panel__body">
-        <div class="schedule-form-row">
-            <label for="slot-playlist" data-i18n="schedule_field_playlist">Playlist</label>
-            <select id="slot-playlist"></select>
-        </div>
-        <div class="schedule-form-row">
-            <label data-i18n="schedule_field_days">Days of week</label>
-            <div class="schedule-day-toggles" id="slot-day-toggles">
-                <button type="button" class="schedule-day-btn" data-day="1">Пн</button>
-                <button type="button" class="schedule-day-btn" data-day="2">Вт</button>
-                <button type="button" class="schedule-day-btn" data-day="4">Ср</button>
-                <button type="button" class="schedule-day-btn" data-day="8">Чт</button>
-                <button type="button" class="schedule-day-btn" data-day="16">Пт</button>
-                <button type="button" class="schedule-day-btn" data-day="32">Сб</button>
-                <button type="button" class="schedule-day-btn" data-day="64">Вс</button>
-            </div>
-        </div>
-        <div class="schedule-form-row schedule-form-row--2col">
-            <div>
-                <label for="slot-start" data-i18n="schedule_field_start">Start</label>
-                <input type="time" id="slot-start" step="900">
-            </div>
-            <div>
-                <label for="slot-end" data-i18n="schedule_field_end">End</label>
-                <input type="time" id="slot-end" step="900">
-            </div>
-        </div>
-        <div class="schedule-form-row">
-            <label for="slot-repeat" data-i18n="schedule_field_repeat">Repeat</label>
-            <select id="slot-repeat">
-                <option value="once" data-i18n="schedule_repeat_once">Once</option>
-                <option value="weekly" data-i18n="schedule_repeat_weekly">Weekly</option>
-            </select>
-        </div>
-        <div class="schedule-form-row">
-            <label for="slot-valid-from" data-i18n="schedule_field_valid_from">Active from</label>
-            <input type="date" id="slot-valid-from">
-        </div>
-        <div class="schedule-form-row">
-            <label for="slot-valid-until" data-i18n="schedule_field_valid_until">Active until</label>
-            <input type="date" id="slot-valid-until">
-            <small data-i18n="schedule_field_valid_until_hint">Leave empty for no end date.</small>
-        </div>
-        <div class="schedule-form-row">
-            <label for="slot-priority" data-i18n="schedule_field_priority">Conflict priority</label>
-            <input type="range" id="slot-priority" min="1" max="10" value="5">
-            <div class="schedule-range-labels">
-                <span data-i18n="schedule_priority_high">1 — High (wins)</span>
-                <span data-i18n="schedule_priority_low">10 — Low (yields)</span>
-            </div>
-            <div id="slot-priority-value" class="schedule-priority-value">5</div>
-        </div>
-        <div class="schedule-form-row" id="schedule-conflict-warning" hidden>
-            <div class="schedule-warning-box">
-                <strong data-i18n="schedule_conflict_title">Schedule conflict</strong>
-                <p><span data-i18n="schedule_conflict_body">Another slot overlaps:</span> <span id="schedule-conflict-name"></span></p>
-            </div>
-        </div>
-    </div>
-    <div class="schedule-slide-panel__footer">
-        <button type="button" class="btn secondary" id="schedule-panel-cancel" data-i18n="btn_cancel">Cancel</button>
-        <button type="button" class="btn danger" id="schedule-panel-archive" data-i18n="schedule_btn_archive">Archive</button>
-        <button type="button" class="btn primary" id="schedule-panel-save" data-i18n="btn_save">Save</button>
-    </div>
-</aside>
-
-<!-- Schedule context menu -->
-<div class="schedule-context-menu" id="schedule-context-menu" role="menu" hidden>
-    <button type="button" class="schedule-context-item" data-action="edit" data-i18n="schedule_ctx_edit">Edit</button>
-    <button type="button" class="schedule-context-item" data-action="toggle" data-i18n="schedule_ctx_toggle">Pause / resume</button>
-    <div class="schedule-context-divider" role="separator"></div>
-    <button type="button" class="schedule-context-item schedule-context-item--danger" data-action="archive" data-i18n="schedule_ctx_archive">Archive</button>
-</div>
-
-<!-- Day transfer dialog -->
-<div class="schedule-modal" id="schedule-day-dialog" hidden>
-    <div class="schedule-modal__backdrop" data-close="1"></div>
-    <div class="schedule-modal__card" role="dialog" aria-labelledby="schedule-day-dialog-title">
-        <h3 id="schedule-day-dialog-title" data-i18n="schedule_day_dialog_title">Move to another day</h3>
-        <p data-i18n="schedule_day_dialog_body">This slot belongs to a recurring rule. What should happen?</p>
-        <div class="schedule-modal__actions">
-            <button type="button" class="btn secondary" id="schedule-day-cancel" data-i18n="btn_cancel">Cancel</button>
-            <button type="button" class="btn secondary" id="schedule-day-duplicate" data-i18n="schedule_day_duplicate">Duplicate</button>
-            <button type="button" class="btn primary" id="schedule-day-transfer" data-i18n="schedule_day_transfer">Move</button>
-        </div>
     </div>
 </div>
 {% endblock %}

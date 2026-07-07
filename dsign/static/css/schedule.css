@@ -73,6 +73,10 @@
     display: none !important;
 }
 
+#view-schedule[hidden] {
+    display: none !important;
+}
+
 /* Playback source badge (sidebar) */
 .playback-source-section {
     margin-top: -4px;
@@ -702,6 +706,15 @@
 }
 
 /* Day transfer modal */
+.schedule-modal[hidden],
+.schedule-slide-overlay[hidden],
+.schedule-slide-panel[hidden],
+.schedule-context-menu[hidden] {
+    display: none !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+}
+
 .schedule-modal {
     position: fixed;
     inset: 0;
