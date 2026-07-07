@@ -46,6 +46,7 @@ class PlaylistManager:
         self._override_lock = Lock()
         self._override_return_ctx: Optional[Dict[str, Any]] = None
         self._playlist_single_pass: bool = False
+        self._on_override_return: Optional[Callable[[], None]] = None
         self._stall_restart_lock = Lock()
         self._stall_restart_pending = False
         self._stall_count_lock = Lock()
@@ -108,6 +109,10 @@ class PlaylistManager:
             self._logo_manager.set_audio_resync_callback(self._sync_settings_audio_to_mpv)
         except Exception:
             pass
+
+    def set_override_return_handler(self, handler: Optional[Callable[[], None]]) -> None:
+        """Schedule engine hook after override single-pass ends (wired in D2.2)."""
+        self._on_override_return = handler
 
     def _sync_settings_audio_route_to_mpv(self, *, cycle_ao: bool = False) -> bool:
         """Apply ao/audio-device from settings (expensive — can interrupt ALSA; call sparingly)."""
@@ -4255,6 +4260,22 @@ class PlaylistManager:
             self._playlist_single_pass = False
 
         if not ctx:
+            return
+
+        if self._on_override_return is not None:
+            self.logger.info("Playback override: delegating return to schedule handler", extra=ctx)
+            try:
+                with self._app_context():
+                    self._on_override_return()
+            except Exception as e:
+                self.logger.error(
+                    "Playback override: schedule return handler failed",
+                    extra={
+                        "error": str(e),
+                        "type": type(e).__name__,
+                        "previous": ctx,
+                    },
+                )
             return
 
         self.logger.info("Playback override: auto-return to previous playlist", extra=ctx)
