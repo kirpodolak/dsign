@@ -61,7 +61,7 @@ def init_extensions(app) -> Dict[str, Any]:
                 _ensure_playlist_sort_order_column(app)
                 _ensure_schedule_schema(app)
             except Exception as e:
-                app.logger.error("db.create_all() failed: %s", e, exc_info=True)
+                app.logger.error(f"db.create_all() failed: {e}", exc_info=True)
                 raise
         bcrypt.init_app(app)
         
@@ -144,7 +144,7 @@ def _ensure_playlist_sort_order_column(app) -> None:
                 row.sort_order = idx
             db.session.commit()
     except Exception as e:
-        app.logger.warning('playlist sort_order migration skipped: %s', e)
+        app.logger.warning(f'playlist sort_order migration skipped: {e}')
         db.session.rollback()
 
 
@@ -175,9 +175,9 @@ def _ensure_schedule_schema(app) -> None:
                     conn.execute(text(
                         f'ALTER TABLE playback_status ADD COLUMN {col_name} {col_type}'
                     ))
-                app.logger.info('Added playback_status.%s', col_name)
+                app.logger.info(f'Added playback_status.{col_name}')
     except Exception as e:
-        app.logger.warning('schedule schema migration skipped: %s', e)
+        app.logger.warning(f'schedule schema migration skipped: {e}')
         db.session.rollback()
 
 
