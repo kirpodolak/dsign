@@ -5,6 +5,7 @@
 
 {% block styles %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}?v={{ timestamp }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/schedule.css') }}?v={{ timestamp }}">
 {% endblock %}
 
 {% block content %}
@@ -41,6 +42,16 @@
             </div>
         </div>
 
+        <div class="sidebar-section playback-source-section" id="playback-source-section">
+            <h3 class="sidebar-section__title" data-i18n="playback_source_heading">Playback source</h3>
+            <div id="playback-source-badge" class="playback-source-badge playback-source-badge--idle" role="status">
+                <span id="playback-source-label" data-i18n="playback_source_idle">Idle</span>
+            </div>
+            <button type="button" id="return-to-schedule-btn" class="btn secondary home-btn--return-schedule" hidden>
+                <span data-i18n="return_to_schedule">Return to schedule</span>
+            </button>
+        </div>
+
         <div class="sidebar-section">
             <h3 class="sidebar-section__title" data-i18n="system_panel">System</h3>
             <div id="settings-container" class="metrics-grid">
@@ -71,17 +82,151 @@
         </div>
     </aside>
 
-    <main class="home-playlists" aria-labelledby="playlists-heading">
-        <div class="home-playlists__head">
-            <h1 id="playlists-heading" class="home-playlists__title" data-i18n="playlists_heading">Playlists</h1>
-            <button id="create-playlist-btn" class="btn primary home-btn--new-playlist" type="button">
-                <span class="home-btn__plus" aria-hidden="true">+</span>
-                <span data-i18n="btn_new_playlist">New Playlist</span>
+    <main class="home-main" aria-label="Main content">
+        <div class="home-view-tabs" role="tablist" aria-label="Home views">
+            <button type="button" class="home-view-tab active" role="tab" id="tab-playlists" aria-selected="true" aria-controls="view-playlists" data-view="playlists">
+                <span data-i18n="tab_playlists">Playlists</span>
+            </button>
+            <button type="button" class="home-view-tab" role="tab" id="tab-schedule" aria-selected="false" aria-controls="view-schedule" data-view="schedule">
+                <span data-i18n="tab_schedule">Schedule</span>
             </button>
         </div>
 
-        <div id="playlist-status"></div>
-        <div id="playlist-cards" class="cards-grid" role="list"></div>
+        <div id="view-playlists" class="home-view-content" role="tabpanel" aria-labelledby="tab-playlists">
+            <div class="home-playlists__head">
+                <h1 id="playlists-heading" class="home-playlists__title" data-i18n="playlists_heading">Playlists</h1>
+                <button id="create-playlist-btn" class="btn primary home-btn--new-playlist" type="button">
+                    <span class="home-btn__plus" aria-hidden="true">+</span>
+                    <span data-i18n="btn_new_playlist">New Playlist</span>
+                </button>
+            </div>
+
+            <div id="playlist-status"></div>
+            <div id="playlist-cards" class="cards-grid" role="list"></div>
+        </div>
+
+        <div id="view-schedule" class="home-view-content home-view-content--hidden" role="tabpanel" aria-labelledby="tab-schedule" hidden>
+            <div class="schedule-toolbar">
+                <div class="schedule-nav">
+                    <button type="button" class="schedule-nav-arrow" id="schedule-prev-week" aria-label="Previous week">‹</button>
+                    <div class="schedule-week-label" id="schedule-week-label">—</div>
+                    <button type="button" class="schedule-nav-arrow" id="schedule-next-week" aria-label="Next week">›</button>
+                    <button type="button" class="btn secondary schedule-today-btn" id="schedule-go-today">
+                        <span data-i18n="schedule_today">Today</span>
+                    </button>
+                </div>
+                <div class="schedule-legend">
+                    <span class="schedule-legend-item"><span class="schedule-legend-dot schedule-legend-dot--live"></span> <span data-i18n="schedule_legend_live">On air</span></span>
+                    <span class="schedule-legend-item"><span class="schedule-legend-dot schedule-legend-dot--planned"></span> <span data-i18n="schedule_legend_planned">Scheduled</span></span>
+                    <span class="schedule-legend-item"><span class="schedule-legend-dot schedule-legend-dot--conflict"></span> <span data-i18n="schedule_legend_conflict">Conflict</span></span>
+                    <span class="schedule-legend-item"><span class="schedule-legend-dot schedule-legend-dot--archived"></span> <span data-i18n="schedule_legend_archived">Archived</span></span>
+                </div>
+            </div>
+
+            <div class="timeline-wrap" id="schedule-grid">
+                <div class="timeline-header">
+                    <div class="timeline-corner" data-i18n="schedule_time_col">Time</div>
+                    <div class="timeline-days" id="timeline-days"></div>
+                </div>
+                <div class="timeline-body">
+                    <div class="timeline-hours" id="timeline-hours"></div>
+                    <div class="timeline-slots" id="timeline-slots"></div>
+                </div>
+            </div>
+
+            <!-- Schedule overlays (scoped to schedule tab — must not block playlists) -->
+            <div class="schedule-slide-overlay" id="schedule-slide-overlay" hidden></div>
+            <aside class="schedule-slide-panel" id="schedule-slide-panel" aria-labelledby="schedule-panel-title" hidden>
+                <div class="schedule-slide-panel__header">
+                    <h3 id="schedule-panel-title" data-i18n="schedule_panel_edit">Edit slot</h3>
+                    <button type="button" class="schedule-panel-close" id="schedule-panel-close" aria-label="Close">✕</button>
+                </div>
+                <div class="schedule-slide-panel__body">
+                    <div class="schedule-form-row">
+                        <label for="slot-playlist" data-i18n="schedule_field_playlist">Playlist</label>
+                        <select id="slot-playlist"></select>
+                    </div>
+                    <div class="schedule-form-row">
+                        <label data-i18n="schedule_field_days">Days of week</label>
+                        <div class="schedule-day-toggles" id="slot-day-toggles">
+                            <button type="button" class="schedule-day-btn" data-day="1">Пн</button>
+                            <button type="button" class="schedule-day-btn" data-day="2">Вт</button>
+                            <button type="button" class="schedule-day-btn" data-day="4">Ср</button>
+                            <button type="button" class="schedule-day-btn" data-day="8">Чт</button>
+                            <button type="button" class="schedule-day-btn" data-day="16">Пт</button>
+                            <button type="button" class="schedule-day-btn" data-day="32">Сб</button>
+                            <button type="button" class="schedule-day-btn" data-day="64">Вс</button>
+                        </div>
+                    </div>
+                    <div class="schedule-form-row schedule-form-row--2col">
+                        <div>
+                            <label for="slot-start" data-i18n="schedule_field_start">Start</label>
+                            <input type="time" id="slot-start" step="900">
+                        </div>
+                        <div>
+                            <label for="slot-end" data-i18n="schedule_field_end">End</label>
+                            <input type="time" id="slot-end" step="900">
+                        </div>
+                    </div>
+                    <div class="schedule-form-row">
+                        <label for="slot-repeat" data-i18n="schedule_field_repeat">Repeat</label>
+                        <select id="slot-repeat">
+                            <option value="once" data-i18n="schedule_repeat_once">Once</option>
+                            <option value="weekly" data-i18n="schedule_repeat_weekly">Weekly</option>
+                        </select>
+                    </div>
+                    <div class="schedule-form-row">
+                        <label for="slot-valid-from" data-i18n="schedule_field_valid_from">Active from</label>
+                        <input type="date" id="slot-valid-from">
+                    </div>
+                    <div class="schedule-form-row">
+                        <label for="slot-valid-until" data-i18n="schedule_field_valid_until">Active until</label>
+                        <input type="date" id="slot-valid-until">
+                        <small data-i18n="schedule_field_valid_until_hint">Leave empty for no end date.</small>
+                    </div>
+                    <div class="schedule-form-row">
+                        <label for="slot-priority" data-i18n="schedule_field_priority">Conflict priority</label>
+                        <input type="range" id="slot-priority" min="1" max="10" value="5">
+                        <div class="schedule-range-labels">
+                            <span data-i18n="schedule_priority_high">1 — High (wins)</span>
+                            <span data-i18n="schedule_priority_low">10 — Low (yields)</span>
+                        </div>
+                        <div id="slot-priority-value" class="schedule-priority-value">5</div>
+                    </div>
+                    <div class="schedule-form-row" id="schedule-conflict-warning" hidden>
+                        <div class="schedule-warning-box">
+                            <strong data-i18n="schedule_conflict_title">Schedule conflict</strong>
+                            <p><span data-i18n="schedule_conflict_body">Another slot overlaps:</span> <span id="schedule-conflict-name"></span></p>
+                        </div>
+                    </div>
+                </div>
+                <div class="schedule-slide-panel__footer">
+                    <button type="button" class="btn secondary" id="schedule-panel-cancel" data-i18n="btn_cancel">Cancel</button>
+                    <button type="button" class="btn danger" id="schedule-panel-archive" data-i18n="schedule_btn_archive">Archive</button>
+                    <button type="button" class="btn primary" id="schedule-panel-save" data-i18n="btn_save">Save</button>
+                </div>
+            </aside>
+
+            <div class="schedule-context-menu" id="schedule-context-menu" role="menu" hidden>
+                <button type="button" class="schedule-context-item" data-action="edit" data-i18n="schedule_ctx_edit">Edit</button>
+                <button type="button" class="schedule-context-item" data-action="toggle" data-i18n="schedule_ctx_toggle">Pause / resume</button>
+                <div class="schedule-context-divider" role="separator"></div>
+                <button type="button" class="schedule-context-item schedule-context-item--danger" data-action="archive" data-i18n="schedule_ctx_archive">Archive</button>
+            </div>
+
+            <div class="schedule-modal" id="schedule-day-dialog" hidden>
+                <div class="schedule-modal__backdrop" data-close="1"></div>
+                <div class="schedule-modal__card" role="dialog" aria-labelledby="schedule-day-dialog-title">
+                    <h3 id="schedule-day-dialog-title" data-i18n="schedule_day_dialog_title">Move to another day</h3>
+                    <p data-i18n="schedule_day_dialog_body">This slot belongs to a recurring rule. What should happen?</p>
+                    <div class="schedule-modal__actions">
+                        <button type="button" class="btn secondary" id="schedule-day-cancel" data-i18n="btn_cancel">Cancel</button>
+                        <button type="button" class="btn secondary" id="schedule-day-duplicate" data-i18n="schedule_day_duplicate">Duplicate</button>
+                        <button type="button" class="btn primary" id="schedule-day-transfer" data-i18n="schedule_day_transfer">Move</button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </main>
 </div>
 

@@ -405,14 +405,7 @@ body.page-home .home-btn--replace-logo:disabled {
     }
 }
 
-/* Playlists */
-.home-playlists {
-    flex: 1;
-    padding: 28px 32px;
-    overflow-y: auto;
-    min-width: 0;
-}
-
+/* Playlists view (main area padding/tabs in schedule.css) */
 .home-playlists__head {
     display: flex;
     align-items: center;

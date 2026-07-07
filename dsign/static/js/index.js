@@ -2,6 +2,7 @@ import { showAlert, showError } from './utils/alerts.js';
 import { toggleButtonState } from './utils/helpers.js';
 import { fetchAPI, getCSRFToken } from './utils/api.js';
 import { t, getUiLang } from './i18n.js';
+import { initSchedule, showScheduleView, hideScheduleView, refreshScheduleIfVisible } from './schedule.js';
 
 function setBtnIconText(btn, text) {
     if (!btn) return;
@@ -23,6 +24,8 @@ const CONFIG = {
             settings: '/api/settings/current',
             playlists: '/api/playlists',
             playback: '/api/playback',
+            scheduleWeek: '/api/schedule/week',
+            returnToSchedule: '/api/playback/return-to-schedule',
             systemStatus: '/api/system/status',
             networkStatus: '/api/system/network/status',
             uploadLogo: '/api/media/upload_logo',
@@ -55,7 +58,13 @@ const CONFIG = {
         loadingIndicator: '#loading-indicator',
         logoFileInput: '#logo-upload',
         refreshPreviewBtn: '#refresh-mpv-preview',
-        mpvLastUpdate: '#mpv-last-update'
+        mpvLastUpdate: '#mpv-last-update',
+        viewTabs: '.home-view-tab',
+        viewPlaylists: '#view-playlists',
+        viewSchedule: '#view-schedule',
+        playbackSourceBadge: '#playback-source-badge',
+        playbackSourceLabel: '#playback-source-label',
+        returnToScheduleBtn: '#return-to-schedule-btn',
     },
     defaultLogo: '/static/images/default-logo.jpg',
     defaultPreview: '/static/images/default-preview.jpg',
@@ -112,6 +121,7 @@ const state = {
     lastMpvPreviewRefreshAt: 0,
     mpvPreviewRequestId: 0,
     lastAppliedPlaybackKey: '',
+    activeHomeView: 'playlists',
 };
 
 // API functions
@@ -243,6 +253,10 @@ const api = {
 
     async getPlaybackStatus() {
         return this.request(`${CONFIG.api.endpoints.playback}/status`, { showLoading: false });
+    },
+
+    async returnToSchedule() {
+        return this.request(CONFIG.api.endpoints.returnToSchedule, { method: 'POST' });
     },
 
     async getSystemStatus() {
@@ -740,8 +754,38 @@ const ui = {
         state.lastAppliedPlaybackKey = playbackKey;
 
         this.updateNowOnScreen(this._nowScreenTitle(statusPayload, list));
+        this.updatePlaybackSourceBadge(statusPayload);
         if (playbackChanged) {
             this.updatePreviewImage({ updateTimestamp: false, force: true });
+        }
+        refreshScheduleIfVisible();
+    },
+
+    updatePlaybackSourceBadge(statusPayload) {
+        const lang = getUiLang();
+        const badge = elements.playbackSourceBadge;
+        const label = elements.playbackSourceLabel;
+        const returnBtn = elements.returnToScheduleBtn;
+        if (!badge || !label) return;
+
+        const source = String(
+            statusPayload?.schedule?.source || statusPayload?.source || 'idle'
+        ).toLowerCase();
+
+        const sourceMap = {
+            schedule: { cls: 'playback-source-badge--schedule', key: 'playback_source_schedule' },
+            manual: { cls: 'playback-source-badge--manual', key: 'playback_source_manual' },
+            override: { cls: 'playback-source-badge--override', key: 'playback_source_override' },
+            idle: { cls: 'playback-source-badge--idle', key: 'playback_source_idle' },
+        };
+        const meta = sourceMap[source] || sourceMap.idle;
+        badge.className = `playback-source-badge ${meta.cls}`;
+        label.textContent = t(meta.key, lang);
+
+        if (returnBtn) {
+            const showReturn = source === 'manual';
+            returnBtn.hidden = !showReturn;
+            returnBtn.disabled = false;
         }
     },
 
@@ -931,6 +975,8 @@ const handlers = {
             ui.renderPlaylists(playlists);
             ui.updateLogo(settings.display?.logo);
 
+            initSchedule({ getPlaylists: () => state.playlists });
+            this.setupHomeTabs();
             this.setupEventListeners();
             document.addEventListener('dsign:language-changed', () => {
                 try {
@@ -958,7 +1004,77 @@ const handlers = {
         }
     },
 
+    setupHomeTabs() {
+        const tabs = document.querySelectorAll(CONFIG.selectors.viewTabs);
+        const viewPlaylists = elements.viewPlaylists || document.querySelector(CONFIG.selectors.viewPlaylists);
+        const viewSchedule = elements.viewSchedule || document.querySelector(CONFIG.selectors.viewSchedule);
+        if (!tabs.length || !viewPlaylists || !viewSchedule) return;
+
+        const switchView = (view) => {
+            const next = view === 'schedule' ? 'schedule' : 'playlists';
+            state.activeHomeView = next;
+            try {
+                sessionStorage.setItem('dsign_home_view', next);
+            } catch {
+                /* ignore */
+            }
+
+            tabs.forEach((tab) => {
+                const active = tab.dataset.view === next;
+                tab.classList.toggle('active', active);
+                tab.setAttribute('aria-selected', active ? 'true' : 'false');
+            });
+
+            const showPlaylists = next === 'playlists';
+            viewPlaylists.hidden = !showPlaylists;
+            viewPlaylists.classList.toggle('home-view-content--hidden', !showPlaylists);
+            viewSchedule.hidden = showPlaylists;
+            viewSchedule.classList.toggle('home-view-content--hidden', showPlaylists);
+
+            if (showPlaylists) {
+                hideScheduleView();
+            } else {
+                showScheduleView();
+            }
+        };
+
+        tabs.forEach((tab) => {
+            tab.addEventListener('click', () => switchView(tab.dataset.view));
+        });
+
+        let initial = 'playlists';
+        try {
+            const stored = sessionStorage.getItem('dsign_home_view');
+            if (stored === 'schedule' || stored === 'playlists') initial = stored;
+        } catch {
+            /* ignore */
+        }
+        switchView(initial);
+    },
+
     setupEventListeners() {
+        elements.returnToScheduleBtn?.addEventListener('click', async () => {
+            const btn = elements.returnToScheduleBtn;
+            if (!btn || btn.disabled) return;
+            btn.disabled = true;
+            try {
+                const resp = await api.returnToSchedule();
+                if (!resp?.success) throw new Error(resp?.error || t('return_to_schedule_err', getUiLang()));
+                const statusResp = await api.getPlaybackStatus();
+                const inner =
+                    statusResp?.status && typeof statusResp.status === 'object'
+                        ? statusResp.status
+                        : null;
+                state.playbackStatus = inner;
+                ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
+                showAlert(t('return_to_schedule_ok', getUiLang()), 'success');
+            } catch (err) {
+                showError(err.message || t('return_to_schedule_err', getUiLang()));
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        });
+
         // Playlist modal
         elements.createPlaylistBtn?.addEventListener('click', () => {
             ui.toggleModal(true);
