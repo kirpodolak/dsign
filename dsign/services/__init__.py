@@ -584,6 +584,15 @@ def init_services(
         try:
             ss = services.get("settings_service")
             pb = services.get("playback_service")
+            sched = services.get("schedule_service")
+            if pb and sched and hasattr(pb, "set_schedule_service"):
+                pb.set_schedule_service(sched)
+                logger.info("ScheduleService wired into PlaybackService")
+            if pb:
+                pm = getattr(pb, "_playlist_manager", None)
+                if pm is not None and hasattr(pm, "set_override_return_handler"):
+                    pm.set_override_return_handler(pb.handle_override_return)
+                    logger.info("Override return handler wired into PlaylistManager")
             if ss and pb:
                 pm = getattr(pb, "_playlist_manager", None)
                 if pm is not None and hasattr(pm, "set_settings_service"):

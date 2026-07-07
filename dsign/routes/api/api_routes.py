@@ -2389,7 +2389,7 @@ def init_api_routes(api_bp, services):
 
             # Backward-compatible: older clients might send `settings`, but PlaybackService.play() doesn't take it.
             playlist_id = int(data['playlist_id'])
-            result = playback_service.play(playlist_id=playlist_id)
+            result = playback_service.play(playlist_id=playlist_id, source='manual')
         
             return jsonify({
                 "success": True,
@@ -2407,7 +2407,7 @@ def init_api_routes(api_bp, services):
     @api_session_or_token_required
     def playback_stop():
         try:
-            result = playback_service.stop()
+            result = playback_service.stop(source='manual')
             return jsonify({
                 "success": True,
                 "details": result
@@ -2418,6 +2418,20 @@ def init_api_routes(api_bp, services):
                 "success": False,
                 "error": str(e)
             }), 500
+
+    @api_bp.route('/playback/return-to-schedule', methods=['POST'])
+    @login_required
+    def playback_return_to_schedule():
+        if not playback_service:
+            return jsonify({"success": False, "error": "Playback service unavailable"}), 503
+        try:
+            ok = playback_service.return_to_schedule()
+            if not ok:
+                return jsonify({"success": False, "error": "Schedule engine unavailable"}), 503
+            return jsonify({"success": True})
+        except Exception as e:
+            current_app.logger.error(f"Error returning to schedule: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/playback/status', methods=['GET'])
     @api_session_or_token_required
