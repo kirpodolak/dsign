@@ -59,6 +59,7 @@ def init_extensions(app) -> Dict[str, Any]:
             try:
                 db.create_all()
                 _ensure_playlist_sort_order_column(app)
+                _ensure_schedule_schema(app)
             except Exception as e:
                 app.logger.error("db.create_all() failed: %s", e, exc_info=True)
                 raise
@@ -144,6 +145,39 @@ def _ensure_playlist_sort_order_column(app) -> None:
             db.session.commit()
     except Exception as e:
         app.logger.warning('playlist sort_order migration skipped: %s', e)
+        db.session.rollback()
+
+
+def _ensure_schedule_schema(app) -> None:
+    """SQLite: schedule_rules table + playback_status columns."""
+    from sqlalchemy import inspect, text
+    from .models import ScheduleRule  # noqa: F401
+
+    try:
+        insp = inspect(db.engine)
+        tables = insp.get_table_names()
+        if 'schedule_rules' not in tables:
+            ScheduleRule.__table__.create(db.engine)
+            app.logger.info('Created schedule_rules table')
+
+        if 'playback_status' not in tables:
+            return
+        cols = {c['name'] for c in insp.get_columns('playback_status')}
+        for col_name, col_type in [
+            ('source', 'VARCHAR(16)'),
+            ('rule_id', 'INTEGER'),
+            ('previous_source', 'VARCHAR(16)'),
+            ('previous_rule_id', 'INTEGER'),
+            ('previous_playlist_id', 'INTEGER'),
+        ]:
+            if col_name not in cols:
+                with db.engine.begin() as conn:
+                    conn.execute(text(
+                        f'ALTER TABLE playback_status ADD COLUMN {col_name} {col_type}'
+                    ))
+                app.logger.info('Added playback_status.%s', col_name)
+    except Exception as e:
+        app.logger.warning('schedule schema migration skipped: %s', e)
         db.session.rollback()
 
 
