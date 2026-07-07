@@ -68,6 +68,9 @@ export class SettingsManager {
             mpvAdvancedSave: document.getElementById('mpv-advanced-save'),
             mpvAdvancedCancel: document.getElementById('mpv-advanced-cancel'),
             mpvAdvancedClose: document.getElementById('mpv-advanced-close'),
+            scheduleTimezoneSelect: document.getElementById('schedule-timezone-select'),
+            scheduleNtpServer: document.getElementById('schedule-ntp-server'),
+            scheduleNtpSyncBtn: document.getElementById('schedule-ntp-sync-btn'),
         };
 
         this.state = {
@@ -91,6 +94,7 @@ export class SettingsManager {
             audioUiHoldUntil: 0,
             _overrideSaveTimers: new Map(),
             _globalSaveTimer: null,
+            scheduleTimezones: [],
         };
 
         this._svcStatusCache = { ts: 0, payload: null };
@@ -131,7 +135,8 @@ export class SettingsManager {
             await Promise.all([
                 this.loadCurrentSettings(),
                 this.loadSettingsSchema(),
-                this.loadIdleLogoRotation().catch(() => 0)
+                this.loadIdleLogoRotation().catch(() => 0),
+                this.loadScheduleTimezones().catch(() => []),
             ]);
             this.performance.mark('settings-schema-current-loaded');
 
@@ -141,6 +146,7 @@ export class SettingsManager {
             await this.refreshSystemServicesStatus().catch(() => {});
             this._bindVolumeKnob();
             this.renderSettingsForm();
+            this.renderScheduleTimeControls();
             this.performance.mark('settings-rendered');
             this.setupEventListeners();
             // startPolling above already arms slow polling; avoid duplicate timers.
@@ -173,6 +179,57 @@ export class SettingsManager {
         const rotate = Number(data.rotate ?? 0);
         this.elements.idleLogoRotate.value = String([0, 90, 180, 270].includes(rotate) ? rotate : 0);
         return rotate;
+    }
+
+    async loadScheduleTimezones() {
+        const resp = await fetch('/api/settings/timezones', { credentials: 'include' });
+        if (!resp.ok) throw new Error('Failed to load timezones');
+        const data = await resp.json();
+        if (!data.success) throw new Error(data.error || 'Invalid timezone list');
+        this.state.scheduleTimezones = Array.isArray(data.timezones) ? data.timezones : [];
+        return this.state.scheduleTimezones;
+    }
+
+    _formatTimezoneLabel(tz) {
+        const lang = getUiLang();
+        const locale = lang === 'en' ? 'en-US' : 'ru-RU';
+        try {
+            const parts = new Intl.DateTimeFormat(locale, {
+                timeZone: tz,
+                timeZoneName: 'shortOffset',
+            }).formatToParts(new Date());
+            const offset = parts.find((p) => p.type === 'timeZoneName')?.value || '';
+            const city = String(tz).split('/').pop()?.replace(/_/g, ' ') || tz;
+            return offset ? `${city} (${offset})` : tz;
+        } catch {
+            return tz;
+        }
+    }
+
+    renderScheduleTimeControls() {
+        const sel = this.elements.scheduleTimezoneSelect;
+        if (!sel) return;
+        const tzList = this.state.scheduleTimezones.length
+            ? this.state.scheduleTimezones
+            : ['Europe/Moscow'];
+        const current = this.state.currentSettings?.timezone || 'Europe/Moscow';
+        sel.innerHTML = tzList.map((tz) => {
+            const label = this._escapeHtml(this._formatTimezoneLabel(tz));
+            return `<option value="${this._escapeHtml(tz)}">${label}</option>`;
+        }).join('');
+        sel.value = tzList.includes(current) ? current : tzList[0];
+        if (this.elements.scheduleNtpServer) {
+            this.elements.scheduleNtpServer.value =
+                this.state.currentSettings?.ntp_server || 'pool.ntp.org';
+        }
+    }
+
+    _escapeHtml(text) {
+        return String(text ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
     }
 
     _formatBytes(bytes) {
@@ -1038,6 +1095,16 @@ export class SettingsManager {
             if (key === 'idle_logo_rotate') v = this.elements.idleLogoRotate?.value;
             if (v != null) this._setSegmentedValue(seg, v);
         });
+
+        const tz = this.state.currentSettings?.timezone || 'Europe/Moscow';
+        if (this.elements.scheduleTimezoneSelect) {
+            const opts = [...this.elements.scheduleTimezoneSelect.options].map((o) => o.value);
+            if (opts.includes(tz)) this.elements.scheduleTimezoneSelect.value = tz;
+        }
+        if (this.elements.scheduleNtpServer) {
+            this.elements.scheduleNtpServer.value =
+                this.state.currentSettings?.ntp_server || 'pool.ntp.org';
+        }
     }
 
     renderSettingsForm() {
@@ -1159,6 +1226,7 @@ export class SettingsManager {
             applyI18n();
             try {
                 this.refreshDashboardAfterLangChange();
+                this.renderScheduleTimeControls();
                 if (this.state.systemServicesStatus) this._renderSystemServices(this.state.systemServicesStatus);
             } catch (e) {
                 console.warn(e);
@@ -1177,6 +1245,19 @@ export class SettingsManager {
         });
 
         this.elements.applyDisplayModeBtn?.addEventListener('click', () => this.handleApplyDisplayMode());
+
+        this.elements.scheduleTimezoneSelect?.addEventListener('change', () => {
+            this._debounceAutosaveScheduleTime();
+        });
+        this.elements.scheduleNtpServer?.addEventListener('change', () => {
+            this._debounceAutosaveScheduleTime();
+        });
+        this.elements.scheduleNtpServer?.addEventListener('blur', () => {
+            this._debounceAutosaveScheduleTime();
+        });
+        this.elements.scheduleNtpSyncBtn?.addEventListener('click', () => {
+            this.handleNtpSync().catch(() => {});
+        });
 
         document.addEventListener('click', (e) => {
             const segBtn = e.target?.closest?.('.segmented-btn');
@@ -1262,6 +1343,62 @@ export class SettingsManager {
     _debounceAutosaveIdle() {
         clearTimeout(this._autosaveIdleT);
         this._autosaveIdleT = setTimeout(() => this._saveIdleRotationSilent(), 650);
+    }
+
+    _debounceAutosaveScheduleTime() {
+        clearTimeout(this._autosaveScheduleTimeT);
+        this._autosaveScheduleTimeT = setTimeout(() => this._saveScheduleTimeSilent(), 650);
+    }
+
+    async _saveScheduleTimeSilent() {
+        const timezone = this.elements.scheduleTimezoneSelect?.value;
+        const ntp_server = this.elements.scheduleNtpServer?.value?.trim();
+        if (!timezone) return;
+        try {
+            const response = await fetch('/api/settings/schedule-time', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCSRFToken() },
+                credentials: 'include',
+                body: JSON.stringify({ timezone, ntp_server }),
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) throw new Error(result.error || 'Failed');
+            await this.loadCurrentSettings();
+            this.applyGlobalSettingsToControls();
+        } catch (err) {
+            console.warn('Schedule time save failed:', err);
+            showAlert(t('settings_schedule_time_save_err', getUiLang()), 'error');
+        }
+    }
+
+    async handleNtpSync() {
+        const btn = this.elements.scheduleNtpSyncBtn;
+        const lang = getUiLang();
+        if (!btn || btn.disabled) return;
+        const ntp_server = this.elements.scheduleNtpServer?.value?.trim();
+        btn.disabled = true;
+        const prev = btn.textContent;
+        btn.textContent = t('settings_ntp_syncing', lang);
+        try {
+            await this._saveScheduleTimeSilent();
+            const response = await fetch('/api/system/ntp/sync', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCSRFToken() },
+                credentials: 'include',
+                body: JSON.stringify({ ntp_server }),
+            });
+            const result = await response.json().catch(() => ({}));
+            if (result.success) {
+                showAlert(t('settings_ntp_sync_ok', lang), 'success');
+            } else {
+                showAlert(result.message || result.error || t('settings_ntp_sync_partial', lang), 'warning');
+            }
+        } catch (err) {
+            showAlert(err.message || t('settings_ntp_sync_err', lang), 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = prev || t('settings_ntp_sync_btn', lang);
+        }
     }
 
     async _savePreviewAutoSilent() {
