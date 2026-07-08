@@ -1,9 +1,16 @@
 # D2 Schedule Engine — Спецификация
 
-**Версия:** 1.4 (final — ready for D2.1)  
-**Статус:** Готово к реализации D2.1–D2.4  
+**Версия:** 1.5 (D2.1–D2.5 реализовано)  
+**Статус:** D2 завершён (PR #103–#107); offline 24 ч 🟡; fleet Bearer — настроить `DSIGN_API_TOKEN` на плеере  
 **Репозиторий:** `kirpodolak/dsign` (Flask + SQLite + MPV + Wayland/labwc)  
 **Прототип UI:** `docs/Расписание протип.html` (demo 08:00–22:00; production — 00:00–23:59)
+
+### Changelog 1.4 → 1.5
+
+- **D2.1–D2.5:** реализовано и проверено на плеере (CRUD, engine, UI, timezone/NTP, month view, exceptions, batch API).
+- **§10:** чеклисты D2.1–D2.3, D2.5 — [x]; D2.4 — offline 24 ч остаётся 🟡.
+- **§7:** schedule API — `@api_session_or_token_required` (session + Fleet Bearer); добавлены `/month`, `/exceptions`, `/rules/batch`.
+- **Monthly repeat:** перенесён из «hidden в D2.4» в D2.5 (UI + `repeat_type: monthly`).
 
 ### Changelog 1.3 → 1.4
 
@@ -123,7 +130,7 @@ class ScheduleRule(db.Model):
     start_time   = Column(Time, nullable=False)
     end_time     = Column(Time, nullable=False)
 
-    repeat_type  = Column(String(16), default='weekly')   # weekly | once
+    repeat_type  = Column(String(16), default='weekly')   # weekly | once | monthly
     valid_from   = Column(Date, nullable=True)            # обязателен для once
     valid_until  = Column(Date, nullable=True)
 
@@ -483,8 +490,7 @@ UI badge: `data.status.schedule.source` (не корень ответа).
 
 ## 7. API Endpoints
 
-Все schedule CRUD: **`@login_required`**.  
-`return-to-schedule`: `@login_required` в MVP; Bearer — D2.5.
+Все schedule endpoints: **`@api_session_or_token_required`** (Flask-Login session + `DSIGN_API_TOKEN` Bearer с D2.5).
 
 ### 7.1. Schedule CRUD
 
@@ -492,12 +498,16 @@ UI badge: `data.status.schedule.source` (не корень ответа).
 |--------|------|----------|------|
 | GET | `/api/schedule/rules` | Все не-archived | D2.1 |
 | GET | `/api/schedule/week?date=YYYY-MM-DD` | 7 дней instances | D2.1 |
+| GET | `/api/schedule/month?date=YYYY-MM-DD` | календарный месяц instances | D2.5 |
 | GET | `/api/schedule/now` | active + next | D2.1 |
 | POST | `/api/schedule/rules` | create | D2.1 |
+| POST | `/api/schedule/rules/batch` | batch create/update/archive | D2.5 |
 | PUT | `/api/schedule/rules/<id>` | update (partial OK для day transfer) | D2.1 |
 | PATCH | `/api/schedule/rules/<id>/archive` | soft delete | D2.1 |
 | PATCH | `/api/schedule/rules/<id>/toggle` | enable/disable | D2.1 |
-| POST | `/api/playback/return-to-schedule` | manual → schedule | **D2.2** |
+| POST | `/api/schedule/exceptions` | skip one occurrence `{rule_id, date}` | D2.5 |
+| DELETE | `/api/schedule/exceptions` | remove skip `{rule_id, date}` | D2.5 |
+| POST | `/api/playback/return-to-schedule` | manual → schedule | D2.2 |
 
 ### 7.2. Валидация
 
@@ -666,67 +676,67 @@ UI: select timezone + NTP server + кнопка «Синхронизироват
 
 ### D2.1 — Модель + API
 
-- [ ] `ScheduleRule` в `dsign/models.py` (или import из submodule)
-- [ ] Расширить `PlaybackStatus` (`source`, `rule_id`, `previous_*`)
-- [ ] `_ensure_schedule_schema()` в `dsign/extensions.py`
-- [ ] Endpoints в `dsign/routes/api/api_routes.py` (кроме `return-to-schedule`)
-- [ ] `schedule_time.local_now()` helper
-- [ ] Валидация §7.2
-- [ ] `GET /week` с полями §7.3 (включая disabled, без archived; `days_of_week` для day-transfer)
-- [ ] `_trigger_schedule_evaluate()` stub
-- [ ] `PlaylistManager._on_override_return = None` (поле stub; без handler — legacy B3 `_play_impl` return)
-- [ ] **Acceptance:** POST rule → GET rules; invalid `start>=end` → 400
+- [x] `ScheduleRule` в `dsign/models.py` (или import из submodule)
+- [x] Расширить `PlaybackStatus` (`source`, `rule_id`, `previous_*`)
+- [x] `_ensure_schedule_schema()` в `dsign/extensions.py`
+- [x] Endpoints в `dsign/routes/api/api_routes.py` (кроме `return-to-schedule`)
+- [x] `schedule_time.local_now()` helper
+- [x] Валидация §7.2
+- [x] `GET /week` с полями §7.3 (включая disabled, без archived; `days_of_week` для day-transfer)
+- [x] `_trigger_schedule_evaluate()` stub
+- [x] `PlaylistManager._on_override_return = None` (поле stub; без handler — legacy B3 `_play_impl` return)
+- [x] **Acceptance:** POST rule → GET rules; invalid `start>=end` → 400
 
 ### D2.2 — ScheduleEngine + playback
 
-- [ ] `dsign/services/schedule_engine.py`
-- [ ] Singleton на `PlaybackService`; `start()` после app ready
-- [ ] `evaluate_now()` (read-only) / `evaluate_and_apply()` (side effects)
-- [ ] `app.app_context()` в tick/evaluate
-- [ ] `source`/`rule_id` kwargs: `PlaybackService` → `PlaylistManager` → `_play_impl` / `_play_local_video_engine` / `_stop_impl`
-- [ ] API play/stop → `source='manual'`
-- [ ] `play_override` → `override` + `previous_*` в PlaybackStatus
-- [ ] `handle_override_return` с guard `row is None` / `_schedule_engine is None` (§6.3)
-- [ ] Boot schedule-first (`evaluate_and_apply`, не `evaluate_now`)
-- [ ] `get_status()` + block `schedule`
-- [ ] `POST /api/playback/return-to-schedule`
-- [ ] `evaluate_and_apply()` после mutate + return-to-schedule
-- [ ] Log `schedule_conflict_resolved`
-- [ ] (optional D2.4) SIGTERM → `engine.stop()`
-- [ ] **Acceptance:** 09:00 rule ±30 с; manual blocks schedule; reboot off-slot → idle
+- [x] `dsign/services/schedule_engine.py`
+- [x] Singleton на `PlaybackService`; `start()` после app ready
+- [x] `evaluate_now()` (read-only) / `evaluate_and_apply()` (side effects)
+- [x] `app.app_context()` в tick/evaluate
+- [x] `source`/`rule_id` kwargs: `PlaybackService` → `PlaylistManager` → `_play_impl` / `_play_local_video_engine` / `_stop_impl`
+- [x] API play/stop → `source='manual'`
+- [x] `play_override` → `override` + `previous_*` в PlaybackStatus
+- [x] `handle_override_return` с guard `row is None` / `_schedule_engine is None` (§6.3)
+- [x] Boot schedule-first (`evaluate_and_apply`, не `evaluate_now`)
+- [x] `get_status()` + block `schedule`
+- [x] `POST /api/playback/return-to-schedule`
+- [x] `evaluate_and_apply()` после mutate + return-to-schedule
+- [x] Log `schedule_conflict_resolved`
+- [x] (optional D2.4) SIGTERM → `engine.stop()`
+- [x] **Acceptance:** 09:00 rule ±30 с; manual blocks schedule; reboot off-slot → idle
 
 ### D2.3 — UI: вкладка Расписание
 
-- [ ] `index.html` — вкладки «Плейлисты» | «Расписание»
-- [ ] `schedule.css` / `schedule.js` (сетка 00–23)
-- [ ] `loadWeek()` → `/api/schedule/week`
-- [ ] Drag: magnets + day dialog (transfer/duplicate/cancel)
-- [ ] Resize: bottom handle, snap 15 мин
-- [ ] Progress bar для `is_playing_now`
-- [ ] `saveSlot()` → PUT/POST; conflict warning
-- [ ] Empty click → create
-- [ ] Context menu: toggle, archive
-- [ ] Sidebar: source badge + return button
-- [ ] CSRF на все POST/PATCH
-- [ ] i18n ключи для UI расписания
-- [ ] **Acceptance:** drag/save survives reload; day transfer → dialog
+- [x] `index.html` — вкладки «Плейлисты» | «Расписание»
+- [x] `schedule.css` / `schedule.js` (сетка 00–23)
+- [x] `loadWeek()` → `/api/schedule/week`
+- [x] Drag: magnets + day dialog (transfer/duplicate/cancel)
+- [x] Resize: bottom handle, snap 15 мин
+- [x] Progress bar для `is_playing_now`
+- [x] `saveSlot()` → PUT/POST; conflict warning
+- [x] Empty click → create
+- [x] Context menu: toggle, archive
+- [x] Sidebar: source badge + return button
+- [x] CSRF на все POST/PATCH
+- [x] i18n ключи для UI расписания
+- [x] **Acceptance:** drag/save survives reload; day transfer → dialog
 
 ### D2.4 — Polish
 
-- [ ] Timezone в Settings UI
-- [ ] NTP sync (optional, best-effort; §9 fallback chain)
-- [ ] Monthly hidden в repeat select
-- [ ] Offline 24 ч test
-- [ ] (optional) SIGTERM shutdown hook
-- [ ] **Acceptance:** чеклист `docs/dsign_4phase_checklist.md` D2
+- [x] Timezone в Settings UI
+- [x] NTP sync (optional, best-effort; §9 fallback chain)
+- [x] ~~Monthly hidden в repeat select~~ → перенесено в D2.5 (monthly включён)
+- [ ] Offline 24 ч test 🟡
+- [x] (optional) SIGTERM shutdown hook
+- [x] **Acceptance:** чеклист `docs/dsign_4phase_checklist.md` D2 (кроме offline 24 ч)
 
-### D2.5 — v2 (не MVP)
+### D2.5 — Расширения (завершено)
 
-- [ ] Monthly repeat + month view
-- [ ] Исключения (отменить одну среду)
-- [ ] Fleet Bearer на schedule API
-- [ ] Batch save
-- [ ] Touch / keyboard
+- [x] Monthly repeat + month view
+- [x] Исключения (отменить одну среду)
+- [x] Fleet Bearer на schedule API (код; на плеере задать `DSIGN_API_TOKEN`)
+- [x] Batch save (`POST /schedule/rules/batch`)
+- [x] Touch / keyboard
 
 ---
 
@@ -762,4 +772,4 @@ Do NOT implement ScheduleEngine (D2.2) or UI (D2.3).
 
 ---
 
-*End of spec v1.4.*
+*End of spec v1.5.*

@@ -334,7 +334,7 @@ Local schedule (SQLite)
 
 
 
-⬜ не начато
+✅ сделано (PR #103–#107; offline 24 ч 🟡)
 
 
 
@@ -1470,19 +1470,17 @@ Update downtime < 5 мин; rollback < 2 мин; fail не ломает сист
 
 D2. Local Schedule (SQLite)
 
-Статус: ⬜ · после B3 (приоритеты override vs schedule)
+Статус: ✅ · PR #103–#107 (D2.1–D2.5); offline 24 ч 🟡
 
 Acceptance:
 
 
 
-
-
-Правило 09:00 → playlist A (±30 s)
+Правило 09:00 → playlist A (±30 s) — ✅ на плеере (`/schedule/now`, `source=schedule`)
 
 
 
-Offline 24 ч — расписание работает
+Offline 24 ч — расписание работает — 🟡 не формально прогнан (timezone/NTP в Settings есть)
 
 
 
@@ -1584,11 +1582,11 @@ D
 
 
 
-D1–D2
+D1 ⬜ · D2 ✅
 
 
 
-OTA + автономное расписание
+OTA (⬜) + автономное расписание (✅)
 
 
 
