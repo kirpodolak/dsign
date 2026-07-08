@@ -76,7 +76,7 @@ flowchart TD
 | **D1** | `dsign-update` OTA (check/download/apply/rollback + timer) | 🔴 | 4phase §D1 | D0 |
 | **T-CI** | GitHub Actions: `pytest` на PR | 🟡 | improvement §1 | — |
 | **T-IPC** | Unit: `MpvJsonIpcSession` | ✅ | improvement §1.1 | — |
-| **T-MPV** | Unit: `MPVManager._send_command()` | 🔴 | improvement §1.2 | T-IPC |
+| **T-MPV** | Unit: `MPVManager._send_command()` | ✅ | improvement §1.2 | T-IPC |
 | **T-REC** | Integration: recovery flows | 🔴 | improvement §1.3 | T-IPC, T-MPV |
 | **T-EOF** | Integration: EOF detection (6 путей) | 🔴 | improvement §1.4 | T-IPC, T-MPV |
 | **T-API** | API smoke (auth, Bearer, schedule, CSRF→**400**) | 🔴 | improvement §1.5 | — |
@@ -313,7 +313,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **T-MPV** (зависит от T-IPC ✅)
+**Следующий PR по качеству:** **T-REC / T-EOF** (зависят от T-IPC ✅ и T-MPV ✅)
 
 ---
 

@@ -26,7 +26,7 @@
 | Подраздел | Backlog ID | Фокус |
 |-----------|------------|--------|
 | 1.1 `MpvJsonIpcSession` | T-IPC ✅ | batch, events, reconnect, locks, timeout, malformed JSON — `tests/test_mpv_ipc_session.py` |
-| 1.2 `MPVManager._send_command()` | T-MPV | retry, transport error, coalesced restart, vo switch |
+| 1.2 `MPVManager._send_command()` | T-MPV ✅ | retry, transport error, coalesced restart, vo switch — `tests/test_mpv_manager_send_command.py` |
 | 1.3 Recovery flows | T-REC | `recover_after_mpv_systemd_restart`, boot resume, crash callback |
 | 1.4 EOF detection | T-EOF | 6 путей end-file / idle / stagnation / HLS / VK |
 | 1.5 API smoke | T-API | auth, Bearer, schedule; CSRF → **400**; rate limit после H-RL |
@@ -86,7 +86,7 @@
 ### Tier 1 — must pass в CI
 
 1. `MpvJsonIpcSession` ✅ (10 unit tests, fake AF_UNIX peer)
-2. `MPVManager._send_command()`
+2. `MPVManager._send_command()` ✅ (unit tests + restart coalesce checks)
 3. `PlaybackService` recovery
 4. EOF detection (все пути)
 5. API validation + auth
@@ -120,4 +120,5 @@ Unit (mock IPC) → Integration (fake MPV) → API smoke → coverage report →
 | Дата | Изменение |
 |------|-----------|
 | 2026-07-08 | T-IPC: unit tests + reader stale-socket fix |
+| 2026-07-08 | T-MPV: unit tests `_send_command` (vo guard, retries, coalesced restart) |
 | 2026-07-08 | Перенесён в `docs/`; открытые задачи → `dsign_backlog.md` |
