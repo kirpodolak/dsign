@@ -25,7 +25,7 @@
 
 | Подраздел | Backlog ID | Фокус |
 |-----------|------------|--------|
-| 1.1 `MpvJsonIpcSession` | T-IPC | batch, events, reconnect, locks, timeout, malformed JSON |
+| 1.1 `MpvJsonIpcSession` | T-IPC ✅ | batch, events, reconnect, locks, timeout, malformed JSON — `tests/test_mpv_ipc_session.py` |
 | 1.2 `MPVManager._send_command()` | T-MPV | retry, transport error, coalesced restart, vo switch |
 | 1.3 Recovery flows | T-REC | `recover_after_mpv_systemd_restart`, boot resume, crash callback |
 | 1.4 EOF detection | T-EOF | 6 путей end-file / idle / stagnation / HLS / VK |
@@ -85,7 +85,7 @@
 
 ### Tier 1 — must pass в CI
 
-1. `MpvJsonIpcSession`
+1. `MpvJsonIpcSession` ✅ (10 unit tests, fake AF_UNIX peer)
 2. `MPVManager._send_command()`
 3. `PlaybackService` recovery
 4. EOF detection (все пути)
@@ -119,4 +119,5 @@ Unit (mock IPC) → Integration (fake MPV) → API smoke → coverage report →
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-08 | T-IPC: unit tests + reader stale-socket fix |
 | 2026-07-08 | Перенесён в `docs/`; открытые задачи → `dsign_backlog.md` |

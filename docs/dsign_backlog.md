@@ -36,6 +36,8 @@
 | **D2 расписание D2.1–D2.5** | ✅ PR #103–#107 |
 | `GET /api/health`, upload limit 1 GiB, login rate limit | ✅ в коде |
 | `MPVManager.shutdown()`, SIGTERM → `ScheduleEngine.stop()` | ✅ частично |
+| **T-IPC** unit tests (`MpvJsonIpcSession`, 10 кейсов) | ✅ PR pytest-tier1 |
+| **T-CI** GitHub Actions pytest (unit) | ✅ частично — integration/API smoke позже |
 | Device snapshot telemetry (`GET /api/health`, `/playback/status`) | ✅ нет истории / fleet hub |
 | Auth: local user + `is_admin` + Bearer token | ✅ не SSO / не multi-tenant |
 
@@ -72,8 +74,8 @@ flowchart TD
 | ID | Задача | 🔴🟡🟢 | Источник | Зависимости |
 |----|--------|--------|----------|-------------|
 | **D1** | `dsign-update` OTA (check/download/apply/rollback + timer) | 🔴 | 4phase §D1 | D0 |
-| **T-CI** | GitHub Actions: `pytest` на PR | 🔴 | improvement §1 | — |
-| **T-IPC** | Unit: `MpvJsonIpcSession` | 🔴 | improvement §1.1 | — |
+| **T-CI** | GitHub Actions: `pytest` на PR | 🟡 | improvement §1 | — |
+| **T-IPC** | Unit: `MpvJsonIpcSession` | ✅ | improvement §1.1 | — |
 | **T-MPV** | Unit: `MPVManager._send_command()` | 🔴 | improvement §1.2 | T-IPC |
 | **T-REC** | Integration: recovery flows | 🔴 | improvement §1.3 | T-IPC, T-MPV |
 | **T-EOF** | Integration: EOF detection (6 путей) | 🔴 | improvement §1.4 | T-IPC, T-MPV |
@@ -174,13 +176,24 @@ flowchart TD
 
 ### T-CI — Continuous Integration
 
-- [ ] Каталог `tests/` + `pytest` / `pytest-cov` (зависимости уже в `setup.py`)
-- [ ] GitHub Actions workflow на PR: unit → integration (fake MPV) → API smoke
-- [ ] Merge gate: Tier 1 must pass
+- [x] Каталог `tests/` + `pytest` / `pytest-cov` (зависимости в `setup.py`, `packages=dsign` only)
+- [x] GitHub Actions workflow на PR: **unit** (`tests/test_mpv_ipc_session.py`)
+- [ ] Integration (fake MPV) + API smoke в том же workflow
+- [ ] Merge gate: полный Tier 1 must pass
 
 *Источник:* improvement §1, стратегия тестов
 
-### T-IPC … T-AUD — pytest Tier 1
+### T-IPC — `MpvJsonIpcSession` unit tests ✅
+
+- [x] `command` / `commands_batch` (в т.ч. empty batch)
+- [x] events: `subscribe_event`, `wait_event`, `drain_events`
+- [x] `reset` / reconnect после reset
+- [x] timeout, malformed JSON, concurrent commands, EOF
+
+*Файлы:* `tests/test_mpv_ipc_session.py`, `tests/fake_mpv_ipc.py`  
+*Фикс в проде:* reader игнорирует ошибки устаревшего сокета после `reset()`.
+
+### T-IPC … T-AUD — pytest Tier 1 (остальное)
 
 Детальный список кейсов — в [dsign_improvement_checklist.md](./dsign_improvement_checklist.md) §1.1–1.6.
 
@@ -300,7 +313,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **T-CI + T-IPC**
+**Следующий PR по качеству:** **T-MPV** (зависит от T-IPC ✅)
 
 ---
 
@@ -308,5 +321,6 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-08 | T-IPC ✅ (10 unit tests), T-CI частично (pytest workflow) |
 | 2026-07-08 | COM v1.0/v1.5/v2.0: proof of play, HTTPS, sec audit, telemetry, fleet push |
 | 2026-07-08 | Создан сводный backlog из 4phase + schedule_spec + improvement_checklist |
