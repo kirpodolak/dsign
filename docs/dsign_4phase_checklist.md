@@ -2,9 +2,9 @@
 
 **Порядок фаз:** A → C → B → D (Playback → Content → API → Ops)  
 **Формат задач:** Что меняем → Зачем → Какой результат  
-**Связанные документы:** [dsign_test_matrix.md](./dsign_test_matrix.md) — acceptance-тесты playback · [dsign_schedule_spec.md](./dsign_schedule_spec.md) — спека расписания (D2)
+**Связанные документы:** [dsign_test_matrix.md](./dsign_test_matrix.md) — acceptance-тесты playback · [dsign_schedule_spec.md](./dsign_schedule_spec.md) — спека расписания (D2) · **[dsign_backlog.md](./dsign_backlog.md) — сводный список того, что осталось**
 
-> Живой чеклист. При закрытии задачи: `[ ]` → `[x]`, указать PR/коммит в колонке «Где сделано».
+> **Открытые задачи** ведите в [dsign_backlog.md](./dsign_backlog.md). Этот файл — история фаз и детальный контекст.
 
 ---
 
@@ -421,6 +421,7 @@ Pause/seek also work when MPV session is active after service restart (before th
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-08 | Ссылка на [dsign_backlog.md](./dsign_backlog.md); открытые D2 → backlog |
 | 2026-07-08 | **D2** закрыт (PR #103–#107); восстановлена markdown-разметка (после поломки в commit 1709977) |
 | 2026-06-17 | B4 — Bearer на `POST /api/playback/play` и `/stop`; fleet playback API complete |
 | 2026-06-17 | B5 — REST `pause`/`seek`/`skip` + Bearer auth |
