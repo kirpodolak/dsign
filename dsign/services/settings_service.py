@@ -5,7 +5,8 @@ import json
 import logging
 import traceback
 import time
-from typing import Optional, Dict, Any, Union
+import zoneinfo
+from typing import Optional, Dict, Any, Union, List
 from pathlib import Path
 from datetime import datetime
 from flask import current_app
@@ -20,6 +21,9 @@ class SettingsService:
         "overscan": False,
         "volume": 80,
         "mute": False,
+        # Schedule clock (D2.4) — used by schedule_time.local_now()
+        "timezone": "Europe/Moscow",
+        "ntp_server": "pool.ntp.org",
         # Global MPV tweaks (flat keys mirrored at top level for UI / IPC).
         "mpv": {},
         "display": {
@@ -402,6 +406,38 @@ class SettingsService:
         self._cached_current_settings = None
         self._cached_current_settings_ts = 0.0
         return settings
+
+    _NTP_SERVER_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.\-]{0,253}$")
+
+    def validate_ntp_server(self, server: str) -> str:
+        value = str(server or "").strip()
+        if not value:
+            raise ValueError("ntp_server is required")
+        if len(value) > 255 or not self._NTP_SERVER_RE.match(value):
+            raise ValueError("invalid ntp_server")
+        return value
+
+    def set_schedule_time_settings(
+        self,
+        *,
+        timezone: Optional[str] = None,
+        ntp_server: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Persist schedule timezone and NTP server (settings.json, D2.4)."""
+        from dsign.services.schedule_time import validate_timezone
+
+        settings = self.load_settings()
+        if timezone is not None:
+            settings["timezone"] = validate_timezone(timezone)
+        if ntp_server is not None:
+            settings["ntp_server"] = self.validate_ntp_server(ntp_server)
+        self.save_settings(settings)
+        self._cached_current_settings = None
+        self._cached_current_settings_ts = 0.0
+        return {
+            "timezone": settings.get("timezone", self.DEFAULT_SETTINGS["timezone"]),
+            "ntp_server": settings.get("ntp_server", self.DEFAULT_SETTINGS["ntp_server"]),
+        }
 
     def update_mpv_settings(self, settings: Dict[str, Any], profile_type: str = None, playlist_id: int = None) -> bool:
         """
