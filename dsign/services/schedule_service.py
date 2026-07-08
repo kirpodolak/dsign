@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import calendar
 import logging
 from datetime import date, datetime, time as dt_time, timedelta
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from sqlalchemy import asc
 
-from ..models import PlaybackStatus, Playlist, ScheduleRule
+from ..models import PlaybackStatus, Playlist, ScheduleException, ScheduleRule
 from .schedule_time import local_now
 
 
@@ -108,8 +109,8 @@ class ScheduleService:
 
         if "repeat_type" in data or not partial:
             repeat = str(data.get("repeat_type", "weekly")).strip().lower()
-            if repeat not in ("weekly", "once"):
-                raise ScheduleValidationError("repeat_type must be weekly or once")
+            if repeat not in ("weekly", "once", "monthly"):
+                raise ScheduleValidationError("repeat_type must be weekly, once, or monthly")
             out["repeat_type"] = repeat
 
         if "valid_from" in data or not partial:
@@ -120,6 +121,9 @@ class ScheduleService:
         if out.get("repeat_type") == "once" and not partial:
             if out.get("valid_from") is None:
                 raise ScheduleValidationError("valid_from is required for repeat_type once")
+        if out.get("repeat_type") == "monthly" and not partial:
+            if out.get("valid_from") is None:
+                raise ScheduleValidationError("valid_from is required for repeat_type monthly")
 
         if "priority" in data or not partial:
             try:
@@ -216,14 +220,60 @@ class ScheduleService:
         monday = anchor - timedelta(days=anchor.weekday())
         return [monday + timedelta(days=i) for i in range(7)]
 
-    def _rule_applies_on_date(self, rule: ScheduleRule, day: date) -> bool:
+    def _month_dates(self, anchor: date) -> List[date]:
+        first = anchor.replace(day=1)
+        last_day = calendar.monthrange(first.year, first.month)[1]
+        count = last_day
+        return [first + timedelta(days=i) for i in range(count)]
+
+    def _monthly_matches(self, rule: ScheduleRule, day: date) -> bool:
+        if rule.valid_from is None:
+            return False
+        anchor_dom = int(rule.valid_from.day)
+        last_dom = calendar.monthrange(day.year, day.month)[1]
+        target_dom = min(anchor_dom, last_dom)
+        if day.day != target_dom:
+            return False
+        bit = 1 << day.weekday()
+        dow = int(rule.days_of_week or 0)
+        if dow > 0 and not (dow & bit):
+            return False
+        return True
+
+    def _exceptions_for_range(self, start: date, end: date) -> Set[Tuple[int, str]]:
+        rows = (
+            self.db_session.query(ScheduleException)
+            .filter(
+                ScheduleException.exception_date >= start,
+                ScheduleException.exception_date <= end,
+            )
+            .all()
+        )
+        return {(int(r.rule_id), r.exception_date.isoformat()) for r in rows}
+
+    def _is_exception(self, rule_id: int, day: date, exceptions: Set[Tuple[int, str]]) -> bool:
+        return (int(rule_id), day.isoformat()) in exceptions
+
+    def _rule_applies_on_date(
+        self,
+        rule: ScheduleRule,
+        day: date,
+        *,
+        exceptions: Optional[Set[Tuple[int, str]]] = None,
+    ) -> bool:
         if rule.archived_at is not None:
+            return False
+        if exceptions is not None and self._is_exception(rule.id, day, exceptions):
             return False
         if rule.repeat_type == "once":
             return rule.valid_from is not None and day == rule.valid_from
-        bit = 1 << day.weekday()
-        if not (int(rule.days_of_week or 0) & bit):
-            return False
+        if rule.repeat_type == "monthly":
+            if not self._monthly_matches(rule, day):
+                return False
+        else:
+            bit = 1 << day.weekday()
+            if not (int(rule.days_of_week or 0) & bit):
+                return False
         if rule.valid_from and day < rule.valid_from:
             return False
         if rule.valid_until and day > rule.valid_until:
@@ -332,25 +382,126 @@ class ScheduleService:
             anchor_date = anchor
         if anchor_date is None:
             raise ScheduleValidationError("date is required")
+        week_dates = self._week_dates(anchor_date)
+        payload = self._expand_dates(week_dates)
+        payload["week_start"] = week_dates[0].isoformat()
+        payload["week_end"] = week_dates[-1].isoformat()
+        return payload
 
+    def expand_month(self, anchor: Union[str, date]) -> Dict[str, Any]:
+        if isinstance(anchor, str):
+            anchor_date = _parse_date(anchor, "date")
+        else:
+            anchor_date = anchor
+        if anchor_date is None:
+            raise ScheduleValidationError("date is required")
+        month_dates = self._month_dates(anchor_date)
+        payload = self._expand_dates(month_dates)
+        payload["month_start"] = month_dates[0].isoformat()
+        payload["month_end"] = month_dates[-1].isoformat()
+        return payload
+
+    def _expand_dates(self, dates: List[date]) -> Dict[str, Any]:
+        if not dates:
+            return {"instances": []}
         now = local_now(self.settings_service)
         playback = self._playback_row()
-        week_dates = self._week_dates(anchor_date)
+        exceptions = self._exceptions_for_range(dates[0], dates[-1])
         rules = self.list_rules()
         instances: List[Dict[str, Any]] = []
         for rule in rules:
-            for day in week_dates:
-                if not self._rule_applies_on_date(rule, day):
+            for day in dates:
+                if not self._rule_applies_on_date(rule, day, exceptions=exceptions):
                     continue
                 instances.append(self._instance_dict(rule, day, now=now, playback=playback))
 
         self._annotate_conflicts(instances)
         instances.sort(key=lambda x: (x["date"], x["start_time"], x["priority"], x["rule_id"]))
+        return {"instances": instances}
+
+    def add_exception(self, rule_id: int, exception_date: Union[str, date]) -> ScheduleException:
+        rule = self.get_rule(rule_id)
+        if rule is None:
+            raise ScheduleValidationError("rule not found")
+        if isinstance(exception_date, str):
+            day = _parse_date(exception_date, "date")
+        else:
+            day = exception_date
+        if day is None:
+            raise ScheduleValidationError("date is required")
+        existing = (
+            self.db_session.query(ScheduleException)
+            .filter_by(rule_id=int(rule_id), exception_date=day)
+            .first()
+        )
+        if existing is not None:
+            return existing
+        row = ScheduleException(rule_id=int(rule_id), exception_date=day)
+        self.db_session.add(row)
+        self.db_session.commit()
+        return row
+
+    def remove_exception(self, rule_id: int, exception_date: Union[str, date]) -> bool:
+        if isinstance(exception_date, str):
+            day = _parse_date(exception_date, "date")
+        else:
+            day = exception_date
+        if day is None:
+            raise ScheduleValidationError("date is required")
+        row = (
+            self.db_session.query(ScheduleException)
+            .filter_by(rule_id=int(rule_id), exception_date=day)
+            .first()
+        )
+        if row is None:
+            return False
+        self.db_session.delete(row)
+        self.db_session.commit()
+        return True
+
+    def batch_mutate(
+        self,
+        *,
+        create: Optional[List[Dict[str, Any]]] = None,
+        update: Optional[List[Dict[str, Any]]] = None,
+        archive: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        created: List[Dict[str, Any]] = []
+        updated: List[Dict[str, Any]] = []
+        archived: List[int] = []
+        errors: List[Dict[str, Any]] = []
+
+        for idx, payload in enumerate(create or []):
+            try:
+                rule = self.create_rule(payload or {})
+                created.append(self.rule_to_dict(rule))
+            except Exception as exc:
+                errors.append({"op": "create", "index": idx, "error": str(exc)})
+
+        for idx, item in enumerate(update or []):
+            try:
+                if not isinstance(item, dict) or "id" not in item:
+                    raise ScheduleValidationError("update item requires id")
+                rule_id = int(item["id"])
+                data = {k: v for k, v in item.items() if k != "id"}
+                rule = self.update_rule(rule_id, data)
+                updated.append(self.rule_to_dict(rule))
+            except Exception as exc:
+                errors.append({"op": "update", "index": idx, "error": str(exc)})
+
+        for idx, rule_id in enumerate(archive or []):
+            try:
+                self.archive_rule(int(rule_id))
+                archived.append(int(rule_id))
+            except Exception as exc:
+                errors.append({"op": "archive", "index": idx, "error": str(exc)})
 
         return {
-            "week_start": week_dates[0].isoformat(),
-            "week_end": week_dates[-1].isoformat(),
-            "instances": instances,
+            "created": created,
+            "updated": updated,
+            "archived": archived,
+            "errors": errors,
+            "success": len(errors) == 0,
         }
 
     def find_active_rule_candidates(
@@ -358,11 +509,12 @@ class ScheduleService:
         now: Optional[datetime] = None,
     ) -> List[ScheduleRule]:
         now = now or local_now(self.settings_service)
+        exceptions = self._exceptions_for_range(now.date(), now.date())
         candidates: List[ScheduleRule] = []
         for rule in self.list_rules():
             if not rule.enabled:
                 continue
-            if not self._rule_applies_on_date(rule, now.date()):
+            if not self._rule_applies_on_date(rule, now.date(), exceptions=exceptions):
                 continue
             if rule.start_time <= now.time() < rule.end_time:
                 candidates.append(rule)
@@ -376,14 +528,16 @@ class ScheduleService:
     def find_next_rule(self, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
         now = now or local_now(self.settings_service)
         best: Optional[tuple] = None
-        for offset in range(0, 14):
+        horizon_end = now.date() + timedelta(days=60)
+        exceptions = self._exceptions_for_range(now.date(), horizon_end)
+        for offset in range(0, 60):
             day = now.date() + timedelta(days=offset)
             same_day = offset == 0
             cutoff = _time_cutoff(now, same_day=same_day)
             for rule in self.list_rules():
                 if not rule.enabled:
                     continue
-                if not self._rule_applies_on_date(rule, day):
+                if not self._rule_applies_on_date(rule, day, exceptions=exceptions):
                     continue
                 if rule.start_time <= cutoff:
                     continue
