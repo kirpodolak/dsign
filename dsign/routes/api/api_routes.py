@@ -2082,7 +2082,7 @@ def init_api_routes(api_bp, services):
             engine.evaluate_and_apply()
 
     @api_bp.route('/schedule/rules', methods=['GET'])
-    @login_required
+    @api_session_or_token_required
     def list_schedule_rules():
         if not schedule_service:
             return jsonify({"success": False, "error": "Schedule service unavailable"}), 503
@@ -2094,7 +2094,7 @@ def init_api_routes(api_bp, services):
             return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/schedule/rules', methods=['POST'])
-    @login_required
+    @api_session_or_token_required
     def create_schedule_rule():
         if not schedule_service:
             return jsonify({"success": False, "error": "Schedule service unavailable"}), 503
@@ -2111,8 +2111,28 @@ def init_api_routes(api_bp, services):
             current_app.logger.error(f"Error creating schedule rule: {e}")
             return jsonify({"success": False, "error": str(e)}), 500
 
+    @api_bp.route('/schedule/rules/batch', methods=['POST'])
+    @api_session_or_token_required
+    def batch_schedule_rules():
+        if not schedule_service:
+            return jsonify({"success": False, "error": "Schedule service unavailable"}), 503
+        try:
+            data = request.get_json(silent=True) or {}
+            result = schedule_service.batch_mutate(
+                create=data.get("create"),
+                update=data.get("update"),
+                archive=data.get("archive"),
+            )
+            if result.get("created") or result.get("updated") or result.get("archived"):
+                _trigger_schedule_evaluate()
+            status = 200 if result.get("success") else 207
+            return jsonify({"success": bool(result.get("success")), **result}), status
+        except Exception as e:
+            current_app.logger.error(f"Error batch schedule mutate: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
     @api_bp.route('/schedule/rules/<int:rule_id>', methods=['PUT'])
-    @login_required
+    @api_session_or_token_required
     def update_schedule_rule(rule_id: int):
         if not schedule_service:
             return jsonify({"success": False, "error": "Schedule service unavailable"}), 503
@@ -2132,7 +2152,7 @@ def init_api_routes(api_bp, services):
             return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/schedule/rules/<int:rule_id>/archive', methods=['PATCH'])
-    @login_required
+    @api_session_or_token_required
     def archive_schedule_rule(rule_id: int):
         if not schedule_service:
             return jsonify({"success": False, "error": "Schedule service unavailable"}), 503
@@ -2149,7 +2169,7 @@ def init_api_routes(api_bp, services):
             return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/schedule/rules/<int:rule_id>/toggle', methods=['PATCH'])
-    @login_required
+    @api_session_or_token_required
     def toggle_schedule_rule(rule_id: int):
         if not schedule_service:
             return jsonify({"success": False, "error": "Schedule service unavailable"}), 503
@@ -2166,7 +2186,7 @@ def init_api_routes(api_bp, services):
             return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/schedule/week', methods=['GET'])
-    @login_required
+    @api_session_or_token_required
     def schedule_week():
         if not schedule_service:
             return jsonify({"success": False, "error": "Schedule service unavailable"}), 503
@@ -2184,8 +2204,82 @@ def init_api_routes(api_bp, services):
             current_app.logger.error(f"Error expanding schedule week: {e}")
             return jsonify({"success": False, "error": str(e)}), 500
 
+    @api_bp.route('/schedule/month', methods=['GET'])
+    @api_session_or_token_required
+    def schedule_month():
+        if not schedule_service:
+            return jsonify({"success": False, "error": "Schedule service unavailable"}), 503
+        try:
+            from dsign.services.schedule_service import ScheduleValidationError
+
+            anchor = request.args.get('date')
+            if not anchor:
+                return jsonify({"success": False, "error": "date query parameter is required (YYYY-MM-DD)"}), 400
+            payload = schedule_service.expand_month(anchor)
+            return jsonify({"success": True, **payload})
+        except ScheduleValidationError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+        except Exception as e:
+            current_app.logger.error(f"Error expanding schedule month: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/schedule/exceptions', methods=['POST'])
+    @api_session_or_token_required
+    def add_schedule_exception():
+        if not schedule_service:
+            return jsonify({"success": False, "error": "Schedule service unavailable"}), 503
+        try:
+            from dsign.services.schedule_service import ScheduleValidationError
+
+            data = request.get_json(silent=True) or {}
+            rule_id = data.get("rule_id")
+            exc_date = data.get("date")
+            if rule_id is None or not exc_date:
+                return jsonify({"success": False, "error": "rule_id and date are required"}), 400
+            row = schedule_service.add_exception(int(rule_id), str(exc_date))
+            _trigger_schedule_evaluate()
+            return jsonify({
+                "success": True,
+                "exception": {
+                    "id": row.id,
+                    "rule_id": row.rule_id,
+                    "date": row.exception_date.isoformat(),
+                },
+            }), 201
+        except ScheduleValidationError as e:
+            msg = str(e)
+            status = 404 if msg == "rule not found" else 400
+            return jsonify({"success": False, "error": msg}), status
+        except Exception as e:
+            current_app.logger.error(f"Error adding schedule exception: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/schedule/exceptions', methods=['DELETE'])
+    @api_session_or_token_required
+    def remove_schedule_exception():
+        if not schedule_service:
+            return jsonify({"success": False, "error": "Schedule service unavailable"}), 503
+        try:
+            from dsign.services.schedule_service import ScheduleValidationError
+
+            data = request.get_json(silent=True) or {}
+            rule_id = data.get("rule_id")
+            exc_date = data.get("date")
+            if rule_id is None or not exc_date:
+                return jsonify({"success": False, "error": "rule_id and date are required"}), 400
+            removed = schedule_service.remove_exception(int(rule_id), str(exc_date))
+            if not removed:
+                return jsonify({"success": False, "error": "exception not found"}), 404
+            _trigger_schedule_evaluate()
+            return jsonify({"success": True})
+        except ScheduleValidationError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+        except Exception as e:
+            current_app.logger.error(f"Error removing schedule exception: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
     @api_bp.route('/schedule/now', methods=['GET'])
-    @login_required
+    @api_session_or_token_required
     def schedule_now():
         if not schedule_service:
             return jsonify({"success": False, "error": "Schedule service unavailable"}), 503
@@ -2482,7 +2576,7 @@ def init_api_routes(api_bp, services):
             }), 500
 
     @api_bp.route('/playback/return-to-schedule', methods=['POST'])
-    @login_required
+    @api_session_or_token_required
     def playback_return_to_schedule():
         if not playback_service:
             return jsonify({"success": False, "error": "Playback service unavailable"}), 503

@@ -151,7 +151,7 @@ def _ensure_playlist_sort_order_column(app) -> None:
 def _ensure_schedule_schema(app) -> None:
     """SQLite: schedule_rules table + playback_status columns."""
     from sqlalchemy import inspect, text
-    from .models import ScheduleRule  # noqa: F401
+    from .models import ScheduleRule, ScheduleException  # noqa: F401
 
     try:
         insp = inspect(db.engine)
@@ -159,6 +159,9 @@ def _ensure_schedule_schema(app) -> None:
         if 'schedule_rules' not in tables:
             ScheduleRule.__table__.create(db.engine)
             app.logger.info('Created schedule_rules table')
+        if 'schedule_exceptions' not in tables:
+            ScheduleException.__table__.create(db.engine)
+            app.logger.info('Created schedule_exceptions table')
 
         if 'playback_status' not in tables:
             return

@@ -167,6 +167,36 @@
     margin-left: 4px;
 }
 
+.schedule-view-tabs {
+    display: flex;
+    gap: 4px;
+    background: var(--sched-border-light);
+    padding: 3px;
+    border-radius: 8px;
+}
+
+.schedule-view-tab {
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: none;
+    background: transparent;
+    color: var(--sched-muted);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+
+.schedule-view-tab:hover {
+    color: var(--sched-text);
+}
+
+.schedule-view-tab.active {
+    background: var(--sched-surface);
+    color: var(--sched-text);
+    box-shadow: var(--sched-shadow);
+}
+
 .schedule-legend {
     display: flex;
     align-items: center;
@@ -327,6 +357,7 @@
     z-index: 2;
     min-height: 18px;
     user-select: none;
+    touch-action: none;
 }
 
 .schedule-item:hover {
@@ -426,9 +457,11 @@
     bottom: 0;
     left: 0;
     right: 0;
-    height: 8px;
+    height: 16px;
+    min-height: 16px;
     cursor: ns-resize;
     background: transparent;
+    touch-action: none;
 }
 
 .schedule-item-resize-handle:hover {
@@ -760,6 +793,129 @@
     gap: 8px;
     justify-content: flex-end;
     flex-wrap: wrap;
+}
+
+/* Month calendar view (D2.5) */
+.schedule-month-wrap {
+    background: var(--sched-surface);
+    border-radius: var(--sched-radius);
+    box-shadow: var(--sched-shadow);
+    border: 1px solid var(--sched-border);
+    overflow: hidden;
+}
+
+.schedule-month-weekdays {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    background: var(--sched-surface-hover);
+    border-bottom: 1px solid var(--sched-border);
+}
+
+.schedule-month-weekday {
+    padding: 10px 8px;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--sched-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.schedule-month-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    grid-auto-rows: minmax(96px, auto);
+}
+
+.schedule-month-cell {
+    border-right: 1px solid var(--sched-border-light);
+    border-bottom: 1px solid var(--sched-border-light);
+    padding: 6px;
+    min-height: 96px;
+    background: var(--sched-surface);
+    cursor: pointer;
+    transition: background 0.12s;
+}
+
+.schedule-month-cell:nth-child(7n) {
+    border-right: none;
+}
+
+.schedule-month-cell:hover {
+    background: var(--sched-surface-hover);
+}
+
+.schedule-month-cell.is-outside {
+    background: #f8fafc;
+    cursor: default;
+}
+
+.schedule-month-cell.is-today {
+    background: var(--sched-accent-light);
+}
+
+.schedule-month-cell.is-today .schedule-month-daynum {
+    background: var(--sched-accent);
+    color: #fff;
+}
+
+.schedule-month-daynum {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--sched-text);
+    margin-bottom: 4px;
+}
+
+.schedule-month-slots {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.schedule-month-chip {
+    display: block;
+    width: 100%;
+    padding: 3px 6px;
+    border-radius: 4px;
+    border: none;
+    text-align: left;
+    font-size: 10px;
+    line-height: 1.3;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    touch-action: manipulation;
+}
+
+.schedule-month-chip.is-live {
+    background: var(--sched-live-bg);
+    color: var(--sched-live-text);
+}
+
+.schedule-month-chip.is-planned {
+    background: var(--sched-info-bg);
+    color: var(--sched-info-text);
+}
+
+.schedule-month-chip.is-disabled {
+    opacity: 0.55;
+}
+
+.schedule-month-chip.is-conflicted {
+    box-shadow: inset 0 0 0 1px var(--sched-warning);
+}
+
+.schedule-month-more {
+    font-size: 10px;
+    color: var(--sched-muted);
+    padding: 0 4px;
 }
 
 @media (max-width: 900px) {

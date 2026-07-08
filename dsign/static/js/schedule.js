@@ -15,6 +15,8 @@ const OVERLAP_THRESHOLD = 4;
 const DAY_KEYS = ['schedule_day_mon', 'schedule_day_tue', 'schedule_day_wed', 'schedule_day_thu', 'schedule_day_fri', 'schedule_day_sat', 'schedule_day_sun'];
 
 let weekMonday = null;
+let monthAnchor = null;
+let viewMode = 'week';
 let instances = [];
 let dragState = null;
 let resizeState = null;
@@ -37,6 +39,10 @@ function popcount(n) {
         v >>= 1;
     }
     return c;
+}
+
+function firstOfMonth(date) {
+    return new Date(date.getFullYear(), date.getMonth(), 1);
 }
 
 function mondayOf(date) {
@@ -117,6 +123,21 @@ function updateDayButtonLabels() {
     });
 }
 
+function formatMonthLabel(anchor) {
+    const lang = getUiLang();
+    const locale = lang === 'en' ? 'en-US' : 'ru-RU';
+    return new Intl.DateTimeFormat(locale, { month: 'long', year: 'numeric' }).format(anchor);
+}
+
+function updatePeriodLabel() {
+    if (!els.periodLabel) return;
+    if (viewMode === 'month' && monthAnchor) {
+        els.periodLabel.textContent = formatMonthLabel(monthAnchor);
+    } else if (weekMonday) {
+        els.periodLabel.textContent = formatWeekLabel(weekMonday);
+    }
+}
+
 function formatWeekLabel(monday) {
     const lang = getUiLang();
     const locale = lang === 'en' ? 'en-US' : 'ru-RU';
@@ -138,6 +159,14 @@ function priorityLabel(val) {
     return t('schedule_priority_tier_low', lang);
 }
 
+async function reloadCurrentView() {
+    if (viewMode === 'month') {
+        await loadMonth();
+    } else {
+        await loadWeek();
+    }
+}
+
 async function loadWeek() {
     if (!weekMonday) weekMonday = mondayOf(new Date());
     const anchor = isoDate(weekMonday);
@@ -146,7 +175,24 @@ async function loadWeek() {
         throw new Error(resp?.error || 'Failed to load schedule week');
     }
     instances = Array.isArray(resp.instances) ? resp.instances : [];
-    renderGrid();
+    if (viewMode === 'week') {
+        renderGrid();
+        updatePeriodLabel();
+    }
+}
+
+async function loadMonth() {
+    if (!monthAnchor) monthAnchor = firstOfMonth(new Date());
+    const anchor = isoDate(monthAnchor);
+    const resp = await fetchAPI('schedule/month', { query: { date: anchor } });
+    if (!resp?.success) {
+        throw new Error(resp?.error || 'Failed to load schedule month');
+    }
+    instances = Array.isArray(resp.instances) ? resp.instances : [];
+    if (viewMode === 'month') {
+        renderMonth();
+        updatePeriodLabel();
+    }
 }
 
 function renderHours() {
@@ -187,9 +233,7 @@ function renderDayHeaders() {
         els.timelineDays.appendChild(dayEl);
     }
 
-    if (els.weekLabel) {
-        els.weekLabel.textContent = formatWeekLabel(weekMonday);
-    }
+    updatePeriodLabel();
 }
 
 function slotClasses(inst) {
@@ -307,6 +351,121 @@ function renderGrid() {
     renderHours();
     renderDayHeaders();
     renderSlots();
+}
+
+function monthChipClass(inst) {
+    const classes = ['schedule-month-chip'];
+    if (inst.is_playing_now) classes.push('is-live');
+    else classes.push('is-planned');
+    if (!inst.is_active) classes.push('is-disabled');
+    if (inst.has_conflict) classes.push('is-conflicted');
+    return classes.join(' ');
+}
+
+function renderMonth() {
+    if (!els.monthWeekdays || !els.monthGrid || !monthAnchor) return;
+    const lang = getUiLang();
+    const todayIso = isoDate(new Date());
+    const year = monthAnchor.getFullYear();
+    const month = monthAnchor.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const leadPad = (firstDay.getDay() + 6) % 7;
+
+    els.monthWeekdays.innerHTML = '';
+    for (let i = 0; i < 7; i += 1) {
+        const el = document.createElement('div');
+        el.className = 'schedule-month-weekday';
+        el.textContent = t(DAY_KEYS[i], lang);
+        els.monthWeekdays.appendChild(el);
+    }
+
+    els.monthGrid.innerHTML = '';
+    const totalCells = leadPad + daysInMonth;
+    const trailing = (7 - (totalCells % 7)) % 7;
+    const cellCount = totalCells + trailing;
+
+    for (let cell = 0; cell < cellCount; cell += 1) {
+        const cellEl = document.createElement('div');
+        cellEl.className = 'schedule-month-cell';
+
+        if (cell < leadPad || cell >= leadPad + daysInMonth) {
+            cellEl.classList.add('is-outside');
+            els.monthGrid.appendChild(cellEl);
+            continue;
+        }
+
+        const dom = cell - leadPad + 1;
+        const date = new Date(year, month, dom);
+        const dateIso = isoDate(date);
+        if (dateIso === todayIso) cellEl.classList.add('is-today');
+
+        const dayNum = document.createElement('div');
+        dayNum.className = 'schedule-month-daynum';
+        dayNum.textContent = String(dom);
+        cellEl.appendChild(dayNum);
+
+        const slotsWrap = document.createElement('div');
+        slotsWrap.className = 'schedule-month-slots';
+        const dayInstances = instances
+            .filter((s) => s.date === dateIso && !s.is_expired)
+            .sort((a, b) => a.start_time.localeCompare(b.start_time));
+        const maxChips = 3;
+        dayInstances.slice(0, maxChips).forEach((inst) => {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = monthChipClass(inst);
+            chip.title = `${inst.start_time}–${inst.end_time} ${inst.playlist_name || ''}`;
+            chip.textContent = `${inst.start_time} ${inst.playlist_name || `#${inst.playlist_id}`}`;
+            chip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openEditPanel(inst);
+            });
+            chip.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                showContextMenu(e, inst);
+            });
+            slotsWrap.appendChild(chip);
+        });
+        if (dayInstances.length > maxChips) {
+            const more = document.createElement('div');
+            more.className = 'schedule-month-more';
+            more.textContent = `+${dayInstances.length - maxChips} ${t('schedule_month_more', lang)}`;
+            slotsWrap.appendChild(more);
+        }
+        cellEl.appendChild(slotsWrap);
+
+        cellEl.addEventListener('click', () => {
+            weekMonday = mondayOf(date);
+            setViewMode('week');
+        });
+
+        els.monthGrid.appendChild(cellEl);
+    }
+}
+
+function setViewMode(mode) {
+    viewMode = mode === 'month' ? 'month' : 'week';
+    els.viewWeekTab?.classList.toggle('active', viewMode === 'week');
+    els.viewMonthTab?.classList.toggle('active', viewMode === 'month');
+    els.viewWeekTab?.setAttribute('aria-selected', viewMode === 'week' ? 'true' : 'false');
+    els.viewMonthTab?.setAttribute('aria-selected', viewMode === 'month' ? 'true' : 'false');
+
+    if (els.weekView) {
+        els.weekView.hidden = viewMode !== 'week';
+    }
+    if (els.monthView) {
+        els.monthView.hidden = viewMode !== 'month';
+    }
+
+    if (viewMode === 'month') {
+        if (!monthAnchor) monthAnchor = firstOfMonth(weekMonday || new Date());
+        loadMonth().catch((e) => showError(e.message));
+    } else {
+        if (!weekMonday) weekMonday = mondayOf(new Date());
+        loadWeek().catch((e) => showError(e.message));
+    }
 }
 
 function findInstance(id) {
@@ -432,10 +591,10 @@ async function onDragEnd() {
     try {
         await updateRuleTimes(state.ruleId, startTime.str, endTimeStr);
         showAlert(t('schedule_saved', getUiLang()), 'success');
-        await loadWeek();
+        await reloadCurrentView();
     } catch (err) {
         showError(err.message || 'Save failed');
-        await loadWeek();
+        await reloadCurrentView();
     }
 }
 
@@ -487,10 +646,10 @@ async function onResizeEnd() {
     try {
         await updateRuleTimes(ruleId, startTime, endTimeStr);
         showAlert(t('schedule_saved', getUiLang()), 'success');
-        await loadWeek();
+        await reloadCurrentView();
     } catch (err) {
         showError(err.message || 'Save failed');
-        await loadWeek();
+        await reloadCurrentView();
     }
 }
 
@@ -647,6 +806,9 @@ function readPanelPayload() {
     if (repeat === 'once' && !payload.valid_from) {
         payload.valid_from = panelInstanceDate;
     }
+    if (repeat === 'monthly' && !payload.valid_from) {
+        payload.valid_from = panelInstanceDate;
+    }
     return payload;
 }
 
@@ -675,7 +837,7 @@ async function saveSlot() {
         if (!resp?.success) throw new Error(resp?.error || 'Save failed');
         closePanel();
         showAlert(t('schedule_saved', getUiLang()), 'success');
-        await loadWeek();
+        await reloadCurrentView();
     } catch (err) {
         showError(err.message || 'Save failed');
     }
@@ -691,9 +853,25 @@ async function toggleRule(ruleId) {
     if (!resp?.success) throw new Error(resp?.error || 'Toggle failed');
 }
 
+async function skipInstanceDay(inst) {
+    const resp = await fetchAPI('schedule/exceptions', {
+        method: 'POST',
+        body: { rule_id: inst.rule_id, date: inst.date },
+    });
+    if (!resp?.success) throw new Error(resp?.error || 'Skip failed');
+}
+
+function canSkipInstance(inst) {
+    const repeat = inst?.repeat_type || 'weekly';
+    return repeat === 'weekly' || repeat === 'monthly';
+}
+
 function showContextMenu(e, inst) {
     contextInstance = inst;
     if (!els.contextMenu) return;
+    if (els.ctxSkipDay) {
+        els.ctxSkipDay.hidden = !canSkipInstance(inst);
+    }
     els.contextMenu.hidden = false;
     els.contextMenu.style.left = `${e.clientX}px`;
     els.contextMenu.style.top = `${e.clientY}px`;
@@ -740,14 +918,14 @@ async function commitDayTransfer(mode) {
             });
             if (!resp?.success) throw new Error(resp?.error || 'Duplicate failed');
         } else {
-            await loadWeek();
+            await reloadCurrentView();
             return;
         }
         showAlert(t('schedule_saved', getUiLang()), 'success');
-        await loadWeek();
+        await reloadCurrentView();
     } catch (err) {
         showError(err.message || 'Operation failed');
-        await loadWeek();
+        await reloadCurrentView();
     }
 }
 
@@ -755,7 +933,7 @@ function dismissDayDialog({ reload = true } = {}) {
     pendingDayMove = null;
     if (els.dayDialog) els.dayDialog.hidden = true;
     if (reload && isVisible) {
-        loadWeek().catch(() => {});
+        reloadCurrentView().catch(() => {});
     }
 }
 
@@ -792,19 +970,35 @@ function bindPanelInputs() {
     });
 }
 
-function bindChrome() {
-    els.prevWeek?.addEventListener('click', () => {
-        weekMonday.setDate(weekMonday.getDate() - 7);
+function shiftPeriod(delta) {
+    if (viewMode === 'month') {
+        if (!monthAnchor) monthAnchor = firstOfMonth(new Date());
+        monthAnchor = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + delta, 1);
+        loadMonth().catch((e) => showError(e.message));
+    } else {
+        if (!weekMonday) weekMonday = mondayOf(new Date());
+        weekMonday.setDate(weekMonday.getDate() + delta * 7);
         loadWeek().catch((e) => showError(e.message));
-    });
-    els.nextWeek?.addEventListener('click', () => {
-        weekMonday.setDate(weekMonday.getDate() + 7);
-        loadWeek().catch((e) => showError(e.message));
-    });
-    els.goToday?.addEventListener('click', () => {
+    }
+}
+
+function goToToday() {
+    if (viewMode === 'month') {
+        monthAnchor = firstOfMonth(new Date());
+        loadMonth().catch((e) => showError(e.message));
+    } else {
         weekMonday = mondayOf(new Date());
         loadWeek().catch((e) => showError(e.message));
-    });
+    }
+}
+
+function bindChrome() {
+    els.prevPeriod?.addEventListener('click', () => shiftPeriod(-1));
+    els.nextPeriod?.addEventListener('click', () => shiftPeriod(1));
+    els.goToday?.addEventListener('click', goToToday);
+
+    els.viewWeekTab?.addEventListener('click', () => setViewMode('week'));
+    els.viewMonthTab?.addEventListener('click', () => setViewMode('month'));
 
     els.panelClose?.addEventListener('click', closePanel);
     els.panelCancel?.addEventListener('click', closePanel);
@@ -816,7 +1010,7 @@ function bindChrome() {
             await archiveRule(panelRuleId);
             closePanel();
             showAlert(t('schedule_archived', getUiLang()), 'success');
-            await loadWeek();
+            await reloadCurrentView();
         } catch (err) {
             showError(err.message);
         }
@@ -833,11 +1027,15 @@ function bindChrome() {
                 else if (action === 'toggle') {
                     await toggleRule(inst.rule_id);
                     showAlert(t('schedule_toggled', getUiLang()), 'success');
-                    await loadWeek();
+                    await reloadCurrentView();
+                } else if (action === 'skip-day') {
+                    await skipInstanceDay(inst);
+                    showAlert(t('schedule_skip_day_ok', getUiLang()), 'success');
+                    await reloadCurrentView();
                 } else if (action === 'archive') {
                     await archiveRule(inst.rule_id);
                     showAlert(t('schedule_archived', getUiLang()), 'success');
-                    await loadWeek();
+                    await reloadCurrentView();
                 }
             } catch (err) {
                 showError(err.message);
@@ -851,16 +1049,33 @@ function bindChrome() {
     els.dayDialog?.querySelector('[data-close]')?.addEventListener('click', cancelDayDialog);
 
     document.addEventListener('click', (e) => {
-        if (!e.target.closest('#schedule-context-menu') && !e.target.closest('.schedule-item')) {
+        if (!e.target.closest('#schedule-context-menu')
+            && !e.target.closest('.schedule-item')
+            && !e.target.closest('.schedule-month-chip')) {
             hideContextMenu();
         }
     });
 
     document.addEventListener('keydown', (e) => {
+        if (!isVisible) return;
+        const tag = e.target?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
         if (e.key === 'Escape') {
             hideContextMenu();
             if (!els.dayDialog?.hidden) cancelDayDialog();
             else closePanel();
+            return;
+        }
+        if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            shiftPeriod(-1);
+        } else if (e.key === 'ArrowRight') {
+            e.preventDefault();
+            shiftPeriod(1);
+        } else if (e.key === 't' || e.key === 'T') {
+            e.preventDefault();
+            goToToday();
         }
     });
 }
@@ -869,7 +1084,7 @@ function startProgressTimer() {
     stopProgressTimer();
     progressTimerId = setInterval(() => {
         if (!isVisible) return;
-        loadWeek().catch(() => {});
+        reloadCurrentView().catch(() => {});
     }, 5000);
 }
 
@@ -881,13 +1096,19 @@ function stopProgressTimer() {
 }
 
 function cacheElements() {
-    els.weekLabel = document.getElementById('schedule-week-label');
+    els.periodLabel = document.getElementById('schedule-week-label');
     els.timelineDays = document.getElementById('timeline-days');
     els.timelineHours = document.getElementById('timeline-hours');
     els.timelineSlots = document.getElementById('timeline-slots');
-    els.prevWeek = document.getElementById('schedule-prev-week');
-    els.nextWeek = document.getElementById('schedule-next-week');
+    els.prevPeriod = document.getElementById('schedule-prev-period');
+    els.nextPeriod = document.getElementById('schedule-next-period');
     els.goToday = document.getElementById('schedule-go-today');
+    els.viewWeekTab = document.getElementById('schedule-view-week');
+    els.viewMonthTab = document.getElementById('schedule-view-month');
+    els.weekView = document.getElementById('schedule-week-view');
+    els.monthView = document.getElementById('schedule-month-view');
+    els.monthWeekdays = document.getElementById('schedule-month-weekdays');
+    els.monthGrid = document.getElementById('schedule-month-grid');
     els.slideOverlay = document.getElementById('schedule-slide-overlay');
     els.slidePanel = document.getElementById('schedule-slide-panel');
     els.panelTitle = document.getElementById('schedule-panel-title');
@@ -908,6 +1129,7 @@ function cacheElements() {
     els.conflictWarning = document.getElementById('schedule-conflict-warning');
     els.conflictName = document.getElementById('schedule-conflict-name');
     els.contextMenu = document.getElementById('schedule-context-menu');
+    els.ctxSkipDay = els.contextMenu?.querySelector('[data-action="skip-day"]');
     els.dayDialog = document.getElementById('schedule-day-dialog');
     els.dayCancel = document.getElementById('schedule-day-cancel');
     els.dayDuplicate = document.getElementById('schedule-day-duplicate');
@@ -928,14 +1150,16 @@ export function initSchedule(options = {}) {
     window.addEventListener('dsign:language-changed', () => {
         updateDayButtonLabels();
         applyI18n();
-        if (weekMonday) renderGrid();
+        if (!weekMonday) return;
+        if (viewMode === 'month') renderMonth();
+        else renderGrid();
     });
 }
 
 export async function showScheduleView() {
     isVisible = true;
     try {
-        await loadWeek();
+        await reloadCurrentView();
         startProgressTimer();
     } catch (err) {
         showError(err.message || 'Failed to load schedule');
@@ -950,7 +1174,7 @@ export function hideScheduleView() {
 
 export function refreshScheduleIfVisible() {
     if (!isVisible) return;
-    loadWeek().catch(() => {});
+    reloadCurrentView().catch(() => {});
 }
 
-export { loadWeek };
+export { loadWeek, loadMonth, reloadCurrentView };

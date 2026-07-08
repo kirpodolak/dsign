@@ -228,6 +228,24 @@ class ScheduleRule(db.Model):
     def __repr__(self) -> str:
         return f'<ScheduleRule {self.id} playlist={self.playlist_id}>'
 
+class ScheduleException(db.Model):
+    """Skip a single rule occurrence on a calendar date (D2.5)."""
+    __tablename__ = 'schedule_exceptions'
+
+    id = db.Column(db.Integer, primary_key=True)
+    rule_id = db.Column(db.Integer, db.ForeignKey('schedule_rules.id'), nullable=False)
+    exception_date = db.Column(db.Date, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    rule = db.relationship('ScheduleRule', backref='exceptions')
+
+    __table_args__ = (
+        db.UniqueConstraint('rule_id', 'exception_date', name='uq_schedule_exception_rule_date'),
+    )
+
+    def __repr__(self) -> str:
+        return f'<ScheduleException rule={self.rule_id} date={self.exception_date}>'
+
 class PlaybackStatus(db.Model):
     """Модель статуса воспроизведения"""
     __tablename__ = 'playback_status'
