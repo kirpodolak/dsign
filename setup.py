@@ -4,6 +4,7 @@ setup(
     name="dsign",
     version="1.0.0",
     description="Digital Signage System with Flask and MPV player",
+    packages=find_packages(include=["dsign", "dsign.*"]),
     include_package_data=True,
     install_requires=[
         'Flask>=3.0.0',
