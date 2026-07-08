@@ -333,6 +333,9 @@ class MpvJsonIpcSession:
             except socket.timeout:
                 continue
             except OSError as e:
+                with self._conn_lock:
+                    if self._sock is not sock:
+                        continue
                 self.logger.debug(
                     "mpv IPC reader socket error",
                     extra={"operation": "MpvJsonIpcSession", "error": str(e)},
@@ -341,6 +344,9 @@ class MpvJsonIpcSession:
                 continue
 
             if chunk == b"":
+                with self._conn_lock:
+                    if self._sock is not sock:
+                        continue
                 self.logger.debug(
                     "mpv IPC EOF on socket",
                     extra={"operation": "MpvJsonIpcSession"},
