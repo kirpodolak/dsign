@@ -103,6 +103,18 @@
                 <input type="hidden" id="audio-route-select" value="auto">
                 <p class="text-muted">Select where MPV outputs audio. Saves automatically.</p>
             </div>
+
+            <div class="settings-tile settings-tile--compact settings-tile--schedule-time">
+                <h3 data-i18n="settings_schedule_time_h">Schedule &amp; clock</h3>
+                <label class="settings-field-label" for="schedule-timezone-select" data-i18n="settings_timezone_label">Timezone</label>
+                <select id="schedule-timezone-select" class="settings-select"></select>
+                <label class="settings-field-label" for="schedule-ntp-server" data-i18n="settings_ntp_server_label">NTP server</label>
+                <input type="text" id="schedule-ntp-server" class="settings-input" maxlength="255" autocomplete="off" spellcheck="false">
+                <div class="tile-actions">
+                    <button type="button" id="schedule-ntp-sync-btn" class="submit-btn" data-i18n="settings_ntp_sync_btn">Sync time</button>
+                </div>
+                <p class="text-muted" data-i18n="settings_schedule_time_hint">Schedule grid uses this timezone. NTP sync is best-effort and may require sudo.</p>
+            </div>
         </div>
     </div>
 
