@@ -108,11 +108,19 @@
         <div id="view-schedule" class="home-view-content home-view-content--hidden" role="tabpanel" aria-labelledby="tab-schedule" hidden>
             <div class="schedule-toolbar">
                 <div class="schedule-nav">
-                    <button type="button" class="schedule-nav-arrow" id="schedule-prev-week" aria-label="Previous week">‹</button>
+                    <button type="button" class="schedule-nav-arrow" id="schedule-prev-period" aria-label="Previous">‹</button>
                     <div class="schedule-week-label" id="schedule-week-label">—</div>
-                    <button type="button" class="schedule-nav-arrow" id="schedule-next-week" aria-label="Next week">›</button>
+                    <button type="button" class="schedule-nav-arrow" id="schedule-next-period" aria-label="Next">›</button>
                     <button type="button" class="btn secondary schedule-today-btn" id="schedule-go-today">
                         <span data-i18n="schedule_today">Today</span>
+                    </button>
+                </div>
+                <div class="schedule-view-tabs" role="tablist" aria-label="Schedule view">
+                    <button type="button" class="schedule-view-tab active" id="schedule-view-week" data-view="week" role="tab" aria-selected="true">
+                        <span data-i18n="schedule_view_week">Week</span>
+                    </button>
+                    <button type="button" class="schedule-view-tab" id="schedule-view-month" data-view="month" role="tab" aria-selected="false">
+                        <span data-i18n="schedule_view_month">Month</span>
                     </button>
                 </div>
                 <div class="schedule-legend">
@@ -123,7 +131,7 @@
                 </div>
             </div>
 
-            <div class="timeline-wrap" id="schedule-grid">
+            <div class="timeline-wrap" id="schedule-week-view">
                 <div class="timeline-header">
                     <div class="timeline-corner" data-i18n="schedule_time_col">Time</div>
                     <div class="timeline-days" id="timeline-days"></div>
@@ -132,6 +140,11 @@
                     <div class="timeline-hours" id="timeline-hours"></div>
                     <div class="timeline-slots" id="timeline-slots"></div>
                 </div>
+            </div>
+
+            <div class="schedule-month-wrap" id="schedule-month-view" hidden>
+                <div class="schedule-month-weekdays" id="schedule-month-weekdays"></div>
+                <div class="schedule-month-grid" id="schedule-month-grid"></div>
             </div>
 
             <!-- Schedule overlays (scoped to schedule tab — must not block playlists) -->
@@ -173,6 +186,7 @@
                         <select id="slot-repeat">
                             <option value="once" data-i18n="schedule_repeat_once">Once</option>
                             <option value="weekly" data-i18n="schedule_repeat_weekly">Weekly</option>
+                            <option value="monthly" data-i18n="schedule_repeat_monthly">Monthly</option>
                         </select>
                     </div>
                     <div class="schedule-form-row">
@@ -210,6 +224,7 @@
             <div class="schedule-context-menu" id="schedule-context-menu" role="menu" hidden>
                 <button type="button" class="schedule-context-item" data-action="edit" data-i18n="schedule_ctx_edit">Edit</button>
                 <button type="button" class="schedule-context-item" data-action="toggle" data-i18n="schedule_ctx_toggle">Pause / resume</button>
+                <button type="button" class="schedule-context-item" data-action="skip-day" data-i18n="schedule_ctx_skip_day">Skip this day</button>
                 <div class="schedule-context-divider" role="separator"></div>
                 <button type="button" class="schedule-context-item schedule-context-item--danger" data-action="archive" data-i18n="schedule_ctx_archive">Archive</button>
             </div>
