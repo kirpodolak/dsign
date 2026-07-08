@@ -1822,6 +1822,68 @@ def init_api_routes(api_bp, services):
             current_app.logger.error(f"Error applying transcode settings: {str(e)}", exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500
 
+    @api_bp.route('/settings/timezones', methods=['GET'])
+    @login_required
+    def list_schedule_timezones():
+        try:
+            from dsign.services.schedule_time import SCHEDULE_TIMEZONE_OPTIONS
+
+            return jsonify({
+                "success": True,
+                "timezones": list(SCHEDULE_TIMEZONE_OPTIONS),
+            })
+        except Exception as e:
+            current_app.logger.error(f"Error listing timezones: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/settings/schedule-time', methods=['POST'])
+    @login_required
+    def save_schedule_time_settings():
+        """Save timezone + NTP server for schedule engine (D2.4)."""
+        try:
+            if not (getattr(current_user, "is_admin", False) or current_user.username == "admin"):
+                return jsonify({"success": False, "error": "Unauthorized"}), 403
+
+            data = request.get_json(silent=True) or {}
+            timezone = data.get("timezone")
+            ntp_server = data.get("ntp_server")
+            if timezone is None and ntp_server is None:
+                return jsonify({"success": False, "error": "timezone or ntp_server required"}), 400
+
+            payload = settings_service.set_schedule_time_settings(
+                timezone=timezone,
+                ntp_server=ntp_server,
+            )
+            return jsonify({"success": True, **payload})
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+        except Exception as e:
+            current_app.logger.error(f"Error saving schedule time settings: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @api_bp.route('/system/ntp/sync', methods=['POST'])
+    @login_required
+    def system_ntp_sync():
+        """Best-effort one-shot NTP sync (D2.4 §9)."""
+        try:
+            if not (getattr(current_user, "is_admin", False) or current_user.username == "admin"):
+                return jsonify({"success": False, "error": "Unauthorized"}), 403
+
+            data = request.get_json(silent=True) or {}
+            ntp_server = data.get("ntp_server")
+            if not ntp_server:
+                settings = settings_service.load_settings()
+                ntp_server = settings.get("ntp_server", "pool.ntp.org")
+
+            from dsign.services.ntp_sync import force_ntp_sync
+
+            result = force_ntp_sync(ntp_server)
+            status = 200 if result.get("success") else 503
+            return jsonify({"success": bool(result.get("success")), **result}), status
+        except Exception as e:
+            current_app.logger.error(f"Error during NTP sync: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
     # ======================
     # Playback Profiles (/api/profiles)
     # ======================
