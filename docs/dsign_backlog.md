@@ -1,7 +1,9 @@
 # DSign — сводный backlog (что осталось)
 
-**Версия:** 2026-07-08  
+**Версия:** 2026-07-08 (commercial gap analysis)  
 **Назначение:** единая точка входа — **только открытые задачи**. Закрыли пункт → `[x]` здесь и в исходном документе (колонка «Источник»).
+
+**Уровни зрелости:** P0 (текущий backlog) = sellable edge player · **COM v1.0** = commercial launch · COM v1.5 = fleet scale · COM v2.0 = enterprise (отложено).
 
 **Не дублирует:** выполненные фазы, спеки API, детальные prompt’ы — см. ссылки ниже.
 
@@ -34,6 +36,8 @@
 | **D2 расписание D2.1–D2.5** | ✅ PR #103–#107 |
 | `GET /api/health`, upload limit 1 GiB, login rate limit | ✅ в коде |
 | `MPVManager.shutdown()`, SIGTERM → `ScheduleEngine.stop()` | ✅ частично |
+| Device snapshot telemetry (`GET /api/health`, `/playback/status`) | ✅ нет истории / fleet hub |
+| Auth: local user + `is_admin` + Bearer token | ✅ не SSO / не multi-tenant |
 
 > **Расхождения в 4phase:** сводка помечает D0/A1 ✅, но в теле документа остались старые `[ ]` — ориентируйтесь на сводку + код. Секцию D0/A1 в 4phase стоит синхронизировать отдельным PR.
 
@@ -43,11 +47,13 @@
 
 ```mermaid
 flowchart TD
-  D1[D1 OTA dsign-update] --> T1[pytest Tier 1 + CI]
+  D1[D1 OTA] --> T1[pytest Tier 1 + CI]
   T1 --> H1[Hardening: rate limit, subprocess, Wi-Fi]
-  H1 --> ACC[Acceptance: test_matrix + D2 offline 24h]
+  H1 --> COM[COM v1.0: HTTPS, PoP, sec audit]
+  COM --> ACC[Acceptance: test_matrix + D2 offline 24h]
   ACC --> C3[C3 nested playlists]
-  C3 --> P2[Polish: cache, shutdown, operator UI]
+  C3 --> V15[COM v1.5: fleet config push]
+  V15 --> P2[Polish: operator UI, alerts]
 ```
 
 | Шаг | Фокус | Зачем сейчас |
@@ -93,6 +99,65 @@ flowchart TD
 | **P-CFG** | Расширить `Config`, убрать дубли `os.getenv` | 🟢 | improvement §15 | частично ✅ |
 | **P-UI** | Operator dashboard (HTML над `/api/health`) | 🟢 | improvement §17 | частично ✅ health API |
 | **P-ALERT** | Webhook/email alerting | 🟢 | improvement §18 | P-UI |
+| **COM-POP** | Proof of play (журнал показов + export) | 🔴 | commercial v1.0 | D2 ✅ |
+| **COM-HTTPS** | HTTPS + secure cookies (install/docs) | 🔴 | commercial v1.0 | — |
+| **COM-SEC** | Security audit: inputs, uploads, API | 🔴 | commercial v1.0 | H-WIFI |
+| **COM-TEL** | Telemetry: история + опциональный push | 🟡 | commercial v1.0 | частично ✅ health |
+| **COM-FLEET** | Remote config push (fleet-wide settings) | 🟡 | commercial v1.5 | D1, COM-TEL |
+| **COM-RBAC** | Multi-tenant / роли beyond `is_admin` | ⏸ v2.0 | commercial v2.0 | fleet platform |
+| **COM-SSO** | OAuth2 / SAML | ⏸ v2.0 | commercial v2.0 | COM-RBAC |
+
+**⏸ v2.0** — в backlog для трассировки, **не планировать до fleet dashboard / central SaaS**.
+
+---
+
+## COM — Commercial launch (gap analysis 2026-07-08)
+
+Задачи **для клиента / интегратора**, не playback engine. **dsign** = edge player (один объект = один инстанс), не multi-tenant SaaS.
+
+| Тема | Что это | У нас сейчас | Делать? | Когда |
+|------|---------|--------------|---------|-------|
+| Proof of play | ROI / billing | Нет журнала показов, только `PlaybackStatus` | **Да** | COM v1.0 |
+| Device telemetry | Fleet health | `GET /api/health` ✅ snapshot; нет истории/hub | **Частично** | v1.0 + v1.5 |
+| HTTPS | Security baseline | nginx HTTP :80 в install | **Да** | COM v1.0 |
+| Input sanitization | Security | CSRF, `secure_filename`; Wi‑Fi слабый | **Да** (audit) | COM v1.0 |
+| Multi-tenant / RBAC | Enterprise | `is_admin` only | **Нет** | v2.0 |
+| Remote config push | Fleet ops | `settings.json` локально | **Да** | v1.5 |
+| SSO | Enterprise login | Local auth | **Нет** | v2.0 |
+
+### COM-POP — Proof of play
+
+- [ ] Таблица `playback_events`: `started_at`, `ended_at`, `playlist_id`, `item_key`, `source`, `rule_id`
+- [ ] Запись при play/stop/смене item (PlaylistManager + ScheduleEngine)
+- [ ] `GET /api/reports/playbacks?from=&to=` (JSON/CSV), Bearer
+- [ ] Retention (например 90 дней)
+
+### COM-HTTPS — TLS
+
+- [ ] `docs/DEPLOY_HTTPS.md` (Let's Encrypt / reverse proxy интегратора)
+- [ ] Опционально `install_dsign.sh --https`
+- [ ] `SESSION_COOKIE_SECURE=true` при TLS
+
+### COM-SEC — Security audit
+
+- [ ] Audit всех inputs: POST body, upload, Wi‑Fi, paths, admin endpoints
+- [ ] Закрыть вместе с **H-WIFI**, **H-RL**
+
+### COM-TEL — Telemetry
+
+- [ ] История health snapshots (SQLite или log rotate)
+- [ ] `GET /api/telemetry/history` — локально
+- [ ] Webhook периодический → см. **P-ALERT**
+
+### COM-FLEET — Remote config (v1.5)
+
+- [ ] API приёма fleet-wide settings (push или pull + etag)
+- [ ] Audit log применений
+- [ ] После **D1 OTA**
+
+### ⏸ COM v2.0 — отложено
+
+- **COM-RBAC**, **COM-SSO** — нужны **central fleet portal**, не плеер на Pi
 
 ---
 
@@ -234,7 +299,8 @@ flowchart TD
 ```
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
-**Следующий PR по качеству:** **T-CI + T-IPC** (фундамент для всего improvement)
+**Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
+**Следующий PR по качеству:** **T-CI + T-IPC**
 
 ---
 
@@ -242,4 +308,5 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-08 | COM v1.0/v1.5/v2.0: proof of play, HTTPS, sec audit, telemetry, fleet push |
 | 2026-07-08 | Создан сводный backlog из 4phase + schedule_spec + improvement_checklist |
