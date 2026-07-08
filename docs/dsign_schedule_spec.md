@@ -3,7 +3,10 @@
 **Версия:** 1.5 (D2.1–D2.5 реализовано)  
 **Статус:** D2 завершён (PR #103–#107); offline 24 ч 🟡; fleet Bearer — настроить `DSIGN_API_TOKEN` на плеере  
 **Репозиторий:** `kirpodolak/dsign` (Flask + SQLite + MPV + Wayland/labwc)  
-**Прототип UI:** `docs/Расписание протип.html` (demo 08:00–22:00; production — 00:00–23:59)
+**Прототип UI:** `docs/Расписание протип.html` (demo 08:00–22:00; production — 00:00–23:59)  
+**Backlog:** [dsign_backlog.md](./dsign_backlog.md) — что осталось после D2
+
+> D2.1–D2.5 реализованы (PR #103–#107). Открытые пункты D2 → [backlog](./dsign_backlog.md) (`D2-24H`, `D2-OPS`).
 
 ### Changelog 1.4 → 1.5
 
