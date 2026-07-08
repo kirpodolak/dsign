@@ -1,4 +1,5 @@
 import os
+import signal
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -126,11 +127,40 @@ class PlaybackService:
                 logger=self.logger,
             )
             self._schedule_engine.start()
+            self._register_schedule_shutdown_hook()
             self._log_info("ScheduleEngine attached", extra={"action": "schedule_engine_start"})
         except Exception as e:
             self._log_warning(
                 "ScheduleEngine start failed",
                 extra={"error": str(e), "type": type(e).__name__},
+            )
+
+    def _register_schedule_shutdown_hook(self) -> None:
+        """SIGTERM/SIGINT → ScheduleEngine.stop() (D2.4 optional polish)."""
+        if getattr(self, "_schedule_shutdown_hook_registered", False):
+            return
+        self._schedule_shutdown_hook_registered = True
+        service = self
+
+        def _handler(signum, frame):
+            try:
+                engine = service._schedule_engine
+                if engine is not None:
+                    engine.stop()
+                    service._log_info(
+                        "ScheduleEngine stopped on shutdown signal",
+                        extra={"signal": int(signum), "action": "schedule_engine_stop"},
+                    )
+            except Exception:
+                pass
+
+        try:
+            signal.signal(signal.SIGTERM, _handler)
+            signal.signal(signal.SIGINT, _handler)
+        except Exception as exc:
+            self._log_warning(
+                "Schedule shutdown hook registration failed",
+                extra={"error": str(exc), "type": type(exc).__name__},
             )
 
     def _ensure_app_wired(self, timeout: float = 90.0) -> bool:
