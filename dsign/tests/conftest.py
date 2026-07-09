@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Dict, Tuple
+from unittest.mock import MagicMock
 
 import pytest
+from flask import Flask
 
 from fake_mpv_ipc import FakeMpvIpcServer, default_echo_handler
 
@@ -38,3 +41,77 @@ def null_logger():
             pass
 
     return _Logger()
+
+
+@pytest.fixture
+def schedule_db(tmp_path: Path) -> Tuple[Flask, Any, Any, Any]:
+    """In-memory Flask app + DB with admin user and one playlist."""
+    from dsign.extensions import bcrypt, csrf, db, login_manager
+    import dsign.models  # noqa: F401
+    from dsign.models import Playlist, User
+
+    app = Flask(__name__)
+    media_dir = tmp_path / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    app.config.update(
+        TESTING=True,
+        SECRET_KEY="pytest-secret-key",
+        SQLALCHEMY_DATABASE_URI="sqlite:///:memory:",
+        SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        WTF_CSRF_ENABLED=True,
+        UPLOAD_FOLDER=str(media_dir),
+    )
+
+    db.init_app(app)
+    bcrypt.init_app(app)
+    csrf.init_app(app)
+    login_manager.init_app(app)
+
+    @login_manager.user_loader
+    def _load_user(user_id: str):
+        return db.session.get(User, int(user_id))
+
+    with app.app_context():
+        db.create_all()
+        user = User(username="admin", is_admin=True)
+        user.set_password("secret")
+        playlist = Playlist(name="Pytest Playlist")
+        db.session.add(user)
+        db.session.add(playlist)
+        db.session.commit()
+        yield app, db.session, user, playlist
+        db.session.remove()
+
+
+@pytest.fixture
+def api_client(schedule_db, monkeypatch):
+    """Flask test client with schedule API + auth; Bearer token configured."""
+    from dsign.routes import create_blueprints
+    from dsign.routes.api.api_routes import init_api_routes
+    from dsign.routes.auth_routes import auth_bp
+    from dsign.services.api_token_auth import configure_api_csrf_auth
+    from dsign.services.schedule_service import ScheduleService
+
+    app, session, user, playlist = schedule_db
+    monkeypatch.setenv("DSIGN_API_TOKEN", "test-bearer-token")
+
+    playback = MagicMock()
+    playback.health_check.return_value = {"mpv_ready": True}
+    playback._schedule_engine = None
+
+    services: Dict[str, Any] = {
+        "schedule_service": ScheduleService(session, settings_service=MagicMock()),
+        "playback_service": playback,
+        "file_service": MagicMock(),
+        "socket_service": MagicMock(),
+        "settings_service": MagicMock(load_settings=lambda: {"timezone": "UTC"}),
+    }
+
+    _main_bp, api_bp = create_blueprints()
+    init_api_routes(api_bp, services)
+    app.register_blueprint(auth_bp)
+    app.register_blueprint(api_bp)
+    configure_api_csrf_auth(app)
+
+    client = app.test_client()
+    return client, app, user, playlist

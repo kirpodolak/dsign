@@ -41,6 +41,8 @@
 | **T-MPV** unit tests (`MPVManager._send_command`, 4 кейса) | ✅ PR #110 |
 | **T-REC** recovery flows (9 кейсов) | ✅ PR t-rec-eof |
 | **T-EOF** EOF detection 6 paths (7 кейсов) | ✅ PR t-rec-eof |
+| **T-API** API smoke (8 кейсов) | ✅ PR t-api-sch |
+| **T-SCH** schedule_service unit (7 кейсов) | ✅ PR t-api-sch |
 | Device snapshot telemetry (`GET /api/health`, `/playback/status`) | ✅ нет истории / fleet hub |
 | Auth: local user + `is_admin` + Bearer token | ✅ не SSO / не multi-tenant |
 
@@ -82,8 +84,8 @@ flowchart TD
 | **T-MPV** | Unit: `MPVManager._send_command()` | ✅ | improvement §1.2 | T-IPC |
 | **T-REC** | Integration: recovery flows | ✅ | improvement §1.3 | T-IPC, T-MPV |
 | **T-EOF** | Integration: EOF detection (6 путей) | ✅ | improvement §1.4 | T-IPC, T-MPV |
-| **T-API** | API smoke (auth, Bearer, schedule, CSRF→**400**) | 🔴 | improvement §1.5 | — |
-| **T-SCH** | Unit/integration: `schedule_service`, exceptions, monthly | 🔴 | schedule §10, 4phase D2 | — |
+| **T-API** | API smoke (auth, Bearer, schedule, CSRF→**400**) | ✅ | improvement §1.5 | — |
+| **T-SCH** | Unit/integration: `schedule_service`, exceptions, monthly | ✅ | schedule §10, 4phase D2 | — |
 | **T-AUD** | Integration: audio subsystem | 🔴 | improvement §1.6 | T-IPC |
 | **H-RL** | Rate limiting API (play/stop/screenshot/reboot) | 🔴 | improvement §2 | — |
 | **H-SUB** | Subprocess timeout audit (`amixer` и др.) | 🔴 | improvement §3 | — |
@@ -218,6 +220,24 @@ flowchart TD
 *Файл:* `dsign/tests/test_playlist_eof_detection.py`  
 *Фикс в проде:* не сбрасывать `consecutive_idle`, когда `idle-active` не опрашивался (чётные poll-тики сети).
 
+### T-API — API smoke ✅
+
+- [x] 401 без auth
+- [x] Bearer: schedule rules, month, exceptions, health
+- [x] Session POST без CSRF → **400**
+- [x] Session POST с `X-CSRFToken` → 201
+
+*Файл:* `dsign/tests/test_api_smoke.py`
+
+### T-SCH — schedule_service ✅
+
+- [x] monthly validation + `_monthly_matches`
+- [x] `expand_week` / `expand_month`
+- [x] exceptions skip instance
+- [x] `batch_mutate` create/update/archive
+
+*Файл:* `dsign/tests/test_schedule_service.py`
+
 ### T-IPC … T-AUD — pytest Tier 1 (остальное)
 
 Детальный список кейсов — в [dsign_improvement_checklist.md](./dsign_improvement_checklist.md) §1.1–1.6.
@@ -338,7 +358,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **T-API** или **T-SCH**
+**Следующий PR по качеству:** **T-AUD** или **T-CI** (API smoke в workflow)
 
 ---
 
@@ -346,6 +366,7 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-09 | T-API + T-SCH ✅ (15 pytest cases) |
 | 2026-07-09 | T-REC + T-EOF ✅ (16 pytest cases); network idle counter fix |
 | 2026-07-08 | T-IPC ✅ (10 unit tests), T-CI частично (pytest workflow) |
 | 2026-07-08 | COM v1.0/v1.5/v2.0: proof of play, HTTPS, sec audit, telemetry, fleet push |
