@@ -3238,7 +3238,7 @@ class PlaylistManager:
                         else:
                             _finish_video_item("local_idle")
                             break
-            else:
+            elif idle is False:
                 consecutive_idle = 0
 
             if not use_eof_events or time.monotonic() < grace_until:
