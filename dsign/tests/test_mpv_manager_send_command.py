@@ -52,8 +52,8 @@ class DummySession:
         return result
 
 
-class TestMPVManager(MPVManager):
-    """Subclass MPVManager to stub out systemd and socket interactions."""
+class StubMPVManager(MPVManager):
+    """Stub MPVManager for unit tests (not collected by pytest)."""
 
     def __init__(self, logger: Any, session: DummySession) -> None:
         super().__init__(logger=logger, socketio=None, upload_folder="/tmp", mpv_socket="/tmp/mpv.sock")
@@ -102,7 +102,7 @@ def test_vo_switch_blocked_during_playback(null_logger):
             {"error": "success", "data": None},
         ]
     )
-    mgr = TestMPVManager(logger=null_logger, session=session)
+    mgr = StubMPVManager(logger=null_logger, session=session)
     mgr.set_playback_session_active(True)
 
     result = mgr._send_command({"command": ["set_property", "vo", "gpu"]})
@@ -116,7 +116,7 @@ def test_vo_switch_allowed_via_helper(null_logger):
     """set_vo_property bypasses the playback guard (used for logo/audio transitions)."""
     reply = {"error": "success", "data": "gpu"}
     session = DummySession([reply])
-    mgr = TestMPVManager(logger=null_logger, session=session)
+    mgr = StubMPVManager(logger=null_logger, session=session)
     mgr.set_playback_session_active(True)
 
     result = mgr.set_vo_property("gpu-next")
@@ -141,7 +141,7 @@ def test_transport_error_triggers_coalesced_restart(null_logger, monkeypatch):
         {"error": "success", "data": "ok"},
     ]
     session = DummySession(behaviours)
-    mgr = TestMPVManager(logger=null_logger, session=session)
+    mgr = StubMPVManager(logger=null_logger, session=session)
 
     start = time.time()
     result = mgr._send_command({"command": ["set_property", "pause", True]}, timeout=1.0, max_attempts=3)
@@ -163,7 +163,7 @@ def test_transport_error_triggers_coalesced_restart(null_logger, monkeypatch):
 def test_send_command_max_retries_respects_playback_flags(null_logger):
     """_send_command_max_retries chooses retry budget based on command and playback state."""
     session = DummySession([])
-    mgr = TestMPVManager(logger=null_logger, session=session)
+    mgr = StubMPVManager(logger=null_logger, session=session)
 
     # get_property → always 1 attempt
     assert mgr._send_command_max_retries("get_property", "pause") == 1
