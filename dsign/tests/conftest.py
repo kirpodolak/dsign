@@ -98,6 +98,8 @@ def api_client(schedule_db, monkeypatch):
     playback = MagicMock()
     playback.health_check.return_value = {"mpv_ready": True}
     playback._schedule_engine = None
+    playback.play.return_value = {"started": True}
+    playback.stop.return_value = {"stopped": True}
 
     services: Dict[str, Any] = {
         "schedule_service": ScheduleService(session, settings_service=MagicMock()),
