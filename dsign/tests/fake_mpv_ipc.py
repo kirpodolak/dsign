@@ -82,7 +82,11 @@ class FakeMpvIpcServer:
         if sock is None:
             return
         data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-        sock.sendall(data)
+        try:
+            sock.sendall(data)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # Client closed the socket (e.g. session.reset() during a slow reply).
+            pass
 
     def _serve(self) -> None:
         assert self._server_sock is not None
