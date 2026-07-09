@@ -12,6 +12,7 @@ from datetime import datetime
 from flask import current_app
 from dsign.extensions import db
 from dsign.services.logger import ServiceLogger
+from dsign.services.subprocess_limits import APLAY_LIST_TIMEOUT_SEC
 
 class SettingsService:
     DEFAULT_SETTINGS = {
@@ -507,7 +508,7 @@ class SettingsService:
             import subprocess
 
             out = subprocess.run(
-                ["aplay", "-L"], capture_output=True, text=True, check=False
+                ["aplay", "-L"], capture_output=True, text=True, check=False, timeout=APLAY_LIST_TIMEOUT_SEC
             ).stdout or ""
         except Exception:
             return []
@@ -850,7 +851,7 @@ class SettingsService:
                 import subprocess
 
                 out = subprocess.run(
-                    ["aplay", "-L"], capture_output=True, text=True, check=False
+                    ["aplay", "-L"], capture_output=True, text=True, check=False, timeout=APLAY_LIST_TIMEOUT_SEC
                 ).stdout or ""
                 has_pch = "CARD=PCH" in out
             except Exception:

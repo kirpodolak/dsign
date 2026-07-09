@@ -13,6 +13,7 @@ import subprocess
 from typing import Dict, Any, Optional
 from pathlib import Path
 from .logger import setup_logger
+from .subprocess_limits import DEP_CHECK_TIMEOUT_SEC
 
 # IMPORTANT:
 # Do NOT import service classes at module import time.
@@ -120,11 +121,15 @@ class ServiceFactory:
             
             # Проверка доступности MPV
             try:
-                mpv_check = subprocess.run(['which', 'mpv'], capture_output=True, text=True)
+                mpv_check = subprocess.run(
+                    ['which', 'mpv'], capture_output=True, text=True, timeout=DEP_CHECK_TIMEOUT_SEC
+                )
                 if mpv_check.returncode != 0:
                     raise RuntimeError("MPV player not found in PATH")
                 
-                mpv_version = subprocess.run(['mpv', '--version'], capture_output=True, text=True)
+                mpv_version = subprocess.run(
+                    ['mpv', '--version'], capture_output=True, text=True, timeout=DEP_CHECK_TIMEOUT_SEC
+                )
                 logger.info('MPV version check', {
                     'version': mpv_version.stdout.split('\n')[0] if mpv_version.stdout else 'unknown'
                 })
@@ -362,13 +367,15 @@ def init_services(
             # Проверка ffmpeg (для видео)
             ffmpeg_available = subprocess.run(
                 ["ffmpeg", "-version"], 
-                capture_output=True
+                capture_output=True,
+                timeout=DEP_CHECK_TIMEOUT_SEC,
             ).returncode == 0
             
             # Проверка MPV (для воспроизведения)
             mpv_available = subprocess.run(
                 ["which", "mpv"],
-                capture_output=True
+                capture_output=True,
+                timeout=DEP_CHECK_TIMEOUT_SEC,
             ).returncode == 0
             
             logger.info("Проверка зависимостей выполнена", {

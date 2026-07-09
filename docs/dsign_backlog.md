@@ -89,7 +89,7 @@ flowchart TD
 | **T-SCH** | Unit/integration: `schedule_service`, exceptions, monthly | ✅ | schedule §10, 4phase D2 | — |
 | **T-AUD** | Integration: audio subsystem | ✅ | improvement §1.6 | T-IPC |
 | **H-RL** | Rate limiting API (play/stop/screenshot/reboot) | ✅ | improvement §2 | — |
-| **H-SUB** | Subprocess timeout audit (`amixer` и др.) | 🔴 | improvement §3 | — |
+| **H-SUB** | Subprocess timeout audit (`amixer` и др.) | ✅ | improvement §3 | — |
 | **H-WIFI** | SSID/password validation (1–32, WPA 8–63) | 🔴 | improvement §5 | — |
 | **H-UPL** | Upload: disk check до save, streaming >100MB | 🟡 | improvement §4 | частично ✅ 1 GiB |
 | **D2-OPS** | `DSIGN_API_TOKEN` на fleet + проверка schedule Bearer | 🟡 | 4phase D2, schedule §D2.5 | — |

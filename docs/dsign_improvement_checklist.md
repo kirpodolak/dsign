@@ -39,9 +39,9 @@
 
 Login + mutating API endpoints: play/stop/screenshot/reboot/service restart — `api_rate_limit.py`, `test_api_rate_limit.py`.
 
-### 3. Subprocess timeouts → `H-SUB`
+### 3. Subprocess timeouts → `H-SUB` ✅
 
-Приоритет: `_audio_set()` / `amixer` без timeout.
+`_audio_set` / `amixer`, `aplay -L`, `display/apply`, dep checks — `subprocess_limits.py`, `test_subprocess_timeouts.py`.
 
 ### 4. Upload → `H-UPL` (🟡)
 
