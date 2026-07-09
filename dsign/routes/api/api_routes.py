@@ -31,6 +31,11 @@ from dsign.services.api_rate_limit import (
     api_rate_limit,
     enforce_global_api_rate_limit,
 )
+from dsign.services.subprocess_limits import (
+    AMIXER_TIMEOUT_SEC,
+    DISPLAY_APPLY_TIMEOUT_SEC,
+    IP_ADDR_TIMEOUT_SEC,
+)
 from PIL import Image
 from dsign.config.config import THUMBNAIL_FOLDER, THUMBNAIL_URL
 import re
@@ -392,7 +397,13 @@ def init_api_routes(api_bp, services):
 
     def _amixer_available() -> bool:
         try:
-            subprocess.run(["amixer", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            subprocess.run(
+                ["amixer", "--version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=AMIXER_TIMEOUT_SEC,
+            )
             return True
         except Exception:
             return False
@@ -640,6 +651,7 @@ def init_api_routes(api_bp, services):
                     ["amixer", "-c", str(card), "scontrols"],
                     text=True,
                     stderr=subprocess.STDOUT,
+                    timeout=AMIXER_TIMEOUT_SEC,
                 )
                 return re.findall(r"Simple mixer control '([^']+)'", out)
 
@@ -731,6 +743,7 @@ def init_api_routes(api_bp, services):
                 ["amixer", "-c", str(card), "sget", ctl],
                 text=True,
                 stderr=subprocess.STDOUT,
+                timeout=AMIXER_TIMEOUT_SEC,
             )
         except Exception:
             return (None, None)
@@ -873,11 +886,13 @@ def init_api_routes(api_bp, services):
                 subprocess.run(
                     ["amixer", "-c", str(card), "sset", ctl, f"{v_pct}%"],
                     check=False,
+                    timeout=AMIXER_TIMEOUT_SEC,
                 )
             if muted is not None:
                 subprocess.run(
                     ["amixer", "-c", str(card), "sset", ctl, "mute" if muted else "unmute"],
                     check=False,
+                    timeout=AMIXER_TIMEOUT_SEC,
                 )
 
         if alsa_targs:
@@ -971,6 +986,7 @@ def init_api_routes(api_bp, services):
                 ["ip", "-4", "-o", "addr", "show", "scope", "global"],
                 text=True,
                 stderr=subprocess.DEVNULL,
+                timeout=IP_ADDR_TIMEOUT_SEC,
             )
         except Exception:
             return []
@@ -1745,12 +1761,23 @@ def init_api_routes(api_bp, services):
                 cmd.append("--no-reboot")
 
             try:
-                subprocess.run(cmd, check=True, capture_output=True, text=True)
+                subprocess.run(
+                    cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=DISPLAY_APPLY_TIMEOUT_SEC,
+                )
             except FileNotFoundError:
                 return jsonify({
                     "success": False,
                     "error": f"Helper script not found: {helper}"
                 }), 500
+            except subprocess.TimeoutExpired:
+                return jsonify({
+                    "success": False,
+                    "error": "Timed out applying display preset",
+                }), 504
             except subprocess.CalledProcessError as e:
                 # sudo missing permissions / helper error
                 msg = (e.stderr or e.stdout or "").strip() or f"Command failed: {e.returncode}"
