@@ -88,7 +88,7 @@ flowchart TD
 | **T-API** | API smoke (auth, Bearer, schedule, CSRF→**400**) | ✅ | improvement §1.5 | — |
 | **T-SCH** | Unit/integration: `schedule_service`, exceptions, monthly | ✅ | schedule §10, 4phase D2 | — |
 | **T-AUD** | Integration: audio subsystem | ✅ | improvement §1.6 | T-IPC |
-| **H-RL** | Rate limiting API (play/stop/screenshot/reboot) | 🔴 | improvement §2 | — |
+| **H-RL** | Rate limiting API (play/stop/screenshot/reboot) | ✅ | improvement §2 | — |
 | **H-SUB** | Subprocess timeout audit (`amixer` и др.) | 🔴 | improvement §3 | — |
 | **H-WIFI** | SSID/password validation (1–32, WPA 8–63) | 🔴 | improvement §5 | — |
 | **H-UPL** | Upload: disk check до save, streaming >100MB | 🟡 | improvement §4 | частично ✅ 1 GiB |
@@ -262,18 +262,19 @@ flowchart TD
 **Поправки ожиданий:**
 
 - CSRF на `/api/*` → **400**, не 403 (`api_token_auth.py`)
-- Тест rate limit play/stop → после **H-RL**, не до
+- [x] Тест rate limit play/stop — `tests/test_api_rate_limit.py`
 
-### H-RL — Rate limiting API
+### H-RL — Rate limiting API ✅
 
-- [ ] Flask-Limiter (или аналог) на mutating endpoints
-- [ ] `POST /api/playback/play` — 5/min; `stop` — 10/min
-- [ ] `POST /api/media/mpv_screenshot/capture` — 6/min
-- [ ] `POST /api/system/services/*/restart` — 3/min (admin)
-- [ ] `POST /api/system/reboot` — 1/hour (admin)
-- [ ] Глобально: 100 req/min per IP
+- [x] In-memory per-IP limiter (`dsign/services/api_rate_limit.py`, аналог login limiter)
+- [x] `POST /api/playback/play` — 5/min; `stop` — 10/min
+- [x] `POST /api/media/mpv_screenshot/capture` — 6/min
+- [x] `POST /api/system/services/*/restart` — 3/min (admin)
+- [x] `POST /api/system/reboot` — 1/hour (admin)
+- [x] Глобально: 100 req/min per IP (`api_bp.before_request`)
 
-*Сейчас:* rate limit только на **login** (`auth_routes.py`).
+*Файлы:* `dsign/services/api_rate_limit.py`, `dsign/tests/test_api_rate_limit.py`  
+*Сейчас:* login limit в `auth_routes.py` — отдельный bucket.
 
 *Источник:* improvement §2
 
@@ -369,7 +370,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **H-RL** (rate limit API) или **H-SUB** (subprocess timeouts)
+**Следующий PR по качеству:** **H-SUB** (subprocess timeouts) или **H-WIFI**
 
 ---
 
@@ -377,6 +378,7 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |
 | 2026-07-09 | T-AUD + T-CI ✅ (13 audio tests; workflow `.github/workflows/pytest.yml`, 58 total) |
 | 2026-07-09 | T-API + T-SCH ✅ (15 pytest cases) |
 | 2026-07-09 | T-REC + T-EOF ✅ (16 pytest cases); network idle counter fix |
