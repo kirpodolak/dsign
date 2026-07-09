@@ -36,13 +36,14 @@
 | **D2 расписание D2.1–D2.5** | ✅ PR #103–#107 |
 | `GET /api/health`, upload limit 1 GiB, login rate limit | ✅ в коде |
 | `MPVManager.shutdown()`, SIGTERM → `ScheduleEngine.stop()` | ✅ частично |
-| **T-CI** GitHub Actions pytest (unit) | ✅ частично — integration/API smoke позже |
+| **T-CI** GitHub Actions pytest Tier 1 (58 кейсов) | ✅ |
 | **T-IPC** unit tests (`MpvJsonIpcSession`, 10 кейсов) | ✅ PR pytest-tier1 |
 | **T-MPV** unit tests (`MPVManager._send_command`, 4 кейса) | ✅ PR #110 |
 | **T-REC** recovery flows (9 кейсов) | ✅ PR t-rec-eof |
 | **T-EOF** EOF detection 6 paths (7 кейсов) | ✅ PR t-rec-eof |
 | **T-API** API smoke (8 кейсов) | ✅ PR t-api-sch |
 | **T-SCH** schedule_service unit (7 кейсов) | ✅ PR t-api-sch |
+| **T-AUD** audio subsystem integration (13 кейсов) | ✅ PR t-aud-ci |
 | Device snapshot telemetry (`GET /api/health`, `/playback/status`) | ✅ нет истории / fleet hub |
 | Auth: local user + `is_admin` + Bearer token | ✅ не SSO / не multi-tenant |
 
@@ -79,14 +80,14 @@ flowchart TD
 | ID | Задача | 🔴🟡🟢 | Источник | Зависимости |
 |----|--------|--------|----------|-------------|
 | **D1** | `dsign-update` OTA (check/download/apply/rollback + timer) | 🔴 | 4phase §D1 | D0 |
-| **T-CI** | GitHub Actions: `pytest` на PR | 🟡 | improvement §1 | — |
+| **T-CI** | GitHub Actions: `pytest` на PR | ✅ | improvement §1 | — |
 | **T-IPC** | Unit: `MpvJsonIpcSession` | ✅ | improvement §1.1 | — |
 | **T-MPV** | Unit: `MPVManager._send_command()` | ✅ | improvement §1.2 | T-IPC |
 | **T-REC** | Integration: recovery flows | ✅ | improvement §1.3 | T-IPC, T-MPV |
 | **T-EOF** | Integration: EOF detection (6 путей) | ✅ | improvement §1.4 | T-IPC, T-MPV |
 | **T-API** | API smoke (auth, Bearer, schedule, CSRF→**400**) | ✅ | improvement §1.5 | — |
 | **T-SCH** | Unit/integration: `schedule_service`, exceptions, monthly | ✅ | schedule §10, 4phase D2 | — |
-| **T-AUD** | Integration: audio subsystem | 🔴 | improvement §1.6 | T-IPC |
+| **T-AUD** | Integration: audio subsystem | ✅ | improvement §1.6 | T-IPC |
 | **H-RL** | Rate limiting API (play/stop/screenshot/reboot) | 🔴 | improvement §2 | — |
 | **H-SUB** | Subprocess timeout audit (`amixer` и др.) | 🔴 | improvement §3 | — |
 | **H-WIFI** | SSID/password validation (1–32, WPA 8–63) | 🔴 | improvement §5 | — |
@@ -179,14 +180,24 @@ flowchart TD
 
 *Источник:* [4phase §D1](./dsign_4phase_checklist.md)
 
-### T-CI — Continuous Integration
+### T-CI — Continuous Integration ✅
 
 - [x] Каталог `tests/` + `pytest` / `pytest-cov` (зависимости в `setup.py`, `packages=dsign` only)
-- [x] GitHub Actions workflow на PR: **unit** (`tests/test_mpv_ipc_session.py`)
-- [ ] Integration (fake MPV) + API smoke в том же workflow
-- [ ] Merge gate: полный Tier 1 must pass
+- [x] GitHub Actions workflow на PR/push → `main` (`.github/workflows/pytest.yml`, `working-directory: dsign`)
+- [x] Integration (fake MPV, recovery, EOF, audio) + API smoke + schedule в том же workflow
+- [x] Merge gate: полный Tier 1 must pass (58 тестов)
 
 *Источник:* improvement §1, стратегия тестов
+
+### T-AUD — audio subsystem ✅
+
+- [x] `expand_audio_route` / `build_mpv_audio_updates` (explicit device, HDMI/PCH, unmute hook)
+- [x] `set_master_audio` persist volume/mute
+- [x] `MPVManager.rebind_audio_output` (cycle ao + device-only path)
+- [x] `MPVManager.force_alsa_ao_open` (ALSA PCM reopen)
+- [x] `PlaylistManager` mute stack + route rebind + PCM force-open
+
+*Файл:* `dsign/tests/test_audio_subsystem.py`
 
 ### T-IPC — `MpvJsonIpcSession` unit tests ✅
 
@@ -358,7 +369,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **T-AUD** или **T-CI** (API smoke в workflow)
+**Следующий PR по качеству:** **H-RL** (rate limit API) или **H-SUB** (subprocess timeouts)
 
 ---
 
@@ -366,6 +377,7 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-09 | T-AUD + T-CI ✅ (13 audio tests; workflow `.github/workflows/pytest.yml`, 58 total) |
 | 2026-07-09 | T-API + T-SCH ✅ (15 pytest cases) |
 | 2026-07-09 | T-REC + T-EOF ✅ (16 pytest cases); network idle counter fix |
 | 2026-07-08 | T-IPC ✅ (10 unit tests), T-CI частично (pytest workflow) |

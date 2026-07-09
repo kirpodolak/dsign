@@ -30,7 +30,7 @@
 | 1.3 Recovery flows | T-REC ✅ | recover, hung restart, stall advance, slideshow crash — `tests/test_playback_recovery.py` |
 | 1.4 EOF detection | T-EOF ✅ | 6 путей end-file / idle / stagnation / HLS / VK — `tests/test_playlist_eof_detection.py` |
 | 1.5 API smoke | T-API ✅ | auth, Bearer, schedule; CSRF → **400** — `tests/test_api_smoke.py` |
-| 1.6 Audio | T-AUD | ALSA open, route rebind, mute |
+| 1.6 Audio | T-AUD ✅ | ALSA open, route rebind, mute — `tests/test_audio_subsystem.py` |
 | Schedule (добавлено) | T-SCH ✅ | monthly, exceptions, expand week/month — `tests/test_schedule_service.py` |
 
 **Зачем:** IPC + recovery + EOF — ядро uptime; без pytest нельзя безопасно рефакторить `playlist_management.py`.
