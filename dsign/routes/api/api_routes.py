@@ -22,6 +22,15 @@ from dsign.models import (
 from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
 from dsign.services.playback_constants import PlaybackConstants
 from dsign.services.api_token_auth import api_session_or_token_required
+from dsign.services.api_rate_limit import (
+    RATE_LIMIT_PLAYBACK_PLAY,
+    RATE_LIMIT_PLAYBACK_STOP,
+    RATE_LIMIT_SCREENSHOT_CAPTURE,
+    RATE_LIMIT_SERVICE_RESTART,
+    RATE_LIMIT_SYSTEM_REBOOT,
+    api_rate_limit,
+    enforce_global_api_rate_limit,
+)
 from PIL import Image
 from dsign.config.config import THUMBNAIL_FOLDER, THUMBNAIL_URL
 import re
@@ -109,6 +118,15 @@ def init_api_routes(api_bp, services):
         "network-assistant": "dsign-network-assistant.service",
         "screenshot": "screenshot.service",
     }
+
+    @api_bp.before_request
+    def _enforce_global_api_rate_limit():
+        if request.method == "OPTIONS":
+            return None
+        blocked = enforce_global_api_rate_limit()
+        if blocked is not None:
+            return blocked
+        return None
 
     _netassist_env_path = Path("/var/lib/dsign/config/network-assistant.env")
 
@@ -1357,6 +1375,7 @@ def init_api_routes(api_bp, services):
             return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/system/services/<string:service_key>/restart', methods=['POST'])
+    @api_rate_limit(*RATE_LIMIT_SERVICE_RESTART, bucket="system_service_restart")
     @login_required
     def restart_system_service(service_key: str):
         try:
@@ -1410,6 +1429,7 @@ def init_api_routes(api_bp, services):
             return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/system/reboot', methods=['POST'])
+    @api_rate_limit(*RATE_LIMIT_SYSTEM_REBOOT, bucket="system_reboot")
     @login_required
     def system_reboot():
         try:
@@ -2533,6 +2553,7 @@ def init_api_routes(api_bp, services):
             return jsonify({"success": False, "error": str(e)}), 500
 
     @api_bp.route('/playback/play', methods=['POST'])
+    @api_rate_limit(*RATE_LIMIT_PLAYBACK_PLAY, bucket="playback_play")
     @api_session_or_token_required
     def playback_play():
         try:
@@ -2560,6 +2581,7 @@ def init_api_routes(api_bp, services):
             }), 500
 
     @api_bp.route('/playback/stop', methods=['POST'])
+    @api_rate_limit(*RATE_LIMIT_PLAYBACK_STOP, bucket="playback_stop")
     @api_session_or_token_required
     def playback_stop():
         try:
@@ -3436,6 +3458,7 @@ def init_api_routes(api_bp, services):
             abort(500)
             
     @api_bp.route('/media/mpv_screenshot/capture', methods=['POST'])
+    @api_rate_limit(*RATE_LIMIT_SCREENSHOT_CAPTURE, bucket="mpv_screenshot_capture")
     @login_required
     def force_screenshot_update():
         """Запуск systemd-сервиса для обновления скриншота"""

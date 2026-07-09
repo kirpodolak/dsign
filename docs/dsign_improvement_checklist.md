@@ -35,9 +35,9 @@
 
 **Зачем:** IPC + recovery + EOF — ядро uptime; без pytest нельзя безопасно рефакторить `playlist_management.py`.
 
-### 2. Rate limiting API → `H-RL`
+### 2. Rate limiting API → `H-RL` ✅
 
-Сейчас limit только на login. Нужен на play/stop/screenshot/reboot — см. backlog.
+Login + mutating API endpoints: play/stop/screenshot/reboot/service restart — `api_rate_limit.py`, `test_api_rate_limit.py`.
 
 ### 3. Subprocess timeouts → `H-SUB`
 
