@@ -36,8 +36,11 @@
 | **D2 расписание D2.1–D2.5** | ✅ PR #103–#107 |
 | `GET /api/health`, upload limit 1 GiB, login rate limit | ✅ в коде |
 | `MPVManager.shutdown()`, SIGTERM → `ScheduleEngine.stop()` | ✅ частично |
-| **T-IPC** unit tests (`MpvJsonIpcSession`, 10 кейсов) | ✅ PR pytest-tier1 |
 | **T-CI** GitHub Actions pytest (unit) | ✅ частично — integration/API smoke позже |
+| **T-IPC** unit tests (`MpvJsonIpcSession`, 10 кейсов) | ✅ PR pytest-tier1 |
+| **T-MPV** unit tests (`MPVManager._send_command`, 4 кейса) | ✅ PR #110 |
+| **T-REC** recovery flows (9 кейсов) | ✅ PR t-rec-eof |
+| **T-EOF** EOF detection 6 paths (7 кейсов) | ✅ PR t-rec-eof |
 | Device snapshot telemetry (`GET /api/health`, `/playback/status`) | ✅ нет истории / fleet hub |
 | Auth: local user + `is_admin` + Bearer token | ✅ не SSO / не multi-tenant |
 
@@ -76,9 +79,9 @@ flowchart TD
 | **D1** | `dsign-update` OTA (check/download/apply/rollback + timer) | 🔴 | 4phase §D1 | D0 |
 | **T-CI** | GitHub Actions: `pytest` на PR | 🟡 | improvement §1 | — |
 | **T-IPC** | Unit: `MpvJsonIpcSession` | ✅ | improvement §1.1 | — |
-| **T-MPV** | Unit: `MPVManager._send_command()` | 🔴 | improvement §1.2 | T-IPC |
-| **T-REC** | Integration: recovery flows | 🔴 | improvement §1.3 | T-IPC, T-MPV |
-| **T-EOF** | Integration: EOF detection (6 путей) | 🔴 | improvement §1.4 | T-IPC, T-MPV |
+| **T-MPV** | Unit: `MPVManager._send_command()` | ✅ | improvement §1.2 | T-IPC |
+| **T-REC** | Integration: recovery flows | ✅ | improvement §1.3 | T-IPC, T-MPV |
+| **T-EOF** | Integration: EOF detection (6 путей) | ✅ | improvement §1.4 | T-IPC, T-MPV |
 | **T-API** | API smoke (auth, Bearer, schedule, CSRF→**400**) | 🔴 | improvement §1.5 | — |
 | **T-SCH** | Unit/integration: `schedule_service`, exceptions, monthly | 🔴 | schedule §10, 4phase D2 | — |
 | **T-AUD** | Integration: audio subsystem | 🔴 | improvement §1.6 | T-IPC |
@@ -192,6 +195,28 @@ flowchart TD
 
 *Файлы:* `tests/test_mpv_ipc_session.py`, `tests/fake_mpv_ipc.py`  
 *Фикс в проде:* reader игнорирует ошибки устаревшего сокета после `reset()`.
+
+### T-REC — recovery flows ✅
+
+- [x] `recover_after_mpv_systemd_restart` (resume index, advance, lock)
+- [x] `get_resume_start_index_for_hung_recovery`
+- [x] `consume_stall_recovery_advance`
+- [x] hung recovery → post-restart callback
+- [x] slideshow thread crash resume
+
+*Файл:* `dsign/tests/test_playback_recovery.py`
+
+### T-EOF — EOF detection ✅
+
+- [x] end-file event (`mpv_end_file_eof`)
+- [x] network idle (2× idle after stream_ready)
+- [x] local idle
+- [x] local time-pos stagnation
+- [x] network near-EOF stagnation (VK/Rutube)
+- [x] network duration reached (HLS)
+
+*Файл:* `dsign/tests/test_playlist_eof_detection.py`  
+*Фикс в проде:* не сбрасывать `consecutive_idle`, когда `idle-active` не опрашивался (чётные poll-тики сети).
 
 ### T-IPC … T-AUD — pytest Tier 1 (остальное)
 
@@ -313,7 +338,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **T-MPV** (зависит от T-IPC ✅)
+**Следующий PR по качеству:** **T-API** или **T-SCH**
 
 ---
 
@@ -321,6 +346,7 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-09 | T-REC + T-EOF ✅ (16 pytest cases); network idle counter fix |
 | 2026-07-08 | T-IPC ✅ (10 unit tests), T-CI частично (pytest workflow) |
 | 2026-07-08 | COM v1.0/v1.5/v2.0: proof of play, HTTPS, sec audit, telemetry, fleet push |
 | 2026-07-08 | Создан сводный backlog из 4phase + schedule_spec + improvement_checklist |
