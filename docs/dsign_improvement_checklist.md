@@ -55,9 +55,21 @@ Disk check до save (`upload_disk.py`). Streaming chunked save для ≥100MB 
 
 SIGTERM/SIGINT → `PlaybackService.graceful_shutdown()`: schedule stop, `playlist_manager.stop(join_timeout=…)`, idle logo, `mpv_manager.shutdown()`, `db.session.remove()`. Env: `DSIGN_SHUTDOWN_JOIN_SEC` (1–60s, default 8). Tests: `test_playback_graceful_shutdown.py`.
 
-### 12. Adaptive coalesce → `H-COAL` ✅
+### 7. Memory leaks → `H-MEM` ✅
 
-MPV systemd restart coalesce window scales with IPC fail streak (`mpv_restart_coalesce.py`, `DSIGN_MPV_RESTART_COALESCE_MAX_SEC`). Tests: `test_mpv_restart_coalesce.py`.
+`_media_backoff` TTL prune — `media_backoff.py`, `DSIGN_MEDIA_BACKOFF_TTL_SEC`. Tests: `test_media_backoff_ttl.py`.
+
+### 8. Prefetch pool → `H-PREF` ✅
+
+ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `cancel_prefetches()` on playlist play/stop. Tests: `test_content_cache_prefetch.py`.
+
+### 9. Cache retry → `H-CACHE` ✅
+
+`_download` retries with exponential backoff (`content_cache_retry.py`, `DSIGN_CONTENT_CACHE_DOWNLOAD_ATTEMPTS`). Tests: `test_content_cache_retry.py`.
+
+### 11. Recovery queue → `H-RQ` ✅
+
+`RecoveryQueue` вместо silent skip при занятом `_recover_lock`. Env: `DSIGN_RECOVERY_QUEUE_MAX`. Tests: `test_recovery_queue.py`, `test_playback_recovery.py`.
 
 ---
 
@@ -68,12 +80,12 @@ MPV systemd restart coalesce window scales with IPC fail streak (`mpv_restart_co
 | § | Backlog | Примечание |
 |---|---------|------------|
 | 6 Graceful shutdown | H-SD | ✅ `graceful_shutdown`, join thread, idle logo, DB cleanup |
-| 7 Memory leaks | H-MEM | `_media_backoff` без TTL |
-| 8 Prefetch pool | H-PREF | сейчас thread per URL |
-| 9 Cache retry | H-CACHE | нет exp backoff в `_download` |
+| 7 Memory leaks | H-MEM | ✅ TTL prune `_media_backoff` |
+| 8 Prefetch pool | H-PREF | ✅ thread pool + cancel on playlist change |
+| 9 Cache retry | H-CACHE | ✅ exp backoff в `_download` |
 | 10 Refactor long methods | H-REF | **только после** T-* |
-| 11 Recovery queue | H-RQ | `blocking=False` skip |
-| 12 Adaptive coalesce | H-COAL | ✅ IPC streak → coalesce window |
+| 11 Recovery queue | H-RQ | ✅ queue вместо `blocking=False` skip |
+| 12 Adaptive coalesce | H-COAL | сейчас фикс. 8s |
 
 ---
 
