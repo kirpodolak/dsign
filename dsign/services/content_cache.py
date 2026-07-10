@@ -17,6 +17,7 @@ from threading import Lock
 from typing import Any, Dict, Optional, Set
 
 from .content_cache_prefetch import prefetch_workers
+from .content_cache_retry import download_max_attempts, download_retry_delay_sec
 
 _CACHE_KEY_RE = __import__("re").compile(r"^ext-[A-Za-z0-9_-]+$")
 
@@ -261,7 +262,51 @@ class ContentCache:
         finally:
             self._finish_prefetch(media_key)
 
+    def _wait_download_retry(self, media_key: str, delay_sec: float) -> bool:
+        """Sleep until delay elapses unless prefetch was cancelled."""
+        deadline = time.monotonic() + max(0.0, float(delay_sec))
+        while time.monotonic() < deadline:
+            if self._is_prefetch_cancelled(media_key):
+                return False
+            time.sleep(min(0.25, deadline - time.monotonic()))
+        return not self._is_prefetch_cancelled(media_key)
+
     def _download(self, media_key: str, page_url: str, provider: str) -> bool:
+        if self._is_prefetch_cancelled(media_key):
+            return False
+        if self.is_ready(media_key):
+            return True
+        ytdl = self._ytdl_path()
+        if not os.path.isfile(ytdl):
+            self.logger.warning("Content cache: yt-dlp missing", extra={"path": ytdl})
+            return False
+
+        max_attempts = download_max_attempts()
+        for attempt in range(1, max_attempts + 1):
+            if self._is_prefetch_cancelled(media_key):
+                return False
+            if self._download_once(media_key, page_url, provider):
+                return True
+            if attempt >= max_attempts:
+                self.logger.warning(
+                    "Content cache: download exhausted retries",
+                    extra={"media_key": media_key, "attempts": attempt},
+                )
+                return False
+            delay = download_retry_delay_sec(attempt)
+            self.logger.info(
+                "Content cache: download retry scheduled",
+                extra={
+                    "media_key": media_key,
+                    "next_attempt": attempt + 1,
+                    "delay_sec": round(delay, 2),
+                },
+            )
+            if not self._wait_download_retry(media_key, delay):
+                return False
+        return False
+
+    def _download_once(self, media_key: str, page_url: str, provider: str) -> bool:
         if self._is_prefetch_cancelled(media_key):
             return False
         out_path = self._media_path(media_key)

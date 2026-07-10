@@ -63,6 +63,10 @@ SIGTERM/SIGINT → `PlaybackService.graceful_shutdown()`: schedule stop, `playli
 
 ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `cancel_prefetches()` on playlist play/stop. Tests: `test_content_cache_prefetch.py`.
 
+### 9. Cache retry → `H-CACHE` ✅
+
+`_download` retries with exponential backoff (`content_cache_retry.py`, `DSIGN_CONTENT_CACHE_DOWNLOAD_ATTEMPTS`). Tests: `test_content_cache_retry.py`.
+
 ---
 
 ## 🟡 Should have (открыто)
@@ -74,7 +78,7 @@ ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `ca
 | 6 Graceful shutdown | H-SD | ✅ `graceful_shutdown`, join thread, idle logo, DB cleanup |
 | 7 Memory leaks | H-MEM | ✅ TTL prune `_media_backoff` |
 | 8 Prefetch pool | H-PREF | ✅ thread pool + cancel on playlist change |
-| 9 Cache retry | H-CACHE | нет exp backoff в `_download` |
+| 9 Cache retry | H-CACHE | ✅ exp backoff в `_download` |
 | 10 Refactor long methods | H-REF | **только после** T-* |
 | 11 Recovery queue | H-RQ | `blocking=False` skip |
 | 12 Adaptive coalesce | H-COAL | сейчас фикс. 8s |
