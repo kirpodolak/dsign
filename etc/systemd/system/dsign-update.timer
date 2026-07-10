@@ -1,0 +1,12 @@
+[Unit]
+Description=DSign OTA daily check (03:00)
+Documentation=file:///home/dsign/dsign/docs/D1_OTA.md
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+AccuracySec=5min
+Unit=dsign-update.service
+
+[Install]
+WantedBy=timers.target
