@@ -43,13 +43,9 @@ Login + mutating API endpoints: play/stop/screenshot/reboot/service restart — 
 
 Приоритет: `_audio_set()` / `amixer` без timeout.
 
-### 4. Upload → `H-UPL` (🟡)
+### 4. Upload → `H-UPL` ✅
 
-**Не делать:** базовый `MAX_CONTENT_LENGTH` (уже 1 GiB). Disk check до save ✅ (`upload_disk.py`). Осталось: streaming >100MB.
-
-### 7. Memory leaks → `H-MEM` ✅
-
-`_media_backoff` TTL prune — `media_backoff.py`, `DSIGN_MEDIA_BACKOFF_TTL_SEC` (default 1h, clamp 60s–24h). Tests: `test_media_backoff_ttl.py`.
+Disk check до save (`upload_disk.py`). Streaming chunked save для ≥100MB и unknown size (`upload_stream.py`, env `DSIGN_UPLOAD_STREAM_THRESHOLD_BYTES`, `DSIGN_UPLOAD_CHUNK_BYTES`). Tests: `test_upload_disk.py`, `test_upload_stream.py`.
 
 ### 5. Wi-Fi SSID/password → `H-WIFI` ✅
 
@@ -68,7 +64,7 @@ SIGTERM/SIGINT → `PlaybackService.graceful_shutdown()`: schedule stop, `playli
 | § | Backlog | Примечание |
 |---|---------|------------|
 | 6 Graceful shutdown | H-SD | ✅ `graceful_shutdown`, join thread, idle logo, DB cleanup |
-| 7 Memory leaks | H-MEM | ✅ TTL prune `_media_backoff` |
+| 7 Memory leaks | H-MEM | `_media_backoff` без TTL |
 | 8 Prefetch pool | H-PREF | сейчас thread per URL |
 | 9 Cache retry | H-CACHE | нет exp backoff в `_download` |
 | 10 Refactor long methods | H-REF | **только после** T-* |
