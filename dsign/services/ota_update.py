@@ -384,15 +384,31 @@ def cmd_auto(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[str, Any
     }
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """CLI parser; ``--json`` may appear before or after the subcommand."""
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", help="JSON output")
+
     parser = argparse.ArgumentParser(description="DSign OTA self-update (D1)")
-    parser.add_argument("--json", action="store_true", help="JSON output")
     sub = parser.add_subparsers(dest="command", required=True)
 
     for name in ("check", "download", "apply", "rollback", "status", "auto"):
-        sub.add_parser(name, help=f"OTA {name}")
+        sub.add_parser(name, parents=[common], help=f"OTA {name}")
+    return parser
 
-    args = parser.parse_args(list(argv) if argv is not None else None)
+
+def _parse_cli_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    raw = list(argv) if argv is not None else None
+    json_flag = bool(raw and "--json" in raw)
+    if json_flag and raw:
+        raw = [a for a in raw if a != "--json"]
+    args = _build_parser().parse_args(raw)
+    args.json = json_flag
+    return args
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = _parse_cli_args(argv)
     cfg = OtaConfig.from_env()
 
     handlers = {

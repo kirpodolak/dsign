@@ -11,6 +11,8 @@ import pytest
 
 from dsign.services.ota_update import (
     OtaConfig,
+    _build_parser,
+    _parse_cli_args,
     apply_update,
     check_update,
     cmd_auto,
@@ -209,3 +211,15 @@ def test_config_reads_ota_env_file(tmp_path):
     cfg = OtaConfig.from_env({"DSIGN_OTA_ENV": str(env_file), "DSIGN_OTA_DIR": str(tmp_path / "ota")})
     assert cfg.branch == "stable"
     assert cfg.enabled is False
+
+
+def test_cli_json_flag_after_subcommand():
+    args = _parse_cli_args(["check", "--json"])
+    assert args.command == "check"
+    assert args.json is True
+
+
+def test_cli_json_flag_before_subcommand():
+    args = _parse_cli_args(["--json", "status"])
+    assert args.command == "status"
+    assert args.json is True
