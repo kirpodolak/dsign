@@ -38,6 +38,17 @@ def test_subprocess_limit_constants():
     assert DISPLAY_APPLY_TIMEOUT_SEC == 90.0
 
 
+def test_subprocess_limits_module_exports_documented_constants():
+    from dsign.services import subprocess_limits as sl
+
+    for name in (
+        "FFPROBE_TIMEOUT_SEC",
+        "SYSTEMCTL_QUERY_TIMEOUT_SEC",
+        "NMCLI_DEFAULT_TIMEOUT_SEC",
+    ):
+        assert hasattr(sl, name)
+        assert getattr(sl, name) > 0
+
 def test_audio_set_amixer_passes_timeout(api_client, monkeypatch):
     """POST /api/system/audio must pass timeout= on every amixer subprocess call."""
     client, _app, user, _playlist = api_client

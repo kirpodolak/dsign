@@ -101,12 +101,20 @@ def api_client(schedule_db, monkeypatch):
     playback.play.return_value = {"started": True}
     playback.stop.return_value = {"stopped": True}
 
+    settings_svc = MagicMock()
+    settings_svc.load_settings.return_value = {"timezone": "UTC"}
+    settings_svc.get_current_settings.return_value = {
+        "timezone": "UTC",
+        "profile_id": None,
+    }
+    settings_svc.update_mpv_settings.return_value = True
+
     services: Dict[str, Any] = {
-        "schedule_service": ScheduleService(session, settings_service=MagicMock()),
+        "schedule_service": ScheduleService(session, settings_service=settings_svc),
         "playback_service": playback,
         "file_service": MagicMock(),
         "socket_service": MagicMock(),
-        "settings_service": MagicMock(load_settings=lambda: {"timezone": "UTC"}),
+        "settings_service": settings_svc,
     }
 
     _main_bp, api_bp = create_blueprints()
