@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# One-shot install of D1 OTA tooling on Pi (when prod copy has no usr/local/).
+set -euo pipefail
+
+BRANCH="${DSIGN_OTA_BRANCH_SRC:-cursor/d1-ota-8ed1}"
+REPO="${DSIGN_OTA_GIT_REPO:-https://github.com/kirpodolak/dsign.git}"
+RAW="https://raw.githubusercontent.com/kirpodolak/dsign/${BRANCH}"
+
+if [ -f /etc/dsign/ota.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source /etc/dsign/ota.env
+  set +a
+fi
+
+PROJECT_ROOT="${DSIGN_PROJECT_ROOT:-/home/dsign/dsign-new}"
+DSIGN_USER="${DSIGN_USER:-dsign}"
+
+echo "dsign-ota-bootstrap: PROJECT_ROOT=${PROJECT_ROOT} branch=${BRANCH}"
+
+install_from_git() {
+  if [ ! -d "${PROJECT_ROOT}/.git" ]; then
+    return 1
+  fi
+  echo "  fetching ${BRANCH} in ${PROJECT_ROOT}..."
+  git -C "$PROJECT_ROOT" fetch origin "$BRANCH"
+  git -C "$PROJECT_ROOT" checkout "$BRANCH" -- usr/local/bin/dsign-update dsign/services/ota_update.py
+  sudo install -m 0755 "${PROJECT_ROOT}/usr/local/bin/dsign-update" /usr/local/bin/dsign-update
+  echo "  installed from git checkout"
+  return 0
+}
+
+install_from_curl() {
+  echo "  downloading from ${RAW}..."
+  tmp="$(mktemp)"
+  curl -fsSL "${RAW}/usr/local/bin/dsign-update" -o "${tmp}/dsign-update"
+  sudo install -m 0755 "${tmp}/dsign-update" /usr/local/bin/dsign-update
+  mkdir -p "${PROJECT_ROOT}/dsign/services"
+  curl -fsSL "${RAW}/dsign/services/ota_update.py" -o "${PROJECT_ROOT}/dsign/services/ota_update.py"
+  chown "${DSIGN_USER}:${DSIGN_USER}" "${PROJECT_ROOT}/dsign/services/ota_update.py" 2>/dev/null || true
+  rm -rf "$tmp"
+  echo "  installed via curl"
+}
+
+if install_from_git; then
+  :
+else
+  install_from_curl
+fi
+
+# Prod copy (no .git) — same module path for wrapper search
+PROD_ROOT="${DSIGN_PROD_ROOT:-/home/dsign/dsign}"
+if [ "$PROD_ROOT" != "$PROJECT_ROOT" ] && [ -d "$PROD_ROOT" ]; then
+  mkdir -p "${PROD_ROOT}/dsign/services"
+  cp -f "${PROJECT_ROOT}/dsign/services/ota_update.py" "${PROD_ROOT}/dsign/services/ota_update.py"
+  echo "  copied ota_update.py -> ${PROD_ROOT}/dsign/services/"
+fi
+
+echo "verify:"
+/usr/local/bin/dsign-update version --json | head -3
+echo "done — run: sudo dsign-update status --json | jq ."

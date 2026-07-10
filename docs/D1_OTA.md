@@ -25,17 +25,34 @@ Set in `/etc/dsign/ota.env`:
 DSIGN_PROJECT_ROOT=/home/dsign/dsign   # path that contains .git/
 ```
 
-### `jq: parse error` or human text with `--json`
+### `jq: parse error` / `version` unknown
 
-The wrapper must run **repo** `ota_update.py`, not an old pip-installed copy:
+Prod copy often has **no** `usr/local/` inside `/home/dsign/dsign`. Install tooling once:
 
 ```bash
-sudo dsign-apply-install -q   # refreshes /usr/local/bin/dsign-update
-head -5 /usr/local/bin/dsign-update   # should mention ota_update.py
-sudo dsign-update status --json | jq .
+# Option A — bootstrap (git clone at dsign-new or curl fallback)
+sudo curl -fsSL https://raw.githubusercontent.com/kirpodolak/dsign/cursor/d1-ota-8ed1/usr/local/bin/dsign-ota-bootstrap -o /tmp/dsign-ota-bootstrap
+sudo bash /tmp/dsign-ota-bootstrap
+
+# Option B — manual from git clone
+cd /home/dsign/dsign-new
+git fetch origin cursor/d1-ota-8ed1
+git checkout cursor/d1-ota-8ed1 -- usr/local/bin/dsign-update dsign/services/ota_update.py
+sudo install -m 0755 usr/local/bin/dsign-update /usr/local/bin/dsign-update
+mkdir -p /home/dsign/dsign/dsign/services
+cp dsign/services/ota_update.py /home/dsign/dsign/dsign/services/
+
+sudo dsign-update version --json | jq .tool_version
+# expect: "2026-07-10-pi3"
 ```
 
-### Commands
+`/etc/dsign/ota.env`:
+
+```bash
+DSIGN_PROJECT_ROOT=/home/dsign/dsign-new
+```
+
+---
 
 ```bash
 sudo dsign-update check      # git fetch; exit 1 if update available

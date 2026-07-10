@@ -2,6 +2,18 @@
 # DSign OTA self-update (backlog D1): check / download / apply / rollback.
 set -euo pipefail
 
+_wants_json() {
+  case " $* " in
+    *" --json "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_json_error() {
+  local msg="$1"
+  printf '{"success":false,"error":"%s"}\n' "$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
 # sudo does not load systemd EnvironmentFile — read fleet config here.
 if [ -f /etc/dsign/ota.env ]; then
   set -a
@@ -45,6 +57,11 @@ if [ -n "$OTA_MODULE" ]; then
   exec "$PYTHON" "$OTA_MODULE" "$@"
 fi
 
-echo "dsign-update: ota_update.py not found (sync dsign/services/ota_update.py from branch)" >&2
-echo "dsign-update: tried PROJECT_ROOT=${PROJECT_ROOT}" >&2
-exec "$PYTHON" -m dsign.services.ota_update "$@"
+MSG="ota_update.py not found — run: sudo dsign-ota-bootstrap (or sync from branch ${DSIGN_OTA_BRANCH_SRC:-cursor/d1-ota-8ed1})"
+if _wants_json "$@"; then
+  _json_error "$MSG"
+  exit 2
+fi
+echo "dsign-update: $MSG" >&2
+echo "dsign-update: PROJECT_ROOT=${PROJECT_ROOT}" >&2
+exit 2
