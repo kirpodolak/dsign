@@ -99,7 +99,7 @@ flowchart TD
 | **H-MEM** | `_media_backoff` TTL cleanup | ✅ | improvement §7 | `media_backoff.py` |
 | **H-PREF** | ContentCache: thread pool + cancel on playlist change | ✅ | improvement §8 | `content_cache_prefetch.py` |
 | **H-CACHE** | ContentCache download retry (exp backoff) | ✅ | improvement §9 | `content_cache_retry.py` |
-| **H-REF** | Refactor длинных методов (после тестов) | 🟡 | improvement §10 | T-* |
+| **H-REF** | Refactor длинных методов (после тестов) | 🟡 | improvement §10 | PR1–2: `playback_eof.py`, `playback_network.py` |
 | **H-RQ** | Recovery queue вместо `blocking=False` skip | ✅ | improvement §11 | `recovery_queue.py`, `DSIGN_RECOVERY_QUEUE_MAX` |
 | **H-COAL** | Adaptive `DSIGN_MPV_RESTART_COALESCE_SEC` | 🟡 | improvement §12 | — |
 | **P-DOC** | `docs/ENVIRONMENT.md` (env vars) | ✅ | improvement §13 | `docs/ENVIRONMENT.md`, `test_environment_doc.py` |
@@ -370,6 +370,17 @@ flowchart TD
 
 *Источник:* improvement §11
 
+### H-REF — refactor `playlist_management.py` (PR1 ✅ частично)
+
+- [x] **PR1:** вынести EOF wait loop → `dsign/services/playback_eof.py` (`PlaybackEofWaiter`)
+- [x] Helpers: `is_external_stream_provider`, network near-EOF, proactive refresh env, IPC diagnostics
+- [x] `PlaylistManager._wait_mpv_video_end` → thin delegate; T-EOF tests green
+- [x] **PR2:** network stream helpers → `playback_network.py` (`PlaybackNetworkHelper`)
+- [ ] **PR3:** `_manual_slideshow_loop` → пошаговые методы
+- [ ] **PR4:** `_play_impl` routing cleanup
+
+*Файлы:* `dsign/services/playback_eof.py`, `dsign/tests/test_playback_eof_module.py`
+
 ### H-COAL
 
 См. [improvement §7–12](./dsign_improvement_checklist.md) — без дублирования текста.
@@ -395,7 +406,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **H-COAL** (adaptive MPV restart coalesce) или **H-REF** (после T-*)
+**Следующий PR по качеству:** **H-REF PR3** (`_manual_slideshow_loop`) или **H-COAL**
 
 ---
 
@@ -403,6 +414,7 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-10 | H-REF PR2 ✅ (`playback_network.py`; playlist ~3440 lines) |
 | 2026-07-10 | H-RQ ✅ (recovery queue; 3+1 pytest) |
 | 2026-07-10 | H-CACHE ✅ (ContentCache download retry backoff; 7 pytest) |
 | 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |
