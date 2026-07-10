@@ -77,7 +77,15 @@ def test_audio_set_amixer_passes_timeout(api_client, monkeypatch):
     assert rv.status_code == 200
     amixer_calls = [c for c in captured if c[1] and c[1][0] == "amixer"]
     assert amixer_calls, "expected amixer subprocess calls on vc4hdmi path"
-    assert all(c[2].get("timeout") == AMIXER_TIMEOUT_SEC for c in amixer_calls)
+    missing_timeout = [
+        {"cmd": c[1], "timeout": c[2].get("timeout")}
+        for c in amixer_calls
+        if c[2].get("timeout") != AMIXER_TIMEOUT_SEC
+    ]
+    assert not missing_timeout, (
+        "every amixer subprocess call must use AMIXER_TIMEOUT_SEC; "
+        f"offenders: {missing_timeout}"
+    )
 
 
 def test_settings_aplay_list_uses_timeout(null_logger, tmp_path, monkeypatch):

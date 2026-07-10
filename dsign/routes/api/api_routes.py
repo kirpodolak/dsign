@@ -444,7 +444,7 @@ def init_api_routes(api_bp, services):
                     ["amixer", "-c", str(cid), "scontrols"],
                     text=True,
                     stderr=subprocess.STDOUT,
-                    timeout=3.0,
+                    timeout=AMIXER_TIMEOUT_SEC,
                 )
                 names = re.findall(r"Simple mixer control '([^']+)'", am_out)
             except Exception:
@@ -663,7 +663,7 @@ def init_api_routes(api_bp, services):
                         ["amixer", "-c", str(card), "sget", ctl],
                         text=True,
                         stderr=subprocess.STDOUT,
-                        timeout=3.0,
+                        timeout=AMIXER_TIMEOUT_SEC,
                     )
                     return (card, ctl)
                 except Exception:
