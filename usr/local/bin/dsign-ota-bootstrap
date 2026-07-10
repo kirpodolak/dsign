@@ -2,6 +2,7 @@
 # One-shot install of D1 OTA tooling on Pi (when prod copy has no usr/local/).
 set -euo pipefail
 
+BOOTSTRAP_VERSION="2026-07-10-fetchhead-v3"
 BRANCH="${DSIGN_OTA_BRANCH_SRC:-cursor/d1-ota-8ed1}"
 RAW="https://raw.githubusercontent.com/kirpodolak/dsign/${BRANCH}"
 
@@ -16,7 +17,7 @@ PROJECT_ROOT="${DSIGN_PROJECT_ROOT:-/home/dsign/dsign-new}"
 PROD_ROOT="${DSIGN_PROD_ROOT:-/home/dsign/dsign}"
 DSIGN_USER="${DSIGN_USER:-dsign}"
 
-echo "dsign-ota-bootstrap: PROJECT_ROOT=${PROJECT_ROOT} branch=${BRANCH}"
+echo "dsign-ota-bootstrap: version=${BOOTSTRAP_VERSION} PROJECT_ROOT=${PROJECT_ROOT} branch=${BRANCH}"
 
 _install_files() {
   local wrapper_src="$1"
@@ -27,18 +28,19 @@ _install_files() {
     [ ! -f "$module_src" ] && echo "  $module_src" >&2
     return 1
   fi
-  sudo install -m 0755 "$wrapper_src" /usr/local/bin/dsign-update
-  mkdir -p "${PROJECT_ROOT}/dsign/services" "${PROJECT_ROOT}/services"
-  cp -f "$module_src" "${PROJECT_ROOT}/dsign/services/ota_update.py"
-  cp -f "$module_src" "${PROJECT_ROOT}/services/ota_update.py" 2>/dev/null || true
-  chown "${DSIGN_USER}:${DSIGN_USER}" "${PROJECT_ROOT}/dsign/services/ota_update.py" 2>/dev/null || true
-  if [ -d "${PROD_ROOT}" ]; then
-    mkdir -p "${PROD_ROOT}/dsign/services" "${PROD_ROOT}/services"
-    cp -f "$module_src" "${PROD_ROOT}/dsign/services/ota_update.py"
-    cp -f "$module_src" "${PROD_ROOT}/services/ota_update.py" 2>/dev/null || true
-    chown "${DSIGN_USER}:${DSIGN_USER}" "${PROD_ROOT}/dsign/services/ota_update.py" 2>/dev/null || true
-    echo "  copied ota_update.py -> ${PROD_ROOT}/dsign/services/ and services/"
-  fi
+  install -m 0755 "$wrapper_src" /usr/local/bin/dsign-update
+  install -m 0755 "$0" /usr/local/bin/dsign-ota-bootstrap 2>/dev/null || true
+  local dest
+  for dest in \
+    "${PROJECT_ROOT}/dsign/services/ota_update.py" \
+    "${PROJECT_ROOT}/services/ota_update.py" \
+    "${PROD_ROOT}/dsign/services/ota_update.py" \
+    "${PROD_ROOT}/services/ota_update.py"; do
+    mkdir -p "$(dirname "$dest")"
+    install -m 0644 "$module_src" "$dest"
+    chown "${DSIGN_USER}:${DSIGN_USER}" "$dest" 2>/dev/null || true
+    echo "  installed $dest"
+  done
   return 0
 }
 
@@ -91,11 +93,15 @@ install_from_curl() {
   return 1
 }
 
-if install_from_git; then
-  :
-elif install_from_curl; then
-  :
+_ok=0
+if [ "${DSIGN_OTA_BOOTSTRAP_PREFER:-}" = curl ]; then
+  install_from_curl && _ok=1
+  [ "$_ok" -eq 0 ] && install_from_git && _ok=1
 else
+  install_from_git && _ok=1
+  [ "$_ok" -eq 0 ] && install_from_curl && _ok=1
+fi
+if [ "$_ok" -eq 0 ]; then
   echo "dsign-ota-bootstrap: FAILED (git and curl)" >&2
   exit 1
 fi
@@ -105,9 +111,11 @@ if ! out="$(/usr/local/bin/dsign-update version --json 2>/dev/null)"; then
   echo "dsign-ota-bootstrap: dsign-update version failed" >&2
   exit 1
 fi
-echo "$out" | head -5
-if ! echo "$out" | grep -q '"tool_version"'; then
-  echo "dsign-ota-bootstrap: old dsign-update still active — check /usr/local/bin/dsign-update" >&2
+printf '%s\n' "$out" | head -8
+if ! printf '%s\n' "$out" | grep -q '"tool_version"'; then
+  echo "dsign-ota-bootstrap: output is not JSON — stale ota_update.py?" >&2
+  echo "  find /home/dsign -name ota_update.py" >&2
+  echo "  or: DSIGN_OTA_BOOTSTRAP_PREFER=curl sudo bash $0" >&2
   exit 1
 fi
 echo "done — run: sudo dsign-update status --json | jq ."

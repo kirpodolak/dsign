@@ -27,24 +27,37 @@ DSIGN_PROJECT_ROOT=/home/dsign/dsign   # path that contains .git/
 
 ### `jq: parse error` / `version` unknown
 
-Prod copy often has **no** `usr/local/` inside `/home/dsign/dsign`. Install tooling once:
+**Symptoms:** `fatal: invalid reference: cursor/d1-ota-8ed1`, `installed from git checkout`, or
+`jq: parse error` while `ota_update.py` is missing under `dsign-new`.
+
+Cause: **stale** `/tmp/dsign-ota-bootstrap` (old script used `git checkout`, not `git show FETCH_HEAD`).
+Re-download every time — do not reuse an old `/tmp` copy.
 
 ```bash
-# Option A — bootstrap (recommended)
-sudo curl -fsSL https://raw.githubusercontent.com/kirpodolak/dsign/cursor/d1-ota-8ed1/usr/local/bin/dsign-ota-bootstrap -o /tmp/dsign-ota-bootstrap
-sudo bash /tmp/dsign-ota-bootstrap
-# uses git show FETCH_HEAD (works when branch is not checked out locally)
-# falls back to curl if git fails
+RAW=https://raw.githubusercontent.com/kirpodolak/dsign/cursor/d1-ota-8ed1
 
-# Option B — curl only (no git)
-sudo curl -fsSL https://raw.githubusercontent.com/kirpodolak/dsign/cursor/d1-ota-8ed1/usr/local/bin/dsign-update -o /tmp/dsign-update
-sudo install -m 0755 /tmp/dsign-update /usr/local/bin/dsign-update
-mkdir -p /home/dsign/dsign-new/dsign/services /home/dsign/dsign/dsign/services
-curl -fsSL https://raw.githubusercontent.com/kirpodolak/dsign/cursor/d1-ota-8ed1/dsign/services/ota_update.py -o /home/dsign/dsign-new/dsign/services/ota_update.py
-cp /home/dsign/dsign-new/dsign/services/ota_update.py /home/dsign/dsign/dsign/services/
+# Option A — bootstrap (recommended; must curl fresh copy)
+sudo curl -fsSL "$RAW/usr/local/bin/dsign-ota-bootstrap" -o /tmp/dsign-ota-bootstrap
+grep -q 'BOOTSTRAP_VERSION=' /tmp/dsign-ota-bootstrap || { echo "stale bootstrap"; exit 1; }
+sudo bash /tmp/dsign-ota-bootstrap
+# expect first line: version=2026-07-10-fetchhead-v3
+# git show FETCH_HEAD, curl fallback, strict JSON verify
+
+# Option B — curl only (fastest on Pi; skip git)
+DSIGN_OTA_BOOTSTRAP_PREFER=curl sudo bash /tmp/dsign-ota-bootstrap
+
+# Option C — manual curl (no bootstrap)
+sudo curl -fsSL "$RAW/usr/local/bin/dsign-update" -o /usr/local/bin/dsign-update
+sudo chmod 755 /usr/local/bin/dsign-update
+for d in /home/dsign/dsign-new/dsign/services /home/dsign/dsign-new/services \
+         /home/dsign/dsign/dsign/services /home/dsign/dsign/services; do
+  sudo mkdir -p "$d"
+  sudo curl -fsSL "$RAW/dsign/services/ota_update.py" -o "$d/ota_update.py"
+  sudo chown dsign:dsign "$d/ota_update.py"
+done
 
 sudo dsign-update version --json | jq .tool_version
-# expect: "2026-07-10-pi4"
+# expect: "2026-07-10-pi5"
 ```
 
 `/etc/dsign/ota.env`:
