@@ -88,6 +88,8 @@ flowchart TD
 | **T-API** | API smoke (auth, Bearer, schedule, CSRF→**400**) | ✅ | improvement §1.5 | — |
 | **T-SCH** | Unit/integration: `schedule_service`, exceptions, monthly | ✅ | schedule §10, 4phase D2 | — |
 | **T-AUD** | Integration: audio subsystem | ✅ | improvement §1.6 | T-IPC |
+| **T-CACHE** | ContentCache LRU / ffprobe (Tier 2) | ✅ | improvement Tier 2 §8 | `test_content_cache_lru_ffprobe.py` |
+| **T-MIX** | Playlist mode: local / mixed / network (Tier 2) | ✅ | improvement Tier 2 §10 | `test_playlist_playback_mode.py` |
 | **H-RL** | Rate limiting API (play/stop/screenshot/reboot) | ✅ | improvement §2 | — |
 | **H-SUB** | Subprocess timeout audit (`amixer` и др.) | 🔴 | improvement §3 | — |
 | **H-WIFI** | SSID/password validation (1–32, WPA 8–63) | ✅ | improvement §5 | — |
@@ -186,6 +188,7 @@ flowchart TD
 - [x] GitHub Actions workflow на PR/push → `main` (`.github/workflows/pytest.yml`, `working-directory: dsign`)
 - [x] Integration (fake MPV, recovery, EOF, audio) + API smoke + schedule в том же workflow
 - [x] Merge gate: полный Tier 1 must pass (58 тестов)
+- [x] Tier 2: ContentCache LRU/ffprobe + mixed playlist routing (160 тестов total)
 
 *Источник:* improvement §1, стратегия тестов
 
@@ -198,6 +201,27 @@ flowchart TD
 - [x] `PlaylistManager` mute stack + route rebind + PCM force-open
 
 *Файл:* `dsign/tests/test_audio_subsystem.py`
+
+### T-CACHE — ContentCache LRU / ffprobe (Tier 2) ✅
+
+- [x] `_safe_key`, `is_ready` (size gate + ffprobe)
+- [x] `_ffprobe_ok` accept/reject
+- [x] `_enforce_size_limit` LRU eviction (oldest mtime first)
+- [x] `should_use_cache_for_playback` offline vs online
+- [x] `has_internet` probe cache TTL
+- [x] `build_playback_dict` from disk cache
+
+*Файл:* `dsign/tests/test_content_cache_lru_ffprobe.py`  
+*Связано:* prefetch/retry — `test_content_cache_prefetch.py`, `test_content_cache_retry.py`
+
+### T-MIX — playlist mode routing (Tier 2) ✅
+
+- [x] `_playlist_playback_mode`: local_single / local_playlist / manual (mixed, network)
+- [x] `_classify_local_media_suffix`
+- [x] `_resolve_playlist_item_path`: local, content cache hit, fresh CDN fallback
+- [x] `_refresh_item_playback_path`: ext-* URL refresh; local skip
+
+*Файл:* `dsign/tests/test_playlist_playback_mode.py`
 
 ### T-IPC — `MpvJsonIpcSession` unit tests ✅
 
@@ -405,6 +429,7 @@ flowchart TD
 |------|-----------|
 | 2026-07-10 | H-RQ ✅ (recovery queue; 3+1 pytest) |
 | 2026-07-10 | H-CACHE ✅ (ContentCache download retry backoff; 7 pytest) |
+| 2026-07-10 | Tier 2 pytest: T-CACHE + T-MIX (24 new tests, 160 total); P-DOC test guard |
 | 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |
 | 2026-07-09 | T-AUD + T-CI ✅ (13 audio tests; workflow `.github/workflows/pytest.yml`, 58 total) |
 | 2026-07-09 | T-API + T-SCH ✅ (15 pytest cases) |
