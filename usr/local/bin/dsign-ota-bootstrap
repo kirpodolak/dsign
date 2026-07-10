@@ -3,7 +3,6 @@
 set -euo pipefail
 
 BRANCH="${DSIGN_OTA_BRANCH_SRC:-cursor/d1-ota-8ed1}"
-REPO="${DSIGN_OTA_GIT_REPO:-https://github.com/kirpodolak/dsign.git}"
 RAW="https://raw.githubusercontent.com/kirpodolak/dsign/${BRANCH}"
 
 if [ -f /etc/dsign/ota.env ]; then
@@ -14,48 +13,99 @@ if [ -f /etc/dsign/ota.env ]; then
 fi
 
 PROJECT_ROOT="${DSIGN_PROJECT_ROOT:-/home/dsign/dsign-new}"
+PROD_ROOT="${DSIGN_PROD_ROOT:-/home/dsign/dsign}"
 DSIGN_USER="${DSIGN_USER:-dsign}"
 
 echo "dsign-ota-bootstrap: PROJECT_ROOT=${PROJECT_ROOT} branch=${BRANCH}"
+
+_install_files() {
+  local wrapper_src="$1"
+  local module_src="$2"
+  if [ ! -f "$wrapper_src" ] || [ ! -f "$module_src" ]; then
+    echo "dsign-ota-bootstrap: missing files:" >&2
+    [ ! -f "$wrapper_src" ] && echo "  $wrapper_src" >&2
+    [ ! -f "$module_src" ] && echo "  $module_src" >&2
+    return 1
+  fi
+  sudo install -m 0755 "$wrapper_src" /usr/local/bin/dsign-update
+  mkdir -p "${PROJECT_ROOT}/dsign/services"
+  cp -f "$module_src" "${PROJECT_ROOT}/dsign/services/ota_update.py"
+  chown "${DSIGN_USER}:${DSIGN_USER}" "${PROJECT_ROOT}/dsign/services/ota_update.py" 2>/dev/null || true
+  if [ "$PROD_ROOT" != "$PROJECT_ROOT" ] && [ -d "$PROD_ROOT" ]; then
+    mkdir -p "${PROD_ROOT}/dsign/services"
+    cp -f "$module_src" "${PROD_ROOT}/dsign/services/ota_update.py"
+    chown "${DSIGN_USER}:${DSIGN_USER}" "${PROD_ROOT}/dsign/services/ota_update.py" 2>/dev/null || true
+    echo "  copied ota_update.py -> ${PROD_ROOT}/dsign/services/"
+  fi
+  return 0
+}
 
 install_from_git() {
   if [ ! -d "${PROJECT_ROOT}/.git" ]; then
     return 1
   fi
-  echo "  fetching ${BRANCH} in ${PROJECT_ROOT}..."
-  git -C "$PROJECT_ROOT" fetch origin "$BRANCH"
-  git -C "$PROJECT_ROOT" checkout "$BRANCH" -- usr/local/bin/dsign-update dsign/services/ota_update.py
-  sudo install -m 0755 "${PROJECT_ROOT}/usr/local/bin/dsign-update" /usr/local/bin/dsign-update
-  echo "  installed from git checkout"
-  return 0
+  echo "  git fetch origin ${BRANCH}..."
+  if ! git -C "$PROJECT_ROOT" fetch origin "${BRANCH}"; then
+    return 1
+  fi
+  local tmp
+  tmp="$(mktemp -d)"
+  # FETCH_HEAD is set after fetch; works when branch is not a local ref yet.
+  if ! git -C "$PROJECT_ROOT" show "FETCH_HEAD:usr/local/bin/dsign-update" > "${tmp}/dsign-update" 2>/dev/null; then
+    if ! git -C "$PROJECT_ROOT" show "origin/${BRANCH}:usr/local/bin/dsign-update" > "${tmp}/dsign-update" 2>/dev/null; then
+      rm -rf "$tmp"
+      return 1
+    fi
+  fi
+  if ! git -C "$PROJECT_ROOT" show "FETCH_HEAD:dsign/services/ota_update.py" > "${tmp}/ota_update.py" 2>/dev/null; then
+    if ! git -C "$PROJECT_ROOT" show "origin/${BRANCH}:dsign/services/ota_update.py" > "${tmp}/ota_update.py" 2>/dev/null; then
+      rm -rf "$tmp"
+      return 1
+    fi
+  fi
+  chmod 0755 "${tmp}/dsign-update"
+  if _install_files "${tmp}/dsign-update" "${tmp}/ota_update.py"; then
+    rm -rf "$tmp"
+    echo "  installed from git (FETCH_HEAD)"
+    return 0
+  fi
+  rm -rf "$tmp"
+  return 1
 }
 
 install_from_curl() {
-  echo "  downloading from ${RAW}..."
-  tmp="$(mktemp)"
+  echo "  curl download from ${RAW}..."
+  local tmp
+  tmp="$(mktemp -d)"
   curl -fsSL "${RAW}/usr/local/bin/dsign-update" -o "${tmp}/dsign-update"
-  sudo install -m 0755 "${tmp}/dsign-update" /usr/local/bin/dsign-update
-  mkdir -p "${PROJECT_ROOT}/dsign/services"
-  curl -fsSL "${RAW}/dsign/services/ota_update.py" -o "${PROJECT_ROOT}/dsign/services/ota_update.py"
-  chown "${DSIGN_USER}:${DSIGN_USER}" "${PROJECT_ROOT}/dsign/services/ota_update.py" 2>/dev/null || true
+  curl -fsSL "${RAW}/dsign/services/ota_update.py" -o "${tmp}/ota_update.py"
+  chmod 0755 "${tmp}/dsign-update"
+  if _install_files "${tmp}/dsign-update" "${tmp}/ota_update.py"; then
+    rm -rf "$tmp"
+    echo "  installed via curl"
+    return 0
+  fi
   rm -rf "$tmp"
-  echo "  installed via curl"
+  return 1
 }
 
 if install_from_git; then
   :
+elif install_from_curl; then
+  :
 else
-  install_from_curl
-fi
-
-# Prod copy (no .git) — same module path for wrapper search
-PROD_ROOT="${DSIGN_PROD_ROOT:-/home/dsign/dsign}"
-if [ "$PROD_ROOT" != "$PROJECT_ROOT" ] && [ -d "$PROD_ROOT" ]; then
-  mkdir -p "${PROD_ROOT}/dsign/services"
-  cp -f "${PROJECT_ROOT}/dsign/services/ota_update.py" "${PROD_ROOT}/dsign/services/ota_update.py"
-  echo "  copied ota_update.py -> ${PROD_ROOT}/dsign/services/"
+  echo "dsign-ota-bootstrap: FAILED (git and curl)" >&2
+  exit 1
 fi
 
 echo "verify:"
-/usr/local/bin/dsign-update version --json | head -3
+if ! out="$(/usr/local/bin/dsign-update version --json 2>/dev/null)"; then
+  echo "dsign-ota-bootstrap: dsign-update version failed" >&2
+  exit 1
+fi
+echo "$out" | head -5
+if ! echo "$out" | grep -q '"tool_version"'; then
+  echo "dsign-ota-bootstrap: old dsign-update still active — check /usr/local/bin/dsign-update" >&2
+  exit 1
+fi
 echo "done — run: sudo dsign-update status --json | jq ."

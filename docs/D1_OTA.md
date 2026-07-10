@@ -30,20 +30,21 @@ DSIGN_PROJECT_ROOT=/home/dsign/dsign   # path that contains .git/
 Prod copy often has **no** `usr/local/` inside `/home/dsign/dsign`. Install tooling once:
 
 ```bash
-# Option A — bootstrap (git clone at dsign-new or curl fallback)
+# Option A — bootstrap (recommended)
 sudo curl -fsSL https://raw.githubusercontent.com/kirpodolak/dsign/cursor/d1-ota-8ed1/usr/local/bin/dsign-ota-bootstrap -o /tmp/dsign-ota-bootstrap
 sudo bash /tmp/dsign-ota-bootstrap
+# uses git show FETCH_HEAD (works when branch is not checked out locally)
+# falls back to curl if git fails
 
-# Option B — manual from git clone
-cd /home/dsign/dsign-new
-git fetch origin cursor/d1-ota-8ed1
-git checkout cursor/d1-ota-8ed1 -- usr/local/bin/dsign-update dsign/services/ota_update.py
-sudo install -m 0755 usr/local/bin/dsign-update /usr/local/bin/dsign-update
-mkdir -p /home/dsign/dsign/dsign/services
-cp dsign/services/ota_update.py /home/dsign/dsign/dsign/services/
+# Option B — curl only (no git)
+sudo curl -fsSL https://raw.githubusercontent.com/kirpodolak/dsign/cursor/d1-ota-8ed1/usr/local/bin/dsign-update -o /tmp/dsign-update
+sudo install -m 0755 /tmp/dsign-update /usr/local/bin/dsign-update
+mkdir -p /home/dsign/dsign-new/dsign/services /home/dsign/dsign/dsign/services
+curl -fsSL https://raw.githubusercontent.com/kirpodolak/dsign/cursor/d1-ota-8ed1/dsign/services/ota_update.py -o /home/dsign/dsign-new/dsign/services/ota_update.py
+cp /home/dsign/dsign-new/dsign/services/ota_update.py /home/dsign/dsign/dsign/services/
 
 sudo dsign-update version --json | jq .tool_version
-# expect: "2026-07-10-pi3"
+# expect: "2026-07-10-pi4"
 ```
 
 `/etc/dsign/ota.env`:

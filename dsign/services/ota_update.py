@@ -20,7 +20,7 @@ DEFAULT_BRANCH = "main"
 DEFAULT_REMOTE = "origin"
 DSIGN_USER = "dsign"
 SIGNAGE_UNIT = "digital-signage.service"
-OTA_TOOL_VERSION = "2026-07-10-pi3"
+OTA_TOOL_VERSION = "2026-07-10-pi4"
 
 RunFn = Callable[..., subprocess.CompletedProcess]
 
