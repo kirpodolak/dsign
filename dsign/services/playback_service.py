@@ -15,6 +15,7 @@ from .logo_management import LogoManager
 from .profile_management import ProfileManager
 from .playlist_management import PlaylistManager
 from .playback_constants import PlaybackConstants
+from .recovery_queue import RecoveryJob, RecoveryJobKind, RecoveryQueue
 from .wayland_manager import WaylandManager
 from .logger import ServiceLogger
 
@@ -77,6 +78,7 @@ class PlaybackService:
         )
         
         self._recover_lock = Lock()
+        self._recovery_queue = RecoveryQueue()
         self._wayland_manager = WaylandManager(logger=self.logger)
         self._last_socket_identity: Optional[tuple] = None
         self._app = None
@@ -457,6 +459,15 @@ class PlaybackService:
             if self._mpv_manager.was_recent_app_initiated_restart(within_sec=60.0):
                 continue
             if self._recover_lock.locked():
+                try:
+                    advance = self._playlist_manager.consume_stall_recovery_advance()
+                    with self._app_context():
+                        self._enqueue_mpv_recovery(resume_advance=advance)
+                except Exception as e:
+                    self._log_warning(
+                        "MPV socket watch recovery queue failed",
+                        extra={"error": str(e), "type": type(e).__name__, "action": "mpv_socket_watch"},
+                    )
                 continue
             self._log_warning(
                 "MPV IPC socket recreated (systemd restart?); recovering playback",
@@ -471,6 +482,59 @@ class PlaybackService:
                     extra={"error": str(e), "type": type(e).__name__, "action": "mpv_socket_watch"},
                 )
 
+    def _enqueue_mpv_recovery(
+        self,
+        *,
+        restart_playlist: Optional[bool] = None,
+        resume_advance: bool = False,
+    ) -> bool:
+        job = RecoveryJob(
+            RecoveryJobKind.MPV_SYSTEMD,
+            kwargs={
+                "restart_playlist": restart_playlist,
+                "resume_advance": bool(resume_advance),
+            },
+        )
+        if self._recovery_queue.enqueue(job):
+            self._log_info(
+                "MPV recovery queued",
+                extra={
+                    "action": "mpv_recover",
+                    "queue_len": len(self._recovery_queue),
+                    "resume_advance": bool(resume_advance),
+                },
+            )
+            return True
+        self._log_warning(
+            "MPV recovery queue full; dropping request",
+            extra={"action": "mpv_recover", "queue_len": len(self._recovery_queue)},
+        )
+        return False
+
+    def _process_next_queued_recovery(self) -> None:
+        job = self._recovery_queue.pop()
+        if job is None:
+            return
+        try:
+            with self._app_context():
+                if job.kind == RecoveryJobKind.MPV_SYSTEMD:
+                    self._recover_after_mpv_systemd_restart_impl(
+                        restart_playlist=job.kwargs.get("restart_playlist"),
+                        resume_advance=bool(job.kwargs.get("resume_advance", False)),
+                    )
+                elif job.kind == RecoveryJobKind.SLIDESHOW_CRASH:
+                    self._resume_slideshow_after_crash_impl()
+        except Exception as exc:
+            self._log_warning(
+                "Queued recovery dispatch failed",
+                extra={
+                    "kind": job.kind.value,
+                    "error": str(exc),
+                    "type": type(exc).__name__,
+                    "action": "recovery_queue",
+                },
+            )
+
     def _on_slideshow_thread_crash(self) -> None:
         Thread(
             target=self._resume_slideshow_after_crash,
@@ -481,35 +545,44 @@ class PlaybackService:
     def _resume_slideshow_after_crash(self) -> None:
         try:
             with self._app_context():
-                if not self._recover_lock.acquire(blocking=False):
-                    return
-                try:
-                    playlist_id = self._resolve_playlist_id_for_recovery()
-                    if playlist_id is None:
-                        return
-                    resume_index = self._playlist_manager.get_resume_start_index(advance=False)
-                    ok = bool(
-                        self._playlist_manager.play(
-                            playlist_id,
-                            start_index=resume_index,
-                        )
-                    )
-                    self._log_warning(
-                        "Resumed playlist after slideshow thread crash",
-                        extra={
-                            "playlist_id": playlist_id,
-                            "start_index": resume_index,
-                            "ok": ok,
-                            "action": "slideshow_recover",
-                        },
-                    )
-                finally:
-                    self._recover_lock.release()
+                self._resume_slideshow_after_crash_impl()
         except Exception as e:
             self._log_warning(
                 "Slideshow crash recovery failed",
                 extra={"error": str(e), "type": type(e).__name__, "action": "slideshow_recover"},
             )
+
+    def _resume_slideshow_after_crash_impl(self) -> None:
+        if not self._recover_lock.acquire(blocking=False):
+            if self._recovery_queue.enqueue(RecoveryJob(RecoveryJobKind.SLIDESHOW_CRASH)):
+                self._log_info(
+                    "Slideshow recovery queued",
+                    extra={"action": "slideshow_recover", "queue_len": len(self._recovery_queue)},
+                )
+            return
+        try:
+            playlist_id = self._resolve_playlist_id_for_recovery()
+            if playlist_id is None:
+                return
+            resume_index = self._playlist_manager.get_resume_start_index(advance=False)
+            ok = bool(
+                self._playlist_manager.play(
+                    playlist_id,
+                    start_index=resume_index,
+                )
+            )
+            self._log_warning(
+                "Resumed playlist after slideshow thread crash",
+                extra={
+                    "playlist_id": playlist_id,
+                    "start_index": resume_index,
+                    "ok": ok,
+                    "action": "slideshow_recover",
+                },
+            )
+        finally:
+            self._recover_lock.release()
+            self._process_next_queued_recovery()
 
     def _on_mpv_app_initiated_restart(self) -> None:
         """Resume playlist after hung-recovery restart (avoid racing socket-watch recover)."""
@@ -551,9 +624,9 @@ class PlaybackService:
         resume_advance: bool = False,
     ) -> bool:
         if not self._recover_lock.acquire(blocking=False):
-            self._log_warning(
-                "MPV recover skipped (already in progress)",
-                extra={"action": "mpv_recover"},
+            self._enqueue_mpv_recovery(
+                restart_playlist=restart_playlist,
+                resume_advance=resume_advance,
             )
             return False
         try:
@@ -563,6 +636,7 @@ class PlaybackService:
             )
         finally:
             self._recover_lock.release()
+            self._process_next_queued_recovery()
 
     def _recover_after_mpv_systemd_restart_body(
         self,
