@@ -36,7 +36,7 @@
 | **D2 расписание D2.1–D2.5** | ✅ PR #103–#107 |
 | `GET /api/health`, upload limit 1 GiB, login rate limit | ✅ в коде |
 | `MPVManager.shutdown()`, SIGTERM → `ScheduleEngine.stop()` | ✅ частично |
-| **T-CI** GitHub Actions pytest Tier 1 (58 кейсов) | ✅ |
+| **T-CI** GitHub Actions pytest (**179** кейсов, Tier 1–3 partial) | ✅ |
 | **T-IPC** unit tests (`MpvJsonIpcSession`, 10 кейсов) | ✅ PR pytest-tier1 |
 | **T-MPV** unit tests (`MPVManager._send_command`, 4 кейса) | ✅ PR #110 |
 | **T-REC** recovery flows (9 кейсов) | ✅ PR t-rec-eof |
@@ -185,7 +185,7 @@ flowchart TD
 - [x] Каталог `tests/` + `pytest` / `pytest-cov` (зависимости в `setup.py`, `packages=dsign` only)
 - [x] GitHub Actions workflow на PR/push → `main` (`.github/workflows/pytest.yml`, `working-directory: dsign`)
 - [x] Integration (fake MPV, recovery, EOF, audio) + API smoke + schedule в том же workflow
-- [x] Merge gate: полный Tier 1 must pass (58 тестов)
+- [x] Merge gate: полный pytest suite must pass (**179** тестов на `main`)
 
 *Источник:* improvement §1, стратегия тестов
 
@@ -410,7 +410,7 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
-| 2026-07-10 | H-COAL ✅ (adaptive MPV restart coalesce; docs sync) |
+| 2026-07-10 | Tier 3 pytest: Settings + System API smoke (179 total) |
 | 2026-07-10 | H-RQ ✅ (recovery queue; 3+1 pytest) |
 | 2026-07-10 | H-CACHE ✅ (ContentCache download retry backoff; 7 pytest) |
 | 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |
