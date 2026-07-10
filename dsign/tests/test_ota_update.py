@@ -13,6 +13,7 @@ from dsign.services.ota_update import (
     OtaConfig,
     _build_parser,
     _parse_cli_args,
+    _resolve_git_root,
     apply_update,
     check_update,
     cmd_auto,
@@ -217,6 +218,28 @@ def test_cli_json_flag_after_subcommand():
     args = _parse_cli_args(["check", "--json"])
     assert args.command == "check"
     assert args.json is True
+
+
+def test_resolve_git_root_finds_clone(tmp_path):
+    repo = tmp_path / "dsign"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    assert _resolve_git_root(repo) == repo.resolve()
+
+
+def test_config_uses_git_root(tmp_path):
+    outer = tmp_path / "home" / "dsign"
+    repo = outer / "dsign"
+    repo.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    cfg = OtaConfig.from_env(
+        {
+            "DSIGN_PROJECT_ROOT": str(outer),
+            "DSIGN_OTA_DIR": str(tmp_path / "ota"),
+            "DSIGN_VENV": str(tmp_path / "venv"),
+        }
+    )
+    assert cfg.project_root == repo.resolve()
 
 
 def test_cli_json_flag_before_subcommand():

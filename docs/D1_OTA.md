@@ -7,18 +7,47 @@ Fleet-обновление без ручного `git pull`: git fetch/merge →
 
 ---
 
-## Команды
+## Troubleshooting
+
+### `not a git repository`
+
+OTA needs a **git clone** (not a plain file copy). On the player:
 
 ```bash
-sudo dsign-update check      # git fetch; exit 1 если есть обновление
-sudo dsign-update download   # ff-only merge + сохранить rollback point
-sudo dsign-update apply      # pip + manifest apply + restart services
-sudo dsign-update rollback   # git reset --hard к rollback + apply
-sudo dsign-update status     # state.json + rollback.json
-sudo dsign-update auto       # check → download → apply (для timer)
+ls -la /home/dsign/dsign/.git
+# or
+ls -la /home/dsign/dsign-new/.git
 ```
 
-JSON: добавьте `--json` к любой команде.
+Set in `/etc/dsign/ota.env`:
+
+```bash
+DSIGN_PROJECT_ROOT=/home/dsign/dsign   # path that contains .git/
+```
+
+### `jq: parse error` or human text with `--json`
+
+The wrapper must run **repo** `ota_update.py`, not an old pip-installed copy:
+
+```bash
+sudo dsign-apply-install -q   # refreshes /usr/local/bin/dsign-update
+head -5 /usr/local/bin/dsign-update   # should mention ota_update.py
+sudo dsign-update status --json | jq .
+```
+
+### Commands
+
+```bash
+sudo dsign-update check      # git fetch; exit 1 if update available
+sudo dsign-update download   # ff-only merge + save rollback point
+sudo dsign-update apply      # pip + manifest apply + restart services
+sudo dsign-update rollback   # git reset --hard + apply
+sudo dsign-update status     # state.json + rollback.json
+sudo dsign-update auto       # check → download → apply (timer)
+
+sudo dsign-update check --json | jq .    # preferred JSON
+sudo dsign-update --json check | jq .    # JSON flag before subcommand
+```
 
 ---
 

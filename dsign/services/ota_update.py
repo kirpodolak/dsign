@@ -60,8 +60,10 @@ class OtaConfig:
         )
         merged = {**_load_env_file(ota_env_path), **base}
         ota_dir = Path(merged.get("DSIGN_OTA_DIR", str(DEFAULT_OTA_DIR)))
+        preferred_root = Path(merged.get("DSIGN_PROJECT_ROOT", str(DEFAULT_PROJECT_ROOT)))
+        git_root = _resolve_git_root(preferred_root)
         return cls(
-            project_root=Path(merged.get("DSIGN_PROJECT_ROOT", str(DEFAULT_PROJECT_ROOT))),
+            project_root=git_root,
             venv_dir=Path(merged.get("DSIGN_VENV", str(DEFAULT_VENV))),
             ota_dir=ota_dir,
             branch=(merged.get("DSIGN_OTA_BRANCH", DEFAULT_BRANCH) or DEFAULT_BRANCH).strip(),
@@ -76,6 +78,35 @@ def _env_bool(val: Optional[str], *, default: bool) -> bool:
     if val is None or str(val).strip() == "":
         return default
     return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_git_root(preferred: Path) -> Path:
+    """
+    Find git repository root on Pi (flat clone, nested dsign/, or dsign-new copy).
+    Falls back to preferred when no .git is found (check will error clearly).
+    """
+    seen: set[Path] = set()
+    candidates: list[Path] = []
+    for base in (
+        preferred,
+        preferred.parent,
+        preferred / "dsign",
+        Path("/home/dsign/dsign"),
+        Path("/home/dsign/dsign-new"),
+    ):
+        try:
+            resolved = base.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        candidates.append(resolved)
+
+    for cand in candidates:
+        if (cand / ".git").is_dir():
+            return cand
+    return preferred.resolve() if preferred.exists() else preferred
 
 
 def _state_path(cfg: OtaConfig) -> Path:
@@ -163,8 +194,12 @@ def _rev_parse(cfg: OtaConfig, ref: str, run_fn: Optional[RunFn] = None) -> str:
 
 
 def _ensure_git_repo(cfg: OtaConfig) -> None:
-    if not (cfg.project_root / ".git").is_dir():
-        raise RuntimeError(f"not a git repository: {cfg.project_root}")
+    if (cfg.project_root / ".git").is_dir():
+        return
+    raise RuntimeError(
+        f"not a git repository: {cfg.project_root} "
+        f"(set DSIGN_PROJECT_ROOT in /etc/dsign/ota.env to the clone with .git/)"
+    )
 
 
 def _working_tree_clean(cfg: OtaConfig, run_fn: Optional[RunFn] = None) -> bool:
@@ -352,10 +387,12 @@ def rollback_update(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[s
 def status_report(cfg: OtaConfig) -> Dict[str, Any]:
     state = load_state(cfg)
     rb = load_rollback(cfg)
+    git_ready = (cfg.project_root / ".git").is_dir()
     return {
         "success": True,
         "enabled": cfg.enabled,
         "project_root": str(cfg.project_root),
+        "git_ready": git_ready,
         "venv": str(cfg.venv_dir),
         "branch": cfg.branch,
         "remote": cfg.remote,
@@ -432,7 +469,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 1
         return 0
     except Exception as exc:
-        payload = {"success": False, "error": str(exc)}
+        payload = {"success": False, "error": str(exc), "command": args.command}
         if args.json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:

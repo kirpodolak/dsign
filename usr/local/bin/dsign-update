@@ -11,5 +11,12 @@ fi
 
 export DSIGN_PROJECT_ROOT="$PROJECT_ROOT"
 export DSIGN_VENV="$VENV"
+# Use repo tree (not stale pip-installed package in venv).
+export PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
+OTA_MODULE="${PROJECT_ROOT}/dsign/services/ota_update.py"
+if [ -f "$OTA_MODULE" ]; then
+  exec "$PYTHON" "$OTA_MODULE" "$@"
+fi
 
 exec "$PYTHON" -m dsign.services.ota_update "$@"
