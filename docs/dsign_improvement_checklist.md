@@ -85,7 +85,7 @@ ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `ca
 | 9 Cache retry | H-CACHE | ✅ exp backoff в `_download` |
 | 10 Refactor long methods | H-REF | **только после** T-* |
 | 11 Recovery queue | H-RQ | ✅ queue вместо `blocking=False` skip |
-| 12 Adaptive coalesce | H-COAL | сейчас фикс. 8s |
+| 12 Adaptive coalesce | H-COAL | ✅ `mpv_restart_coalesce.py` — base 8s, ×2 по IPC streak, cap 60s |
 | 13 ENV docs | P-DOC | ✅ `docs/ENVIRONMENT.md` |
 
 ---
@@ -139,6 +139,6 @@ Unit (mock IPC) → Integration (fake MPV) → API smoke → coverage report →
 
 | Дата | Изменение |
 |------|-----------|
-| 2026-07-08 | T-IPC: unit tests + reader stale-socket fix |
+| 2026-07-10 | H-COAL ✅: adaptive restart coalesce documented (код уже в main) |
 | 2026-07-09 | T-API + T-SCH: API smoke + schedule_service pytest |
 | 2026-07-08 | Перенесён в `docs/`; открытые задачи → `dsign_backlog.md` |
