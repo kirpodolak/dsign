@@ -91,12 +91,12 @@ flowchart TD
 | **H-RL** | Rate limiting API (play/stop/screenshot/reboot) | ✅ | improvement §2 | — |
 | **H-SUB** | Subprocess timeout audit (`amixer` и др.) | 🔴 | improvement §3 | — |
 | **H-WIFI** | SSID/password validation (1–32, WPA 8–63) | ✅ | improvement §5 | — |
-| **H-UPL** | Upload: disk check до save, streaming >100MB | 🟡 | improvement §4 | disk check ✅; streaming open |
+| **H-UPL** | Upload: disk check до save, streaming >100MB | ✅ | improvement §4 | `upload_disk.py`, `upload_stream.py` |
 | **D2-OPS** | `DSIGN_API_TOKEN` на fleet + проверка schedule Bearer | 🟡 | 4phase D2, schedule §D2.5 | — |
 | **D2-24H** | Offline 24 ч — расписание по timezone | 🟡 | schedule §D2.4, 4phase D2 | — |
 | **C3** | Nested playlists (DB + flat play) | 🟡 | 4phase §C3 | — |
 | **H-SD** | Graceful shutdown playback (join thread, logo, DB) | ✅ | improvement §6 | `graceful_shutdown`, `DSIGN_SHUTDOWN_JOIN_SEC` |
-| **H-MEM** | `_media_backoff` TTL cleanup | ✅ | improvement §7 | `media_backoff.py`, `DSIGN_MEDIA_BACKOFF_TTL_SEC` |
+| **H-MEM** | `_media_backoff` TTL cleanup | 🟡 | improvement §7 | — |
 | **H-PREF** | ContentCache: thread pool + cancel on playlist change | 🟡 | improvement §8 | — |
 | **H-CACHE** | ContentCache download retry (exp backoff) | 🟡 | improvement §9 | — |
 | **H-REF** | Refactor длинных методов (после тестов) | 🟡 | improvement §10 | T-* |
@@ -332,8 +332,8 @@ flowchart TD
 
 **Уже есть:** `MAX_CONTENT_LENGTH` 1 GiB, post-save size check.
 
-- [x] Disk space check **до** сохранения файла (`upload_disk.py`, PR #118)
-- [ ] Streaming upload для больших файлов (опционально снизить лимит на Pi)
+- [x] Disk space check **до** сохранения файла (`upload_disk.py`)
+- [x] Streaming upload для больших файлов (`upload_stream.py`, chunked save ≥100MB / unknown size)
 
 *Источник:* improvement §4
 
@@ -346,14 +346,7 @@ flowchart TD
 
 *Источник:* improvement §6
 
-### H-MEM — `_media_backoff` TTL
-
-- [x] TTL cleanup устаревших записей (`DSIGN_MEDIA_BACKOFF_TTL_SEC`, default 1h)
-- [x] Prune при `_register_media_failure` и старте `_play_impl`
-
-*Источник:* improvement §7
-
-### H-PREF, H-CACHE, H-RQ, H-COAL
+### H-MEM, H-PREF, H-CACHE, H-RQ, H-COAL
 
 См. [improvement §7–12](./dsign_improvement_checklist.md) — без дублирования текста.
 
@@ -378,7 +371,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **H-UPL** (streaming upload >100MB) или **H-PREF** (prefetch thread pool)
+**Следующий PR по качеству:** **H-MEM** (`_media_backoff` TTL) или **H-PREF** (prefetch thread pool)
 
 ---
 
@@ -387,8 +380,7 @@ flowchart TD
 | Дата | Изменение |
 |------|-----------|
 | 2026-07-10 | H-SD ✅ (graceful shutdown: join playback thread, idle logo, MPV + DB cleanup; 3 pytest) |
-| 2026-07-10 | H-MEM ✅ (`_media_backoff` TTL prune; `DSIGN_MEDIA_BACKOFF_TTL_SEC`; 8 pytest) |
-| 2026-07-10 | H-UPL disk check ✅ (`upload_disk.py`, 7 pytest) |
+| 2026-07-10 | H-UPL ✅ (disk check + streaming upload ≥100MB; `upload_stream.py`, 11 pytest) |
 | 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |
 | 2026-07-09 | T-AUD + T-CI ✅ (13 audio tests; workflow `.github/workflows/pytest.yml`, 58 total) |
 | 2026-07-09 | T-API + T-SCH ✅ (15 pytest cases) |
