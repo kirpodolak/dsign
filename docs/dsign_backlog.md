@@ -102,7 +102,7 @@ flowchart TD
 | **H-REF** | Refactor длинных методов (после тестов) | 🟡 | improvement §10 | T-* |
 | **H-RQ** | Recovery queue вместо `blocking=False` skip | ✅ | improvement §11 | `recovery_queue.py`, `DSIGN_RECOVERY_QUEUE_MAX` |
 | **H-COAL** | Adaptive `DSIGN_MPV_RESTART_COALESCE_SEC` | 🟡 | improvement §12 | — |
-| **P-DOC** | `docs/ENVIRONMENT.md` (env vars) | 🟢 | improvement §13 | — |
+| **P-DOC** | `docs/ENVIRONMENT.md` (env vars) | ✅ | improvement §13 | `docs/ENVIRONMENT.md`, `test_environment_doc.py` |
 | **P-TYP** | mypy strict на critical paths | 🟢 | improvement §14 | — |
 | **P-CFG** | Расширить `Config`, убрать дубли `os.getenv` | 🟢 | improvement §15 | частично ✅ |
 | **P-UI** | Operator dashboard (HTML над `/api/health`) | 🟢 | improvement §17 | частично ✅ health API |
@@ -376,7 +376,7 @@ flowchart TD
 
 ### P-DOC … P-ALERT — Nice to have
 
-- [ ] `docs/ENVIRONMENT.md`
+- [x] `docs/ENVIRONMENT.md`
 - [ ] mypy `--strict` в CI
 - [ ] Централизовать env в `Config` (расширить `dsign/config/config.py`)
 - [ ] Operator UI поверх `GET /api/health` + `/api/playback/status`
