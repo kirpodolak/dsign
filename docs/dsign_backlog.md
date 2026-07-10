@@ -101,7 +101,7 @@ flowchart TD
 | **H-CACHE** | ContentCache download retry (exp backoff) | ✅ | improvement §9 | `content_cache_retry.py` |
 | **H-REF** | Refactor длинных методов (после тестов) | 🟡 | improvement §10 | T-* |
 | **H-RQ** | Recovery queue вместо `blocking=False` skip | ✅ | improvement §11 | `recovery_queue.py`, `DSIGN_RECOVERY_QUEUE_MAX` |
-| **H-COAL** | Adaptive `DSIGN_MPV_RESTART_COALESCE_SEC` | 🟡 | improvement §12 | — |
+| **H-COAL** | Adaptive `DSIGN_MPV_RESTART_COALESCE_SEC` | ✅ | improvement §12 | `mpv_restart_coalesce.py`, `test_mpv_restart_coalesce.py` |
 | **P-DOC** | `docs/ENVIRONMENT.md` (env vars) | ✅ | improvement §13 | `docs/ENVIRONMENT.md`, `test_environment_doc.py` |
 | **P-TYP** | mypy strict на critical paths | 🟢 | improvement §14 | — |
 | **P-CFG** | Расширить `Config`, убрать дубли `os.getenv` | 🟢 | improvement §15 | частично ✅ |
@@ -370,9 +370,16 @@ flowchart TD
 
 *Источник:* improvement §11
 
-### H-COAL
+### H-COAL — adaptive MPV restart coalesce ✅
 
-См. [improvement §7–12](./dsign_improvement_checklist.md) — без дублирования текста.
+- [x] `adaptive_restart_coalesce_sec()` — base × 2^streak (cap 4 steps), max `DSIGN_MPV_RESTART_COALESCE_MAX_SEC`
+- [x] `MPVManager._restart_coalesce_window_sec()` — streak из playback + watchdog IPC fails
+- [x] `_restart_systemd_service_if_needed()` — не рестартит чаще окна; soft socket recover
+- [x] Env: `DSIGN_MPV_RESTART_COALESCE_SEC` (default 8), `DSIGN_MPV_RESTART_COALESCE_MAX_SEC` (default 60)
+- [x] pytest: `test_mpv_restart_coalesce.py` (6) + coalesce в `test_mpv_manager_send_command.py`
+
+*Файлы:* `dsign/services/mpv_restart_coalesce.py`, `dsign/services/mpv_management.py`  
+*Источник:* improvement §12
 
 ### P-DOC … P-ALERT — Nice to have
 
@@ -395,7 +402,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **H-COAL** (adaptive MPV restart coalesce) или **H-REF** (после T-*)
+**Следующий PR по качеству:** **D1 OTA** (fleet) или **P-CFG** / **P-TYP**
 
 ---
 
@@ -403,6 +410,7 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-10 | H-COAL ✅ (adaptive MPV restart coalesce; docs sync) |
 | 2026-07-10 | H-RQ ✅ (recovery queue; 3+1 pytest) |
 | 2026-07-10 | H-CACHE ✅ (ContentCache download retry backoff; 7 pytest) |
 | 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |
