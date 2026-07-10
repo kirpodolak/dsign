@@ -865,6 +865,15 @@ class PlaylistManager:
             return
         cache.prefetch_async(media_key=media_key, page_url=page_url, provider=provider)
 
+    def _cancel_content_cache_prefetches(self) -> None:
+        cache = self._content_cache
+        if cache is None or not hasattr(cache, "cancel_prefetches"):
+            return
+        try:
+            cache.cancel_prefetches()
+        except Exception:
+            pass
+
     def _ensure_network_stream_started(
         self,
         item: Dict[str, Any],
@@ -4365,6 +4374,7 @@ class PlaylistManager:
         try:
             # Stop any previous manual playback loop
             self._stop_play_thread(preserve_stall_tracking=preserve_stall_tracking)
+            self._cancel_content_cache_prefetches()
             self._prune_media_backoff()
             # Mark playback starting before DB/profile IPC so Wi-Fi-on-display skips.
             self._set_playback_active_marker(True)
@@ -4727,6 +4737,7 @@ class PlaylistManager:
                 preserve_loop_position=preserve_loop_position,
                 join_timeout=join_timeout,
             )
+            self._cancel_content_cache_prefetches()
             try:
                 self._logo_manager.ensure_mpv_video_output()
             except Exception:
