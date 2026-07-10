@@ -45,7 +45,7 @@ Login + mutating API endpoints: play/stop/screenshot/reboot/service restart — 
 
 ### 4. Upload → `H-UPL` (🟡)
 
-**Не делать:** базовый `MAX_CONTENT_LENGTH` (уже 1 GiB). Нужны: disk check до save, опционально streaming.
+Disk check before save ✅ (`upload_disk.py`). Streaming upload for >100MB — still open.
 
 ### 5. Wi-Fi SSID/password → `H-WIFI`
 

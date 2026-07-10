@@ -13,6 +13,7 @@ from threading import Lock
 from datetime import datetime
 from dsign.models import MediaFolder, MediaItemMeta
 from dsign.config.config import Config
+from dsign.services.upload_disk import check_disk_space_for_upload
 from .logger import ServiceLogger
 
 class FileService:
@@ -217,6 +218,21 @@ class FileService:
                 self._log_warning(
                     f"Rejected upload: {file.filename}",
                     extra={'filename': file.filename, 'reported_size': reported, 'action': 'file_upload'},
+                )
+                continue
+            ok_disk, disk_err = check_disk_space_for_upload(
+                self.upload_folder,
+                int(reported or 0),
+                max_file_bytes=self.MAX_MEDIA_SIZE,
+            )
+            if not ok_disk:
+                self._log_warning(
+                    disk_err or "Insufficient disk space",
+                    extra={
+                        'filename': file.filename,
+                        'reported_size': reported,
+                        'action': 'file_upload',
+                    },
                 )
                 continue
             try:
@@ -583,6 +599,19 @@ class FileService:
                 'file_size': logo.content_length
             })
             return {'success': False, 'error': error_msg}
+
+        reported = self._upload_file_size(logo)
+        ok_disk, disk_err = check_disk_space_for_upload(
+            self.upload_folder,
+            int(reported or 0),
+            max_file_bytes=self.MAX_LOGO_SIZE,
+        )
+        if not ok_disk:
+            self._log_warning(
+                disk_err or "Insufficient disk space",
+                extra={'action': 'logo_upload', 'filename': logo.filename},
+            )
+            return {'success': False, 'error': disk_err or 'Insufficient disk space'}
 
         try:
             filename = self.DEFAULT_LOGO
