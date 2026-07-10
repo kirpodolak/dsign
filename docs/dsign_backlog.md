@@ -1,6 +1,6 @@
 # DSign — сводный backlog (что осталось)
 
-**Версия:** 2026-07-08 (commercial gap analysis)  
+**Версия:** 2026-07-10 (pre-OTA docs sync)  
 **Назначение:** единая точка входа — **только открытые задачи**. Закрыли пункт → `[x]` здесь и в исходном документе (колонка «Источник»).
 
 **Уровни зрелости:** P0 (текущий backlog) = sellable edge player · **COM v1.0** = commercial launch · COM v1.5 = fleet scale · COM v2.0 = enterprise (отложено).
@@ -36,7 +36,9 @@
 | **D2 расписание D2.1–D2.5** | ✅ PR #103–#107 |
 | `GET /api/health`, upload limit 1 GiB, login rate limit | ✅ в коде |
 | `MPVManager.shutdown()`, SIGTERM → `ScheduleEngine.stop()` | ✅ частично |
-| **T-CI** GitHub Actions pytest Tier 1 (58 кейсов) | ✅ |
+| **T-CI** GitHub Actions pytest (170 кейсов, Tier 1 + Tier 2) | ✅ |
+| **H-REF** extract-only refactor `playlist_management.py` | ✅ PR #128–#131 |
+| **Tier 2 pytest** (T-CACHE, T-MIX, prefetch/retry) | ✅ частично |
 | **T-IPC** unit tests (`MpvJsonIpcSession`, 10 кейсов) | ✅ PR pytest-tier1 |
 | **T-MPV** unit tests (`MPVManager._send_command`, 4 кейса) | ✅ PR #110 |
 | **T-REC** recovery flows (9 кейсов) | ✅ PR t-rec-eof |
@@ -55,23 +57,22 @@
 
 ```mermaid
 flowchart TD
-  D1[D1 OTA] --> T1[pytest Tier 1 + CI]
-  T1 --> H1[Hardening: rate limit, subprocess, Wi-Fi]
-  H1 --> COM[COM v1.0: HTTPS, PoP, sec audit]
+  DONE[Hardening + pytest 170 ✅] --> D1[D1 OTA]
+  D1 --> OPS[D2-OPS fleet Bearer]
+  OPS --> COM[COM v1.0: HTTPS, PoP, sec audit]
   COM --> ACC[Acceptance: test_matrix + D2 offline 24h]
   ACC --> C3[C3 nested playlists]
   C3 --> V15[COM v1.5: fleet config push]
-  V15 --> P2[Polish: operator UI, alerts]
 ```
 
 | Шаг | Фокус | Зачем сейчас |
 |-----|-------|--------------|
-| 1 | **D1 OTA** | Fleet без ручного `git pull`; зависит от D0 (уже есть) |
-| 2 | **pytest Tier 1 + GitHub Actions** | Gate на regression до массового рефакторинга |
-| 3 | **API hardening** | rate limit, subprocess timeouts, Wi-Fi validation |
-| 4 | **Acceptance** | test_matrix + offline 24 ч расписания |
+| 1 | **D1 OTA** | Fleet без ручного `git pull`; hardening + pytest gate готов |
+| 2 | **D2-OPS** | `DSIGN_API_TOKEN` на fleet + curl schedule Bearer |
+| 3 | **Acceptance** | test_matrix + offline 24 ч расписания (D2-24H) |
+| 4 | **COM v1.0** | HTTPS, proof of play, security audit |
 | 5 | **C3** | nested playlists — единственная открытая фаза C |
-| 6 | **Polish** | graceful shutdown playback, cache retry, operator UI |
+| 6 | **Tier 3 pytest** (опц.) | System/Settings API smoke |
 
 ---
 
@@ -99,7 +100,7 @@ flowchart TD
 | **H-MEM** | `_media_backoff` TTL cleanup | ✅ | improvement §7 | `media_backoff.py` |
 | **H-PREF** | ContentCache: thread pool + cancel on playlist change | ✅ | improvement §8 | `content_cache_prefetch.py` |
 | **H-CACHE** | ContentCache download retry (exp backoff) | ✅ | improvement §9 | `content_cache_retry.py` |
-| **H-REF** | Refactor длинных методов (после тестов) | 🟡 | improvement §10 | T-* |
+| **H-REF** | Refactor длинных методов (extract-only) | ✅ | improvement §10 | PR #128–#131 |
 | **H-RQ** | Recovery queue вместо `blocking=False` skip | ✅ | improvement §11 | `recovery_queue.py`, `DSIGN_RECOVERY_QUEUE_MAX` |
 | **H-COAL** | Adaptive `DSIGN_MPV_RESTART_COALESCE_SEC` | ✅ | improvement §12 | `mpv_restart_coalesce.py`, `test_mpv_restart_coalesce.py` |
 | **P-DOC** | `docs/ENVIRONMENT.md` (env vars) | ✅ | improvement §13 | `docs/ENVIRONMENT.md`, `test_environment_doc.py` |
@@ -185,7 +186,7 @@ flowchart TD
 - [x] Каталог `tests/` + `pytest` / `pytest-cov` (зависимости в `setup.py`, `packages=dsign` only)
 - [x] GitHub Actions workflow на PR/push → `main` (`.github/workflows/pytest.yml`, `working-directory: dsign`)
 - [x] Integration (fake MPV, recovery, EOF, audio) + API smoke + schedule в том же workflow
-- [x] Merge gate: полный Tier 1 must pass (58 тестов)
+- [x] Merge gate: полный pytest suite must pass (**170** тестов на `main`)
 
 *Источник:* improvement §1, стратегия тестов
 
@@ -253,11 +254,11 @@ flowchart TD
 
 Детальный список кейсов — в [dsign_improvement_checklist.md](./dsign_improvement_checklist.md) §1.1–1.6.
 
-**Добавить к improvement (нет в оригинале):**
+**Добавлено в pytest (закрыто):**
 
-- [ ] `schedule_service`: `_monthly_matches`, exceptions, `expand_week` / `expand_month`
-- [ ] API: `POST/DELETE /api/schedule/exceptions`, `GET /api/schedule/month`
-- [ ] Bearer: schedule endpoints с `DSIGN_API_TOKEN` (без CSRF)
+- [x] `schedule_service`: `_monthly_matches`, exceptions, `expand_week` / `expand_month` — `test_schedule_service.py`
+- [x] API: `POST /api/schedule/exceptions`, `GET /api/schedule/month` — `test_api_smoke.py`
+- [x] Bearer: schedule endpoints с `DSIGN_API_TOKEN` (без CSRF) — `test_api_smoke.py`
 
 **Поправки ожиданий:**
 
@@ -372,6 +373,20 @@ flowchart TD
 
 *Источник:* improvement §11
 
+### H-REF — refactor long methods ✅
+
+Extract-only refactor `playlist_management.py` → отдельные модули (PR #128–#131):
+
+| Модуль | Содержимое |
+|--------|------------|
+| `playback_eof.py` | EOF wait, end-file helpers |
+| `playback_network.py` | stream open, headers, midstream reload |
+| `playback_slideshow.py` | `_manual_slideshow_loop` |
+| `playback_play.py` | `_play_impl` |
+
+*Тесты:* `test_playback_eof_module.py`, `test_playback_network_module.py`, `test_playback_slideshow_module.py`, `test_playback_play_module.py`  
+*Источник:* improvement §10
+
 ### H-COAL — adaptive MPV restart coalesce ✅
 
 - [x] `adaptive_restart_coalesce_sec()` — base × 2^streak (cap 4 steps), max `DSIGN_MPV_RESTART_COALESCE_MAX_SEC`
@@ -403,8 +418,8 @@ flowchart TD
 ```
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
-**Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **D1 OTA** (fleet) или **P-CFG** / **P-TYP**
+**Следующий ops на fleet:** **D2-OPS** (`DSIGN_API_TOKEN` + schedule Bearer)  
+**Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**
 
 ---
 
@@ -413,6 +428,7 @@ flowchart TD
 | Дата | Изменение |
 |------|-----------|
 | 2026-07-10 | H-SUB ✅ (subprocess audit + pytest gate) |
+| 2026-07-10 | Docs sync: H-REF ✅, 170 pytest, Tier 2 partial, порядок → D1 OTA |
 | 2026-07-10 | H-COAL ✅ (adaptive MPV restart coalesce; docs sync) |
 | 2026-07-10 | H-RQ ✅ (recovery queue; 3+1 pytest) |
 | 2026-07-10 | H-CACHE ✅ (ContentCache download retry backoff; 7 pytest) |

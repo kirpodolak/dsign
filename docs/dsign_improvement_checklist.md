@@ -1,6 +1,6 @@
 # DSign — checklist улучшений (production hardening)
 
-**Версия:** 2026-07-08  
+**Версия:** 2026-07-10  
 **Статус:** открытые пункты сведены в **[dsign_backlog.md](./dsign_backlog.md)** — править задачи там.
 
 Этот документ хранит **детали и обоснование** hardening-работ (тесты, SRE). Продуктовые фазы — в [dsign_4phase_checklist.md](./dsign_4phase_checklist.md).
@@ -83,7 +83,7 @@ ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `ca
 | 7 Memory leaks | H-MEM | ✅ TTL prune `_media_backoff` |
 | 8 Prefetch pool | H-PREF | ✅ thread pool + cancel on playlist change |
 | 9 Cache retry | H-CACHE | ✅ exp backoff в `_download` |
-| 10 Refactor long methods | H-REF | **только после** T-* |
+| 10 Refactor long methods | H-REF | ✅ extract-only: `playback_eof`, `playback_network`, `playback_slideshow`, `playback_play` (PR #128–#131) |
 | 11 Recovery queue | H-RQ | ✅ queue вместо `blocking=False` skip |
 | 12 Adaptive coalesce | H-COAL | ✅ `mpv_restart_coalesce.py` — base 8s, ×2 по IPC streak, cap 60s |
 | 13 ENV docs | P-DOC | ✅ `docs/ENVIRONMENT.md` |
@@ -114,16 +114,16 @@ ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `ca
 
 ### Tier 2 — should pass
 
-7. Audio subsystem  
-8. ContentCache LRU / prefetch / ffprobe  
-9. Network reliability (ytdl, hung recovery)  
-10. Mixed playlists  
+7. Audio subsystem ✅ — `test_audio_subsystem.py`  
+8. ContentCache LRU / prefetch / ffprobe ✅ — `test_content_cache_lru_ffprobe.py`, `test_content_cache_prefetch.py`, `test_content_cache_retry.py`  
+9. Network reliability (ytdl, hung recovery) ✅ — `test_playback_recovery.py`, `test_playback_network_module.py`  
+10. Mixed playlists ✅ — `test_playlist_playback_mode.py`
 
-### Tier 3 — nice
+### Tier 3 — nice (частично)
 
-11. System API (Wi-Fi, screenshot, restart)  
-12. Settings API  
-13. Media upload / thumbnails  
+11. System API (Wi-Fi, screenshot, restart) — `test_wifi_validation.py`, `test_api_rate_limit.py` (partial)  
+12. Settings API — 🟡 нет dedicated smoke  
+13. Media upload / thumbnails — `test_upload_disk.py`, `test_upload_stream.py` (partial)
 
 ### CI pipeline (целевой)
 
@@ -140,5 +140,7 @@ Unit (mock IPC) → Integration (fake MPV) → API smoke → coverage report →
 | Дата | Изменение |
 |------|-----------|
 | 2026-07-10 | H-SUB ✅: AST audit test; все run/check_output с timeout |
+| 2026-07-10 | Docs sync: H-REF ✅, Tier 2 ✅, 170 pytest; H-SUB/D2-OPS — отдельные PR |
+| 2026-07-10 | H-COAL ✅: adaptive restart coalesce documented (код уже в main) |
 | 2026-07-09 | T-API + T-SCH: API smoke + schedule_service pytest |
 | 2026-07-08 | Перенесён в `docs/`; открытые задачи → `dsign_backlog.md` |
