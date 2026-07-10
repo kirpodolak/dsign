@@ -101,7 +101,7 @@ flowchart TD
 | **H-CACHE** | ContentCache download retry (exp backoff) | 🟡 | improvement §9 | — |
 | **H-REF** | Refactor длинных методов (после тестов) | 🟡 | improvement §10 | T-* |
 | **H-RQ** | Recovery queue вместо `blocking=False` skip | 🟡 | improvement §11 | — |
-| **H-COAL** | Adaptive `DSIGN_MPV_RESTART_COALESCE_SEC` | 🟡 | improvement §12 | — |
+| **H-COAL** | Adaptive `DSIGN_MPV_RESTART_COALESCE_SEC` | ✅ | improvement §12 | `mpv_restart_coalesce.py` |
 | **P-DOC** | `docs/ENVIRONMENT.md` (env vars) | 🟢 | improvement §13 | — |
 | **P-TYP** | mypy strict на critical paths | 🟢 | improvement §14 | — |
 | **P-CFG** | Расширить `Config`, убрать дубли `os.getenv` | 🟢 | improvement §15 | частично ✅ |
@@ -346,7 +346,14 @@ flowchart TD
 
 *Источник:* improvement §6
 
-### H-MEM, H-PREF, H-CACHE, H-RQ, H-COAL
+### H-COAL — Adaptive MPV restart coalesce
+
+- [x] Coalesce window scales with IPC fail streak (`DSIGN_MPV_RESTART_COALESCE_SEC` base, `DSIGN_MPV_RESTART_COALESCE_MAX_SEC` cap)
+- [x] `MPVManager._restart_coalesce_window_sec()` used for systemd restart paths
+
+*Источник:* improvement §12
+
+### H-RQ
 
 См. [improvement §7–12](./dsign_improvement_checklist.md) — без дублирования текста.
 
@@ -371,7 +378,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **H-MEM** (`_media_backoff` TTL) или **H-PREF** (prefetch thread pool)
+**Следующий PR по качеству:** **H-RQ** (recovery queue) или **H-REF** (после T-*)
 
 ---
 
@@ -379,6 +386,7 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-10 | H-COAL ✅ (adaptive MPV restart coalesce; 7 pytest) |
 | 2026-07-10 | H-SD ✅ (graceful shutdown: join playback thread, idle logo, MPV + DB cleanup; 3 pytest) |
 | 2026-07-10 | H-UPL ✅ (disk check + streaming upload ≥100MB; `upload_stream.py`, 11 pytest) |
 | 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |

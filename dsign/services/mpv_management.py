@@ -86,6 +86,18 @@ class MPVManager:
             'mute': False
         }
 
+    def _restart_coalesce_window_sec(self) -> float:
+        from .mpv_restart_coalesce import adaptive_restart_coalesce_sec
+
+        with self._playback_ipc_fail_lock:
+            playback_streak = int(self._playback_ipc_fail_streak or 0)
+        with self._watchdog_ipc_fail_lock:
+            watchdog_streak = int(self._watchdog_ipc_fail_streak or 0)
+        return adaptive_restart_coalesce_sec(
+            ipc_fail_streak=max(playback_streak, watchdog_streak),
+            playback_active=bool(self._playback_session_active),
+        )
+
     def _cache_mpv_state(self):
         """Кеширует важные параметры MPV"""
         props = ["pause", "volume", "mute"]
@@ -536,9 +548,7 @@ class MPVManager:
             )
             return self._try_recover_socket_without_restart()
 
-        window = float(os.getenv("DSIGN_MPV_RESTART_COALESCE_SEC", "8") or 8)
-        if window < 0:
-            window = 0.0
+        window = self._restart_coalesce_window_sec()
         now = time.time()
         with self._mpv_restart_coalesce_lock:
             if window > 0 and (now - self._last_mpv_restart_attempt_ts) < window:
@@ -892,9 +902,7 @@ class MPVManager:
         def _maybe_restart_mpv_batch(
             *, reason: str, attempt_num: int, ipc_request_id: int
         ) -> None:
-            window = float(os.getenv("DSIGN_MPV_RESTART_COALESCE_SEC", "8") or 8)
-            if window < 0:
-                window = 0.0
+            window = self._restart_coalesce_window_sec()
             now = time.time()
             with self._mpv_restart_coalesce_lock:
                 if window > 0 and (now - self._last_mpv_restart_attempt_ts) < window:
@@ -1170,9 +1178,7 @@ class MPVManager:
             """
             One bounded systemd restart per burst of IPC failures (transport drop or hung/no-reply).
             """
-            window = float(os.getenv("DSIGN_MPV_RESTART_COALESCE_SEC", "8") or 8)
-            if window < 0:
-                window = 0.0
+            window = self._restart_coalesce_window_sec()
             now = time.time()
             with self._mpv_restart_coalesce_lock:
                 if window > 0 and (now - self._last_mpv_restart_attempt_ts) < window:

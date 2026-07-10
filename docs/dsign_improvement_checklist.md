@@ -55,6 +55,10 @@ Disk check до save (`upload_disk.py`). Streaming chunked save для ≥100MB 
 
 SIGTERM/SIGINT → `PlaybackService.graceful_shutdown()`: schedule stop, `playlist_manager.stop(join_timeout=…)`, idle logo, `mpv_manager.shutdown()`, `db.session.remove()`. Env: `DSIGN_SHUTDOWN_JOIN_SEC` (1–60s, default 8). Tests: `test_playback_graceful_shutdown.py`.
 
+### 12. Adaptive coalesce → `H-COAL` ✅
+
+MPV systemd restart coalesce window scales with IPC fail streak (`mpv_restart_coalesce.py`, `DSIGN_MPV_RESTART_COALESCE_MAX_SEC`). Tests: `test_mpv_restart_coalesce.py`.
+
 ---
 
 ## 🟡 Should have (открыто)
@@ -69,7 +73,7 @@ SIGTERM/SIGINT → `PlaybackService.graceful_shutdown()`: schedule stop, `playli
 | 9 Cache retry | H-CACHE | нет exp backoff в `_download` |
 | 10 Refactor long methods | H-REF | **только после** T-* |
 | 11 Recovery queue | H-RQ | `blocking=False` skip |
-| 12 Adaptive coalesce | H-COAL | сейчас фикс. 8s |
+| 12 Adaptive coalesce | H-COAL | ✅ IPC streak → coalesce window |
 
 ---
 
