@@ -33,7 +33,7 @@ class PlaylistManager:
         self._content_cache = None
         self._settings_service = None
         # Backoff per media key for unstable/blocked streams to avoid busy looping loadfile.
-        # key -> {failures:int, next_try_monotonic:float}
+        # key -> {failures:int, next_try_monotonic:float, last_touch_monotonic:float}
         self._media_backoff: Dict[str, Dict[str, Any]] = {}
         self._app = None
         self._preloaded_stream_ready = False
@@ -4194,9 +4194,12 @@ class PlaylistManager:
         delay = min(120.0, float(2 ** min(failures, 6)))
         jitter = min(1.5, 0.1 * delay)
         next_try = time.monotonic() + delay + (jitter * (0.5))
+        now_mono = time.monotonic()
         entry["failures"] = failures
         entry["next_try_monotonic"] = next_try
+        entry["last_touch_monotonic"] = now_mono
         self._media_backoff[media_key] = entry
+        self._prune_media_backoff(now_mono=now_mono)
         self.logger.warning(
             "Media backoff scheduled",
             extra={
@@ -4215,6 +4218,17 @@ class PlaylistManager:
                 del self._media_backoff[media_key]
             except Exception:
                 self._media_backoff.pop(media_key, None)
+
+    def _prune_media_backoff(self, *, now_mono: Optional[float] = None) -> int:
+        from .media_backoff import prune_stale_media_backoff
+
+        removed = prune_stale_media_backoff(self._media_backoff, now=now_mono)
+        if removed:
+            self.logger.debug(
+                "Pruned stale media backoff entries",
+                extra={"event": "media_backoff_prune", "removed": removed},
+            )
+        return removed
 
     def play(
         self,
@@ -4351,6 +4365,7 @@ class PlaylistManager:
         try:
             # Stop any previous manual playback loop
             self._stop_play_thread(preserve_stall_tracking=preserve_stall_tracking)
+            self._prune_media_backoff()
             # Mark playback starting before DB/profile IPC so Wi-Fi-on-display skips.
             self._set_playback_active_marker(True)
             self._audio_route_applied_for_play = False
