@@ -37,9 +37,11 @@ _find_ota_module() {
   local root="$1"
   local candidates=(
     "${root}/dsign/services/ota_update.py"
+    "${root}/services/ota_update.py"
     "/home/dsign/dsign/dsign/services/ota_update.py"
-    "/home/dsign/dsign-new/dsign/services/ota_update.py"
     "/home/dsign/dsign/services/ota_update.py"
+    "/home/dsign/dsign-new/dsign/services/ota_update.py"
+    "/home/dsign/dsign-new/services/ota_update.py"
   )
   local path
   for path in "${candidates[@]}"; do

@@ -28,14 +28,16 @@ _install_files() {
     return 1
   fi
   sudo install -m 0755 "$wrapper_src" /usr/local/bin/dsign-update
-  mkdir -p "${PROJECT_ROOT}/dsign/services"
+  mkdir -p "${PROJECT_ROOT}/dsign/services" "${PROJECT_ROOT}/services"
   cp -f "$module_src" "${PROJECT_ROOT}/dsign/services/ota_update.py"
+  cp -f "$module_src" "${PROJECT_ROOT}/services/ota_update.py" 2>/dev/null || true
   chown "${DSIGN_USER}:${DSIGN_USER}" "${PROJECT_ROOT}/dsign/services/ota_update.py" 2>/dev/null || true
-  if [ "$PROD_ROOT" != "$PROJECT_ROOT" ] && [ -d "$PROD_ROOT" ]; then
-    mkdir -p "${PROD_ROOT}/dsign/services"
+  if [ -d "${PROD_ROOT}" ]; then
+    mkdir -p "${PROD_ROOT}/dsign/services" "${PROD_ROOT}/services"
     cp -f "$module_src" "${PROD_ROOT}/dsign/services/ota_update.py"
+    cp -f "$module_src" "${PROD_ROOT}/services/ota_update.py" 2>/dev/null || true
     chown "${DSIGN_USER}:${DSIGN_USER}" "${PROD_ROOT}/dsign/services/ota_update.py" 2>/dev/null || true
-    echo "  copied ota_update.py -> ${PROD_ROOT}/dsign/services/"
+    echo "  copied ota_update.py -> ${PROD_ROOT}/dsign/services/ and services/"
   fi
   return 0
 }
