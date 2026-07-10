@@ -20,6 +20,7 @@ DEFAULT_BRANCH = "main"
 DEFAULT_REMOTE = "origin"
 DSIGN_USER = "dsign"
 SIGNAGE_UNIT = "digital-signage.service"
+OTA_TOOL_VERSION = "2026-07-10-pi2"
 
 RunFn = Callable[..., subprocess.CompletedProcess]
 
@@ -390,6 +391,7 @@ def status_report(cfg: OtaConfig) -> Dict[str, Any]:
     git_ready = (cfg.project_root / ".git").is_dir()
     return {
         "success": True,
+        "tool_version": OTA_TOOL_VERSION,
         "enabled": cfg.enabled,
         "project_root": str(cfg.project_root),
         "git_ready": git_ready,
@@ -431,6 +433,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     for name in ("check", "download", "apply", "rollback", "status", "auto"):
         sub.add_parser(name, parents=[common], help=f"OTA {name}")
+    sub.add_parser("version", parents=[common], help="Print OTA tool version (deploy check)")
     return parser
 
 
@@ -455,6 +458,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "rollback": lambda: rollback_update(cfg),
         "status": lambda: status_report(cfg),
         "auto": lambda: cmd_auto(cfg),
+        "version": lambda: {
+            "success": True,
+            "tool_version": OTA_TOOL_VERSION,
+            "project_root": str(cfg.project_root),
+            "git_ready": (cfg.project_root / ".git").is_dir(),
+        },
     }
 
     try:
@@ -507,6 +516,8 @@ def _print_human(command: str, result: Dict[str, Any]) -> None:
             print(f"last_apply={st['last_apply_at']}")
     elif command == "auto":
         print(result.get("message") or result.get("action", "done"))
+    elif command == "version":
+        print(result.get("tool_version", OTA_TOOL_VERSION))
 
 
 if __name__ == "__main__":

@@ -246,3 +246,12 @@ def test_cli_json_flag_before_subcommand():
     args = _parse_cli_args(["--json", "status"])
     assert args.command == "status"
     assert args.json is True
+
+
+def test_version_reports_tool_version():
+    args = _parse_cli_args(["version", "--json"])
+    assert args.command == "version"
+    from dsign.services.ota_update import OTA_TOOL_VERSION, main
+
+    assert main(["version", "--json"]) == 0
+    assert OTA_TOOL_VERSION
