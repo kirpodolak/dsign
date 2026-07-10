@@ -83,7 +83,7 @@ ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `ca
 | 7 Memory leaks | H-MEM | ✅ TTL prune `_media_backoff` |
 | 8 Prefetch pool | H-PREF | ✅ thread pool + cancel on playlist change |
 | 9 Cache retry | H-CACHE | ✅ exp backoff в `_download` |
-| 10 Refactor long methods | H-REF | PR1 ✅ `playback_eof.py`; PR2–4 открыты |
+| 10 Refactor long methods | H-REF | PR1–2 ✅ `playback_eof.py`, `playback_network.py`; PR3–4 открыты |
 | 11 Recovery queue | H-RQ | ✅ queue вместо `blocking=False` skip |
 | 12 Adaptive coalesce | H-COAL | сейчас фикс. 8s |
 | 13 ENV docs | P-DOC | ✅ `docs/ENVIRONMENT.md` |
@@ -139,6 +139,7 @@ Unit (mock IPC) → Integration (fake MPV) → API smoke → coverage report →
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-10 | H-REF PR2: `playback_network.py` — stream open, headers, midstream reload |
 | 2026-07-10 | H-REF PR1: `playback_eof.py` — EOF wait loop extracted from `playlist_management.py` |
 | 2026-07-09 | T-API + T-SCH: API smoke + schedule_service pytest |
 | 2026-07-08 | Перенесён в `docs/`; открытые задачи → `dsign_backlog.md` |
