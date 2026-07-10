@@ -159,6 +159,7 @@ udevadm trigger
 systemctl daemon-reload
 systemctl enable screenshot.service screenshot.timer 2>/dev/null || true
 systemctl start screenshot.timer 2>/dev/null || true
+systemctl enable dsign-update.timer 2>/dev/null || true
 if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
     systemctl enable seatd.service 2>/dev/null || true
     # Headless signage: logind creates /run/user/UID at boot (compositor also pre-creates it as root).
@@ -226,6 +227,7 @@ echo "Администратор: admin/admin123"
 echo "Сервисы:"
 echo "  Веб-интерфейс: systemctl status digital-signage.service"
 echo "  API token:     sudo dsign-api-token show   # GET /api/health Bearer auth"
+echo "  OTA:           sudo dsign-update check      # see docs/D1_OTA.md"
 if [ "$DSIGN_DISPLAY_BACKEND" = "wayland" ]; then
     echo "  Compositor:    systemctl status dsign-compositor.service"
     echo "  Logo (imv):    systemctl status dsign-logo.service"

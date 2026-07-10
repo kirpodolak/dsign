@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# DSign OTA self-update (backlog D1): check / download / apply / rollback.
+set -euo pipefail
+
+PROJECT_ROOT="${DSIGN_PROJECT_ROOT:-/home/dsign/dsign}"
+VENV="${DSIGN_VENV:-/home/dsign/venv}"
+PYTHON="${VENV}/bin/python3"
+if [ ! -x "$PYTHON" ]; then
+  PYTHON="$(command -v python3)"
+fi
+
+export DSIGN_PROJECT_ROOT="$PROJECT_ROOT"
+export DSIGN_VENV="$VENV"
+
+exec "$PYTHON" -m dsign.services.ota_update "$@"

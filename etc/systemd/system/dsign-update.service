@@ -1,0 +1,19 @@
+[Unit]
+Description=DSign OTA self-update (git + apply-install)
+Documentation=file:///home/dsign/dsign/docs/D1_OTA.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/dsign/ota.env
+Environment=DSIGN_PROJECT_ROOT=/home/dsign/dsign
+Environment=DSIGN_VENV=/home/dsign/venv
+ExecStart=/usr/local/bin/dsign-update auto --json
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dsign-update
+
+[Install]
+WantedBy=multi-user.target

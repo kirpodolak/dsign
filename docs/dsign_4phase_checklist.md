@@ -27,7 +27,7 @@
 | **B3** | `POST /api/playback/override` | ✅ сделано | main; плеер EMERG-001 OK |
 | **B4** | API Bearer token | ✅ сделано | fleet: health, status, play, stop, override, pause/seek/skip |
 | **B5** | Remote control (REST, не WS stub) | ✅ сделано | main; pause/seek/skip на плеере |
-| **D1** | `dsign-update` OTA | ⬜ не начато | зависит от **D0** |
+| **D1** | `dsign-update` OTA | ✅ код + timer | [D1_OTA.md](./D1_OTA.md) |
 | **D2** | Local schedule (SQLite) | ✅ сделано | PR #103–#107; offline 24 ч 🟡 |
 
 **Легенда:** ✅ сделано · 🟡 частично · ⬜ не начато
@@ -357,14 +357,16 @@ Pause/seek also work when MPV session is active after service restart (before th
 
 ### D1. dsign-update (Self-Update)
 
-**Статус:** ⬜ · **Требует D0**
+**Статус:** ✅ · **Требует D0**
 
-- [ ] `check` / `download` / `apply` / `rollback`
-- [ ] systemd timer (например 03:00)
-- [ ] apply вызывает `dsign-apply-install`, не только `git pull`
+- [x] `check` / `download` / `apply` / `rollback` / `auto`
+- [x] systemd timer `dsign-update.timer` (03:00)
+- [x] apply вызывает `dsign-apply-install`, не только `git pull`
 
-**Acceptance:**
+**Acceptance (на Pi):**
 - [ ] Update downtime < 5 мин; rollback < 2 мин; fail не ломает систему
+
+*Runbook:* [D1_OTA.md](./D1_OTA.md)
 
 ### D2. Local Schedule (SQLite)
 
@@ -397,7 +399,7 @@ Pause/seek also work when MPV session is active after service restart (before th
 | **A** | A1–A5 | Zero-gap локали, safe loadfile |
 | **C** | C1–C3 | Offline, audio-only, nested |
 | **B** | B1–B5 | Remote control + monitoring |
-| **D** | D1 ⬜ · D2 ✅ | OTA (⬜) + автономное расписание (✅) |
+| **D** | D1 ✅ · D2 ✅ | OTA + автономное расписание |
 
 ---
 
