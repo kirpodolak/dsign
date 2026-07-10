@@ -43,9 +43,9 @@ Login + mutating API endpoints: play/stop/screenshot/reboot/service restart — 
 
 Приоритет: `_audio_set()` / `amixer` без timeout.
 
-### 4. Upload → `H-UPL` (🟡)
+### 4. Upload → `H-UPL` ✅
 
-**Не делать:** базовый `MAX_CONTENT_LENGTH` (уже 1 GiB). Нужны: disk check до save, опционально streaming.
+Disk check до save (`upload_disk.py`). Streaming chunked save для ≥100MB и unknown size (`upload_stream.py`, env `DSIGN_UPLOAD_STREAM_THRESHOLD_BYTES`, `DSIGN_UPLOAD_CHUNK_BYTES`). Tests: `test_upload_disk.py`, `test_upload_stream.py`.
 
 ### 5. Wi-Fi SSID/password → `H-WIFI` ✅
 

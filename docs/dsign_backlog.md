@@ -91,7 +91,7 @@ flowchart TD
 | **H-RL** | Rate limiting API (play/stop/screenshot/reboot) | ✅ | improvement §2 | — |
 | **H-SUB** | Subprocess timeout audit (`amixer` и др.) | 🔴 | improvement §3 | — |
 | **H-WIFI** | SSID/password validation (1–32, WPA 8–63) | ✅ | improvement §5 | — |
-| **H-UPL** | Upload: disk check до save, streaming >100MB | 🟡 | improvement §4 | частично ✅ 1 GiB |
+| **H-UPL** | Upload: disk check до save, streaming >100MB | ✅ | improvement §4 | `upload_disk.py`, `upload_stream.py` |
 | **D2-OPS** | `DSIGN_API_TOKEN` на fleet + проверка schedule Bearer | 🟡 | 4phase D2, schedule §D2.5 | — |
 | **D2-24H** | Offline 24 ч — расписание по timezone | 🟡 | schedule §D2.4, 4phase D2 | — |
 | **C3** | Nested playlists (DB + flat play) | 🟡 | 4phase §C3 | — |
@@ -332,8 +332,8 @@ flowchart TD
 
 **Уже есть:** `MAX_CONTENT_LENGTH` 1 GiB, post-save size check.
 
-- [ ] Disk space check **до** сохранения файла
-- [ ] Streaming upload для больших файлов (опционально снизить лимит на Pi)
+- [x] Disk space check **до** сохранения файла (`upload_disk.py`)
+- [x] Streaming upload для больших файлов (`upload_stream.py`, chunked save ≥100MB / unknown size)
 
 *Источник:* improvement §4
 
@@ -371,7 +371,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **H-UPL** (streaming upload >100MB) или **H-MEM** (`_media_backoff` TTL)
+**Следующий PR по качеству:** **H-MEM** (`_media_backoff` TTL) или **H-PREF** (prefetch thread pool)
 
 ---
 
@@ -380,7 +380,7 @@ flowchart TD
 | Дата | Изменение |
 |------|-----------|
 | 2026-07-10 | H-SD ✅ (graceful shutdown: join playback thread, idle logo, MPV + DB cleanup; 3 pytest) |
-| 2026-07-10 | H-WIFI ✅ (SSID/password validation + 13 pytest cases) |
+| 2026-07-10 | H-UPL ✅ (disk check + streaming upload ≥100MB; `upload_stream.py`, 11 pytest) |
 | 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |
 | 2026-07-09 | T-AUD + T-CI ✅ (13 audio tests; workflow `.github/workflows/pytest.yml`, 58 total) |
 | 2026-07-09 | T-API + T-SCH ✅ (15 pytest cases) |

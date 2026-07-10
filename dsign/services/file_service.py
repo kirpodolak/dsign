@@ -14,6 +14,12 @@ from datetime import datetime
 from dsign.models import MediaFolder, MediaItemMeta
 from dsign.config.config import Config
 from dsign.services.upload_disk import check_disk_space_for_upload
+from dsign.services.upload_stream import (
+    UploadTooLargeError,
+    should_stream_upload,
+    stream_save_upload,
+    upload_size_hint,
+)
 from .logger import ServiceLogger
 
 class FileService:
@@ -211,9 +217,15 @@ class FileService:
             if not file or not file.filename:
                 continue
             try:
-                reported = self._upload_file_size(file)
+                reported = upload_size_hint(file)
             except Exception:
                 reported = None
+            use_streaming = should_stream_upload(reported)
+            if not use_streaming and reported is None:
+                try:
+                    reported = self._upload_file_size(file)
+                except Exception:
+                    reported = None
             if not self.allowed_file(file.filename, reported):
                 self._log_warning(
                     f"Rejected upload: {file.filename}",
@@ -240,8 +252,35 @@ class FileService:
                 if not filename:
                     continue
                 file_path = self.upload_folder / filename
-                file.save(str(file_path))
-                actual = file_path.stat().st_size
+                if use_streaming:
+                    stream = getattr(file, "stream", None)
+                    if stream is None:
+                        self._log_warning(
+                            f"Rejected upload without stream: {file.filename}",
+                            extra={'filename': file.filename, 'action': 'file_upload'},
+                        )
+                        continue
+                    try:
+                        actual = stream_save_upload(
+                            stream,
+                            file_path,
+                            max_bytes=self.MAX_MEDIA_SIZE,
+                        )
+                    except UploadTooLargeError as exc:
+                        file_path.unlink(missing_ok=True)
+                        self._log_warning(
+                            f"Removed oversized stream upload: {filename}",
+                            extra={
+                                'filename': filename,
+                                'size': exc.bytes_written,
+                                'action': 'file_upload',
+                                'streaming': True,
+                            },
+                        )
+                        continue
+                else:
+                    file.save(str(file_path))
+                    actual = file_path.stat().st_size
                 if actual > self.MAX_MEDIA_SIZE:
                     file_path.unlink(missing_ok=True)
                     self._log_warning(
