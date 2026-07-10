@@ -147,3 +147,43 @@ def test_bearer_health_endpoint(api_client):
     assert rv.status_code == 200
     body = rv.get_json()
     assert body.get("success") is True
+
+
+def test_bearer_can_read_schedule_week(api_client):
+    client, _app, _user, playlist = api_client
+    headers = {"Authorization": "Bearer test-bearer-token"}
+
+    client.post(
+        "/api/schedule/rules",
+        json=_weekly_rule_body(playlist.id),
+        headers=headers,
+    )
+
+    rv = client.get("/api/schedule/week?date=2026-07-07", headers=headers)
+
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body.get("success") is True
+    assert "instances" in body
+
+
+def test_bearer_can_read_schedule_now(api_client):
+    client, _app, _user, _playlist = api_client
+    headers = {"Authorization": "Bearer test-bearer-token"}
+
+    rv = client.get("/api/schedule/now", headers=headers)
+
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body.get("success") is True
+
+
+def test_bearer_return_to_schedule_without_csrf(api_client):
+    client, _app, _user, _playlist = api_client
+    headers = {"Authorization": "Bearer test-bearer-token"}
+
+    rv = client.post("/api/playback/return-to-schedule", headers=headers)
+
+    assert rv.status_code in (200, 409)
+    body = rv.get_json()
+    assert "success" in body
