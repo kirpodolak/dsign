@@ -89,7 +89,7 @@ flowchart TD
 | **T-SCH** | Unit/integration: `schedule_service`, exceptions, monthly | ✅ | schedule §10, 4phase D2 | — |
 | **T-AUD** | Integration: audio subsystem | ✅ | improvement §1.6 | T-IPC |
 | **H-RL** | Rate limiting API (play/stop/screenshot/reboot) | ✅ | improvement §2 | — |
-| **H-SUB** | Subprocess timeout audit (`amixer` и др.) | 🔴 | improvement §3 | — |
+| **H-SUB** | Subprocess timeout audit (`amixer` и др.) | ✅ | improvement §3 | `subprocess_limits.py`, `test_subprocess_audit.py` |
 | **H-WIFI** | SSID/password validation (1–32, WPA 8–63) | ✅ | improvement §5 | — |
 | **H-UPL** | Upload: disk check до save, streaming >100MB | ✅ | improvement §4 | `upload_disk.py`, `upload_stream.py` |
 | **D2-OPS** | `DSIGN_API_TOKEN` на fleet + проверка schedule Bearer | 🟡 | 4phase D2, schedule §D2.5 | — |
@@ -278,12 +278,14 @@ flowchart TD
 
 *Источник:* improvement §2
 
-### H-SUB — Subprocess timeouts
+### H-SUB — Subprocess timeouts ✅
 
-- [ ] `_audio_set()` → `amixer` с `timeout=3`
-- [ ] Audit остальных `subprocess.run` без timeout (`settings_service`, `api_routes` display apply, …)
-- [ ] `_run_nmcli` уже 20–45s — ок
+- [x] `_audio_set()` → `amixer` с `timeout=3` (`AMIXER_TIMEOUT_SEC`)
+- [x] Audit всех `subprocess.run` / `check_output` — AST gate `test_subprocess_audit.py`
+- [x] `_run_nmcli` 20–45s — ок
+- [x] `Popen` только с manual deadline (yt-dlp prefetch, ffmpeg transcode, wifi-on-display daemon)
 
+*Файлы:* `dsign/services/subprocess_limits.py`, `dsign/tests/test_subprocess_timeouts.py`, `dsign/tests/test_subprocess_audit.py`  
 *Источник:* improvement §3
 
 ### H-WIFI — Wi-Fi validation ✅
@@ -410,6 +412,7 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-10 | H-SUB ✅ (subprocess audit + pytest gate) |
 | 2026-07-10 | H-COAL ✅ (adaptive MPV restart coalesce; docs sync) |
 | 2026-07-10 | H-RQ ✅ (recovery queue; 3+1 pytest) |
 | 2026-07-10 | H-CACHE ✅ (ContentCache download retry backoff; 7 pytest) |
