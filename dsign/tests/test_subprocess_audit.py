@@ -1,4 +1,4 @@
-"""Static audit: every subprocess.run/check_output in prod code must pass timeout= (H-SUB)."""
+"""Static audit: subprocess.run/check_output in app code must pass timeout= (H-SUB)."""
 
 from __future__ import annotations
 
@@ -7,26 +7,53 @@ from pathlib import Path
 
 import pytest
 
-DSIGN_ROOT = Path(__file__).resolve().parents[1]
-SKIP_PARTS = frozenset({"tests", "__pycache__"})
+# Package root: .../dsign/ (parent of tests/)
+DSIGN_PKG_ROOT = Path(__file__).resolve().parents[1]
 
-# Long-running workers use Popen + manual deadline (not subprocess.run timeout).
-POPEN_ALLOWLIST = frozenset(
+# Only scan first-party app trees (not venv, dsign-new, site-packages, tests).
+SCAN_SUBDIRS = ("routes", "services")
+
+SKIP_DIR_NAMES = frozenset(
     {
-        "dsign/services/content_cache.py",  # yt-dlp prefetch loop
-        "dsign/services/file_service.py",  # ffmpeg transcode progress stream
-        "dsign/routes/api/api_routes.py",  # dsign-wifi-on-display daemon
+        "tests",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "site-packages",
+        "dsign-new",
+        "node_modules",
+        ".git",
+    }
+)
+
+# Popen with manual deadline — suffix paths inside the dsign package.
+POPEN_ALLOWLIST_SUFFIXES = frozenset(
+    {
+        "services/content_cache.py",  # yt-dlp prefetch loop
+        "services/file_service.py",  # ffmpeg transcode progress stream
+        "routes/api/api_routes.py",  # dsign-wifi-on-display daemon
     }
 )
 
 
+def _is_skipped(path: Path) -> bool:
+    return any(part in SKIP_DIR_NAMES for part in path.parts)
+
+
+def _rel_pkg_path(path: Path) -> str:
+    return path.relative_to(DSIGN_PKG_ROOT).as_posix()
+
+
 def _iter_prod_py_files() -> list[Path]:
     files: list[Path] = []
-    for path in sorted(DSIGN_ROOT.rglob("*.py")):
-        rel = path.relative_to(DSIGN_ROOT.parent)
-        if any(part in SKIP_PARTS for part in path.parts):
+    for sub in SCAN_SUBDIRS:
+        root = DSIGN_PKG_ROOT / sub
+        if not root.is_dir():
             continue
-        files.append(path)
+        for path in sorted(root.rglob("*.py")):
+            if _is_skipped(path):
+                continue
+            files.append(path)
     return files
 
 
@@ -35,7 +62,7 @@ def _calls_missing_timeout(path: Path) -> list[tuple[int, str]]:
     try:
         tree = ast.parse(src, filename=str(path))
     except SyntaxError as exc:
-        pytest.fail(f"syntax error in {path}: {exc}")
+        pytest.fail(f"syntax error in {_rel_pkg_path(path)}: {exc}")
 
     missing: list[tuple[int, str]] = []
     for node in ast.walk(tree):
@@ -54,9 +81,9 @@ def _calls_missing_timeout(path: Path) -> list[tuple[int, str]]:
     return missing
 
 
-def _popen_without_allowlist(path: Path) -> list[int]:
-    rel = str(path.relative_to(DSIGN_ROOT.parent)).replace("\\", "/")
-    if rel in POPEN_ALLOWLIST:
+def _popen_lines_without_allowlist(path: Path) -> list[int]:
+    rel = _rel_pkg_path(path)
+    if rel in POPEN_ALLOWLIST_SUFFIXES:
         return []
 
     src = path.read_text(encoding="utf-8", errors="ignore")
@@ -76,18 +103,38 @@ def _popen_without_allowlist(path: Path) -> list[int]:
     return lines
 
 
-@pytest.mark.parametrize("path", _iter_prod_py_files(), ids=lambda p: p.relative_to(DSIGN_ROOT.parent).as_posix())
-def test_subprocess_run_and_check_output_have_timeout(path: Path):
-    missing = _calls_missing_timeout(path)
-    assert not missing, (
-        f"{path.relative_to(DSIGN_ROOT.parent)}: subprocess calls without timeout=: {missing}"
+def test_subprocess_run_and_check_output_have_timeout():
+    """Every subprocess.run/check_output in routes/ + services/ must set timeout=."""
+    violations: list[str] = []
+    for path in _iter_prod_py_files():
+        missing = _calls_missing_timeout(path)
+        if missing:
+            rel = _rel_pkg_path(path)
+            violations.append(f"{rel}: {missing}")
+    assert not violations, "subprocess calls without timeout=:\n" + "\n".join(violations)
+
+
+def test_subprocess_popen_is_allowlisted_or_absent():
+    """Popen is only allowed on the manual-deadline allowlist."""
+    violations: list[str] = []
+    for path in _iter_prod_py_files():
+        popens = _popen_lines_without_allowlist(path)
+        if popens:
+            rel = _rel_pkg_path(path)
+            violations.append(f"{rel}: Popen at lines {popens}")
+    assert not violations, (
+        "unexpected subprocess.Popen (add deadline or allowlist suffix):\n"
+        + "\n".join(violations)
     )
 
 
-@pytest.mark.parametrize("path", _iter_prod_py_files(), ids=lambda p: p.relative_to(DSIGN_ROOT.parent).as_posix())
-def test_subprocess_popen_is_allowlisted_or_absent(path: Path):
-    popens = _popen_without_allowlist(path)
-    assert not popens, (
-        f"{path.relative_to(DSIGN_ROOT.parent)}: subprocess.Popen at lines {popens} "
-        f"— add manual deadline or extend POPEN_ALLOWLIST with justification"
-    )
+def test_subprocess_audit_scans_only_app_trees():
+    """Guard: audit must not pick up venv / site-packages on player workstations."""
+    scanned = {_rel_pkg_path(p) for p in _iter_prod_py_files()}
+    assert scanned, "expected at least one app .py file under routes/ or services/"
+    for rel in scanned:
+        parts = rel.split("/")
+        assert "site-packages" not in parts
+        assert "dsign-new" not in parts
+        assert ".venv" not in parts
+        assert "venv" not in parts
