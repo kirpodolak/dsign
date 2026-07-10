@@ -11,9 +11,13 @@ import os
 import socket
 import subprocess
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from threading import Lock, Thread
-from typing import Any, Dict, Optional
+from threading import Lock
+from typing import Any, Dict, Optional, Set
+
+from .content_cache_prefetch import prefetch_workers
+from .content_cache_retry import download_max_attempts, download_retry_delay_sec
 
 _CACHE_KEY_RE = __import__("re").compile(r"^ext-[A-Za-z0-9_-]+$")
 
@@ -24,7 +28,10 @@ class ContentCache:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._prefetch_lock = Lock()
-        self._active_prefetch: Dict[str, Thread] = {}
+        self._active_prefetch: Dict[str, Future] = {}
+        self._active_download_procs: Dict[str, subprocess.Popen] = {}
+        self._cancelled_prefetch: Set[str] = set()
+        self._prefetch_executor: Optional[ThreadPoolExecutor] = None
         self._internet_cache: Dict[str, Any] = {"ok": None, "ts": 0.0}
 
     # ------------------------------------------------------------------ config
@@ -70,6 +77,56 @@ class ContentCache:
 
     def _part_path(self, media_key: str) -> Path:
         return self.cache_dir / f"{media_key}.mp4.part"
+
+    def _get_prefetch_executor(self) -> ThreadPoolExecutor:
+        if self._prefetch_executor is None:
+            self._prefetch_executor = ThreadPoolExecutor(
+                max_workers=prefetch_workers(),
+                thread_name_prefix="content-cache-prefetch",
+            )
+        return self._prefetch_executor
+
+    def cancel_prefetches(self, *, except_keys: Optional[Set[str]] = None) -> int:
+        """Cancel in-flight prefetches (playlist change / stop)."""
+        keep = except_keys or set()
+        cancelled = 0
+        with self._prefetch_lock:
+            keys = [k for k in list(self._active_prefetch.keys()) if k not in keep]
+            for key in keys:
+                self._cancelled_prefetch.add(key)
+                proc = self._active_download_procs.get(key)
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                    except OSError:
+                        pass
+                fut = self._active_prefetch.get(key)
+                if fut is not None:
+                    fut.cancel()
+                cancelled += 1
+        return cancelled
+
+    def _is_prefetch_cancelled(self, media_key: str) -> bool:
+        with self._prefetch_lock:
+            return media_key in self._cancelled_prefetch
+
+    def _clear_prefetch_cancelled(self, media_key: str) -> None:
+        with self._prefetch_lock:
+            self._cancelled_prefetch.discard(media_key)
+
+    def _finish_prefetch(self, media_key: str) -> None:
+        with self._prefetch_lock:
+            self._active_prefetch.pop(media_key, None)
+            self._active_download_procs.pop(media_key, None)
+            self._cancelled_prefetch.discard(media_key)
+
+    def shutdown_prefetch_pool(self, *, wait: bool = False) -> None:
+        """Release prefetch worker threads (tests / process shutdown)."""
+        self.cancel_prefetches()
+        executor = self._prefetch_executor
+        if executor is not None:
+            executor.shutdown(wait=wait, cancel_futures=True)
+            self._prefetch_executor = None
 
     # ------------------------------------------------------------------ public
 
@@ -146,17 +203,18 @@ class ContentCache:
         if self.is_ready(key):
             return False
         with self._prefetch_lock:
-            t = self._active_prefetch.get(key)
-            if t is not None and t.is_alive():
+            fut = self._active_prefetch.get(key)
+            if fut is not None and not fut.done():
                 return False
-            thread = Thread(
-                target=self._prefetch_worker,
-                name=f"content-cache-{key}",
-                args=(key, url, str(provider or "")),
-                daemon=True,
-            )
-            self._active_prefetch[key] = thread
-            thread.start()
+            self._clear_prefetch_cancelled(key)
+        future = self._get_prefetch_executor().submit(
+            self._prefetch_worker,
+            key,
+            url,
+            str(provider or ""),
+        )
+        with self._prefetch_lock:
+            self._active_prefetch[key] = future
         return True
 
     def get_status_summary(self) -> Dict[str, Any]:
@@ -178,12 +236,17 @@ class ContentCache:
             "cached_items": ready,
             "cache_size_mb": round(total_bytes / (1024 * 1024), 1),
             "cache_dir": str(self.cache_dir),
+            "active_prefetches": sum(
+                1 for fut in self._active_prefetch.values() if fut is not None and not fut.done()
+            ),
         }
 
     # ------------------------------------------------------------------ workers
 
     def _prefetch_worker(self, media_key: str, page_url: str, provider: str) -> None:
         try:
+            if self._is_prefetch_cancelled(media_key):
+                return
             if not self.has_internet(force=True):
                 return
             self._download(media_key, page_url, provider)
@@ -197,10 +260,55 @@ class ContentCache:
                 },
             )
         finally:
-            with self._prefetch_lock:
-                self._active_prefetch.pop(media_key, None)
+            self._finish_prefetch(media_key)
+
+    def _wait_download_retry(self, media_key: str, delay_sec: float) -> bool:
+        """Sleep until delay elapses unless prefetch was cancelled."""
+        deadline = time.monotonic() + max(0.0, float(delay_sec))
+        while time.monotonic() < deadline:
+            if self._is_prefetch_cancelled(media_key):
+                return False
+            time.sleep(min(0.25, deadline - time.monotonic()))
+        return not self._is_prefetch_cancelled(media_key)
 
     def _download(self, media_key: str, page_url: str, provider: str) -> bool:
+        if self._is_prefetch_cancelled(media_key):
+            return False
+        if self.is_ready(media_key):
+            return True
+        ytdl = self._ytdl_path()
+        if not os.path.isfile(ytdl):
+            self.logger.warning("Content cache: yt-dlp missing", extra={"path": ytdl})
+            return False
+
+        max_attempts = download_max_attempts()
+        for attempt in range(1, max_attempts + 1):
+            if self._is_prefetch_cancelled(media_key):
+                return False
+            if self._download_once(media_key, page_url, provider):
+                return True
+            if attempt >= max_attempts:
+                self.logger.warning(
+                    "Content cache: download exhausted retries",
+                    extra={"media_key": media_key, "attempts": attempt},
+                )
+                return False
+            delay = download_retry_delay_sec(attempt)
+            self.logger.info(
+                "Content cache: download retry scheduled",
+                extra={
+                    "media_key": media_key,
+                    "next_attempt": attempt + 1,
+                    "delay_sec": round(delay, 2),
+                },
+            )
+            if not self._wait_download_retry(media_key, delay):
+                return False
+        return False
+
+    def _download_once(self, media_key: str, page_url: str, provider: str) -> bool:
+        if self._is_prefetch_cancelled(media_key):
+            return False
         out_path = self._media_path(media_key)
         part_path = self._part_path(media_key)
         if self.is_ready(media_key):
@@ -232,8 +340,45 @@ class ContentCache:
         except ValueError:
             timeout = 7200.0
         timeout = max(120.0, min(14400.0, timeout))
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if proc.returncode != 0:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        with self._prefetch_lock:
+            self._active_download_procs[media_key] = proc
+        deadline = time.monotonic() + timeout
+        return_code = None
+        try:
+            while True:
+                if self._is_prefetch_cancelled(media_key):
+                    try:
+                        proc.terminate()
+                    except OSError:
+                        pass
+                    part_path.unlink(missing_ok=True)
+                    return False
+                if proc.poll() is not None:
+                    return_code = int(proc.returncode or 0)
+                    break
+                if time.monotonic() >= deadline:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                    part_path.unlink(missing_ok=True)
+                    self.logger.warning(
+                        "Content cache: yt-dlp download timed out",
+                        extra={"media_key": media_key},
+                    )
+                    return False
+                time.sleep(0.25)
+        finally:
+            with self._prefetch_lock:
+                self._active_download_procs.pop(media_key, None)
+        stderr_tail = ""
+        try:
+            _, stderr_data = proc.communicate(timeout=1.0)
+            stderr_tail = (stderr_data or "")[-400:]
+        except Exception:
+            pass
+        if return_code != 0:
             part_path.unlink(missing_ok=True)
             for stray in self.cache_dir.glob(f"{media_key}.*"):
                 if stray.suffix in (".part", ".temp", ".ytdl"):
@@ -242,7 +387,7 @@ class ContentCache:
                 "Content cache: yt-dlp download failed",
                 extra={
                     "media_key": media_key,
-                    "stderr": (proc.stderr or "")[-400:],
+                    "stderr": stderr_tail,
                 },
             )
             return False
