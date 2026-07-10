@@ -11,7 +11,7 @@
 
 | Место | Назначение |
 |-------|------------|
-| `/etc/dsign/api.env` | `DSIGN_API_TOKEN` (Bearer для API / fleet). Шаблон: `etc/dsign/api.env.example` |
+| `/etc/dsign/api.env` | `DSIGN_API_TOKEN` (Bearer для API / fleet). Шаблон: `etc/dsign/api.env.example`. Runbook: [D2_OPS_FLEET.md](./D2_OPS_FLEET.md) |
 | `/var/lib/dsign/config/wayland.env` | Wayland / DRM / MPV display. Шаблон: `etc/dsign/wayland.env.example` |
 | `/var/lib/dsign/config/network-assistant.env` | Wi‑Fi assistant на экране (пишет Settings API) |
 | `digital-signage.service` / drop-in | Переменные Flask-приложения (`EnvironmentFile=`) |
