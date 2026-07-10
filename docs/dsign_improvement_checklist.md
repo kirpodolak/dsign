@@ -47,9 +47,9 @@ Login + mutating API endpoints: play/stop/screenshot/reboot/service restart — 
 
 **Не делать:** базовый `MAX_CONTENT_LENGTH` (уже 1 GiB). Нужны: disk check до save, опционально streaming.
 
-### 5. Wi-Fi SSID/password → `H-WIFI`
+### 5. Wi-Fi SSID/password → `H-WIFI` ✅
 
-Расширить валидацию в `connect_wifi_network`.
+`validate_wifi_ssid` / `validate_wifi_password` — `wifi_validation.py`, `test_wifi_validation.py`; endpoint `POST /api/system/network/wifi/connect`.
 
 ---
 

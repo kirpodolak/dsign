@@ -21,6 +21,7 @@ from dsign.models import (
 )
 from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
 from dsign.services.playback_constants import PlaybackConstants
+from dsign.services.wifi_validation import validate_wifi_password, validate_wifi_ssid
 from dsign.services.api_token_auth import api_session_or_token_required
 from dsign.services.api_rate_limit import (
     RATE_LIMIT_PLAYBACK_PLAY,
@@ -1537,17 +1538,26 @@ def init_api_routes(api_bp, services):
 
         try:
             data = request.get_json(silent=True) or {}
-            ssid = str(data.get("ssid", "")).strip()
+            ssid_raw = str(data.get("ssid", ""))
             password_raw = data.get("password")
             password = str(password_raw) if password_raw is not None else None
             hidden = bool(data.get("hidden", False))
 
-            if not ssid:
+            ok_ssid, ssid_error = validate_wifi_ssid(ssid_raw)
+            if not ok_ssid:
                 return jsonify({
                     "success": False,
-                    "error": "SSID is required",
+                    "error": ssid_error,
                 }), 400
 
+            ok_password, password_error = validate_wifi_password(password)
+            if not ok_password:
+                return jsonify({
+                    "success": False,
+                    "error": password_error,
+                }), 400
+
+            ssid = ssid_raw.strip()
             ok, message = _connect_wifi(ssid=ssid, password=password, hidden=hidden)
             if not ok:
                 return jsonify({

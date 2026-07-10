@@ -90,7 +90,7 @@ flowchart TD
 | **T-AUD** | Integration: audio subsystem | ✅ | improvement §1.6 | T-IPC |
 | **H-RL** | Rate limiting API (play/stop/screenshot/reboot) | ✅ | improvement §2 | — |
 | **H-SUB** | Subprocess timeout audit (`amixer` и др.) | 🔴 | improvement §3 | — |
-| **H-WIFI** | SSID/password validation (1–32, WPA 8–63) | 🔴 | improvement §5 | — |
+| **H-WIFI** | SSID/password validation (1–32, WPA 8–63) | ✅ | improvement §5 | — |
 | **H-UPL** | Upload: disk check до save, streaming >100MB | 🟡 | improvement §4 | частично ✅ 1 GiB |
 | **D2-OPS** | `DSIGN_API_TOKEN` на fleet + проверка schedule Bearer | 🟡 | 4phase D2, schedule §D2.5 | — |
 | **D2-24H** | Offline 24 ч — расписание по timezone | 🟡 | schedule §D2.4, 4phase D2 | — |
@@ -286,13 +286,14 @@ flowchart TD
 
 *Источник:* improvement §3
 
-### H-WIFI — Wi-Fi validation
+### H-WIFI — Wi-Fi validation ✅
 
-- [ ] SSID: 1–32 символа, без control chars
-- [ ] WPA password: 8–63 (если задан)
-- [ ] Reject empty (уже есть) — расширить валидацию
+- [x] SSID: 1–32 UTF-8 bytes, без control chars
+- [x] WPA password: 8–63 (если задан; пустой/`null` — open network)
+- [x] Reject empty SSID (как раньше)
 
-*Сейчас:* только `strip()` + not empty (`connect_wifi_network`).
+*Файлы:* `dsign/services/wifi_validation.py`, `dsign/tests/test_wifi_validation.py`  
+*Endpoint:* `POST /api/system/network/wifi/connect`
 
 *Источник:* improvement §5
 
@@ -370,7 +371,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **H-SUB** (subprocess timeouts) или **H-WIFI**
+**Следующий PR по качеству:** **H-SUB** (subprocess timeouts) или **H-UPL** (upload disk check)
 
 ---
 
@@ -378,6 +379,7 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-10 | H-WIFI ✅ (SSID/password validation + 13 pytest cases) |
 | 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |
 | 2026-07-09 | T-AUD + T-CI ✅ (13 audio tests; workflow `.github/workflows/pytest.yml`, 58 total) |
 | 2026-07-09 | T-API + T-SCH ✅ (15 pytest cases) |
