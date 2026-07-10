@@ -86,6 +86,7 @@ ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `ca
 | 10 Refactor long methods | H-REF | **только после** T-* |
 | 11 Recovery queue | H-RQ | ✅ queue вместо `blocking=False` skip |
 | 12 Adaptive coalesce | H-COAL | сейчас фикс. 8s |
+| 13 ENV docs | P-DOC | ✅ `docs/ENVIRONMENT.md` |
 
 ---
 
@@ -93,7 +94,6 @@ ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `ca
 
 | § | Backlog |
 |---|---------|
-| 13 ENV docs | P-DOC |
 | 14 mypy strict | P-TYP |
 | 15 Central config | P-CFG (расширить существующий `Config`) |
 | 17 Metrics dashboard | P-UI (база: `GET /api/health` ✅) |
