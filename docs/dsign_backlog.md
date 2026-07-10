@@ -91,7 +91,7 @@ flowchart TD
 | **H-RL** | Rate limiting API (play/stop/screenshot/reboot) | ✅ | improvement §2 | — |
 | **H-SUB** | Subprocess timeout audit (`amixer` и др.) | 🔴 | improvement §3 | — |
 | **H-WIFI** | SSID/password validation (1–32, WPA 8–63) | ✅ | improvement §5 | — |
-| **H-UPL** | Upload: disk check до save, streaming >100MB | 🟡 | improvement §4 | частично ✅ 1 GiB |
+| **H-UPL** | Upload: disk check до save, streaming >100MB | 🟡 | improvement §4 | disk check ✅ |
 | **D2-OPS** | `DSIGN_API_TOKEN` на fleet + проверка schedule Bearer | 🟡 | 4phase D2, schedule §D2.5 | — |
 | **D2-24H** | Offline 24 ч — расписание по timezone | 🟡 | schedule §D2.4, 4phase D2 | — |
 | **C3** | Nested playlists (DB + flat play) | 🟡 | 4phase §C3 | — |
@@ -332,8 +332,11 @@ flowchart TD
 
 **Уже есть:** `MAX_CONTENT_LENGTH` 1 GiB, post-save size check.
 
-- [ ] Disk space check **до** сохранения файла
+- [x] Disk space check **до** сохранения файла (`upload_disk.py` → `FileService.handle_upload` / `handle_logo_upload`)
 - [ ] Streaming upload для больших файлов (опционально снизить лимит на Pi)
+
+*Env:* `DSIGN_UPLOAD_DISK_RESERVE_BYTES` (default 50 MiB headroom)  
+*Файлы:* `dsign/services/upload_disk.py`, `dsign/tests/test_upload_disk.py`
 
 *Источник:* improvement §4
 
@@ -371,7 +374,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **H-SUB** (subprocess timeouts) или **H-UPL** (upload disk check)
+**Следующий PR по качеству:** **H-SD** (graceful shutdown) или streaming upload (H-UPL tail)
 
 ---
 
@@ -379,6 +382,7 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-10 | H-UPL disk check ✅ (7 pytest cases; streaming upload still open) |
 | 2026-07-10 | H-WIFI ✅ (SSID/password validation + 13 pytest cases) |
 | 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |
 | 2026-07-09 | T-AUD + T-CI ✅ (13 audio tests; workflow `.github/workflows/pytest.yml`, 58 total) |
