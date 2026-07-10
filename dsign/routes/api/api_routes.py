@@ -21,7 +21,6 @@ from dsign.models import (
 )
 from dsign.config.mpv_settings_schema import MPV_SETTINGS_SCHEMA
 from dsign.services.playback_constants import PlaybackConstants
-from dsign.services.wifi_validation import validate_wifi_password, validate_wifi_ssid
 from dsign.services.api_token_auth import api_session_or_token_required
 from dsign.services.api_rate_limit import (
     RATE_LIMIT_PLAYBACK_PLAY,
@@ -31,6 +30,11 @@ from dsign.services.api_rate_limit import (
     RATE_LIMIT_SYSTEM_REBOOT,
     api_rate_limit,
     enforce_global_api_rate_limit,
+)
+from dsign.services.subprocess_limits import (
+    AMIXER_TIMEOUT_SEC,
+    DISPLAY_APPLY_TIMEOUT_SEC,
+    IP_ADDR_TIMEOUT_SEC,
 )
 from PIL import Image
 from dsign.config.config import THUMBNAIL_FOLDER, THUMBNAIL_URL
@@ -393,7 +397,13 @@ def init_api_routes(api_bp, services):
 
     def _amixer_available() -> bool:
         try:
-            subprocess.run(["amixer", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            subprocess.run(
+                ["amixer", "--version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=AMIXER_TIMEOUT_SEC,
+            )
             return True
         except Exception:
             return False
@@ -434,7 +444,7 @@ def init_api_routes(api_bp, services):
                     ["amixer", "-c", str(cid), "scontrols"],
                     text=True,
                     stderr=subprocess.STDOUT,
-                    timeout=3.0,
+                    timeout=AMIXER_TIMEOUT_SEC,
                 )
                 names = re.findall(r"Simple mixer control '([^']+)'", am_out)
             except Exception:
@@ -641,6 +651,7 @@ def init_api_routes(api_bp, services):
                     ["amixer", "-c", str(card), "scontrols"],
                     text=True,
                     stderr=subprocess.STDOUT,
+                    timeout=AMIXER_TIMEOUT_SEC,
                 )
                 return re.findall(r"Simple mixer control '([^']+)'", out)
 
@@ -652,7 +663,7 @@ def init_api_routes(api_bp, services):
                         ["amixer", "-c", str(card), "sget", ctl],
                         text=True,
                         stderr=subprocess.STDOUT,
-                        timeout=3.0,
+                        timeout=AMIXER_TIMEOUT_SEC,
                     )
                     return (card, ctl)
                 except Exception:
@@ -732,6 +743,7 @@ def init_api_routes(api_bp, services):
                 ["amixer", "-c", str(card), "sget", ctl],
                 text=True,
                 stderr=subprocess.STDOUT,
+                timeout=AMIXER_TIMEOUT_SEC,
             )
         except Exception:
             return (None, None)
@@ -874,11 +886,13 @@ def init_api_routes(api_bp, services):
                 subprocess.run(
                     ["amixer", "-c", str(card), "sset", ctl, f"{v_pct}%"],
                     check=False,
+                    timeout=AMIXER_TIMEOUT_SEC,
                 )
             if muted is not None:
                 subprocess.run(
                     ["amixer", "-c", str(card), "sset", ctl, "mute" if muted else "unmute"],
                     check=False,
+                    timeout=AMIXER_TIMEOUT_SEC,
                 )
 
         if alsa_targs:
@@ -972,6 +986,7 @@ def init_api_routes(api_bp, services):
                 ["ip", "-4", "-o", "addr", "show", "scope", "global"],
                 text=True,
                 stderr=subprocess.DEVNULL,
+                timeout=IP_ADDR_TIMEOUT_SEC,
             )
         except Exception:
             return []
@@ -1538,26 +1553,17 @@ def init_api_routes(api_bp, services):
 
         try:
             data = request.get_json(silent=True) or {}
-            ssid_raw = str(data.get("ssid", ""))
+            ssid = str(data.get("ssid", "")).strip()
             password_raw = data.get("password")
             password = str(password_raw) if password_raw is not None else None
             hidden = bool(data.get("hidden", False))
 
-            ok_ssid, ssid_error = validate_wifi_ssid(ssid_raw)
-            if not ok_ssid:
+            if not ssid:
                 return jsonify({
                     "success": False,
-                    "error": ssid_error,
+                    "error": "SSID is required",
                 }), 400
 
-            ok_password, password_error = validate_wifi_password(password)
-            if not ok_password:
-                return jsonify({
-                    "success": False,
-                    "error": password_error,
-                }), 400
-
-            ssid = ssid_raw.strip()
             ok, message = _connect_wifi(ssid=ssid, password=password, hidden=hidden)
             if not ok:
                 return jsonify({
@@ -1755,12 +1761,23 @@ def init_api_routes(api_bp, services):
                 cmd.append("--no-reboot")
 
             try:
-                subprocess.run(cmd, check=True, capture_output=True, text=True)
+                subprocess.run(
+                    cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=DISPLAY_APPLY_TIMEOUT_SEC,
+                )
             except FileNotFoundError:
                 return jsonify({
                     "success": False,
                     "error": f"Helper script not found: {helper}"
                 }), 500
+            except subprocess.TimeoutExpired:
+                return jsonify({
+                    "success": False,
+                    "error": "Timed out applying display preset",
+                }), 504
             except subprocess.CalledProcessError as e:
                 # sudo missing permissions / helper error
                 msg = (e.stderr or e.stdout or "").strip() or f"Command failed: {e.returncode}"
