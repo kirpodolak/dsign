@@ -96,12 +96,12 @@ flowchart TD
 | **D2-24H** | Offline 24 ч — расписание по timezone | 🟡 | schedule §D2.4, 4phase D2 | — |
 | **C3** | Nested playlists (DB + flat play) | 🟡 | 4phase §C3 | — |
 | **H-SD** | Graceful shutdown playback (join thread, logo, DB) | ✅ | improvement §6 | `graceful_shutdown`, `DSIGN_SHUTDOWN_JOIN_SEC` |
-| **H-MEM** | `_media_backoff` TTL cleanup | ✅ | improvement §7 | `media_backoff.py` |
-| **H-PREF** | ContentCache: thread pool + cancel on playlist change | ✅ | improvement §8 | `content_cache_prefetch.py` |
-| **H-CACHE** | ContentCache download retry (exp backoff) | ✅ | improvement §9 | `content_cache_retry.py` |
+| **H-MEM** | `_media_backoff` TTL cleanup | 🟡 | improvement §7 | — |
+| **H-PREF** | ContentCache: thread pool + cancel on playlist change | 🟡 | improvement §8 | — |
+| **H-CACHE** | ContentCache download retry (exp backoff) | 🟡 | improvement §9 | — |
 | **H-REF** | Refactor длинных методов (после тестов) | 🟡 | improvement §10 | T-* |
 | **H-RQ** | Recovery queue вместо `blocking=False` skip | 🟡 | improvement §11 | — |
-| **H-COAL** | Adaptive `DSIGN_MPV_RESTART_COALESCE_SEC` | 🟡 | improvement §12 | — |
+| **H-COAL** | Adaptive `DSIGN_MPV_RESTART_COALESCE_SEC` | ✅ | improvement §12 | `mpv_restart_coalesce.py` |
 | **P-DOC** | `docs/ENVIRONMENT.md` (env vars) | 🟢 | improvement §13 | — |
 | **P-TYP** | mypy strict на critical paths | 🟢 | improvement §14 | — |
 | **P-CFG** | Расширить `Config`, убрать дубли `os.getenv` | 🟢 | improvement §15 | частично ✅ |
@@ -346,23 +346,14 @@ flowchart TD
 
 *Источник:* improvement §6
 
-### H-PREF — ContentCache prefetch pool
+### H-COAL — Adaptive MPV restart coalesce
 
-- [x] `ThreadPoolExecutor` вместо thread-per-URL (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`, default 1)
-- [x] `cancel_prefetches()` при play/stop (playlist change)
-- [x] Прерывание yt-dlp subprocess при cancel
+- [x] Coalesce window scales with IPC fail streak (`DSIGN_MPV_RESTART_COALESCE_SEC` base, `DSIGN_MPV_RESTART_COALESCE_MAX_SEC` cap)
+- [x] `MPVManager._restart_coalesce_window_sec()` used for systemd restart paths
 
-*Источник:* improvement §8
+*Источник:* improvement §12
 
-### H-CACHE — ContentCache download retry
-
-- [x] Exponential backoff retries in `_download` (`DSIGN_CONTENT_CACHE_DOWNLOAD_ATTEMPTS`, default 3)
-- [x] Env: `DSIGN_CONTENT_CACHE_RETRY_BASE_SEC`, `DSIGN_CONTENT_CACHE_RETRY_MAX_SEC`
-- [x] Respect prefetch cancel during retry wait
-
-*Источник:* improvement §9
-
-### H-RQ, H-COAL
+### H-RQ
 
 См. [improvement §7–12](./dsign_improvement_checklist.md) — без дублирования текста.
 
@@ -387,7 +378,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **H-RQ** (recovery queue) или **H-COAL** (adaptive MPV restart coalesce)
+**Следующий PR по качеству:** **H-RQ** (recovery queue) или **H-REF** (после T-*)
 
 ---
 
@@ -395,8 +386,9 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-10 | H-COAL ✅ (adaptive MPV restart coalesce; 7 pytest) |
 | 2026-07-10 | H-SD ✅ (graceful shutdown: join playback thread, idle logo, MPV + DB cleanup; 3 pytest) |
-| 2026-07-10 | H-CACHE ✅ (ContentCache download retry backoff; 7 pytest) |
+| 2026-07-10 | H-UPL ✅ (disk check + streaming upload ≥100MB; `upload_stream.py`, 11 pytest) |
 | 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |
 | 2026-07-09 | T-AUD + T-CI ✅ (13 audio tests; workflow `.github/workflows/pytest.yml`, 58 total) |
 | 2026-07-09 | T-API + T-SCH ✅ (15 pytest cases) |
