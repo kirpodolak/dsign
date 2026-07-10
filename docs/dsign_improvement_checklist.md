@@ -55,6 +55,14 @@ Disk check до save (`upload_disk.py`). Streaming chunked save для ≥100MB 
 
 SIGTERM/SIGINT → `PlaybackService.graceful_shutdown()`: schedule stop, `playlist_manager.stop(join_timeout=…)`, idle logo, `mpv_manager.shutdown()`, `db.session.remove()`. Env: `DSIGN_SHUTDOWN_JOIN_SEC` (1–60s, default 8). Tests: `test_playback_graceful_shutdown.py`.
 
+### 7. Memory leaks → `H-MEM` ✅
+
+`_media_backoff` TTL prune — `media_backoff.py`, `DSIGN_MEDIA_BACKOFF_TTL_SEC`. Tests: `test_media_backoff_ttl.py`.
+
+### 8. Prefetch pool → `H-PREF` ✅
+
+ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `cancel_prefetches()` on playlist play/stop. Tests: `test_content_cache_prefetch.py`.
+
 ---
 
 ## 🟡 Should have (открыто)
@@ -64,8 +72,8 @@ SIGTERM/SIGINT → `PlaybackService.graceful_shutdown()`: schedule stop, `playli
 | § | Backlog | Примечание |
 |---|---------|------------|
 | 6 Graceful shutdown | H-SD | ✅ `graceful_shutdown`, join thread, idle logo, DB cleanup |
-| 7 Memory leaks | H-MEM | `_media_backoff` без TTL |
-| 8 Prefetch pool | H-PREF | сейчас thread per URL |
+| 7 Memory leaks | H-MEM | ✅ TTL prune `_media_backoff` |
+| 8 Prefetch pool | H-PREF | ✅ thread pool + cancel on playlist change |
 | 9 Cache retry | H-CACHE | нет exp backoff в `_download` |
 | 10 Refactor long methods | H-REF | **только после** T-* |
 | 11 Recovery queue | H-RQ | `blocking=False` skip |
