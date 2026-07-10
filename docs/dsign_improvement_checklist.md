@@ -83,7 +83,7 @@ ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `ca
 | 7 Memory leaks | H-MEM | ✅ TTL prune `_media_backoff` |
 | 8 Prefetch pool | H-PREF | ✅ thread pool + cancel on playlist change |
 | 9 Cache retry | H-CACHE | ✅ exp backoff в `_download` |
-| 10 Refactor long methods | H-REF | PR1–3 ✅ (`playback_eof/network/slideshow`); PR4 открыт |
+| 10 Refactor long methods | H-REF | ✅ PR1–4 (`playback_eof/network/slideshow/play`) |
 | 11 Recovery queue | H-RQ | ✅ queue вместо `blocking=False` skip |
 | 12 Adaptive coalesce | H-COAL | сейчас фикс. 8s |
 | 13 ENV docs | P-DOC | ✅ `docs/ENVIRONMENT.md` |
@@ -139,7 +139,7 @@ Unit (mock IPC) → Integration (fake MPV) → API smoke → coverage report →
 
 | Дата | Изменение |
 |------|-----------|
-| 2026-07-10 | H-REF PR3: `playback_slideshow.py` — mixed playlist manual loop |
+| 2026-07-10 | H-REF PR4: `playback_play.py` — play routing; H-REF series complete |
 | 2026-07-08 | T-IPC: unit tests + reader stale-socket fix |
 | 2026-07-09 | T-API + T-SCH: API smoke + schedule_service pytest |
 | 2026-07-08 | Перенесён в `docs/`; открытые задачи → `dsign_backlog.md` |
