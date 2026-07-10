@@ -20,6 +20,7 @@ def test_environment_doc_covers_key_vars():
         "DSIGN_RECOVERY_QUEUE_MAX",
         "DSIGN_CONTENT_CACHE_ENABLED",
         "DSIGN_MPV_RESTART_COALESCE_SEC",
+        "DSIGN_OTA_ENABLED",
     ):
         assert var in text, f"{var} not documented in ENVIRONMENT.md"
 
@@ -28,3 +29,11 @@ def test_environment_doc_covers_deployment_paths():
     text = _ENV_DOC.read_text(encoding="utf-8")
     assert "/etc/dsign/api.env" in text
     assert "wayland.env" in text
+
+
+def test_d1_ota_doc_exists():
+    path = _REPO_ROOT / "docs" / "D1_OTA.md"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    assert "dsign-update" in text
+    assert "dsign-apply-install" in text

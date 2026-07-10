@@ -12,6 +12,7 @@
 | Место | Назначение |
 |-------|------------|
 | `/etc/dsign/api.env` | `DSIGN_API_TOKEN` (Bearer для API / fleet). Шаблон: `etc/dsign/api.env.example`. Runbook: [D2_OPS_FLEET.md](./D2_OPS_FLEET.md) |
+| `/etc/dsign/ota.env` | OTA (`dsign-update`). Шаблон: `etc/dsign/ota.env.example`. Runbook: [D1_OTA.md](./D1_OTA.md) |
 | `/var/lib/dsign/config/wayland.env` | Wayland / DRM / MPV display. Шаблон: `etc/dsign/wayland.env.example` |
 | `/var/lib/dsign/config/network-assistant.env` | Wi‑Fi assistant на экране (пишет Settings API) |
 | `digital-signage.service` / drop-in | Переменные Flask-приложения (`EnvironmentFile=`) |
@@ -51,6 +52,17 @@
 | `DSIGN_API_TOKEN` | — | Bearer token для `/api/*` (schedule, health, play/stop). Файл: `/etc/dsign/api.env` |
 
 Rate limits (**H-RL**) заданы константами в `dsign/services/api_rate_limit.py` (не env): play 5/min, stop 10/min, screenshot 6/min, service restart 3/min, reboot 1/h, global 100/min.
+
+## OTA (D1)
+
+| Переменная | Default | Описание |
+|------------|---------|----------|
+| `DSIGN_OTA_ENABLED` | `1` | `0` — отключить `dsign-update auto` |
+| `DSIGN_OTA_BRANCH` | `main` | Ветка git для OTA |
+| `DSIGN_OTA_REMOTE` | `origin` | Git remote |
+| `DSIGN_OTA_DIR` | `/var/lib/dsign/ota` | state.json / rollback.json |
+
+Timer: `dsign-update.timer` (03:00). См. [D1_OTA.md](./D1_OTA.md).
 
 ---
 

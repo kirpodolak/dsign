@@ -80,7 +80,7 @@ flowchart TD
 
 | ID | Задача | 🔴🟡🟢 | Источник | Зависимости |
 |----|--------|--------|----------|-------------|
-| **D1** | `dsign-update` OTA (check/download/apply/rollback + timer) | 🔴 | 4phase §D1 | D0 |
+| **D1** | `dsign-update` OTA (check/download/apply/rollback + timer) | ✅ | 4phase §D1 | D0 |
 | **T-CI** | GitHub Actions: `pytest` на PR | ✅ | improvement §1 | — |
 | **T-IPC** | Unit: `MpvJsonIpcSession` | ✅ | improvement §1.1 | — |
 | **T-MPV** | Unit: `MPVManager._send_command()` | ✅ | improvement §1.2 | T-IPC |
@@ -172,13 +172,14 @@ flowchart TD
 
 ## P0 — Продукт и блокеры production
 
-### D1 — `dsign-update` OTA
+### D1 — `dsign-update` OTA ✅
 
-- [ ] `check` / `download` / `apply` / `rollback`
-- [ ] systemd timer (например 03:00)
-- [ ] `apply` вызывает `dsign-apply-install`, не только `git pull`
-- [ ] Acceptance: downtime < 5 мин; rollback < 2 мин; fail не ломает систему
+- [x] `check` / `download` / `apply` / `rollback` + `auto`
+- [x] systemd timer `dsign-update.timer` (03:00)
+- [x] `apply` вызывает `dsign-apply-install`, не только `git pull`
+- [ ] Acceptance на Pi: downtime < 5 мин; rollback < 2 мин
 
+*Файлы:* `dsign/services/ota_update.py`, `usr/local/bin/dsign-update`, `etc/systemd/system/dsign-update.{service,timer}`, [D1_OTA.md](./D1_OTA.md)  
 *Источник:* [4phase §D1](./dsign_4phase_checklist.md)
 
 ### T-CI — Continuous Integration ✅
@@ -415,9 +416,8 @@ Extract-only refactor `playlist_management.py` → отдельные модул
 4. Закрыли → [x] здесь + в источнике + PR в колонке коммита
 ```
 
-**Следующий логичный PR по продукту:** **D1 OTA**  
-**Следующий ops на fleet:** **D2-OPS** (`DSIGN_API_TOKEN` + schedule Bearer)  
-**Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**
+**Следующий ops на fleet:** **D2-OPS** ([D2_OPS_FLEET.md](./D2_OPS_FLEET.md))  
+**Следующий продукт:** **C3** nested playlists или **COM v1.0**
 
 ---
 
@@ -426,7 +426,7 @@ Extract-only refactor `playlist_management.py` → отдельные модул
 | Дата | Изменение |
 |------|-----------|
 | 2026-07-10 | Docs sync: H-REF ✅, 170 pytest, Tier 2 partial, порядок → D1 OTA |
-| 2026-07-10 | H-COAL ✅ (adaptive MPV restart coalesce; docs sync) |
+| 2026-07-10 | D1 OTA ✅: dsign-update + timer + docs/D1_OTA.md |
 | 2026-07-10 | H-RQ ✅ (recovery queue; 3+1 pytest) |
 | 2026-07-10 | H-CACHE ✅ (ContentCache download retry backoff; 7 pytest) |
 | 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |

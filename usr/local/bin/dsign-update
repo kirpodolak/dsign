@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# DSign OTA self-update (backlog D1): check / download / apply / rollback.
+set -euo pipefail
+
+_wants_json() {
+  case " $* " in
+    *" --json "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_json_error() {
+  local msg="$1"
+  printf '{"success":false,"error":"%s"}\n' "$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
+# sudo does not load systemd EnvironmentFile — read fleet config here.
+if [ -f /etc/dsign/ota.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source /etc/dsign/ota.env
+  set +a
+fi
+
+PROJECT_ROOT="${DSIGN_PROJECT_ROOT:-/home/dsign/dsign}"
+VENV="${DSIGN_VENV:-/home/dsign/venv}"
+PYTHON="${VENV}/bin/python3"
+if [ ! -x "$PYTHON" ]; then
+  PYTHON="$(command -v python3)"
+fi
+
+export DSIGN_PROJECT_ROOT="$PROJECT_ROOT"
+export DSIGN_VENV="$VENV"
+export DSIGN_OTA_ENV="${DSIGN_OTA_ENV:-/etc/dsign/ota.env}"
+
+_find_ota_module() {
+  local root="$1"
+  local candidates=(
+    "${root}/dsign/services/ota_update.py"
+    "${root}/services/ota_update.py"
+    "/home/dsign/dsign/dsign/services/ota_update.py"
+    "/home/dsign/dsign/services/ota_update.py"
+    "/home/dsign/dsign-new/dsign/services/ota_update.py"
+    "/home/dsign/dsign-new/services/ota_update.py"
+  )
+  local path
+  for path in "${candidates[@]}"; do
+    if [ -f "$path" ]; then
+      printf '%s' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+OTA_MODULE="$(_find_ota_module "$PROJECT_ROOT" || true)"
+if [ -n "$OTA_MODULE" ]; then
+  export PYTHONPATH="$(dirname "$(dirname "$(dirname "$OTA_MODULE")")")${PYTHONPATH:+:${PYTHONPATH}}"
+  exec "$PYTHON" "$OTA_MODULE" "$@"
+fi
+
+MSG="ota_update.py not found — run: sudo dsign-ota-bootstrap (or sync from branch ${DSIGN_OTA_BRANCH_SRC:-cursor/d1-ota-8ed1})"
+if _wants_json "$@"; then
+  _json_error "$MSG"
+  exit 2
+fi
+echo "dsign-update: $MSG" >&2
+echo "dsign-update: PROJECT_ROOT=${PROJECT_ROOT}" >&2
+exit 2

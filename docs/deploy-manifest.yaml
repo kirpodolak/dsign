@@ -41,6 +41,8 @@ entries:
   - { src: usr/local/bin/dsign-verify-install, dest: /usr/local/bin/dsign-verify-install, mode: always, perm: "0755", strip_crlf: true }
   - { src: usr/local/bin/dsign-apply-install, dest: /usr/local/bin/dsign-apply-install, mode: always, perm: "0755", strip_crlf: true }
   - { src: usr/local/bin/dsign-api-token, dest: /usr/local/bin/dsign-api-token, mode: always, perm: "0755", strip_crlf: true }
+  - { src: usr/local/bin/dsign-update, dest: /usr/local/bin/dsign-update, mode: always, perm: "0755", strip_crlf: true }
+  - { src: usr/local/bin/dsign-ota-bootstrap, dest: /usr/local/bin/dsign-ota-bootstrap, mode: always, perm: "0755", strip_crlf: true }
 
   # --- systemd units (canonical from etc/, not install_dsign.sh heredoc) ---
   - { src: etc/systemd/system/digital-signage.service, dest: /etc/systemd/system/digital-signage.service, mode: always, perm: "0644", post: [patch-digital-signage-unit] }
@@ -52,6 +54,8 @@ entries:
   - { src: etc/systemd/system/dsign-show-startup-ip.service, dest: /etc/systemd/system/dsign-show-startup-ip.service, mode: always, perm: "0644", note: "replaces install_dsign.sh heredoc" }
   - { src: etc/systemd/system/screenshot.service, dest: /etc/systemd/system/screenshot.service, mode: always, perm: "0644" }
   - { src: etc/systemd/system/screenshot.timer, dest: /etc/systemd/system/screenshot.timer, mode: always, perm: "0644" }
+  - { src: etc/systemd/system/dsign-update.service, dest: /etc/systemd/system/dsign-update.service, mode: always, perm: "0644" }
+  - { src: etc/systemd/system/dsign-update.timer, dest: /etc/systemd/system/dsign-update.timer, mode: always, perm: "0644" }
   - { src: etc/systemd/system/digital-signage.service.d/wayland.conf, dest: /etc/systemd/system/digital-signage.service.d/wayland.conf, mode: always, perm: "0644", group: wayland }
   - { src: etc/systemd/system/screenshot.service.d/wayland.conf, dest: /etc/systemd/system/screenshot.service.d/wayland.conf, mode: always, perm: "0644", group: wayland }
   - { src: etc/systemd/system/dsign-show-startup-ip.service.d/wayland.conf, dest: /etc/systemd/system/dsign-show-startup-ip.service.d/wayland.conf, mode: always, perm: "0644", group: wayland }
