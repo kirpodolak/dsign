@@ -114,10 +114,10 @@ ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `ca
 
 ### Tier 2 — should pass
 
-7. Audio subsystem  
-8. ContentCache LRU / prefetch / ffprobe  
-9. Network reliability (ytdl, hung recovery)  
-10. Mixed playlists  
+7. Audio subsystem ✅ (`test_audio_subsystem.py`, T-AUD)  
+8. ContentCache LRU / prefetch / ffprobe ✅ (`test_content_cache_lru_ffprobe.py`, prefetch/retry)  
+9. Network reliability (ytdl, hung recovery) — частично ✅ (`test_playback_recovery.py`, `test_playlist_eof_detection.py`; refresh URL — `test_playlist_playback_mode.py`)  
+10. Mixed playlists ✅ (`test_playlist_playback_mode.py` — `_playlist_playback_mode`, cache fallback)
 
 ### Tier 3 — nice
 
@@ -139,6 +139,6 @@ Unit (mock IPC) → Integration (fake MPV) → API smoke → coverage report →
 
 | Дата | Изменение |
 |------|-----------|
-| 2026-07-08 | T-IPC: unit tests + reader stale-socket fix |
+| 2026-07-10 | Tier 2 pytest: T-CACHE (LRU/ffprobe) + T-MIX (playback mode routing); P-DOC test guard |
 | 2026-07-09 | T-API + T-SCH: API smoke + schedule_service pytest |
 | 2026-07-08 | Перенесён в `docs/`; открытые задачи → `dsign_backlog.md` |
