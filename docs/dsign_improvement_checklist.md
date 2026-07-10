@@ -45,7 +45,11 @@ Login + mutating API endpoints: play/stop/screenshot/reboot/service restart — 
 
 ### 4. Upload → `H-UPL` (🟡)
 
-**Не делать:** базовый `MAX_CONTENT_LENGTH` (уже 1 GiB). Нужны: disk check до save, опционально streaming.
+**Не делать:** базовый `MAX_CONTENT_LENGTH` (уже 1 GiB). Disk check до save ✅ (`upload_disk.py`). Осталось: streaming >100MB.
+
+### 7. Memory leaks → `H-MEM` ✅
+
+`_media_backoff` TTL prune — `media_backoff.py`, `DSIGN_MEDIA_BACKOFF_TTL_SEC` (default 1h, clamp 60s–24h). Tests: `test_media_backoff_ttl.py`.
 
 ### 5. Wi-Fi SSID/password → `H-WIFI` ✅
 
@@ -64,7 +68,7 @@ SIGTERM/SIGINT → `PlaybackService.graceful_shutdown()`: schedule stop, `playli
 | § | Backlog | Примечание |
 |---|---------|------------|
 | 6 Graceful shutdown | H-SD | ✅ `graceful_shutdown`, join thread, idle logo, DB cleanup |
-| 7 Memory leaks | H-MEM | `_media_backoff` без TTL |
+| 7 Memory leaks | H-MEM | ✅ TTL prune `_media_backoff` |
 | 8 Prefetch pool | H-PREF | сейчас thread per URL |
 | 9 Cache retry | H-CACHE | нет exp backoff в `_download` |
 | 10 Refactor long methods | H-REF | **только после** T-* |
