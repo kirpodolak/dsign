@@ -67,6 +67,10 @@ ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `ca
 
 `_download` retries with exponential backoff (`content_cache_retry.py`, `DSIGN_CONTENT_CACHE_DOWNLOAD_ATTEMPTS`). Tests: `test_content_cache_retry.py`.
 
+### 11. Recovery queue → `H-RQ` ✅
+
+`RecoveryQueue` вместо silent skip при занятом `_recover_lock`. Env: `DSIGN_RECOVERY_QUEUE_MAX`. Tests: `test_recovery_queue.py`, `test_playback_recovery.py`.
+
 ---
 
 ## 🟡 Should have (открыто)
@@ -80,7 +84,7 @@ ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `ca
 | 8 Prefetch pool | H-PREF | ✅ thread pool + cancel on playlist change |
 | 9 Cache retry | H-CACHE | ✅ exp backoff в `_download` |
 | 10 Refactor long methods | H-REF | **только после** T-* |
-| 11 Recovery queue | H-RQ | `blocking=False` skip |
+| 11 Recovery queue | H-RQ | ✅ queue вместо `blocking=False` skip |
 | 12 Adaptive coalesce | H-COAL | сейчас фикс. 8s |
 
 ---

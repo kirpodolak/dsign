@@ -12,6 +12,7 @@ from dsign.services.mpv_ipc_session import MPVIPCClosedError
 from dsign.services.mpv_management import MPVManager
 from dsign.services.playback_service import PlaybackService
 from dsign.services.playlist_management import PlaylistManager
+from dsign.services.recovery_queue import RecoveryJobKind, RecoveryQueue
 
 
 def _make_playlist_manager(null_logger, tmp_path) -> PlaylistManager:
@@ -28,6 +29,7 @@ def _make_recovery_service(null_logger) -> PlaybackService:
     svc._log_warning = lambda *args, **kwargs: None
     svc._log_error = lambda *args, **kwargs: None
     svc._recover_lock = Lock()
+    svc._recovery_queue = RecoveryQueue()
     svc._playlist_manager = MagicMock()
     svc._mpv_manager = MagicMock()
     svc._app_context = lambda: nullcontext()
@@ -100,16 +102,22 @@ def test_recover_after_mpv_systemd_restart_uses_advance_index(null_logger):
     svc.play.assert_called_once_with(7, start_index=5, preserve_stall_tracking=True)
 
 
-def test_recover_skipped_when_lock_held(null_logger):
+def test_recover_queued_when_lock_held(null_logger):
     svc = _make_recovery_service(null_logger)
     assert svc._recover_lock.acquire(blocking=False)
     try:
         ok = svc.recover_after_mpv_systemd_restart()
     finally:
-        svc._recover_lock.release()
+        pass
 
     assert ok is False
     svc.play.assert_not_called()
+    assert RecoveryJobKind.MPV_SYSTEMD.value in svc._recovery_queue.pending_kinds()
+
+    svc._recover_lock.release()
+    svc._process_next_queued_recovery()
+
+    svc.play.assert_called_once()
 
 
 def test_hung_recovery_invokes_post_restart_callback(null_logger, monkeypatch):

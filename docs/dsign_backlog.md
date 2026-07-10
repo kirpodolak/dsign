@@ -100,7 +100,7 @@ flowchart TD
 | **H-PREF** | ContentCache: thread pool + cancel on playlist change | ✅ | improvement §8 | `content_cache_prefetch.py` |
 | **H-CACHE** | ContentCache download retry (exp backoff) | ✅ | improvement §9 | `content_cache_retry.py` |
 | **H-REF** | Refactor длинных методов (после тестов) | 🟡 | improvement §10 | T-* |
-| **H-RQ** | Recovery queue вместо `blocking=False` skip | 🟡 | improvement §11 | — |
+| **H-RQ** | Recovery queue вместо `blocking=False` skip | ✅ | improvement §11 | `recovery_queue.py`, `DSIGN_RECOVERY_QUEUE_MAX` |
 | **H-COAL** | Adaptive `DSIGN_MPV_RESTART_COALESCE_SEC` | 🟡 | improvement §12 | — |
 | **P-DOC** | `docs/ENVIRONMENT.md` (env vars) | 🟢 | improvement §13 | — |
 | **P-TYP** | mypy strict на critical paths | 🟢 | improvement §14 | — |
@@ -362,7 +362,15 @@ flowchart TD
 
 *Источник:* improvement §9
 
-### H-RQ, H-COAL
+### H-RQ — Recovery queue
+
+- [x] `RecoveryQueue` вместо silent skip при занятом `_recover_lock`
+- [x] MPV recover + slideshow crash + socket-watch enqueue
+- [x] Drain очереди после release lock; dedupe per job kind
+
+*Источник:* improvement §11
+
+### H-COAL
 
 См. [improvement §7–12](./dsign_improvement_checklist.md) — без дублирования текста.
 
@@ -387,7 +395,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **H-RQ** (recovery queue) или **H-COAL** (adaptive MPV restart coalesce)
+**Следующий PR по качеству:** **H-COAL** (adaptive MPV restart coalesce) или **H-REF** (после T-*)
 
 ---
 
@@ -395,7 +403,7 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
-| 2026-07-10 | H-SD ✅ (graceful shutdown: join playback thread, idle logo, MPV + DB cleanup; 3 pytest) |
+| 2026-07-10 | H-RQ ✅ (recovery queue; 3+1 pytest) |
 | 2026-07-10 | H-CACHE ✅ (ContentCache download retry backoff; 7 pytest) |
 | 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |
 | 2026-07-09 | T-AUD + T-CI ✅ (13 audio tests; workflow `.github/workflows/pytest.yml`, 58 total) |
