@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import ast
+import functools
 from pathlib import Path
 
 import pytest
-
-# Package root: .../dsign/ (parent of tests/)
-DSIGN_PKG_ROOT = Path(__file__).resolve().parents[1]
 
 # Only scan first-party app trees (not venv, dsign-new, site-packages, tests).
 SCAN_SUBDIRS = ("routes", "services")
@@ -35,22 +33,57 @@ POPEN_ALLOWLIST_SUFFIXES = frozenset(
     }
 )
 
+# routes/ + services/ on main; fail fast if layout discovery breaks on Pi.
+MIN_EXPECTED_APP_PY_FILES = 30
+
+
+@functools.lru_cache(maxsize=1)
+def _pkg_root() -> Path:
+    """
+    Locate the dsign package root (directory containing routes/ and services/).
+
+    Supports CI (repo/dsign/tests), Pi prod (~/dsign/dsign/tests), and nested
+    ~/dsign/dsign/dsign/ copies by walking up from this test module.
+    """
+    tests_dir = Path(__file__).resolve().parent
+    candidates: list[Path] = []
+    for base in [tests_dir, *tests_dir.parents[:6]]:
+        candidates.append(base)
+        nested = base / "dsign"
+        if nested != base:
+            candidates.append(nested)
+
+    seen: set[Path] = set()
+    for cand in candidates:
+        if cand in seen:
+            continue
+        seen.add(cand)
+        if (cand / "routes").is_dir() and (cand / "services").is_dir():
+            return cand
+
+    tried = ", ".join(str(c) for c in candidates[:12])
+    pytest.fail(
+        "could not locate dsign package root (need routes/ + services/). "
+        f"Searched from {tests_dir}; candidates included: {tried}"
+    )
+
 
 def _is_skipped(path: Path) -> bool:
     return any(part in SKIP_DIR_NAMES for part in path.parts)
 
 
 def _rel_pkg_path(path: Path) -> str:
-    return path.relative_to(DSIGN_PKG_ROOT).as_posix()
+    return path.relative_to(_pkg_root()).as_posix()
 
 
 def _iter_prod_py_files() -> list[Path]:
+    root = _pkg_root()
     files: list[Path] = []
     for sub in SCAN_SUBDIRS:
-        root = DSIGN_PKG_ROOT / sub
-        if not root.is_dir():
+        scan_root = root / sub
+        if not scan_root.is_dir():
             continue
-        for path in sorted(root.rglob("*.py")):
+        for path in sorted(scan_root.rglob("*.py")):
             if _is_skipped(path):
                 continue
             files.append(path)
@@ -105,12 +138,17 @@ def _popen_lines_without_allowlist(path: Path) -> list[int]:
 
 def test_subprocess_run_and_check_output_have_timeout():
     """Every subprocess.run/check_output in routes/ + services/ must set timeout=."""
+    files = _iter_prod_py_files()
+    assert len(files) >= MIN_EXPECTED_APP_PY_FILES, (
+        f"audit scanned too few files ({len(files)}) under {_pkg_root()} — "
+        "check Pi layout (routes/ + services/)"
+    )
+
     violations: list[str] = []
-    for path in _iter_prod_py_files():
+    for path in files:
         missing = _calls_missing_timeout(path)
         if missing:
-            rel = _rel_pkg_path(path)
-            violations.append(f"{rel}: {missing}")
+            violations.append(f"{_rel_pkg_path(path)}: {missing}")
     assert not violations, "subprocess calls without timeout=:\n" + "\n".join(violations)
 
 
@@ -120,8 +158,7 @@ def test_subprocess_popen_is_allowlisted_or_absent():
     for path in _iter_prod_py_files():
         popens = _popen_lines_without_allowlist(path)
         if popens:
-            rel = _rel_pkg_path(path)
-            violations.append(f"{rel}: Popen at lines {popens}")
+            violations.append(f"{_rel_pkg_path(path)}: Popen at lines {popens}")
     assert not violations, (
         "unexpected subprocess.Popen (add deadline or allowlist suffix):\n"
         + "\n".join(violations)
@@ -131,7 +168,10 @@ def test_subprocess_popen_is_allowlisted_or_absent():
 def test_subprocess_audit_scans_only_app_trees():
     """Guard: audit must not pick up venv / site-packages on player workstations."""
     scanned = {_rel_pkg_path(p) for p in _iter_prod_py_files()}
-    assert scanned, "expected at least one app .py file under routes/ or services/"
+    assert len(scanned) >= MIN_EXPECTED_APP_PY_FILES, (
+        f"expected >= {MIN_EXPECTED_APP_PY_FILES} app .py files, got {len(scanned)} "
+        f"(pkg root {_pkg_root()})"
+    )
     for rel in scanned:
         parts = rel.split("/")
         assert "site-packages" not in parts
