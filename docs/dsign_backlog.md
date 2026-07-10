@@ -95,7 +95,7 @@ flowchart TD
 | **D2-OPS** | `DSIGN_API_TOKEN` на fleet + проверка schedule Bearer | 🟡 | 4phase D2, schedule §D2.5 | — |
 | **D2-24H** | Offline 24 ч — расписание по timezone | 🟡 | schedule §D2.4, 4phase D2 | — |
 | **C3** | Nested playlists (DB + flat play) | 🟡 | 4phase §C3 | — |
-| **H-SD** | Graceful shutdown playback (join thread, logo, DB) | 🟡 | improvement §6 | частично ✅ |
+| **H-SD** | Graceful shutdown playback (join thread, logo, DB) | ✅ | improvement §6 | `graceful_shutdown`, `DSIGN_SHUTDOWN_JOIN_SEC` |
 | **H-MEM** | `_media_backoff` TTL cleanup | 🟡 | improvement §7 | — |
 | **H-PREF** | ContentCache: thread pool + cancel on playlist change | 🟡 | improvement §8 | — |
 | **H-CACHE** | ContentCache download retry (exp backoff) | 🟡 | improvement §9 | — |
@@ -341,8 +341,8 @@ flowchart TD
 
 **Уже есть:** `MPVManager.shutdown()`, `MpvJsonIpcSession.close()`, SIGTERM → schedule engine stop.
 
-- [ ] SIGTERM/SIGINT: `_stop_event` → join playback thread
-- [ ] Idle logo перед exit; DB/session cleanup
+- [x] SIGTERM/SIGINT: `_stop_event` → join playback thread (`DSIGN_SHUTDOWN_JOIN_SEC`, default 8s)
+- [x] Idle logo перед exit; DB/session cleanup (`graceful_shutdown` в `playback_service.py`)
 
 *Источник:* improvement §6
 
@@ -371,7 +371,7 @@ flowchart TD
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**  
-**Следующий PR по качеству:** **H-SUB** (subprocess timeouts) или **H-UPL** (upload disk check)
+**Следующий PR по качеству:** **H-UPL** (streaming upload >100MB) или **H-MEM** (`_media_backoff` TTL)
 
 ---
 
@@ -379,6 +379,7 @@ flowchart TD
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-10 | H-SD ✅ (graceful shutdown: join playback thread, idle logo, MPV + DB cleanup; 3 pytest) |
 | 2026-07-10 | H-WIFI ✅ (SSID/password validation + 13 pytest cases) |
 | 2026-07-09 | H-RL ✅ (API rate limits + 6 pytest cases) |
 | 2026-07-09 | T-AUD + T-CI ✅ (13 audio tests; workflow `.github/workflows/pytest.yml`, 58 total) |

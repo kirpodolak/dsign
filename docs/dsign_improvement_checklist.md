@@ -47,9 +47,13 @@ Login + mutating API endpoints: play/stop/screenshot/reboot/service restart — 
 
 **Не делать:** базовый `MAX_CONTENT_LENGTH` (уже 1 GiB). Нужны: disk check до save, опционально streaming.
 
-### 5. Wi-Fi SSID/password → `H-WIFI`
+### 5. Wi-Fi SSID/password → `H-WIFI` ✅
 
-Расширить валидацию в `connect_wifi_network`.
+Расширить валидацию в `connect_wifi_network` — `wifi_validation.py`, `test_wifi_validation.py`.
+
+### 6. Graceful shutdown → `H-SD` ✅
+
+SIGTERM/SIGINT → `PlaybackService.graceful_shutdown()`: schedule stop, `playlist_manager.stop(join_timeout=…)`, idle logo, `mpv_manager.shutdown()`, `db.session.remove()`. Env: `DSIGN_SHUTDOWN_JOIN_SEC` (1–60s, default 8). Tests: `test_playback_graceful_shutdown.py`.
 
 ---
 
@@ -59,7 +63,7 @@ Login + mutating API endpoints: play/stop/screenshot/reboot/service restart — 
 
 | § | Backlog | Примечание |
 |---|---------|------------|
-| 6 Graceful shutdown | H-SD | Schedule SIGTERM ✅; нужен join playback thread |
+| 6 Graceful shutdown | H-SD | ✅ `graceful_shutdown`, join thread, idle logo, DB cleanup |
 | 7 Memory leaks | H-MEM | `_media_backoff` без TTL |
 | 8 Prefetch pool | H-PREF | сейчас thread per URL |
 | 9 Cache retry | H-CACHE | нет exp backoff в `_download` |

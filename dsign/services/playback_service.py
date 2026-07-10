@@ -135,22 +135,80 @@ class PlaybackService:
                 extra={"error": str(e), "type": type(e).__name__},
             )
 
+    def _shutdown_join_timeout_sec(self) -> float:
+        raw = (os.getenv("DSIGN_SHUTDOWN_JOIN_SEC") or "8").strip()
+        try:
+            return max(1.0, min(60.0, float(raw)))
+        except ValueError:
+            return 8.0
+
+    def graceful_shutdown(self, *, signal_num: Optional[int] = None) -> None:
+        """
+        SIGTERM/SIGINT path: stop schedule, join playback thread, idle logo, MPV IPC, DB session.
+        """
+        if getattr(self, "_shutdown_started", False):
+            return
+        self._shutdown_started = True
+        extra = {"action": "graceful_shutdown"}
+        if signal_num is not None:
+            extra["signal"] = int(signal_num)
+
+        try:
+            engine = self._schedule_engine
+            if engine is not None:
+                engine.stop()
+                self._log_info("ScheduleEngine stopped on shutdown", extra=extra)
+        except Exception as exc:
+            self._log_warning(
+                "ScheduleEngine stop failed during shutdown",
+                extra={**extra, "error": str(exc), "type": type(exc).__name__},
+            )
+
+        try:
+            self._playlist_manager.stop(
+                show_idle_logo=True,
+                update_status=True,
+                source="shutdown",
+                join_timeout=self._shutdown_join_timeout_sec(),
+            )
+        except Exception as exc:
+            self._log_warning(
+                "Playback stop failed during shutdown",
+                extra={**extra, "error": str(exc), "type": type(exc).__name__},
+            )
+
+        try:
+            self._mpv_manager.shutdown()
+        except Exception as exc:
+            self._log_warning(
+                "MPV shutdown failed",
+                extra={**extra, "error": str(exc), "type": type(exc).__name__},
+            )
+
+        try:
+            from dsign.extensions import db
+
+            with self._app_context():
+                db.session.remove()
+        except Exception as exc:
+            self._log_warning(
+                "DB session cleanup failed during shutdown",
+                extra={**extra, "error": str(exc), "type": type(exc).__name__},
+            )
+
+        self._log_info("Graceful shutdown completed", extra=extra)
+
     def _register_schedule_shutdown_hook(self) -> None:
-        """SIGTERM/SIGINT → ScheduleEngine.stop() (D2.4 optional polish)."""
+        """SIGTERM/SIGINT → graceful shutdown (schedule, playback thread, idle logo, MPV, DB)."""
         if getattr(self, "_schedule_shutdown_hook_registered", False):
             return
         self._schedule_shutdown_hook_registered = True
+        self._shutdown_started = False
         service = self
 
         def _handler(signum, frame):
             try:
-                engine = service._schedule_engine
-                if engine is not None:
-                    engine.stop()
-                    service._log_info(
-                        "ScheduleEngine stopped on shutdown signal",
-                        extra={"signal": int(signum), "action": "schedule_engine_stop"},
-                    )
+                service.graceful_shutdown(signal_num=int(signum))
             except Exception:
                 pass
 

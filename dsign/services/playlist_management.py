@@ -3560,13 +3560,22 @@ class PlaylistManager:
         *,
         preserve_stall_tracking: bool = False,
         preserve_loop_position: bool = False,
+        join_timeout: float = 2.0,
     ):
         if self._play_thread and self._play_thread.is_alive():
             self._stop_event.set()
             try:
-                self._play_thread.join(timeout=2.0)
+                self._play_thread.join(timeout=max(0.1, float(join_timeout)))
             except Exception:
                 pass
+            if self._play_thread.is_alive():
+                self.logger.warning(
+                    "Playback thread did not exit before join timeout",
+                    extra={
+                        "event": "playback_thread_join_timeout",
+                        "join_timeout_sec": float(join_timeout),
+                    },
+                )
         self._play_thread = None
         self._stop_event.clear()
         self._item_skip_event.clear()
@@ -4669,6 +4678,7 @@ class PlaylistManager:
         preserve_stall_tracking: bool = False,
         preserve_loop_position: bool = False,
         source: str = "manual",
+        join_timeout: float = 2.0,
     ) -> bool:
         """Stop playback and persist stopped state so UI/API match MPV (idle logo)."""
         with self._app_context():
@@ -4678,6 +4688,7 @@ class PlaylistManager:
                 preserve_stall_tracking=preserve_stall_tracking,
                 preserve_loop_position=preserve_loop_position,
                 source=source,
+                join_timeout=join_timeout,
             )
 
     def _stop_impl(
@@ -4688,6 +4699,7 @@ class PlaylistManager:
         preserve_stall_tracking: bool = False,
         preserve_loop_position: bool = False,
         source: str = "manual",
+        join_timeout: float = 2.0,
     ) -> bool:
         from ..models import PlaybackStatus
 
@@ -4698,6 +4710,7 @@ class PlaylistManager:
             self._stop_play_thread(
                 preserve_stall_tracking=preserve_stall_tracking,
                 preserve_loop_position=preserve_loop_position,
+                join_timeout=join_timeout,
             )
             try:
                 self._logo_manager.ensure_mpv_video_output()
