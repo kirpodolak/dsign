@@ -20,7 +20,7 @@ DEFAULT_BRANCH = "main"
 DEFAULT_REMOTE = "origin"
 DSIGN_USER = "dsign"
 SIGNAGE_UNIT = "digital-signage.service"
-OTA_TOOL_VERSION = "2026-07-10-pi6"
+OTA_TOOL_VERSION = "2026-07-10-pi7"
 
 RunFn = Callable[..., subprocess.CompletedProcess]
 
@@ -167,10 +167,13 @@ def _run(
     runner = run_fn or subprocess.run
     full_cmd: List[str] = list(cmd)
     if user:
-        full_cmd = ["sudo", "-n", "-u", user, *full_cmd]
+        # -H: HOME for git; stdin must not be DEVNULL (Pi: dsign may lack /dev/null perms).
+        full_cmd = ["sudo", "-n", "-H", "-u", user, *full_cmd]
     return runner(
         full_cmd,
         cwd=str(cwd) if cwd else None,
+        stdin=subprocess.PIPE,
+        input="",
         capture_output=True,
         text=True,
         timeout=timeout,

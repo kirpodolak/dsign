@@ -8,7 +8,6 @@ After=network-online.target
 Type=oneshot
 User=root
 EnvironmentFile=-/etc/dsign/ota.env
-Environment=DSIGN_PROJECT_ROOT=/home/dsign/dsign
 Environment=DSIGN_VENV=/home/dsign/venv
 ExecStart=/usr/local/bin/dsign-update auto --json
 StandardOutput=journal

@@ -56,6 +56,24 @@ sudo dsign-update version --json | jq .tool_version
 # expect: "2026-07-10-pi6"
 ```
 
+### `fatal: could not open '/dev/null' for reading and writing`
+
+Git runs as `dsign` via `sudo`; Python must not pass stdin=DEVNULL (some Pi images restrict `/dev/null` for non-root).
+
+**pi7+** uses `stdin=PIPE` in OTA subprocess. Also verify:
+
+```bash
+ls -la /dev/null          # expect: crw-rw-rw- 1 root root
+sudo chmod 666 /dev/null  # if permissions are wrong
+
+RAW=https://raw.githubusercontent.com/kirpodolak/dsign/cursor/d1-ota-8ed1
+sudo curl -fsSL "$RAW/dsign/services/ota_update.py" -o /home/dsign/dsign-new/dsign/services/ota_update.py
+sudo chown dsign:dsign /home/dsign/dsign-new/dsign/services/ota_update.py
+sudo dsign-update check --json | jq '{success, update_available}'
+```
+
+**systemd:** remove hardcoded `DSIGN_PROJECT_ROOT=/home/dsign/dsign` from `dsign-update.service` — use `/etc/dsign/ota.env` only, then `sudo systemctl daemon-reload`.
+
 ### `jq: parse error` with module present in `dsign-new`
 
 If `ota_update.py` exists but `version --json` prints plain `2026-07-10-pi5` (no `{`), update to **pi6+**

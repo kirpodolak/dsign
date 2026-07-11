@@ -61,15 +61,16 @@ def test_check_reports_up_to_date(tmp_path):
     local = "a" * 40
     run_fn = _git_mock(
         {
-            ("sudo", "-n", "-u", "dsign", "git", "-C", str(cfg.project_root), "fetch", "origin", "main"): MagicMock(
+            ("sudo", "-n", "-H", "-u", "dsign", "git", "-C", str(cfg.project_root), "fetch", "origin", "main"): MagicMock(
                 returncode=0, stdout="", stderr=""
             ),
-            ("sudo", "-n", "-u", "dsign", "git", "-C", str(cfg.project_root), "rev-parse", "HEAD"): MagicMock(
+            ("sudo", "-n", "-H", "-u", "dsign", "git", "-C", str(cfg.project_root), "rev-parse", "HEAD"): MagicMock(
                 returncode=0, stdout=local + "\n", stderr=""
             ),
             (
                 "sudo",
                 "-n",
+                "-H",
                 "-u",
                 "dsign",
                 "git",
@@ -93,15 +94,16 @@ def test_check_reports_update_available(tmp_path):
     remote = "b" * 40
     run_fn = _git_mock(
         {
-            ("sudo", "-n", "-u", "dsign", "git", "-C", str(cfg.project_root), "fetch", "origin", "main"): MagicMock(
+            ("sudo", "-n", "-H", "-u", "dsign", "git", "-C", str(cfg.project_root), "fetch", "origin", "main"): MagicMock(
                 returncode=0, stdout="", stderr=""
             ),
-            ("sudo", "-n", "-u", "dsign", "git", "-C", str(cfg.project_root), "rev-parse", "HEAD"): MagicMock(
+            ("sudo", "-n", "-H", "-u", "dsign", "git", "-C", str(cfg.project_root), "rev-parse", "HEAD"): MagicMock(
                 returncode=0, stdout=local + "\n", stderr=""
             ),
             (
                 "sudo",
                 "-n",
+                "-H",
                 "-u",
                 "dsign",
                 "git",
