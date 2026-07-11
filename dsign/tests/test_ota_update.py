@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -14,6 +15,7 @@ from dsign.services.ota_update import (
     _build_parser,
     _parse_cli_args,
     _resolve_git_root,
+    _working_tree_clean,
     apply_update,
     check_update,
     cmd_auto,
@@ -220,6 +222,28 @@ def test_cli_json_flag_after_subcommand():
     assert args.json is True
 
 
+def test_working_tree_ignores_bootstrap_ota_files(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        return MagicMock(
+            returncode=0,
+            stdout="?? dsign/services/ota_update.py\n?? services/ota_update.py\n",
+            stderr="",
+        )
+
+    assert _working_tree_clean(cfg, run_fn=fake_run) is True
+
+
+def test_working_tree_blocks_other_local_changes(tmp_path):
+    cfg = _cfg(tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        return MagicMock(returncode=0, stdout=" M dsign/routes/api.py\n", stderr="")
+
+    assert _working_tree_clean(cfg, run_fn=fake_run) is False
+
+
 def test_resolve_git_root_finds_clone(tmp_path):
     repo = tmp_path / "dsign"
     repo.mkdir()
@@ -248,10 +272,20 @@ def test_cli_json_flag_before_subcommand():
     assert args.json is True
 
 
-def test_version_reports_tool_version():
+def test_version_reports_tool_version(capsys):
     args = _parse_cli_args(["version", "--json"])
     assert args.command == "version"
     from dsign.services.ota_update import OTA_TOOL_VERSION, main
 
     assert main(["version", "--json"]) == 0
+    out = capsys.readouterr().out
+    assert '"tool_version"' in out
     assert OTA_TOOL_VERSION
+
+
+def test_cli_json_from_sys_argv(capsys, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["ota_update.py", "version", "--json"])
+    from dsign.services.ota_update import main
+
+    assert main() == 0
+    assert '"tool_version"' in capsys.readouterr().out

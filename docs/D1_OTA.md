@@ -53,7 +53,19 @@ sudo chmod 755 /usr/local/bin/dsign-update
 sudo chown -R dsign:dsign /home/dsign/dsign-new/.git /home/dsign/dsign-new
 
 sudo dsign-update version --json | jq .tool_version
-# expect: "2026-07-10-pi5"
+# expect: "2026-07-10-pi6"
+```
+
+### `jq: parse error` with module present in `dsign-new`
+
+If `ota_update.py` exists but `version --json` prints plain `2026-07-10-pi5` (no `{`), update to **pi6+**
+(`--json` was ignored when run via `python ota_update.py` — fixed in pi6).
+
+```bash
+RAW=https://raw.githubusercontent.com/kirpodolak/dsign/cursor/d1-ota-8ed1
+sudo curl -fsSL "$RAW/dsign/services/ota_update.py" -o /home/dsign/dsign-new/dsign/services/ota_update.py
+sudo chown dsign:dsign /home/dsign/dsign-new/dsign/services/ota_update.py
+sudo dsign-update version --json | jq .tool_version   # "2026-07-10-pi6"
 ```
 
 ### `insufficient permission for adding an object to repository database .git/objects`
@@ -64,6 +76,16 @@ OTA runs `git fetch` as user `dsign` (`sudo -u dsign`). If `.git/` was touched b
 sudo chown -R dsign:dsign /home/dsign/dsign-new/.git
 sudo chown -R dsign:dsign /home/dsign/dsign-new
 sudo dsign-update check --json | jq .
+```
+
+### `working tree has local changes`
+
+Bootstrap installs `ota_update.py` into the clone before D1 is on `main`. **pi6+** ignores only those paths for `download`/`auto`; other local edits still block OTA.
+
+```bash
+cd /home/dsign/dsign-new && git status --short
+# ?? dsign/services/ota_update.py  ?? services/ota_update.py  — OK on pi6+
+sudo dsign-update download --json | jq .
 ```
 
 `/etc/dsign/ota.env`:

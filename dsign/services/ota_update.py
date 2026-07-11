@@ -20,7 +20,7 @@ DEFAULT_BRANCH = "main"
 DEFAULT_REMOTE = "origin"
 DSIGN_USER = "dsign"
 SIGNAGE_UNIT = "digital-signage.service"
-OTA_TOOL_VERSION = "2026-07-10-pi5"
+OTA_TOOL_VERSION = "2026-07-10-pi6"
 
 RunFn = Callable[..., subprocess.CompletedProcess]
 
@@ -207,7 +207,14 @@ def _working_tree_clean(cfg: OtaConfig, run_fn: Optional[RunFn] = None) -> bool:
     proc = _git(cfg, "status", "--porcelain", run_fn=run_fn, timeout=30.0)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or "git status failed").strip())
-    return not (proc.stdout or "").strip()
+    lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    # Bootstrap may install OTA module before D1 lands on main — do not block merge for that alone.
+    bootstrap_only = {
+        "dsign/services/ota_update.py",
+        "services/ota_update.py",
+    }
+    lines = [ln for ln in lines if ln[3:].strip() not in bootstrap_only]
+    return not lines
 
 
 def check_update(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[str, Any]:
@@ -438,9 +445,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _parse_cli_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    raw = list(argv) if argv is not None else None
-    json_flag = bool(raw and "--json" in raw)
-    if json_flag and raw:
+    raw = list(argv) if argv is not None else sys.argv[1:]
+    json_flag = "--json" in raw
+    if json_flag:
         raw = [a for a in raw if a != "--json"]
     args = _build_parser().parse_args(raw)
     args.json = json_flag
