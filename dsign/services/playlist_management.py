@@ -1337,21 +1337,6 @@ class PlaylistManager:
                     return None
         return None
 
-
-
-    @staticmethod
-
-
-
-
-    @staticmethod
-
-    @staticmethod
-
-
-
-
-
     def _collect_mpv_network_buffering_per_file(self, item: dict, *, stream_url: str) -> Dict[str, str]:
         """
         Collect per-file buffering options for external network streams to reduce microfreezes.
