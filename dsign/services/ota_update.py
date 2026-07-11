@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ DEFAULT_BRANCH = "main"
 DEFAULT_REMOTE = "origin"
 DSIGN_USER = "dsign"
 SIGNAGE_UNIT = "digital-signage.service"
-OTA_TOOL_VERSION = "2026-07-10-pi7"
+OTA_TOOL_VERSION = "2026-07-10-pi8"
 
 RunFn = Callable[..., subprocess.CompletedProcess]
 
@@ -332,6 +333,35 @@ def _apply_manifest(cfg: OtaConfig, run_fn: Optional[RunFn] = None) -> None:
         raise RuntimeError((proc.stderr or proc.stdout or "dsign-apply-install failed").strip())
 
 
+def _clear_pycache(project_root: Path) -> int:
+    """Remove stale bytecode so .py hotfixes take effect without a full reinstall."""
+    removed = 0
+    if not project_root.is_dir():
+        return 0
+    for cache_dir in project_root.rglob("__pycache__"):
+        if not cache_dir.is_dir():
+            continue
+        try:
+            removed += sum(1 for _ in cache_dir.iterdir())
+            shutil.rmtree(cache_dir)
+        except OSError:
+            continue
+    return removed
+
+
+def purge_pycache(cfg: OtaConfig) -> Dict[str, Any]:
+    count = _clear_pycache(cfg.project_root)
+    prod_root = Path(os.environ.get("DSIGN_PROJECT_ROOT", str(DEFAULT_PROJECT_ROOT)))
+    extra = 0
+    if prod_root.resolve() != cfg.project_root.resolve() and prod_root.is_dir():
+        extra = _clear_pycache(prod_root)
+    return {
+        "success": True,
+        "project_root": str(cfg.project_root),
+        "pycache_entries_removed": count + extra,
+    }
+
+
 def _restart_units(cfg: OtaConfig, run_fn: Optional[RunFn] = None) -> List[str]:
     if cfg.display_backend == "wayland":
         units = [
@@ -357,6 +387,7 @@ def apply_update(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[str,
 
     _pip_install(cfg, run_fn=run_fn)
     _apply_manifest(cfg, run_fn=run_fn)
+    pycache_removed = _clear_pycache(cfg.project_root)
     restarted = _restart_units(cfg, run_fn=run_fn)
 
     state = load_state(cfg)
@@ -372,6 +403,7 @@ def apply_update(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[str,
     return {
         "success": True,
         "applied_commit": commit,
+        "pycache_entries_removed": pycache_removed,
         "restarted_units": restarted,
     }
 
@@ -441,7 +473,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DSign OTA self-update (D1)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("check", "download", "apply", "rollback", "status", "auto"):
+    for name in ("check", "download", "apply", "rollback", "status", "auto", "purge-pycache"):
         sub.add_parser(name, parents=[common], help=f"OTA {name}")
     sub.add_parser("version", parents=[common], help="Print OTA tool version (deploy check)")
     return parser
@@ -468,6 +500,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "rollback": lambda: rollback_update(cfg),
         "status": lambda: status_report(cfg),
         "auto": lambda: cmd_auto(cfg),
+        "purge-pycache": lambda: purge_pycache(cfg),
         "version": lambda: {
             "success": True,
             "tool_version": OTA_TOOL_VERSION,
@@ -512,9 +545,14 @@ def _print_human(command: str, result: Dict[str, Any]) -> None:
             print(result.get("message", "already up to date"))
     elif command == "apply":
         print(f"applied {result.get('applied_commit', '?')[:8]}")
+        removed = result.get("pycache_entries_removed")
+        if removed:
+            print(f"cleared {removed} pycache entries")
         units = result.get("restarted_units") or []
         if units:
             print("restarted:", ", ".join(units))
+    elif command == "purge-pycache":
+        print(f"cleared {result.get('pycache_entries_removed', 0)} pycache entries under {result.get('project_root')}")
     elif command == "rollback":
         print(f"rolled back to {result.get('rolled_back_to', '?')[:8]}")
     elif command == "status":

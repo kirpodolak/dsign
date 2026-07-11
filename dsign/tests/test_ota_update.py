@@ -13,6 +13,7 @@ import pytest
 from dsign.services.ota_update import (
     OtaConfig,
     _build_parser,
+    _clear_pycache,
     _parse_cli_args,
     _resolve_git_root,
     _working_tree_clean,
@@ -21,6 +22,7 @@ from dsign.services.ota_update import (
     cmd_auto,
     download_update,
     load_rollback,
+    purge_pycache,
     save_rollback,
 )
 
@@ -291,3 +293,40 @@ def test_cli_json_from_sys_argv(capsys, monkeypatch):
 
     assert main() == 0
     assert '"tool_version"' in capsys.readouterr().out
+
+
+def test_clear_pycache_removes_bytecode(tmp_path):
+    repo = tmp_path / "repo"
+    cache = repo / "dsign" / "services" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "playlist_management.cpython-312.pyc").write_bytes(b"fake")
+    assert _clear_pycache(repo) == 1
+    assert not cache.exists()
+
+
+def test_purge_pycache_cli(tmp_path):
+    cfg = _cfg(tmp_path)
+    cache = cfg.project_root / "dsign" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "x.pyc").write_bytes(b"x")
+    result = purge_pycache(cfg)
+    assert result["success"] is True
+    assert result["pycache_entries_removed"] == 1
+    assert not cache.exists()
+
+
+def test_apply_clears_pycache_before_restart(tmp_path):
+    cfg = _cfg(tmp_path)
+    cache = cfg.project_root / "dsign" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "x.pyc").write_bytes(b"x")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    result = apply_update(cfg, run_fn=fake_run)
+    assert result["pycache_entries_removed"] == 1
+    assert not cache.exists()
