@@ -30,6 +30,9 @@ DSIGN_PROJECT_ROOT=/home/dsign/dsign   # path that contains .git/
 **Symptoms:** `fatal: invalid reference: cursor/d1-ota-8ed1`, `installed from git checkout`, or
 `jq: parse error` while `ota_update.py` is missing under `dsign-new`.
 
+**Common Pi layout bug:** module only under `/home/dsign/dsign/services/ota_update.py` (prod flat path),
+but `DSIGN_PROJECT_ROOT=/home/dsign/dsign-new`. Wrapper must load module from **project root only**.
+
 Cause: **stale** `/tmp/dsign-ota-bootstrap` (old script used `git checkout`, not `git show FETCH_HEAD`).
 Re-download every time — do not reuse an old `/tmp` copy.
 
@@ -39,25 +42,28 @@ RAW=https://raw.githubusercontent.com/kirpodolak/dsign/cursor/d1-ota-8ed1
 # Option A — bootstrap (recommended; must curl fresh copy)
 sudo curl -fsSL "$RAW/usr/local/bin/dsign-ota-bootstrap" -o /tmp/dsign-ota-bootstrap
 grep -q 'BOOTSTRAP_VERSION=' /tmp/dsign-ota-bootstrap || { echo "stale bootstrap"; exit 1; }
-sudo bash /tmp/dsign-ota-bootstrap
-# expect first line: version=2026-07-10-fetchhead-v3
-# git show FETCH_HEAD, curl fallback, strict JSON verify
-
-# Option B — curl only (fastest on Pi; skip git)
 DSIGN_OTA_BOOTSTRAP_PREFER=curl sudo bash /tmp/dsign-ota-bootstrap
+# expect: version=2026-07-10-fetchhead-v4
 
-# Option C — manual curl (no bootstrap)
+# Option B — manual fix (module + git ownership)
+sudo mkdir -p /home/dsign/dsign-new/dsign/services /home/dsign/dsign-new/services
+sudo curl -fsSL "$RAW/dsign/services/ota_update.py" -o /home/dsign/dsign-new/dsign/services/ota_update.py
 sudo curl -fsSL "$RAW/usr/local/bin/dsign-update" -o /usr/local/bin/dsign-update
 sudo chmod 755 /usr/local/bin/dsign-update
-for d in /home/dsign/dsign-new/dsign/services /home/dsign/dsign-new/services \
-         /home/dsign/dsign/dsign/services /home/dsign/dsign/services; do
-  sudo mkdir -p "$d"
-  sudo curl -fsSL "$RAW/dsign/services/ota_update.py" -o "$d/ota_update.py"
-  sudo chown dsign:dsign "$d/ota_update.py"
-done
+sudo chown -R dsign:dsign /home/dsign/dsign-new/.git /home/dsign/dsign-new
 
 sudo dsign-update version --json | jq .tool_version
 # expect: "2026-07-10-pi5"
+```
+
+### `insufficient permission for adding an object to repository database .git/objects`
+
+OTA runs `git fetch` as user `dsign` (`sudo -u dsign`). If `.git/` was touched by `root` (bootstrap, manual sudo git), fetch fails.
+
+```bash
+sudo chown -R dsign:dsign /home/dsign/dsign-new/.git
+sudo chown -R dsign:dsign /home/dsign/dsign-new
+sudo dsign-update check --json | jq .
 ```
 
 `/etc/dsign/ota.env`:
