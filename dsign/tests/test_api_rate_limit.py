@@ -90,6 +90,7 @@ def test_global_api_rate_limit_blocks_excess_requests(api_client, monkeypatch):
     headers = {"Authorization": "Bearer test-bearer-token"}
     max_req = 5
     monkeypatch.setattr("dsign.services.api_rate_limit.GLOBAL_MAX_REQUESTS", max_req)
+    monkeypatch.setenv("DSIGN_API_RATE_LIMIT_LOOPBACK", "0")
 
     for _ in range(max_req):
         rv = client.get("/api/schedule/now", headers=headers)
@@ -98,6 +99,16 @@ def test_global_api_rate_limit_blocks_excess_requests(api_client, monkeypatch):
     rv = client.get("/api/schedule/now", headers=headers)
     assert rv.status_code == 429
     assert rv.get_json().get("success") is False
+
+
+def test_global_api_rate_limit_skips_loopback_by_default(api_client, monkeypatch):
+    client, _app, _user, _playlist = api_client
+    headers = {"Authorization": "Bearer test-bearer-token"}
+    monkeypatch.setattr("dsign.services.api_rate_limit.GLOBAL_MAX_REQUESTS", 2)
+
+    for _ in range(10):
+        rv = client.get("/api/schedule/now", headers=headers)
+        assert rv.status_code == 200
 
 
 def _login_session(client, user) -> None:
