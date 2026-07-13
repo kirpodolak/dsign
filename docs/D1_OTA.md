@@ -1,9 +1,36 @@
 # D1 — OTA self-update (`dsign-update`)
 
-**Версия:** 2026-07-10  
+**Версия:** 2026-07-13  
 **Backlog:** `D1` · зависит от **D0** (`dsign-apply-install`)
 
-Fleet-обновление без ручного `git pull`: git fetch/merge → `pip install` → `dsign-apply-install` → restart systemd.
+Fleet-обновление без ручного `git pull`: git fetch/merge → `pip install` → **sync prod runtime** → `dsign-apply-install` → restart systemd.
+
+---
+
+## Две директории на Pi (опционально)
+
+**Ваш плеер (по `systemctl cat`):** signage запускается **из того же clone**, что и OTA:
+
+```
+WorkingDirectory=/home/dsign/dsign-new
+ExecStart=.../home/dsign/dsign-new/run.py
+```
+
+Это **одно дерево** — `sync-runtime` не нужен (`same_tree`). Достаточно:
+
+```bash
+DSIGN_PROJECT_ROOT=/home/dsign/dsign-new
+# DSIGN_RUNTIME_ROOT не задавать
+```
+
+Другой вариант (два дерева):
+
+| Путь | Роль |
+|------|------|
+| `/home/dsign/dsign-new` | Git clone |
+| `/home/dsign/dsign` | Prod flat tree для systemd |
+
+Тогда задайте `DSIGN_RUNTIME_ROOT=/home/dsign/dsign` — `apply` скопирует код перед рестартом.
 
 ---
 
@@ -117,7 +144,8 @@ DSIGN_PROJECT_ROOT=/home/dsign/dsign-new
 ```bash
 sudo dsign-update check      # git fetch; exit 1 if update available
 sudo dsign-update download   # ff-only merge + save rollback point
-sudo dsign-update apply      # pip + manifest apply + restart services
+sudo dsign-update apply      # pip + sync-runtime + manifest + restart
+sudo dsign-update sync-runtime   # только копия clone → prod (без pip/restart)
 sudo dsign-update rollback   # git reset --hard + apply
 sudo dsign-update status     # state.json + rollback.json
 sudo dsign-update auto       # check → download → apply (timer)
@@ -128,15 +156,16 @@ sudo dsign-update --json check | jq .    # JSON flag before subcommand
 
 ---
 
-## Что делает `apply`
+## Что делает `apply` (pi10+)
 
 1. `pip install -r requirements.txt` (или `pip install -e .`) в `DSIGN_VENV`
-2. **`dsign-apply-install -q`** — не только git, а полный manifest D0
-3. `systemctl restart` signage stack:
-   - **drm:** `digital-signage.service`, `dsign-mpv.service`
-   - **wayland:** + `dsign-compositor`, `dsign-logo`, `dsign-mpv-wayland`
+2. **`sync-runtime`** — только если `DSIGN_RUNTIME_ROOT` ≠ git clone (два дерева)
+3. **`dsign-apply-install -q`** — systemd, mpv, скрипты по manifest D0
+4. **`smoke check`** — `compileall` + `py_compile run.py` **до** restart (`DSIGN_OTA_SMOKE_CHECK=1`)
+5. **Restart по порядку:** mpv/compositor/logo → **digital-signage последним**; `restart --no-block` + ожидание `is-active` (`DSIGN_OTA_RESTART_WAIT_SEC`)
+6. При ошибке apply — **auto-rollback** на commit из `download` (`DSIGN_OTA_AUTO_ROLLBACK=1`)
 
-Rollback point сохраняется в **`download`** (commit до merge).
+Rollback point сохраняется в **`download`** (commit **до** merge). Это корректная точка отката даже если `apply` сломал venv или сервисы.
 
 ---
 
@@ -153,7 +182,11 @@ Rollback point сохраняется в **`download`** (commit до merge).
 | `DSIGN_OTA_ENABLED` | `1` | `0` — `auto` no-op |
 | `DSIGN_OTA_BRANCH` | `main` | Ветка для fetch/merge |
 | `DSIGN_OTA_REMOTE` | `origin` | Git remote |
-| `DSIGN_PROJECT_ROOT` | `/home/dsign/dsign` | Git repo |
+| `DSIGN_PROJECT_ROOT` | `/home/dsign/dsign-new` | Git repo (clone) |
+| `DSIGN_RUNTIME_ROOT` | = `project_root` | Prod tree; задавать только при двух деревьях |
+| `DSIGN_OTA_SMOKE_CHECK` | `1` | `compileall` перед restart |
+| `DSIGN_OTA_AUTO_ROLLBACK` | `1` | откат при failed apply |
+| `DSIGN_OTA_RESTART_WAIT_SEC` | `90` | таймаут ожидания `is-active` на unit |
 | `DSIGN_VENV` | `/home/dsign/venv` | venv для pip |
 | `DSIGN_DISPLAY_BACKEND` | `drm` | Какие units рестартить |
 
