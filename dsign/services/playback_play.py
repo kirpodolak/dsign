@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import traceback
+from threading import Thread
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from .playback_constants import PlaybackConstants
