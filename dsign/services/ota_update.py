@@ -24,7 +24,7 @@ DEFAULT_BRANCH = "main"
 DEFAULT_REMOTE = "origin"
 DSIGN_USER = "dsign"
 SIGNAGE_UNIT = "digital-signage.service"
-OTA_TOOL_VERSION = "2026-07-13-pi11"
+OTA_TOOL_VERSION = "2026-07-13-pi12"
 
 RunFn = Callable[..., subprocess.CompletedProcess]
 
@@ -222,12 +222,14 @@ def _bootstrap_untracked_path(path: str) -> bool:
     p = path.strip()
     allowed = {
         "dsign/services/ota_update.py",
+        "dsign/services/api_rate_limit.py",
         "services/ota_update.py",
+        "services/api_rate_limit.py",
         "docs/D1_OTA.md",
     }
     if p in allowed:
         return True
-    if p.startswith("services/"):
+    if p.startswith("services/") or p.startswith("docs/D1_OTA"):
         return True
     return False
 
