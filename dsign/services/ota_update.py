@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +24,7 @@ DEFAULT_BRANCH = "main"
 DEFAULT_REMOTE = "origin"
 DSIGN_USER = "dsign"
 SIGNAGE_UNIT = "digital-signage.service"
-OTA_TOOL_VERSION = "2026-07-10-pi9"
+OTA_TOOL_VERSION = "2026-07-13-pi10"
 
 RunFn = Callable[..., subprocess.CompletedProcess]
 
@@ -67,9 +68,12 @@ class OtaConfig:
         ota_dir = Path(merged.get("DSIGN_OTA_DIR", str(DEFAULT_OTA_DIR)))
         preferred_root = Path(merged.get("DSIGN_PROJECT_ROOT", str(DEFAULT_GIT_CLONE_ROOT)))
         git_root = _resolve_git_root(preferred_root)
-        runtime_root = Path(
-            merged.get("DSIGN_RUNTIME_ROOT", str(DEFAULT_RUNTIME_ROOT))
-        ).resolve()
+        runtime_raw = merged.get("DSIGN_RUNTIME_ROOT", "").strip()
+        if runtime_raw:
+            runtime_root = Path(runtime_raw).resolve()
+        else:
+            # Single-tree Pi (signage runs from the same clone as git) — do not assume /home/dsign/dsign.
+            runtime_root = git_root.resolve()
         return cls(
             project_root=git_root,
             runtime_root=runtime_root,
@@ -450,36 +454,127 @@ def sync_runtime_from_git(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> 
     }
 
 
-def _restart_units(cfg: OtaConfig, run_fn: Optional[RunFn] = None) -> List[str]:
-    if cfg.display_backend == "wayland":
-        units = [
-            SIGNAGE_UNIT,
-            "dsign-compositor.service",
-            "dsign-logo.service",
-            "dsign-mpv-wayland.service",
-        ]
-    else:
-        units = [SIGNAGE_UNIT, "dsign-mpv.service"]
+def _ota_smoke_enabled(cfg: OtaConfig) -> bool:
+    return _env_bool(os.environ.get("DSIGN_OTA_SMOKE_CHECK"), default=True)
 
+
+def _ota_auto_rollback_enabled(cfg: OtaConfig) -> bool:
+    return _env_bool(os.environ.get("DSIGN_OTA_AUTO_ROLLBACK"), default=True)
+
+
+def _restart_wait_sec() -> float:
+    raw = os.environ.get("DSIGN_OTA_RESTART_WAIT_SEC", "90")
+    try:
+        return max(10.0, float(raw))
+    except ValueError:
+        return 90.0
+
+
+def _units_restart_order(cfg: OtaConfig) -> List[str]:
+    """Dependencies first, digital-signage last (matches systemd After=/Wants=)."""
+    if cfg.display_backend == "wayland":
+        return [
+            "dsign-compositor.service",
+            "dsign-mpv-wayland.service",
+            "dsign-logo.service",
+            SIGNAGE_UNIT,
+        ]
+    return ["dsign-mpv.service", SIGNAGE_UNIT]
+
+
+def _wait_service_active(
+    unit: str,
+    *,
+    timeout: float,
+    run_fn: Optional[RunFn] = None,
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        proc = _run(["systemctl", "is-active", unit], timeout=15.0, run_fn=run_fn)
+        state = (proc.stdout or "").strip()
+        if state == "active":
+            return True
+        if state == "failed":
+            return False
+        time.sleep(1.0)
+    return False
+
+
+def _smoke_check(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[str, Any]:
+    """Compile Python app before restart — catches import/syntax errors early."""
+    python = cfg.venv_dir / "bin" / "python"
+    if not python.is_file():
+        raise RuntimeError(f"python not found for smoke check: {python}")
+
+    app_pkg = _resolve_package_source(cfg.project_root)
+    proc = _run(
+        [str(python), "-m", "compileall", "-q", str(app_pkg)],
+        user=cfg.dsign_user,
+        cwd=cfg.project_root,
+        timeout=180.0,
+        run_fn=run_fn,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "compileall smoke check failed").strip())
+
+    checked_run: Optional[str] = None
+    for candidate in (cfg.project_root / "run.py", app_pkg / "run.py", cfg.runtime_root / "run.py"):
+        if candidate.is_file():
+            rp = _run(
+                [str(python), "-m", "py_compile", str(candidate)],
+                user=cfg.dsign_user,
+                timeout=60.0,
+                run_fn=run_fn,
+            )
+            if rp.returncode != 0:
+                raise RuntimeError((rp.stderr or rp.stdout or f"py_compile failed for {candidate}").strip())
+            checked_run = str(candidate)
+            break
+
+    return {"success": True, "package": str(app_pkg), "run_py": checked_run}
+
+
+def _restart_units(cfg: OtaConfig, run_fn: Optional[RunFn] = None) -> List[str]:
+    units = _units_restart_order(cfg)
+    wait_sec = _restart_wait_sec()
     restarted: List[str] = []
     for unit in units:
-        proc = _run(["systemctl", "restart", unit], timeout=90.0, run_fn=run_fn)
-        if proc.returncode == 0:
-            restarted.append(unit)
+        proc = _run(["systemctl", "restart", "--no-block", unit], timeout=30.0, run_fn=run_fn)
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout or f"systemctl restart {unit} failed").strip())
+        if not _wait_service_active(unit, timeout=wait_sec, run_fn=run_fn):
+            raise RuntimeError(f"{unit} did not become active within {wait_sec:.0f}s")
+        restarted.append(unit)
     return restarted
 
 
-def apply_update(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[str, Any]:
+def apply_update(
+    cfg: OtaConfig,
+    *,
+    run_fn: Optional[RunFn] = None,
+    auto_rollback: bool = True,
+) -> Dict[str, Any]:
     _ensure_git_repo(cfg)
     commit = _rev_parse(cfg, "HEAD", run_fn=run_fn)
+    smoke: Optional[Dict[str, Any]] = None
 
-    _pip_install(cfg, run_fn=run_fn)
-    runtime_sync = sync_runtime_from_git(cfg, run_fn=run_fn)
-    _apply_manifest(cfg, run_fn=run_fn)
-    pycache_removed = _clear_pycache(cfg.project_root)
-    if cfg.runtime_root.resolve() != cfg.project_root.resolve():
-        pycache_removed += _clear_pycache(cfg.runtime_root)
-    restarted = _restart_units(cfg, run_fn=run_fn)
+    try:
+        _pip_install(cfg, run_fn=run_fn)
+        runtime_sync = sync_runtime_from_git(cfg, run_fn=run_fn)
+        _apply_manifest(cfg, run_fn=run_fn)
+        pycache_removed = _clear_pycache(cfg.project_root)
+        if cfg.runtime_root.resolve() != cfg.project_root.resolve():
+            pycache_removed += _clear_pycache(cfg.runtime_root)
+        if _ota_smoke_enabled(cfg):
+            smoke = _smoke_check(cfg, run_fn=run_fn)
+        restarted = _restart_units(cfg, run_fn=run_fn)
+    except Exception as exc:
+        if auto_rollback and _ota_auto_rollback_enabled(cfg) and load_rollback(cfg):
+            rb = _auto_rollback_after_failed_apply(cfg, run_fn=run_fn, reason=str(exc))
+            raise RuntimeError(
+                f"apply failed ({exc}); auto-rolled back to {rb.get('rolled_back_to', '?')[:8]}"
+            ) from exc
+        raise
 
     state = load_state(cfg)
     state.update(
@@ -488,6 +583,7 @@ def apply_update(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[str,
             "applied_commit": commit,
             "restarted_units": restarted,
             "runtime_sync": runtime_sync,
+            "smoke_check": smoke,
         }
     )
     save_state(cfg, state)
@@ -496,9 +592,34 @@ def apply_update(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[str,
         "success": True,
         "applied_commit": commit,
         "runtime_sync": runtime_sync,
+        "smoke_check": smoke,
         "pycache_entries_removed": pycache_removed,
         "restarted_units": restarted,
     }
+
+
+def _auto_rollback_after_failed_apply(
+    cfg: OtaConfig,
+    *,
+    run_fn: Optional[RunFn] = None,
+    reason: str,
+) -> Dict[str, Any]:
+    rb = load_rollback(cfg)
+    if not rb or not rb.get("previous_commit"):
+        raise RuntimeError("no rollback point for auto-rollback")
+
+    target = str(rb["previous_commit"])
+    reset = _git(cfg, "reset", "--hard", target, run_fn=run_fn, timeout=60.0)
+    if reset.returncode != 0:
+        raise RuntimeError((reset.stderr or reset.stdout or "git reset --hard failed").strip())
+
+    result = apply_update(cfg, run_fn=run_fn, auto_rollback=False)
+    state = load_state(cfg)
+    state["last_rollback_at"] = _utc_now()
+    state["rolled_back_to"] = target
+    state["auto_rollback_reason"] = reason
+    save_state(cfg, state)
+    return {**result, "rolled_back_to": target, "auto_rollback_reason": reason}
 
 
 def rollback_update(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[str, Any]:
@@ -511,7 +632,7 @@ def rollback_update(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[s
     if reset.returncode != 0:
         raise RuntimeError((reset.stderr or reset.stdout or "git reset --hard failed").strip())
 
-    result = apply_update(cfg, run_fn=run_fn)
+    result = apply_update(cfg, run_fn=run_fn, auto_rollback=False)
     state = load_state(cfg)
     state["last_rollback_at"] = _utc_now()
     state["rolled_back_to"] = target

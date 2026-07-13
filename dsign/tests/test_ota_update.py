@@ -15,6 +15,7 @@ from dsign.services.ota_update import (
     _build_parser,
     _parse_cli_args,
     _resolve_git_root,
+    _units_restart_order,
     _working_tree_clean,
     apply_update,
     check_update,
@@ -35,6 +36,10 @@ def _cfg(
     repo = project_root or (tmp_path / "repo")
     repo.mkdir(parents=True, exist_ok=True)
     (repo / ".git").mkdir(exist_ok=True)
+    services = repo / "dsign" / "services"
+    services.mkdir(parents=True, exist_ok=True)
+    (services / "__init__.py").write_text("")
+    (repo / "dsign" / "run.py").write_text("print('ok')\n")
     venv = tmp_path / "venv" / "bin"
     venv.mkdir(parents=True, exist_ok=True)
     (venv / "pip").write_text("#!/bin/sh\nexit 0\n")
@@ -52,6 +57,18 @@ def _cfg(
         display_backend="drm",
         dsign_user="dsign",
     )
+
+
+def _active_run_fn(calls: list[list[str]] | None = None):
+    def run_fn(cmd, **kwargs):
+        if calls is not None:
+            calls.append(list(cmd))
+        c = list(cmd)
+        if len(c) >= 3 and c[0] == "systemctl" and c[1] == "is-active":
+            return MagicMock(returncode=0, stdout="active\n", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    return run_fn
 
 
 def _git_mock(responses: dict[tuple, subprocess.CompletedProcess]):
@@ -191,9 +208,13 @@ def test_apply_runs_pip_manifest_and_restart(tmp_path, monkeypatch):
 
     def run_fn(cmd, **kwargs):
         calls.append(list(cmd))
+        c = list(cmd)
+        if len(c) >= 3 and c[0] == "systemctl" and c[1] == "is-active":
+            return MagicMock(returncode=0, stdout="active\n", stderr="")
         return MagicMock(returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("DSIGN_APPLY_INSTALL", "echo-apply")
+    monkeypatch.setenv("DSIGN_OTA_SMOKE_CHECK", "0")
 
     def fake_run(cmd, **kwargs):
         calls.append(list(cmd))
@@ -208,7 +229,7 @@ def test_apply_runs_pip_manifest_and_restart(tmp_path, monkeypatch):
     assert result["success"] is True
     assert any("pip" in " ".join(c) for c in calls)
     assert any(c[:2] == ["echo-apply", "-q"] for c in calls)
-    assert "digital-signage.service" in result["restarted_units"]
+    assert result["restarted_units"][-1] == "digital-signage.service"
     assert result["runtime_sync"]["synced"] is False
     assert result["runtime_sync"]["reason"] == "same_tree"
 
@@ -223,6 +244,7 @@ def test_sync_runtime_copies_nested_package(tmp_path):
     (pkg / "run.py").write_text("print('run')\n")
 
     cfg = _cfg(tmp_path, project_root=git_root, runtime_root=runtime)
+    (pkg / "run.py").write_text("print('run')\n")
 
     def run_fn(cmd, **kwargs):
         return MagicMock(returncode=0, stdout="", stderr="")
@@ -271,8 +293,12 @@ def test_apply_syncs_separate_runtime_tree(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, project_root=git_root, runtime_root=runtime)
 
     monkeypatch.setenv("DSIGN_APPLY_INSTALL", "echo-apply")
+    monkeypatch.setenv("DSIGN_OTA_SMOKE_CHECK", "0")
 
     def run_fn(cmd, **kwargs):
+        c = list(cmd)
+        if len(c) >= 3 and c[0] == "systemctl" and c[1] == "is-active":
+            return MagicMock(returncode=0, stdout="active\n", stderr="")
         return MagicMock(returncode=0, stdout="", stderr="")
 
     import dsign.services.ota_update as ota
@@ -291,6 +317,53 @@ def test_auto_skipped_when_disabled(tmp_path):
     cfg.enabled = False
     result = cmd_auto(cfg)
     assert result.get("skipped") is True
+
+
+def test_config_runtime_defaults_to_project_root(tmp_path):
+    repo = tmp_path / "dsign-new"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    cfg = OtaConfig.from_env(
+        {
+            "DSIGN_PROJECT_ROOT": str(repo),
+            "DSIGN_OTA_DIR": str(tmp_path / "ota"),
+            "DSIGN_VENV": str(tmp_path / "venv"),
+        }
+    )
+    assert cfg.project_root == repo.resolve()
+    assert cfg.runtime_root == repo.resolve()
+
+
+def test_restart_order_signage_last_drm():
+    cfg = OtaConfig(
+        project_root=Path("/tmp/r"),
+        runtime_root=Path("/tmp/r"),
+        venv_dir=Path("/tmp/v"),
+        ota_dir=Path("/tmp/o"),
+        branch="main",
+        remote="origin",
+        enabled=True,
+        display_backend="drm",
+        dsign_user="dsign",
+    )
+    assert _units_restart_order(cfg) == ["dsign-mpv.service", "digital-signage.service"]
+
+
+def test_restart_order_signage_last_wayland():
+    cfg = OtaConfig(
+        project_root=Path("/tmp/r"),
+        runtime_root=Path("/tmp/r"),
+        venv_dir=Path("/tmp/v"),
+        ota_dir=Path("/tmp/o"),
+        branch="main",
+        remote="origin",
+        enabled=True,
+        display_backend="wayland",
+        dsign_user="dsign",
+    )
+    units = _units_restart_order(cfg)
+    assert units[-1] == "digital-signage.service"
+    assert "dsign-mpv-wayland.service" in units
 
 
 def test_config_reads_ota_env_file(tmp_path):
