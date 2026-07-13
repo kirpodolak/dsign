@@ -35,3 +35,11 @@ def test_play_runner_missing_playlist_raises(null_logger, tmp_path):
         assert False, "expected RuntimeError"
     except RuntimeError as e:
         assert "Failed to start playback" in str(e)
+
+
+def test_playback_play_imports_thread():
+    """Regression: H-REF extract used Thread without importing it."""
+    from dsign.services import playback_play
+    from threading import Thread
+
+    assert playback_play.Thread is Thread

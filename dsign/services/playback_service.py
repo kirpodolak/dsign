@@ -81,6 +81,7 @@ class PlaybackService:
         self._recovery_queue = RecoveryQueue()
         self._wayland_manager = WaylandManager(logger=self.logger)
         self._last_socket_identity: Optional[tuple] = None
+        self._last_desync_recover_ts: float = 0.0
         self._app = None
         self._app_ready = Event()
         self._mpv_init_ready = Event()
@@ -101,6 +102,7 @@ class PlaybackService:
         ).start()
         self._start_mpv_socket_watch()
         self._start_mpv_ipc_watchdog()
+        self._start_playback_desync_watch()
 
     def set_app(self, app) -> None:
         """Attach Flask app for DB access from background threads (socket watch, boot resume)."""
@@ -422,6 +424,132 @@ class PlaybackService:
             return
         Thread(target=self._mpv_ipc_watchdog_loop, name="mpv-ipc-watchdog", daemon=True).start()
 
+    def _start_playback_desync_watch(self) -> None:
+        if os.getenv("DSIGN_PLAYBACK_DESYNC_WATCH", "1").strip().lower() in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            return
+        Thread(
+            target=self._playback_desync_watch_loop,
+            name="playback-desync-watch",
+            daemon=True,
+        ).start()
+
+    def _playback_desync_coalesce_sec(self) -> float:
+        try:
+            return float((os.getenv("DSIGN_PLAYBACK_DESYNC_COALESCE_SEC") or "60").strip())
+        except ValueError:
+            return 60.0
+
+    def _playback_desync_watch_interval_sec(self) -> float:
+        try:
+            return float((os.getenv("DSIGN_PLAYBACK_DESYNC_WATCH_SEC") or "20").strip())
+        except ValueError:
+            return 20.0
+
+    def _playback_desync_watch_loop(self) -> None:
+        interval = max(5.0, min(120.0, self._playback_desync_watch_interval_sec()))
+        while True:
+            time.sleep(interval)
+            try:
+                self._maybe_recover_playback_desync()
+            except Exception as e:
+                self._log_warning(
+                    "Playback desync watch raised",
+                    extra={
+                        "error": str(e),
+                        "type": type(e).__name__,
+                        "action": "playback_desync_watch",
+                    },
+                )
+
+    def _clear_stale_playing_status(self) -> None:
+        try:
+            with self._app_context():
+                self._playlist_manager._persist_playback_status(
+                    playlist_id=None,
+                    status="idle",
+                    source="idle",
+                    clear_rule=True,
+                )
+                self._playlist_manager._set_playback_active_marker(False)
+                try:
+                    self._mpv_manager.set_playback_session_active(False)
+                except Exception:
+                    pass
+        except Exception as e:
+            self._log_warning(
+                "Failed to clear stale playing status",
+                extra={
+                    "error": str(e),
+                    "type": type(e).__name__,
+                    "action": "playback_desync_recover",
+                },
+            )
+
+    def _maybe_recover_playback_desync(self) -> None:
+        if not self._app_ready.is_set():
+            return
+        if self._recover_lock.locked():
+            return
+        now = time.monotonic()
+        if now - float(self._last_desync_recover_ts or 0.0) < self._playback_desync_coalesce_sec():
+            return
+        with self._app_context():
+            snap = self._playlist_manager._remote_playback_snapshot()
+            if str(snap.get("db_status") or "").lower() != "playing":
+                return
+            if snap.get("thread_alive"):
+                return
+            playlist_id = snap.get("db_playlist_id")
+            if not playlist_id:
+                return
+            if snap.get("mpv_idle") is not True and self._playlist_manager._mpv_has_active_media():
+                return
+            self._last_desync_recover_ts = now
+            resume_index = 0
+            try:
+                resume_index = self._playlist_manager.get_resume_start_index(advance=False)
+            except Exception:
+                resume_index = 0
+            _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
+            self._log_warning(
+                "Playback desync: DB playing but slideshow thread dead and mpv idle; resuming",
+                extra={
+                    "playlist_id": playlist_id,
+                    "start_index": resume_index,
+                    "source": resume_source,
+                    "rule_id": resume_rule_id,
+                    "action": "playback_desync_recover",
+                },
+            )
+            ok = False
+            try:
+                ok = bool(
+                    self.play(
+                        int(playlist_id),
+                        start_index=resume_index,
+                        preserve_stall_tracking=True,
+                        source=resume_source,
+                        rule_id=resume_rule_id,
+                    )
+                )
+            except Exception as e:
+                self._log_warning(
+                    "Playback desync resume raised",
+                    extra={
+                        "playlist_id": playlist_id,
+                        "error": str(e),
+                        "type": type(e).__name__,
+                        "action": "playback_desync_recover",
+                    },
+                )
+            if not ok:
+                self._clear_stale_playing_status()
+
     def _mpv_ipc_watchdog_loop(self) -> None:
         interval = self._mpv_manager._watchdog_interval_sec()
         while True:
@@ -565,10 +693,13 @@ class PlaybackService:
             if playlist_id is None:
                 return
             resume_index = self._playlist_manager.get_resume_start_index(advance=False)
+            _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
             ok = bool(
                 self._playlist_manager.play(
                     playlist_id,
                     start_index=resume_index,
+                    source=resume_source,
+                    rule_id=resume_rule_id,
                 )
             )
             self._log_warning(
@@ -576,6 +707,8 @@ class PlaybackService:
                 extra={
                     "playlist_id": playlist_id,
                     "start_index": resume_index,
+                    "source": resume_source,
+                    "rule_id": resume_rule_id,
                     "ok": ok,
                     "action": "slideshow_recover",
                 },
@@ -691,6 +824,7 @@ class PlaybackService:
         self._wait_after_mpv_recover()
         self._last_socket_identity = self._mpv_socket_identity()
         if playlist_id is not None:
+            _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
             ok = False
             for attempt in range(2):
                 try:
@@ -699,6 +833,8 @@ class PlaybackService:
                             playlist_id,
                             start_index=resume_index,
                             preserve_stall_tracking=True,
+                            source=resume_source,
+                            rule_id=resume_rule_id,
                         )
                     )
                 except Exception as e:
@@ -720,6 +856,8 @@ class PlaybackService:
                             "playlist_id": playlist_id,
                             "start_index": resume_index,
                             "resume_advance": resume_advance,
+                            "source": resume_source,
+                            "rule_id": resume_rule_id,
                             "last_good_media_key": (
                                 self._playlist_manager.get_network_playback_health().get(
                                     "last_good_media_key"
@@ -735,6 +873,7 @@ class PlaybackService:
                 "MPV recover: play() failed after mpv restart",
                 extra={"playlist_id": playlist_id, "action": "mpv_recover"},
             )
+            self._clear_stale_playing_status()
             return False
         if not self._playback_active_marker_exists() and not self._playlist_manager_has_active_playback():
             Thread(target=self._preload_resources, daemon=True).start()
@@ -853,6 +992,34 @@ class PlaybackService:
             except Exception:
                 pass
         return None
+
+    def _resolve_playback_resume_context(
+        self,
+    ) -> tuple[Optional[int], str, Optional[int]]:
+        """Return (playlist_id, source, rule_id) for recovery resume — preserve schedule."""
+        playlist_id = self._resolve_playlist_id_for_recovery()
+        source = "manual"
+        rule_id: Optional[int] = None
+        with self._app_context():
+            try:
+                from ..models import PlaybackStatus
+
+                session = getattr(self.db_session, "session", self.db_session)
+                row = session.query(PlaybackStatus).get(1)
+                if row is not None:
+                    source = str(row.source or "manual")
+                    if row.rule_id is not None:
+                        rule_id = int(row.rule_id)
+            except Exception as e:
+                self._log_warning(
+                    "Could not read playback source for recovery",
+                    extra={
+                        "error": str(e),
+                        "type": type(e).__name__,
+                        "action": "playback_resume_context",
+                    },
+                )
+        return playlist_id, source, rule_id
 
     def _should_resume_playback_after_boot(self) -> bool:
         return self._resolve_playlist_id_for_recovery() is not None

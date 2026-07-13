@@ -238,11 +238,12 @@ class PlaybackEofWaiter:
         stall_limit = max(3, min(120, stall_limit))
 
         try:
+            stagnation_default = "45" if is_network else "90"
             stagnation_sec = float(
-                (os.getenv("DSIGN_MPV_PLAYBACK_STAGNATION_SEC") or "90").strip()
+                (os.getenv("DSIGN_MPV_PLAYBACK_STAGNATION_SEC") or stagnation_default).strip()
             )
         except ValueError:
-            stagnation_sec = 90.0
+            stagnation_sec = 45.0 if is_network else 90.0
         stagnation_sec = max(20.0, min(600.0, stagnation_sec))
         try:
             ipc_dead_sec = float(
