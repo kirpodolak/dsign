@@ -515,11 +515,14 @@ class PlaybackService:
                 resume_index = self._playlist_manager.get_resume_start_index(advance=False)
             except Exception:
                 resume_index = 0
+            _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
             self._log_warning(
                 "Playback desync: DB playing but slideshow thread dead and mpv idle; resuming",
                 extra={
                     "playlist_id": playlist_id,
                     "start_index": resume_index,
+                    "source": resume_source,
+                    "rule_id": resume_rule_id,
                     "action": "playback_desync_recover",
                 },
             )
@@ -530,6 +533,8 @@ class PlaybackService:
                         int(playlist_id),
                         start_index=resume_index,
                         preserve_stall_tracking=True,
+                        source=resume_source,
+                        rule_id=resume_rule_id,
                     )
                 )
             except Exception as e:
@@ -688,10 +693,13 @@ class PlaybackService:
             if playlist_id is None:
                 return
             resume_index = self._playlist_manager.get_resume_start_index(advance=False)
+            _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
             ok = bool(
                 self._playlist_manager.play(
                     playlist_id,
                     start_index=resume_index,
+                    source=resume_source,
+                    rule_id=resume_rule_id,
                 )
             )
             self._log_warning(
@@ -699,6 +707,8 @@ class PlaybackService:
                 extra={
                     "playlist_id": playlist_id,
                     "start_index": resume_index,
+                    "source": resume_source,
+                    "rule_id": resume_rule_id,
                     "ok": ok,
                     "action": "slideshow_recover",
                 },
@@ -814,6 +824,7 @@ class PlaybackService:
         self._wait_after_mpv_recover()
         self._last_socket_identity = self._mpv_socket_identity()
         if playlist_id is not None:
+            _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
             ok = False
             for attempt in range(2):
                 try:
@@ -822,6 +833,8 @@ class PlaybackService:
                             playlist_id,
                             start_index=resume_index,
                             preserve_stall_tracking=True,
+                            source=resume_source,
+                            rule_id=resume_rule_id,
                         )
                     )
                 except Exception as e:
@@ -843,6 +856,8 @@ class PlaybackService:
                             "playlist_id": playlist_id,
                             "start_index": resume_index,
                             "resume_advance": resume_advance,
+                            "source": resume_source,
+                            "rule_id": resume_rule_id,
                             "last_good_media_key": (
                                 self._playlist_manager.get_network_playback_health().get(
                                     "last_good_media_key"
@@ -977,6 +992,34 @@ class PlaybackService:
             except Exception:
                 pass
         return None
+
+    def _resolve_playback_resume_context(
+        self,
+    ) -> tuple[Optional[int], str, Optional[int]]:
+        """Return (playlist_id, source, rule_id) for recovery resume — preserve schedule."""
+        playlist_id = self._resolve_playlist_id_for_recovery()
+        source = "manual"
+        rule_id: Optional[int] = None
+        with self._app_context():
+            try:
+                from ..models import PlaybackStatus
+
+                session = getattr(self.db_session, "session", self.db_session)
+                row = session.query(PlaybackStatus).get(1)
+                if row is not None:
+                    source = str(row.source or "manual")
+                    if row.rule_id is not None:
+                        rule_id = int(row.rule_id)
+            except Exception as e:
+                self._log_warning(
+                    "Could not read playback source for recovery",
+                    extra={
+                        "error": str(e),
+                        "type": type(e).__name__,
+                        "action": "playback_resume_context",
+                    },
+                )
+        return playlist_id, source, rule_id
 
     def _should_resume_playback_after_boot(self) -> bool:
         return self._resolve_playlist_id_for_recovery() is not None
