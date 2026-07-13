@@ -386,7 +386,7 @@ def test_working_tree_ignores_bootstrap_ota_files(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         return MagicMock(
             returncode=0,
-            stdout="?? dsign/services/ota_update.py\n?? services/ota_update.py\n",
+            stdout="?? dsign/services/ota_update.py\n?? services/ota_update.py\n?? docs/D1_OTA.md\n?? services/foo.py\n",
             stderr="",
         )
 

@@ -24,7 +24,7 @@ DEFAULT_BRANCH = "main"
 DEFAULT_REMOTE = "origin"
 DSIGN_USER = "dsign"
 SIGNAGE_UNIT = "digital-signage.service"
-OTA_TOOL_VERSION = "2026-07-13-pi10"
+OTA_TOOL_VERSION = "2026-07-13-pi11"
 
 RunFn = Callable[..., subprocess.CompletedProcess]
 
@@ -179,13 +179,12 @@ def _run(
     runner = run_fn or subprocess.run
     full_cmd: List[str] = list(cmd)
     if user:
-        # -H: HOME for git; stdin must not be DEVNULL (Pi: dsign may lack /dev/null perms).
+        # -H: HOME for git. stdin=DEVNULL (requires /dev/null readable — chmod 666 on Pi if needed).
         full_cmd = ["sudo", "-n", "-H", "-u", user, *full_cmd]
     return runner(
         full_cmd,
         cwd=str(cwd) if cwd else None,
-        stdin=subprocess.PIPE,
-        input="",
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -218,17 +217,27 @@ def _ensure_git_repo(cfg: OtaConfig) -> None:
     )
 
 
+def _bootstrap_untracked_path(path: str) -> bool:
+    """Paths allowed as untracked during OTA download (bootstrap / manual doc drop)."""
+    p = path.strip()
+    allowed = {
+        "dsign/services/ota_update.py",
+        "services/ota_update.py",
+        "docs/D1_OTA.md",
+    }
+    if p in allowed:
+        return True
+    if p.startswith("services/"):
+        return True
+    return False
+
+
 def _working_tree_clean(cfg: OtaConfig, run_fn: Optional[RunFn] = None) -> bool:
     proc = _git(cfg, "status", "--porcelain", run_fn=run_fn, timeout=30.0)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or "git status failed").strip())
     lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
-    # Bootstrap may install OTA module before D1 lands on main — do not block merge for that alone.
-    bootstrap_only = {
-        "dsign/services/ota_update.py",
-        "services/ota_update.py",
-    }
-    lines = [ln for ln in lines if ln[3:].strip() not in bootstrap_only]
+    lines = [ln for ln in lines if not _bootstrap_untracked_path(ln[3:])]
     return not lines
 
 

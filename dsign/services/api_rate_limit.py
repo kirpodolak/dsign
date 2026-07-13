@@ -5,6 +5,7 @@ Mirrors the login rate limiter in auth_routes.py — no extra dependencies.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from functools import wraps
 from threading import Lock
@@ -17,8 +18,8 @@ F = TypeVar("F", bound=Callable[..., Any])
 _lock = Lock()
 _buckets: dict[str, dict[str, Any]] = {}
 
-GLOBAL_MAX_REQUESTS = 100
-GLOBAL_WINDOW_SEC = 60.0
+GLOBAL_MAX_REQUESTS = int(os.environ.get("DSIGN_API_GLOBAL_RATE_MAX", "100"))
+GLOBAL_WINDOW_SEC = float(os.environ.get("DSIGN_API_GLOBAL_RATE_WINDOW_SEC", "60"))
 
 RATE_LIMIT_PLAYBACK_PLAY = (5, 60.0)
 RATE_LIMIT_PLAYBACK_STOP = (10, 60.0)
@@ -30,6 +31,10 @@ RATE_LIMIT_SYSTEM_REBOOT = (1, 3600.0)
 def client_ip() -> str:
     forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
     return forwarded or (request.remote_addr or "unknown")
+
+
+def _is_loopback(ip: str) -> bool:
+    return ip in ("127.0.0.1", "::1", "localhost")
 
 
 def check_rate_limit(key: str, max_requests: int, window_seconds: float) -> bool:
@@ -71,6 +76,13 @@ def rate_limit_response() -> tuple[Any, int]:
 
 def enforce_global_api_rate_limit() -> Optional[tuple[Any, int]]:
     ip = client_ip()
+    if _is_loopback(ip) and os.environ.get("DSIGN_API_RATE_LIMIT_LOOPBACK", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return None
     key = f"{ip}:__global__"
     if not check_rate_limit(key, GLOBAL_MAX_REQUESTS, GLOBAL_WINDOW_SEC):
         return rate_limit_response()
