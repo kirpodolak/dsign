@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 DEFAULT_PROJECT_ROOT = Path("/home/dsign/dsign")
+DEFAULT_RUNTIME_ROOT = Path("/home/dsign/dsign")
+DEFAULT_GIT_CLONE_ROOT = Path("/home/dsign/dsign-new")
 DEFAULT_VENV = Path("/home/dsign/venv")
 DEFAULT_OTA_DIR = Path("/var/lib/dsign/ota")
 DEFAULT_OTA_ENV = Path("/etc/dsign/ota.env")
@@ -21,7 +23,7 @@ DEFAULT_BRANCH = "main"
 DEFAULT_REMOTE = "origin"
 DSIGN_USER = "dsign"
 SIGNAGE_UNIT = "digital-signage.service"
-OTA_TOOL_VERSION = "2026-07-10-pi8"
+OTA_TOOL_VERSION = "2026-07-10-pi9"
 
 RunFn = Callable[..., subprocess.CompletedProcess]
 
@@ -46,6 +48,7 @@ def _load_env_file(path: Path) -> Dict[str, str]:
 @dataclass
 class OtaConfig:
     project_root: Path
+    runtime_root: Path
     venv_dir: Path
     ota_dir: Path
     branch: str
@@ -62,10 +65,14 @@ class OtaConfig:
         )
         merged = {**_load_env_file(ota_env_path), **base}
         ota_dir = Path(merged.get("DSIGN_OTA_DIR", str(DEFAULT_OTA_DIR)))
-        preferred_root = Path(merged.get("DSIGN_PROJECT_ROOT", str(DEFAULT_PROJECT_ROOT)))
+        preferred_root = Path(merged.get("DSIGN_PROJECT_ROOT", str(DEFAULT_GIT_CLONE_ROOT)))
         git_root = _resolve_git_root(preferred_root)
+        runtime_root = Path(
+            merged.get("DSIGN_RUNTIME_ROOT", str(DEFAULT_RUNTIME_ROOT))
+        ).resolve()
         return cls(
             project_root=git_root,
+            runtime_root=runtime_root,
             venv_dir=Path(merged.get("DSIGN_VENV", str(DEFAULT_VENV))),
             ota_dir=ota_dir,
             branch=(merged.get("DSIGN_OTA_BRANCH", DEFAULT_BRANCH) or DEFAULT_BRANCH).strip(),
@@ -351,14 +358,95 @@ def _clear_pycache(project_root: Path) -> int:
 
 def purge_pycache(cfg: OtaConfig) -> Dict[str, Any]:
     count = _clear_pycache(cfg.project_root)
-    prod_root = Path(os.environ.get("DSIGN_PROJECT_ROOT", str(DEFAULT_PROJECT_ROOT)))
     extra = 0
-    if prod_root.resolve() != cfg.project_root.resolve() and prod_root.is_dir():
-        extra = _clear_pycache(prod_root)
+    if cfg.runtime_root.resolve() != cfg.project_root.resolve() and cfg.runtime_root.is_dir():
+        extra = _clear_pycache(cfg.runtime_root)
     return {
         "success": True,
         "project_root": str(cfg.project_root),
+        "runtime_root": str(cfg.runtime_root),
         "pycache_entries_removed": count + extra,
+    }
+
+
+_RUNTIME_SKIP_DIRS = frozenset(
+    {".git", "__pycache__", ".pytest_cache", "node_modules", "venv", ".egg-info"}
+)
+_RUNTIME_SKIP_SUFFIXES = (".pyc", ".pyo")
+
+
+def _resolve_package_source(git_root: Path) -> Path:
+    """Application tree inside git clone (nested dsign/ or flat services/)."""
+    nested = git_root / "dsign"
+    if (nested / "services").is_dir():
+        return nested
+    if (git_root / "services").is_dir():
+        return git_root
+    raise RuntimeError(f"cannot find application package (services/) under {git_root}")
+
+
+def _copy_app_tree(src: Path, dest: Path) -> int:
+    copied = 0
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if d not in _RUNTIME_SKIP_DIRS]
+        rel = Path(root).relative_to(src)
+        target_dir = dest / rel
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            if name.endswith(_RUNTIME_SKIP_SUFFIXES):
+                continue
+            shutil.copy2(Path(root) / name, target_dir / name)
+            copied += 1
+    return copied
+
+
+def _chown_tree(path: Path, user: str, run_fn: Optional[RunFn] = None) -> None:
+    if not path.is_dir():
+        return
+    proc = _run(["chown", "-R", f"{user}:{user}", str(path)], timeout=120.0, run_fn=run_fn)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or f"chown failed for {path}").strip())
+
+
+def sync_runtime_from_git(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[str, Any]:
+    """
+    Copy Python app from git clone (DSIGN_PROJECT_ROOT) to prod runtime (DSIGN_RUNTIME_ROOT).
+
+    On Pi: git lives in /home/dsign/dsign-new, signage runs from flat /home/dsign/dsign.
+    Without this step OTA only updates the clone while systemd still executes stale prod files.
+    """
+    git_root = cfg.project_root.resolve()
+    runtime = cfg.runtime_root.resolve()
+    if git_root == runtime:
+        return {
+            "synced": False,
+            "reason": "same_tree",
+            "runtime_root": str(runtime),
+            "files_copied": 0,
+        }
+
+    src_pkg = _resolve_package_source(git_root)
+    if not runtime.is_dir():
+        runtime.mkdir(parents=True, exist_ok=True)
+
+    files_copied = _copy_app_tree(src_pkg, runtime)
+
+    root_run = git_root / "run.py"
+    nested_run = src_pkg / "run.py"
+    for candidate in (root_run, nested_run):
+        if candidate.is_file():
+            shutil.copy2(candidate, runtime / "run.py")
+            files_copied += 1
+            break
+
+    _chown_tree(runtime, cfg.dsign_user, run_fn=run_fn)
+    _clear_pycache(runtime)
+
+    return {
+        "synced": True,
+        "runtime_root": str(runtime),
+        "source": str(src_pkg),
+        "files_copied": files_copied,
     }
 
 
@@ -386,8 +474,11 @@ def apply_update(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[str,
     commit = _rev_parse(cfg, "HEAD", run_fn=run_fn)
 
     _pip_install(cfg, run_fn=run_fn)
+    runtime_sync = sync_runtime_from_git(cfg, run_fn=run_fn)
     _apply_manifest(cfg, run_fn=run_fn)
     pycache_removed = _clear_pycache(cfg.project_root)
+    if cfg.runtime_root.resolve() != cfg.project_root.resolve():
+        pycache_removed += _clear_pycache(cfg.runtime_root)
     restarted = _restart_units(cfg, run_fn=run_fn)
 
     state = load_state(cfg)
@@ -396,6 +487,7 @@ def apply_update(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[str,
             "last_apply_at": _utc_now(),
             "applied_commit": commit,
             "restarted_units": restarted,
+            "runtime_sync": runtime_sync,
         }
     )
     save_state(cfg, state)
@@ -403,6 +495,7 @@ def apply_update(cfg: OtaConfig, *, run_fn: Optional[RunFn] = None) -> Dict[str,
     return {
         "success": True,
         "applied_commit": commit,
+        "runtime_sync": runtime_sync,
         "pycache_entries_removed": pycache_removed,
         "restarted_units": restarted,
     }
@@ -436,6 +529,7 @@ def status_report(cfg: OtaConfig) -> Dict[str, Any]:
         "tool_version": OTA_TOOL_VERSION,
         "enabled": cfg.enabled,
         "project_root": str(cfg.project_root),
+        "runtime_root": str(cfg.runtime_root),
         "git_ready": git_ready,
         "venv": str(cfg.venv_dir),
         "branch": cfg.branch,
@@ -473,7 +567,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DSign OTA self-update (D1)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("check", "download", "apply", "rollback", "status", "auto", "purge-pycache"):
+    for name in ("check", "download", "apply", "rollback", "status", "auto", "purge-pycache", "sync-runtime"):
         sub.add_parser(name, parents=[common], help=f"OTA {name}")
     sub.add_parser("version", parents=[common], help="Print OTA tool version (deploy check)")
     return parser
@@ -501,10 +595,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "status": lambda: status_report(cfg),
         "auto": lambda: cmd_auto(cfg),
         "purge-pycache": lambda: purge_pycache(cfg),
+        "sync-runtime": lambda: sync_runtime_from_git(cfg),
         "version": lambda: {
             "success": True,
             "tool_version": OTA_TOOL_VERSION,
             "project_root": str(cfg.project_root),
+            "runtime_root": str(cfg.runtime_root),
             "git_ready": (cfg.project_root / ".git").is_dir(),
         },
     }
@@ -545,6 +641,12 @@ def _print_human(command: str, result: Dict[str, Any]) -> None:
             print(result.get("message", "already up to date"))
     elif command == "apply":
         print(f"applied {result.get('applied_commit', '?')[:8]}")
+        sync = result.get("runtime_sync") or {}
+        if sync.get("synced"):
+            print(
+                f"synced {sync.get('files_copied', 0)} files "
+                f"{sync.get('source', '?')} -> {sync.get('runtime_root', '?')}"
+            )
         removed = result.get("pycache_entries_removed")
         if removed:
             print(f"cleared {removed} pycache entries")
@@ -552,7 +654,17 @@ def _print_human(command: str, result: Dict[str, Any]) -> None:
         if units:
             print("restarted:", ", ".join(units))
     elif command == "purge-pycache":
-        print(f"cleared {result.get('pycache_entries_removed', 0)} pycache entries under {result.get('project_root')}")
+        print(
+            f"cleared {result.get('pycache_entries_removed', 0)} pycache entries "
+            f"(git={result.get('project_root')}, runtime={result.get('runtime_root')})"
+        )
+    elif command == "sync-runtime":
+        if result.get("synced"):
+            print(
+                f"synced {result.get('files_copied', 0)} files to {result.get('runtime_root')}"
+            )
+        else:
+            print(f"no sync needed ({result.get('reason', 'same_tree')})")
     elif command == "rollback":
         print(f"rolled back to {result.get('rolled_back_to', '?')[:8]}")
     elif command == "status":

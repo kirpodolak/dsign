@@ -22,20 +22,28 @@ from dsign.services.ota_update import (
     download_update,
     load_rollback,
     save_rollback,
+    sync_runtime_from_git,
 )
 
 
-def _cfg(tmp_path: Path) -> OtaConfig:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / ".git").mkdir()
+def _cfg(
+    tmp_path: Path,
+    *,
+    project_root: Path | None = None,
+    runtime_root: Path | None = None,
+) -> OtaConfig:
+    repo = project_root or (tmp_path / "repo")
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / ".git").mkdir(exist_ok=True)
     venv = tmp_path / "venv" / "bin"
-    venv.mkdir(parents=True)
+    venv.mkdir(parents=True, exist_ok=True)
     (venv / "pip").write_text("#!/bin/sh\nexit 0\n")
     (venv / "pip").chmod(0o755)
     (repo / "requirements.txt").write_text("Flask>=3.0\n")
+    runtime = runtime_root if runtime_root is not None else repo
     return OtaConfig(
         project_root=repo,
+        runtime_root=runtime,
         venv_dir=tmp_path / "venv",
         ota_dir=tmp_path / "ota",
         branch="main",
@@ -201,6 +209,81 @@ def test_apply_runs_pip_manifest_and_restart(tmp_path, monkeypatch):
     assert any("pip" in " ".join(c) for c in calls)
     assert any(c[:2] == ["echo-apply", "-q"] for c in calls)
     assert "digital-signage.service" in result["restarted_units"]
+    assert result["runtime_sync"]["synced"] is False
+    assert result["runtime_sync"]["reason"] == "same_tree"
+
+
+def test_sync_runtime_copies_nested_package(tmp_path):
+    git_root = tmp_path / "clone"
+    runtime = tmp_path / "prod"
+    pkg = git_root / "dsign"
+    services = pkg / "services"
+    services.mkdir(parents=True)
+    (services / "playback_service.py").write_text("# v2\n")
+    (pkg / "run.py").write_text("print('run')\n")
+
+    cfg = _cfg(tmp_path, project_root=git_root, runtime_root=runtime)
+
+    def run_fn(cmd, **kwargs):
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    result = sync_runtime_from_git(cfg, run_fn=run_fn)
+
+    assert result["synced"] is True
+    assert (runtime / "services" / "playback_service.py").read_text() == "# v2\n"
+    assert (runtime / "run.py").read_text() == "print('run')\n"
+    assert result["files_copied"] >= 2
+
+
+def test_sync_runtime_skips_when_same_tree(tmp_path):
+    cfg = _cfg(tmp_path)
+    result = sync_runtime_from_git(cfg)
+    assert result["synced"] is False
+    assert result["reason"] == "same_tree"
+
+
+def test_config_reads_runtime_root(tmp_path):
+    outer = tmp_path / "home" / "dsign"
+    repo = outer / "dsign-new"
+    repo.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    runtime = outer / "dsign"
+    runtime.mkdir()
+    cfg = OtaConfig.from_env(
+        {
+            "DSIGN_PROJECT_ROOT": str(repo),
+            "DSIGN_RUNTIME_ROOT": str(runtime),
+            "DSIGN_OTA_DIR": str(tmp_path / "ota"),
+            "DSIGN_VENV": str(tmp_path / "venv"),
+        }
+    )
+    assert cfg.project_root == repo.resolve()
+    assert cfg.runtime_root == runtime.resolve()
+
+
+def test_apply_syncs_separate_runtime_tree(tmp_path, monkeypatch):
+    git_root = tmp_path / "clone"
+    runtime = tmp_path / "prod"
+    pkg = git_root / "dsign" / "services"
+    pkg.mkdir(parents=True)
+    (pkg / "app.py").write_text("x=1\n")
+
+    cfg = _cfg(tmp_path, project_root=git_root, runtime_root=runtime)
+
+    monkeypatch.setenv("DSIGN_APPLY_INSTALL", "echo-apply")
+
+    def run_fn(cmd, **kwargs):
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    import dsign.services.ota_update as ota
+
+    monkeypatch.setattr(ota.subprocess, "run", run_fn)
+
+    result = apply_update(cfg, run_fn=run_fn)
+
+    assert result["success"] is True
+    assert result["runtime_sync"]["synced"] is True
+    assert (runtime / "services" / "app.py").read_text() == "x=1\n"
 
 
 def test_auto_skipped_when_disabled(tmp_path):
