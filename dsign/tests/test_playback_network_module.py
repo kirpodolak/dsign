@@ -51,3 +51,12 @@ def test_sanitize_headers_prefers_external_media_service(null_logger, tmp_path):
 def test_escape_mpv_key_value_list_token(null_logger, tmp_path):
     net = _helper(null_logger, tmp_path)
     assert net._escape_mpv_key_value_list_token("a=b,c") == r"a\=b\,c"
+
+
+def test_collect_mpv_network_buffering_per_file_instance_method(null_logger, tmp_path, monkeypatch):
+    """Regression: stray @staticmethod broke playback (missing 'item' arg)."""
+    net = _helper(null_logger, tmp_path)
+    monkeypatch.delenv("DSIGN_MPV_NETBUF", raising=False)
+    item = {"provider": "rutube"}
+    out = net._pm._collect_mpv_network_buffering_per_file(item, stream_url="https://rutube.ru/x")
+    assert out == {}
