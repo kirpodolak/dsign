@@ -9,7 +9,6 @@ import pytest
 from flask_wtf.csrf import generate_csrf
 
 from dsign.services.api_rate_limit import (
-    GLOBAL_MAX_REQUESTS,
     RATE_LIMIT_PLAYBACK_PLAY,
     check_rate_limit,
     reset_api_rate_limits,
@@ -85,16 +84,20 @@ def test_playback_stop_returns_429_after_limit(api_client):
     assert rv.status_code == 429
 
 
-def test_global_api_rate_limit_blocks_excess_requests(api_client):
+def test_global_api_rate_limit_blocks_excess_requests(api_client, monkeypatch):
+    """Global limit is enforced on any /api/* route; use a light endpoint + small cap."""
     client, _app, _user, _playlist = api_client
     headers = {"Authorization": "Bearer test-bearer-token"}
+    max_req = 5
+    monkeypatch.setattr("dsign.services.api_rate_limit.GLOBAL_MAX_REQUESTS", max_req)
 
-    for _ in range(GLOBAL_MAX_REQUESTS):
-        rv = client.get("/api/health", headers=headers)
+    for _ in range(max_req):
+        rv = client.get("/api/schedule/now", headers=headers)
         assert rv.status_code == 200
 
-    rv = client.get("/api/health", headers=headers)
+    rv = client.get("/api/schedule/now", headers=headers)
     assert rv.status_code == 429
+    assert rv.get_json().get("success") is False
 
 
 def _login_session(client, user) -> None:
