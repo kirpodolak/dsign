@@ -24,4 +24,4 @@ jobs:
 
       - name: Run pytest
         run: |
-          python3 -m pytest tests/ -v --tb=short
+          cd dsign && python3 -m pytest tests/ -v --tb=short
