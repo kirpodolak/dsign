@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -13,6 +14,8 @@ from dsign.services.ota_update import (
     OtaConfig,
     _build_parser,
     _parse_cli_args,
+    _resolve_git_root,
+    _working_tree_clean,
     apply_update,
     check_update,
     cmd_auto,
@@ -58,15 +61,16 @@ def test_check_reports_up_to_date(tmp_path):
     local = "a" * 40
     run_fn = _git_mock(
         {
-            ("sudo", "-n", "-u", "dsign", "git", "-C", str(cfg.project_root), "fetch", "origin", "main"): MagicMock(
+            ("sudo", "-n", "-H", "-u", "dsign", "git", "-C", str(cfg.project_root), "fetch", "origin", "main"): MagicMock(
                 returncode=0, stdout="", stderr=""
             ),
-            ("sudo", "-n", "-u", "dsign", "git", "-C", str(cfg.project_root), "rev-parse", "HEAD"): MagicMock(
+            ("sudo", "-n", "-H", "-u", "dsign", "git", "-C", str(cfg.project_root), "rev-parse", "HEAD"): MagicMock(
                 returncode=0, stdout=local + "\n", stderr=""
             ),
             (
                 "sudo",
                 "-n",
+                "-H",
                 "-u",
                 "dsign",
                 "git",
@@ -90,15 +94,16 @@ def test_check_reports_update_available(tmp_path):
     remote = "b" * 40
     run_fn = _git_mock(
         {
-            ("sudo", "-n", "-u", "dsign", "git", "-C", str(cfg.project_root), "fetch", "origin", "main"): MagicMock(
+            ("sudo", "-n", "-H", "-u", "dsign", "git", "-C", str(cfg.project_root), "fetch", "origin", "main"): MagicMock(
                 returncode=0, stdout="", stderr=""
             ),
-            ("sudo", "-n", "-u", "dsign", "git", "-C", str(cfg.project_root), "rev-parse", "HEAD"): MagicMock(
+            ("sudo", "-n", "-H", "-u", "dsign", "git", "-C", str(cfg.project_root), "rev-parse", "HEAD"): MagicMock(
                 returncode=0, stdout=local + "\n", stderr=""
             ),
             (
                 "sudo",
                 "-n",
+                "-H",
                 "-u",
                 "dsign",
                 "git",
@@ -219,7 +224,70 @@ def test_cli_json_flag_after_subcommand():
     assert args.json is True
 
 
+def test_working_tree_ignores_bootstrap_ota_files(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        return MagicMock(
+            returncode=0,
+            stdout="?? dsign/services/ota_update.py\n?? services/ota_update.py\n",
+            stderr="",
+        )
+
+    assert _working_tree_clean(cfg, run_fn=fake_run) is True
+
+
+def test_working_tree_blocks_other_local_changes(tmp_path):
+    cfg = _cfg(tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        return MagicMock(returncode=0, stdout=" M dsign/routes/api.py\n", stderr="")
+
+    assert _working_tree_clean(cfg, run_fn=fake_run) is False
+
+
+def test_resolve_git_root_finds_clone(tmp_path):
+    repo = tmp_path / "dsign"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    assert _resolve_git_root(repo) == repo.resolve()
+
+
+def test_config_uses_git_root(tmp_path):
+    outer = tmp_path / "home" / "dsign"
+    repo = outer / "dsign"
+    repo.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    cfg = OtaConfig.from_env(
+        {
+            "DSIGN_PROJECT_ROOT": str(outer),
+            "DSIGN_OTA_DIR": str(tmp_path / "ota"),
+            "DSIGN_VENV": str(tmp_path / "venv"),
+        }
+    )
+    assert cfg.project_root == repo.resolve()
+
+
 def test_cli_json_flag_before_subcommand():
     args = _parse_cli_args(["--json", "status"])
     assert args.command == "status"
     assert args.json is True
+
+
+def test_version_reports_tool_version(capsys):
+    args = _parse_cli_args(["version", "--json"])
+    assert args.command == "version"
+    from dsign.services.ota_update import OTA_TOOL_VERSION, main
+
+    assert main(["version", "--json"]) == 0
+    out = capsys.readouterr().out
+    assert '"tool_version"' in out
+    assert OTA_TOOL_VERSION
+
+
+def test_cli_json_from_sys_argv(capsys, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["ota_update.py", "version", "--json"])
+    from dsign.services.ota_update import main
+
+    assert main() == 0
+    assert '"tool_version"' in capsys.readouterr().out
