@@ -273,13 +273,6 @@ class PlaybackPlayRunner:
                     },
                 )
 
-            self._pm._persist_playback_status(
-                playlist_id=playlist_id,
-                status="playing",
-                source=source,
-                rule_id=rule_id,
-            )
-
             # Start background loop to enforce durations and EOF waits.
             # play() loadfile'd items[start_index]; loop walks from there, skips reload on first offset once.
             self._pm._play_thread = Thread(
@@ -293,6 +286,14 @@ class PlaybackPlayRunner:
                 daemon=True,
             )
             self._pm._play_thread.start()
+
+            # Persist only after the slideshow thread is running (avoids DB=playing + dead thread).
+            self._pm._persist_playback_status(
+                playlist_id=playlist_id,
+                status="playing",
+                source=source,
+                rule_id=rule_id,
+            )
 
             # Notify clients
             try:

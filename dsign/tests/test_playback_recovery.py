@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from threading import Lock
+from threading import Event, Lock
 from unittest.mock import MagicMock
 
 import pytest
@@ -155,3 +155,68 @@ def test_resume_slideshow_after_crash_restarts_playlist(null_logger, monkeypatch
     svc._resume_slideshow_after_crash()
 
     svc._playlist_manager.play.assert_called_once_with(7, start_index=1)
+
+
+def test_maybe_recover_playback_desync_resumes_playlist(null_logger, monkeypatch):
+    svc = _make_recovery_service(null_logger)
+    svc._app_ready = Event()
+    svc._app_ready.set()
+    svc._last_desync_recover_ts = 0.0
+    svc._playlist_manager._remote_playback_snapshot.return_value = {
+        "db_status": "playing",
+        "db_playlist_id": 6,
+        "thread_alive": False,
+        "mpv_idle": True,
+    }
+    svc._playlist_manager._mpv_has_active_media.return_value = False
+    svc._playlist_manager.get_resume_start_index.return_value = 2
+    svc.play.return_value = True
+    monkeypatch.setenv("DSIGN_PLAYBACK_DESYNC_COALESCE_SEC", "0")
+
+    svc._maybe_recover_playback_desync()
+
+    svc.play.assert_called_once_with(6, start_index=2, preserve_stall_tracking=True)
+
+
+def test_maybe_recover_playback_desync_clears_status_when_resume_fails(null_logger, monkeypatch):
+    svc = _make_recovery_service(null_logger)
+    svc._app_ready = Event()
+    svc._app_ready.set()
+    svc._last_desync_recover_ts = 0.0
+    svc._playlist_manager._remote_playback_snapshot.return_value = {
+        "db_status": "playing",
+        "db_playlist_id": 6,
+        "thread_alive": False,
+        "mpv_idle": True,
+    }
+    svc._playlist_manager._mpv_has_active_media.return_value = False
+    svc._playlist_manager.get_resume_start_index.return_value = 0
+    svc.play.return_value = False
+    monkeypatch.setenv("DSIGN_PLAYBACK_DESYNC_COALESCE_SEC", "0")
+
+    svc._maybe_recover_playback_desync()
+
+    svc._playlist_manager._persist_playback_status.assert_called_once_with(
+        playlist_id=None,
+        status="idle",
+        source="idle",
+        clear_rule=True,
+    )
+
+
+def test_recover_after_mpv_restart_clears_stale_status_on_play_failure(null_logger):
+    svc = _make_recovery_service(null_logger)
+    svc._playlist_manager.get_resume_start_index_for_hung_recovery.return_value = 0
+    svc._mpv_manager.wait_for_ipc_socket_at_startup.return_value = True
+    svc._mpv_manager.initialize.return_value = True
+    svc.play.return_value = False
+
+    ok = svc.recover_after_mpv_systemd_restart()
+
+    assert ok is False
+    svc._playlist_manager._persist_playback_status.assert_called_once_with(
+        playlist_id=None,
+        status="idle",
+        source="idle",
+        clear_rule=True,
+    )
