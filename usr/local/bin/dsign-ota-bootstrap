@@ -2,7 +2,7 @@
 # One-shot install of D1 OTA tooling on Pi (when prod copy has no usr/local/).
 set -euo pipefail
 
-BOOTSTRAP_VERSION="2026-07-10-fetchhead-v3"
+BOOTSTRAP_VERSION="2026-07-10-fetchhead-v4"
 BRANCH="${DSIGN_OTA_BRANCH_SRC:-cursor/d1-ota-8ed1}"
 RAW="https://raw.githubusercontent.com/kirpodolak/dsign/${BRANCH}"
 
@@ -42,6 +42,15 @@ _install_files() {
     echo "  installed $dest"
   done
   return 0
+}
+
+_fix_git_ownership() {
+  if [ ! -d "${PROJECT_ROOT}/.git" ]; then
+    return 0
+  fi
+  echo "  chown ${DSIGN_USER} on ${PROJECT_ROOT}/.git (OTA runs git as ${DSIGN_USER})..."
+  chown -R "${DSIGN_USER}:${DSIGN_USER}" "${PROJECT_ROOT}/.git"
+  chown -R "${DSIGN_USER}:${DSIGN_USER}" "${PROJECT_ROOT}" 2>/dev/null || true
 }
 
 install_from_git() {
@@ -105,6 +114,8 @@ if [ "$_ok" -eq 0 ]; then
   echo "dsign-ota-bootstrap: FAILED (git and curl)" >&2
   exit 1
 fi
+
+_fix_git_ownership
 
 echo "verify:"
 if ! out="$(/usr/local/bin/dsign-update version --json 2>/dev/null)"; then
