@@ -102,6 +102,22 @@ class PlaylistManager:
             self._ensure_app_wired(timeout=90.0)
         return self._app.app_context() if self._app is not None else nullcontext()
 
+    def _release_db_session(self) -> None:
+        """Return scoped-session connection before long mpv/ytdl waits (pool exhaustion)."""
+        try:
+            remove = getattr(self.db_session, "remove", None)
+            if callable(remove):
+                remove()
+                return
+        except Exception:
+            pass
+        try:
+            from ..extensions import db
+
+            db.session.remove()
+        except Exception:
+            pass
+
     def set_external_media_service(self, service) -> None:
         """Attach external media resolver service (optional)."""
         self._external_media_service = service
@@ -1651,7 +1667,8 @@ class PlaylistManager:
         start_index: int,
         profile_muted: bool,
         profile_settings: Dict[str, Any],
-        playlist: Any,
+        playlist: Any = None,
+        playlist_name: Optional[str] = None,
         mode: str,
         source: str = "manual",
         rule_id: Optional[int] = None,
@@ -1661,6 +1678,11 @@ class PlaylistManager:
         self._active_playlist_id = playlist_id
         self._active_playback_mode = mode
         self._audio_route_applied_for_play = False
+        name = playlist_name
+        if not name and playlist is not None:
+            name = str(getattr(playlist, "name", "") or "")
+        # Avoid ORM use after caller released the session.
+        playlist = None
         try:
             self._logo_manager.ensure_mpv_video_output()
         except Exception:
@@ -1680,6 +1702,9 @@ class PlaylistManager:
                 "start_index": start_index,
             },
         )
+
+        # DB work already done by caller; ensure connection is free before loadfile.
+        self._release_db_session()
 
         ordered_indices: Optional[List[int]] = None
         if mode == "local_single":
@@ -1766,9 +1791,9 @@ class PlaylistManager:
                     "playback_update",
                     {
                         "status": "playing",
-                        "playlist_id": playlist.id,
+                        "playlist_id": int(playlist_id),
                         "current_media": self._get_current_media_label(),
-                        "playlist": {"id": playlist.id, "name": playlist.name},
+                        "playlist": {"id": int(playlist_id), "name": str(name or "")},
                         "settings": profile_settings,
                         "playback_mode": mode,
                     },
