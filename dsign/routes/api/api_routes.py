@@ -2124,13 +2124,14 @@ def init_api_routes(api_bp, services):
     # Schedule (D2.1 — CRUD + week/now peek; engine in D2.2)
     # ======================
     def _trigger_schedule_evaluate() -> None:
-        """Apply schedule after rule mutations without blocking the HTTP response.
-
-        ``evaluate_and_apply`` may call ``play()`` (slow loadfile) or ``stop()``; running
-        it inline froze toggle/archive and could ``session.remove()`` mid-request.
-        """
-        engine = getattr(playback_service, '_schedule_engine', None)
-        if engine is None or not hasattr(engine, 'evaluate_and_apply'):
+        """Apply schedule after rule mutations without blocking the HTTP response."""
+        if not playback_service:
+            return
+        if hasattr(playback_service, "enqueue_schedule_evaluate"):
+            playback_service.enqueue_schedule_evaluate(ignore_manual=False)
+            return
+        engine = getattr(playback_service, "_schedule_engine", None)
+        if engine is None or not hasattr(engine, "evaluate_and_apply"):
             return
         app = current_app._get_current_object()
 
@@ -2615,13 +2616,24 @@ def init_api_routes(api_bp, services):
                 }), 400
 
             # Backward-compatible: older clients might send `settings`, but PlaybackService.play() doesn't take it.
+            # Never block the HTTP worker on ytdl/loadfile — UI Play/Stop would freeze otherwise.
             playlist_id = int(data['playlist_id'])
-            result = playback_service.play(playlist_id=playlist_id, source='manual')
-        
+            enqueue = getattr(playback_service, "enqueue_play", None)
+            if callable(enqueue):
+                details = enqueue(playlist_id=playlist_id, source="manual")
+            else:
+                details = playback_service.play(
+                    playlist_id=playlist_id, source="manual"
+                )
+            # Keep response JSON-safe (tests may stub with MagicMock return values).
+            if not isinstance(details, (dict, list, str, int, float, bool, type(None))):
+                details = {"ok": bool(details)}
+
             return jsonify({
                 "success": True,
+                "accepted": True,
                 "playlist_id": playlist_id,
-                "details": result
+                "details": details,
             })
         except Exception as e:
             current_app.logger.error(f"Error starting playback: {str(e)}")
@@ -2635,6 +2647,7 @@ def init_api_routes(api_bp, services):
     @api_session_or_token_required
     def playback_stop():
         try:
+            # Stop must stay synchronous but fast (persist + abort play_seq).
             result = playback_service.stop(source='manual')
             return jsonify({
                 "success": True,
@@ -2653,10 +2666,11 @@ def init_api_routes(api_bp, services):
         if not playback_service:
             return jsonify({"success": False, "error": "Playback service unavailable"}), 503
         try:
+            # Clears manual lock then enqueues evaluate (must not await play/loadfile).
             ok = playback_service.return_to_schedule()
             if not ok:
                 return jsonify({"success": False, "error": "Schedule engine unavailable"}), 503
-            return jsonify({"success": True})
+            return jsonify({"success": True, "accepted": True})
         except Exception as e:
             current_app.logger.error(f"Error returning to schedule: {e}")
             return jsonify({"success": False, "error": str(e)}), 500
