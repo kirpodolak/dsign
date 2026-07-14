@@ -737,19 +737,29 @@ const ui = {
         const pid =
             rawPid != null && rawPid !== '' ? String(rawPid) : '';
         const st = String(statusPayload?.status || '').toLowerCase();
+        // DB may say idle while mpv still loops (orphan) — keep Stop usable.
+        const orphan = Boolean(statusPayload?.orphan_mpv);
+        const stopEnabled = st === 'playing' || orphan;
 
         const currentMedia = statusPayload?.current_media;
         ids.forEach((id) => {
-            if (pid === id && st === 'playing') {
+            if (pid === id && (st === 'playing' || orphan)) {
                 this.setPlaybackCardState(id, 'playing', currentMedia);
-            } else if (pid === id && st === 'stopped') {
+            } else if (pid === id && st === 'stopped' && !orphan) {
                 this.setPlaybackCardState(id, 'stopped');
             } else {
                 this.setPlaybackCardState(id, 'idle');
             }
+            // Orphan / live: Stop must work even when badge is Idle on other cards.
+            if (stopEnabled) {
+                const stopBtn = document.querySelector(
+                    `.playlist-card[data-id="${id}"] button.stop`
+                );
+                if (stopBtn) stopBtn.disabled = false;
+            }
         });
 
-        const playbackKey = `${st}|${pid}`;
+        const playbackKey = `${st}|${pid}|${orphan ? 1 : 0}`;
         const playbackChanged = playbackKey !== state.lastAppliedPlaybackKey;
         state.lastAppliedPlaybackKey = playbackKey;
 
@@ -1058,16 +1068,23 @@ const handlers = {
             if (!btn || btn.disabled) return;
             btn.disabled = true;
             try {
+                // Server accepts immediately; schedule play runs in background.
                 const resp = await api.returnToSchedule();
                 if (!resp?.success) throw new Error(resp?.error || t('return_to_schedule_err', getUiLang()));
-                const statusResp = await api.getPlaybackStatus();
-                const inner =
-                    statusResp?.status && typeof statusResp.status === 'object'
-                        ? statusResp.status
-                        : null;
-                state.playbackStatus = inner;
-                ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
                 showAlert(t('return_to_schedule_ok', getUiLang()), 'success');
+                const refreshStatus = async () => {
+                    const statusResp = await api.getPlaybackStatus().catch(() => null);
+                    const inner =
+                        statusResp?.status && typeof statusResp.status === 'object'
+                            ? statusResp.status
+                            : null;
+                    if (!inner) return;
+                    state.playbackStatus = inner;
+                    ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
+                };
+                await refreshStatus();
+                // Schedule evaluate/play may land a moment later — one delayed refresh.
+                setTimeout(() => { refreshStatus(); }, 1500);
             } catch (err) {
                 showError(err.message || t('return_to_schedule_err', getUiLang()));
             } finally {
