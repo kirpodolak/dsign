@@ -36,6 +36,7 @@ class PlaybackPlayRunner:
             self._pm._stop_play_thread(preserve_stall_tracking=preserve_stall_tracking)
             self._pm._cancel_content_cache_prefetches()
             self._pm._prune_media_backoff()
+            play_seq = self._pm._begin_play_seq()
             # Mark playback starting before DB/profile IPC so Wi-Fi-on-display skips.
             self._pm._set_playback_active_marker(True)
             self._pm._audio_route_applied_for_play = False
@@ -133,6 +134,7 @@ class PlaybackPlayRunner:
                     mode=playback_mode,
                     source=source,
                     rule_id=rule_id,
+                    play_seq=play_seq,
                 )
 
             self._pm._active_playlist_id = playlist_id
@@ -281,6 +283,22 @@ class PlaybackPlayRunner:
                     },
                 )
 
+            if not self._pm._is_play_seq_current(play_seq):
+                self._pm.logger.info(
+                    "Playback play aborted: superseded by stop/newer play",
+                    extra={"playlist_id": playlist_id, "play_seq": play_seq},
+                )
+                try:
+                    self._pm._mpv_manager.set_playback_stream_opening(False)
+                except Exception:
+                    pass
+                self._pm._set_playback_active_marker(False)
+                try:
+                    self._pm._mpv_manager.set_playback_session_active(False)
+                except Exception:
+                    pass
+                return False
+
             # Start background loop to enforce durations and EOF waits.
             # play() loadfile'd items[start_index]; loop walks from there, skips reload on first offset once.
             self._pm._play_thread = Thread(
@@ -294,6 +312,10 @@ class PlaybackPlayRunner:
                 daemon=True,
             )
             self._pm._play_thread.start()
+
+            if not self._pm._is_play_seq_current(play_seq):
+                self._pm._stop_play_thread(preserve_stall_tracking=preserve_stall_tracking)
+                return False
 
             # Persist only after the slideshow thread is running (avoids DB=playing + dead thread).
             self._pm._persist_playback_status(
