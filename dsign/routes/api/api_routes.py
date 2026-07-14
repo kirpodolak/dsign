@@ -2244,11 +2244,27 @@ def init_api_routes(api_bp, services):
         if not schedule_service:
             return jsonify({"success": False, "error": "Schedule service unavailable"}), 503
         try:
+            from dsign.models import PlaybackStatus
             from dsign.services.schedule_service import ScheduleValidationError
 
             rule = schedule_service.toggle_rule(rule_id)
             payload = schedule_service.rule_to_dict(rule)
-            _trigger_schedule_evaluate()
+            # Pausing the on-air rule must stop mpv even if source drifted to manual
+            # (Stop race) — plain evaluate would no-op on source=manual.
+            force_stop = False
+            if not bool(getattr(rule, "enabled", True)):
+                try:
+                    row = db.session.query(PlaybackStatus).get(1)
+                    if row is not None and row.rule_id is not None and int(row.rule_id) == int(rule_id):
+                        force_stop = True
+                    elif row is not None and str(row.source or "") == "schedule":
+                        force_stop = True
+                except Exception:
+                    force_stop = False
+            if force_stop and playback_service and hasattr(playback_service, "enqueue_stop"):
+                playback_service.enqueue_stop(source="schedule")
+            else:
+                _trigger_schedule_evaluate()
             return jsonify({"success": True, "rule": payload})
         except ScheduleValidationError as e:
             return jsonify({"success": False, "error": str(e)}), 404
