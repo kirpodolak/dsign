@@ -207,3 +207,90 @@ def test_eof_network_duration_reached(eof_setup, monkeypatch):
         )
 
     assert ok is True
+
+
+def test_eof_reached_property_paused_network(eof_setup, monkeypatch):
+    """Rutube/HLS: eof-reached=true while pause=true must advance (Pi stuck-at-EOF)."""
+    pm, mpv, clock = eof_setup
+    _bind_clock(pm, clock, monkeypatch)
+    monkeypatch.setenv("DSIGN_MPV_NETWORK_IDLE_GRACE_SEC", "3")
+    monkeypatch.setenv("DSIGN_MPV_NETWORK_EOF_POLL_SEC", "1")
+
+    def _get_light(prop: str, *, timeout: float = 8.0):
+        if prop == "time-pos":
+            return 3636.67
+        if prop == "duration":
+            return 3636.67
+        if prop == "idle-active":
+            return False
+        if prop == "eof-reached":
+            return True
+        if prop == "pause":
+            return True
+        return None
+
+    with patch.object(pm, "_mpv_get_light", side_effect=_get_light):
+        clock.advance(3.5)
+        ok = pm._wait_mpv_video_end(
+            1,
+            is_network=True,
+            stream_ready=True,
+            provider="rutube",
+            stream_url="ytdl://https://rutube.ru/video/d2465847a301b47b84ad734a0a0aaca0/",
+            media_key="ext-4",
+        )
+
+    assert ok is True
+
+
+def test_eof_reached_property_unpaused(eof_setup, monkeypatch):
+    """eof-reached=true without pause also finishes the item after grace."""
+    pm, mpv, clock = eof_setup
+    _bind_clock(pm, clock, monkeypatch)
+    monkeypatch.setenv("DSIGN_MPV_NETWORK_IDLE_GRACE_SEC", "3")
+
+    def _get_light(prop: str, *, timeout: float = 8.0):
+        if prop == "time-pos":
+            return 100.0
+        if prop == "idle-active":
+            return False
+        if prop == "eof-reached":
+            return True
+        if prop == "pause":
+            return False
+        return None
+
+    with patch.object(pm, "_mpv_get_light", side_effect=_get_light):
+        clock.advance(3.5)
+        ok = pm._wait_mpv_video_end(
+            1,
+            is_network=True,
+            stream_ready=True,
+            provider="rutube",
+            stream_url="https://rutube.ru/video/x",
+        )
+
+    assert ok is True
+
+
+def test_eof_reached_unavailable_still_uses_idle(eof_setup, monkeypatch):
+    """When eof-reached is unavailable, previous idle path still works."""
+    pm, mpv, clock = eof_setup
+    _bind_clock(pm, clock, monkeypatch)
+    monkeypatch.setenv("DSIGN_MPV_NETWORK_IDLE_GRACE_SEC", "3")
+    monkeypatch.setenv("DSIGN_MPV_NETWORK_EOF_POLL_SEC", "1")
+
+    def _get_light(prop: str, *, timeout: float = 8.0):
+        if prop == "idle-active":
+            return True
+        if prop == "time-pos":
+            return 12.0
+        if prop == "eof-reached":
+            return None
+        return None
+
+    with patch.object(pm, "_mpv_get_light", side_effect=_get_light):
+        clock.advance(3.5)
+        ok = pm._wait_mpv_video_end(1, is_network=True, stream_ready=True)
+
+    assert ok is True

@@ -193,10 +193,11 @@ class PlaybackEofWaiter:
         is_audio: bool = False,
     ) -> bool:
         """
-        End-of-playback detection that works when `eof-reached` is permanently unavailable.
+        End-of-playback detection for local and network items.
 
-        Returns True when the item ended normally; False when playback should stop
-        without advancing (stall restart, user stop, or playlist change).
+        Prefers mpv end-file events when available. Also finishes when
+        ``eof-reached`` is true (Rutube/HLS often sits paused at EOF), then
+        falls back to duration, idle, and time-pos stagnation.
         """
         start = time.time()
         # Short grace caused false EOF on HLS (idle flicker while buffering) → tight loadfile loops
@@ -342,6 +343,32 @@ class PlaybackEofWaiter:
                     idle_raw = self._pm._mpv_get_light("idle-active", timeout=snap_timeout)
             else:
                 idle_raw = self._pm._mpv_get_light("idle-active", timeout=snap_timeout)
+
+            # When mpv exposes eof-reached=true it often keeps pause=true (HLS / deferred_unpause).
+            # Without this check the loop waits forever for end-file / duration / idle.
+            if time.monotonic() >= grace_until and (
+                (not is_network) or (poll_tick % 2 == 0)
+            ):
+                eof_raw = self._pm._mpv_get_light("eof-reached", timeout=snap_timeout)
+                if self._pm._snap_bool({"eof-reached": eof_raw}, "eof-reached") is True:
+                    pause_raw = self._pm._mpv_get_light("pause", timeout=min(1.0, snap_timeout))
+                    paused = self._pm._snap_bool({"pause": pause_raw}, "pause")
+                    reason = (
+                        "eof_reached_paused" if paused is True else "eof_reached"
+                    )
+                    self._pm.logger.info(
+                        "playlist_eof: mpv eof-reached; finishing item",
+                        extra={
+                            "playlist_id": playlist_id,
+                            "is_network": is_network,
+                            "media_key": media_key,
+                            "paused": paused,
+                            "time_pos": tp,
+                            "reason": reason,
+                        },
+                    )
+                    _finish_video_item(reason)
+                    break
 
             dur: Optional[float] = None
             poll_duration = (not is_network) or eof_capable
