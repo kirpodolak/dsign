@@ -504,24 +504,41 @@ class PlaybackService:
         resume_index = 0
         resume_source = "manual"
         resume_rule_id = None
+        orphan_stop = False
         with self._app_context():
             try:
                 snap = self._playlist_manager._remote_playback_snapshot()
-                if str(snap.get("db_status") or "").lower() != "playing":
+                db_status = str(snap.get("db_status") or "").lower()
+                thread_alive = bool(snap.get("thread_alive"))
+
+                # Orphan: DB idle/stopped but mpv still looping (common after
+                # return-to-schedule left Idle while async play was blocked).
+                if db_status != "playing" and not thread_alive:
+                    try:
+                        st = self._playlist_manager.get_status()
+                        orphan_stop = bool(st.get("orphan_mpv"))
+                    except Exception:
+                        orphan_stop = False
+                    if orphan_stop:
+                        self._last_desync_recover_ts = now
+                    else:
+                        return
+                elif db_status != "playing":
                     return
-                if snap.get("thread_alive"):
+                elif thread_alive:
                     return
-                playlist_id = snap.get("db_playlist_id")
-                if not playlist_id:
-                    return
-                if snap.get("mpv_idle") is not True and self._playlist_manager._mpv_has_active_media():
-                    return
-                self._last_desync_recover_ts = now
-                try:
-                    resume_index = self._playlist_manager.get_resume_start_index(advance=False)
-                except Exception:
-                    resume_index = 0
-                _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
+                else:
+                    playlist_id = snap.get("db_playlist_id")
+                    if not playlist_id:
+                        return
+                    if snap.get("mpv_idle") is not True and self._playlist_manager._mpv_has_active_media():
+                        return
+                    self._last_desync_recover_ts = now
+                    try:
+                        resume_index = self._playlist_manager.get_resume_start_index(advance=False)
+                    except Exception:
+                        resume_index = 0
+                    _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
             finally:
                 try:
                     from ..extensions import db
@@ -529,6 +546,20 @@ class PlaybackService:
                     db.session.remove()
                 except Exception:
                     pass
+
+        if orphan_stop:
+            self._log_warning(
+                "Playback orphan: mpv active while DB idle; forcing stop",
+                extra={"action": "playback_orphan_stop"},
+            )
+            try:
+                self.stop(source="manual")
+            except Exception as e:
+                self._log_warning(
+                    "Playback orphan stop failed",
+                    extra={"error": str(e), "type": type(e).__name__},
+                )
+            return
 
         if not playlist_id:
             return
@@ -1240,16 +1271,106 @@ class PlaybackService:
             prev = row.previous_source
             if prev == "schedule":
                 if self._schedule_engine is not None:
-                    self._schedule_engine.evaluate_and_apply()
+                    # Do not block the override-return thread on loadfile.
+                    self.enqueue_schedule_evaluate(ignore_manual=False)
                 else:
                     self.stop(source="schedule")
             elif prev == "manual" and row.previous_playlist_id:
-                self.play(int(row.previous_playlist_id), source="manual")
+                self.enqueue_play(int(row.previous_playlist_id), source="manual")
             else:
                 self.stop(source="schedule")
 
+    def enqueue_schedule_evaluate(self, *, ignore_manual: bool = False) -> bool:
+        """Run ScheduleEngine.evaluate_and_apply on a daemon thread (never block HTTP)."""
+        engine = self._schedule_engine
+        if engine is None or not hasattr(engine, "evaluate_and_apply"):
+            return False
+        app = self._app
+
+        def _run() -> None:
+            try:
+                if app is not None:
+                    with app.app_context():
+                        engine.evaluate_and_apply(ignore_manual=ignore_manual)
+                else:
+                    engine.evaluate_and_apply(ignore_manual=ignore_manual)
+            except Exception as exc:
+                self._log_error(
+                    "Async schedule evaluate failed",
+                    extra={
+                        "error": str(exc),
+                        "type": type(exc).__name__,
+                        "action": "schedule_evaluate_async",
+                        "ignore_manual": bool(ignore_manual),
+                    },
+                )
+
+        Thread(target=_run, name="schedule-evaluate", daemon=True).start()
+        return True
+
+    def enqueue_play(
+        self,
+        playlist_id: int,
+        *,
+        start_index: int = 0,
+        preserve_stall_tracking: bool = False,
+        source: str = "manual",
+        rule_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Start play() off the HTTP worker — loadfile/ytdl must not freeze the UI."""
+        app = self._app
+        pid = int(playlist_id)
+        # Suppress orphan-desync reclaim while a fresh play is starting.
+        self._last_desync_recover_ts = time.monotonic()
+
+        def _run() -> None:
+            try:
+                if app is not None:
+                    with app.app_context():
+                        self.play(
+                            pid,
+                            start_index=start_index,
+                            preserve_stall_tracking=preserve_stall_tracking,
+                            source=source,
+                            rule_id=rule_id,
+                        )
+                else:
+                    self.play(
+                        pid,
+                        start_index=start_index,
+                        preserve_stall_tracking=preserve_stall_tracking,
+                        source=source,
+                        rule_id=rule_id,
+                    )
+            except Exception as exc:
+                self._log_error(
+                    "Async play failed",
+                    extra={
+                        "playlist_id": pid,
+                        "source": source,
+                        "error": str(exc),
+                        "type": type(exc).__name__,
+                        "action": "play_async",
+                    },
+                )
+
+        Thread(target=_run, name=f"playback-play-{pid}", daemon=True).start()
+        return {
+            "accepted": True,
+            "playlist_id": pid,
+            "source": source,
+            "rule_id": rule_id,
+            "start_index": int(start_index or 0),
+        }
+
     def return_to_schedule(self) -> bool:
-        """Clear manual lock and apply current schedule slot (D2.2)."""
+        """Clear manual lock and apply current schedule slot (D2.2).
+
+        Plans synchronously (fast DB), then enqueues play/stop so the HTTP request
+        never waits on loadfile. Avoids Idle-stuck UI when evaluate was blocked
+        behind another in-flight play holding the schedule apply lock.
+        """
+        action = None
         with self._app_context():
             from ..models import PlaybackStatus
             session = getattr(self.db_session, "session", self.db_session)
@@ -1260,8 +1381,50 @@ class PlaybackService:
                 session.commit()
             if self._schedule_engine is None:
                 return False
-            self._schedule_engine.evaluate_and_apply(ignore_manual=True)
+            try:
+                plan = getattr(self._schedule_engine, "plan_action", None)
+                if callable(plan):
+                    action = plan(ignore_manual=True)
+                else:
+                    action = None
+            except Exception as exc:
+                self._log_warning(
+                    "return_to_schedule plan failed; falling back to async evaluate",
+                    extra={"error": str(exc), "type": type(exc).__name__},
+                )
+                action = None
+
+        if action and action[0] == "play":
+            self.enqueue_play(
+                int(action[1]),
+                source="schedule",
+                rule_id=int(action[2]),
+            )
             return True
+        if action and action[0] == "stop":
+            app = self._app
+
+            def _stop_run() -> None:
+                try:
+                    if app is not None:
+                        with app.app_context():
+                            self.stop(source="schedule")
+                    else:
+                        self.stop(source="schedule")
+                except Exception as exc:
+                    self._log_error(
+                        "Async schedule stop failed",
+                        extra={
+                            "error": str(exc),
+                            "type": type(exc).__name__,
+                            "action": "return_to_schedule_stop",
+                        },
+                    )
+
+            Thread(target=_stop_run, name="schedule-stop", daemon=True).start()
+            return True
+        # No immediate slot change (already correct) or plan unavailable — full evaluate.
+        return self.enqueue_schedule_evaluate(ignore_manual=True)
 
     def remote_pause(self, paused: Optional[bool] = None) -> Dict[str, Any]:
         """Pause or resume current playlist playback via MPV."""
