@@ -33,6 +33,8 @@ class ScheduleEngine:
         self._timer: Optional[Timer] = None
         self._running = False
         self._lock = Lock()
+        # Serialize plan+play/stop so parallel async evaluates cannot stack loadfiles.
+        self._apply_lock = Lock()
 
     def _app_context(self):
         app = getattr(self.playback, "_app", None)
@@ -136,22 +138,23 @@ class ScheduleEngine:
         Never call ``session.remove()`` while serving an HTTP request — that detaches
         ORM objects still needed for the JSON response (schedule toggle/archive).
         """
-        action: Optional[_ScheduleAction] = None
-        release = not self._in_request_context()
-        if self._in_app_context():
-            try:
-                action = self._plan(ignore_manual=ignore_manual)
-            finally:
-                if release:
-                    self._release_db_session()
-        else:
-            with self._app_context():
+        with self._apply_lock:
+            action: Optional[_ScheduleAction] = None
+            release = not self._in_request_context()
+            if self._in_app_context():
                 try:
                     action = self._plan(ignore_manual=ignore_manual)
                 finally:
                     if release:
                         self._release_db_session()
-        self._apply_action(action)
+            else:
+                with self._app_context():
+                    try:
+                        action = self._plan(ignore_manual=ignore_manual)
+                    finally:
+                        if release:
+                            self._release_db_session()
+            self._apply_action(action)
 
     def _apply_action(self, action: Optional[_ScheduleAction]) -> None:
         if not action:

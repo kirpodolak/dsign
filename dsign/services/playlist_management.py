@@ -2338,18 +2338,21 @@ class PlaylistManager:
 
             ok = True
             if show_idle_logo:
-                # mpv-internal playlist (loop-playlist) keeps running until replaced.
+                # Keep Stop HTTP fast: brief IPC attempt, then finish logo in background
+                # if loadfile still holds the long IPC lock.
                 try:
                     self._mpv_manager._send_command(
                         {"command": ["stop"]},
-                        timeout=3.0,
-                        lock_wait=30.0,
+                        timeout=2.0,
+                        lock_wait=2.0,
                         max_attempts=1,
                     )
                 except Exception:
                     pass
-                ok = self._logo_manager.display_idle_logo(lock_wait=30.0)
-            return ok
+                ok = bool(self._logo_manager.display_idle_logo(lock_wait=2.0))
+                if not ok:
+                    self._enqueue_idle_logo_retry()
+            return True if update_status else ok
         except Exception as e:
             self.logger.error(
                 "Stop error",
@@ -2360,6 +2363,43 @@ class PlaylistManager:
                 }
             )
             return False
+
+    def _enqueue_idle_logo_retry(self) -> None:
+        """Best-effort logo after Stop when mpv IPC was busy during the request."""
+        app = self._app
+
+        def _run() -> None:
+            try:
+                if app is not None:
+                    with app.app_context():
+                        try:
+                            self._mpv_manager._send_command(
+                                {"command": ["stop"]},
+                                timeout=3.0,
+                                lock_wait=30.0,
+                                max_attempts=1,
+                            )
+                        except Exception:
+                            pass
+                        self._logo_manager.display_idle_logo(lock_wait=30.0)
+                else:
+                    try:
+                        self._mpv_manager._send_command(
+                            {"command": ["stop"]},
+                            timeout=3.0,
+                            lock_wait=30.0,
+                            max_attempts=1,
+                        )
+                    except Exception:
+                        pass
+                    self._logo_manager.display_idle_logo(lock_wait=30.0)
+            except Exception as exc:
+                self.logger.warning(
+                    "Background idle logo after stop failed",
+                    extra={"error": str(exc), "type": type(exc).__name__},
+                )
+
+        Thread(target=_run, name="idle-logo-retry", daemon=True).start()
 
     def _get_loop_position_snapshot(self) -> tuple[Optional[int], int]:
         with self._loop_position_lock:

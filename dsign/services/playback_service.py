@@ -1240,16 +1240,101 @@ class PlaybackService:
             prev = row.previous_source
             if prev == "schedule":
                 if self._schedule_engine is not None:
-                    self._schedule_engine.evaluate_and_apply()
+                    # Do not block the override-return thread on loadfile.
+                    self.enqueue_schedule_evaluate(ignore_manual=False)
                 else:
                     self.stop(source="schedule")
             elif prev == "manual" and row.previous_playlist_id:
-                self.play(int(row.previous_playlist_id), source="manual")
+                self.enqueue_play(int(row.previous_playlist_id), source="manual")
             else:
                 self.stop(source="schedule")
 
+    def enqueue_schedule_evaluate(self, *, ignore_manual: bool = False) -> bool:
+        """Run ScheduleEngine.evaluate_and_apply on a daemon thread (never block HTTP)."""
+        engine = self._schedule_engine
+        if engine is None or not hasattr(engine, "evaluate_and_apply"):
+            return False
+        app = self._app
+
+        def _run() -> None:
+            try:
+                if app is not None:
+                    with app.app_context():
+                        engine.evaluate_and_apply(ignore_manual=ignore_manual)
+                else:
+                    engine.evaluate_and_apply(ignore_manual=ignore_manual)
+            except Exception as exc:
+                self._log_error(
+                    "Async schedule evaluate failed",
+                    extra={
+                        "error": str(exc),
+                        "type": type(exc).__name__,
+                        "action": "schedule_evaluate_async",
+                        "ignore_manual": bool(ignore_manual),
+                    },
+                )
+
+        Thread(target=_run, name="schedule-evaluate", daemon=True).start()
+        return True
+
+    def enqueue_play(
+        self,
+        playlist_id: int,
+        *,
+        start_index: int = 0,
+        preserve_stall_tracking: bool = False,
+        source: str = "manual",
+        rule_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Start play() off the HTTP worker — loadfile/ytdl must not freeze the UI."""
+        app = self._app
+        pid = int(playlist_id)
+
+        def _run() -> None:
+            try:
+                if app is not None:
+                    with app.app_context():
+                        self.play(
+                            pid,
+                            start_index=start_index,
+                            preserve_stall_tracking=preserve_stall_tracking,
+                            source=source,
+                            rule_id=rule_id,
+                        )
+                else:
+                    self.play(
+                        pid,
+                        start_index=start_index,
+                        preserve_stall_tracking=preserve_stall_tracking,
+                        source=source,
+                        rule_id=rule_id,
+                    )
+            except Exception as exc:
+                self._log_error(
+                    "Async play failed",
+                    extra={
+                        "playlist_id": pid,
+                        "source": source,
+                        "error": str(exc),
+                        "type": type(exc).__name__,
+                        "action": "play_async",
+                    },
+                )
+
+        Thread(target=_run, name=f"playback-play-{pid}", daemon=True).start()
+        return {
+            "accepted": True,
+            "playlist_id": pid,
+            "source": source,
+            "rule_id": rule_id,
+            "start_index": int(start_index or 0),
+        }
+
     def return_to_schedule(self) -> bool:
-        """Clear manual lock and apply current schedule slot (D2.2)."""
+        """Clear manual lock and apply current schedule slot (D2.2).
+
+        Evaluate/play runs asynchronously so the UI request cannot hang on loadfile.
+        """
         with self._app_context():
             from ..models import PlaybackStatus
             session = getattr(self.db_session, "session", self.db_session)
@@ -1260,8 +1345,7 @@ class PlaybackService:
                 session.commit()
             if self._schedule_engine is None:
                 return False
-            self._schedule_engine.evaluate_and_apply(ignore_manual=True)
-            return True
+        return self.enqueue_schedule_evaluate(ignore_manual=True)
 
     def remote_pause(self, paused: Optional[bool] = None) -> Dict[str, Any]:
         """Pause or resume current playlist playback via MPV."""

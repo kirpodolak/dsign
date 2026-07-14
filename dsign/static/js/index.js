@@ -1058,16 +1058,23 @@ const handlers = {
             if (!btn || btn.disabled) return;
             btn.disabled = true;
             try {
+                // Server accepts immediately; schedule play runs in background.
                 const resp = await api.returnToSchedule();
                 if (!resp?.success) throw new Error(resp?.error || t('return_to_schedule_err', getUiLang()));
-                const statusResp = await api.getPlaybackStatus();
-                const inner =
-                    statusResp?.status && typeof statusResp.status === 'object'
-                        ? statusResp.status
-                        : null;
-                state.playbackStatus = inner;
-                ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
                 showAlert(t('return_to_schedule_ok', getUiLang()), 'success');
+                const refreshStatus = async () => {
+                    const statusResp = await api.getPlaybackStatus().catch(() => null);
+                    const inner =
+                        statusResp?.status && typeof statusResp.status === 'object'
+                            ? statusResp.status
+                            : null;
+                    if (!inner) return;
+                    state.playbackStatus = inner;
+                    ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
+                };
+                await refreshStatus();
+                // Schedule evaluate/play may land a moment later — one delayed refresh.
+                setTimeout(() => { refreshStatus(); }, 1500);
             } catch (err) {
                 showError(err.message || t('return_to_schedule_err', getUiLang()));
             } finally {
