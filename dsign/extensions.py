@@ -6,7 +6,7 @@ from flask_wtf.csrf import CSRFProtect
 from flask import request, jsonify, redirect, url_for
 import os
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 # Инициализация экземпляров расширений
 db = SQLAlchemy()
@@ -14,6 +14,36 @@ bcrypt = Bcrypt()
 login_manager = LoginManager()
 socketio = SocketIO()
 csrf = CSRFProtect()
+
+
+def _is_file_sqlite_uri(uri: Optional[str]) -> bool:
+    if not uri or not str(uri).startswith("sqlite"):
+        return False
+    u = str(uri).lower()
+    return ":memory:" not in u and "mode=memory" not in u
+
+
+def configure_sqlite_engine_options(app) -> None:
+    """
+    Use NullPool for on-disk SQLite so background threads cannot exhaust QueuePool
+    while holding a checked-out connection during long playback IPC.
+    Leave :memory: alone (pytest relies on StaticPool / shared connection).
+    """
+    uri = app.config.get("SQLALCHEMY_DATABASE_URI")
+    if not _is_file_sqlite_uri(uri):
+        return
+    from sqlalchemy.pool import NullPool
+
+    opts = dict(app.config.get("SQLALCHEMY_ENGINE_OPTIONS") or {})
+    if opts.get("poolclass") is None:
+        opts["poolclass"] = NullPool
+    connect_args = dict(opts.get("connect_args") or {})
+    connect_args.setdefault("check_same_thread", False)
+    # Wait for SQLite locks instead of failing immediately under concurrent writers.
+    connect_args.setdefault("timeout", 30)
+    opts["connect_args"] = connect_args
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = opts
+
 
 def init_extensions(app) -> Dict[str, Any]:
     """
@@ -51,6 +81,7 @@ def init_extensions(app) -> Dict[str, Any]:
                     l.addHandler(h)
 
         # 1. Инициализация Flask-расширений
+        configure_sqlite_engine_options(app)
         db.init_app(app)
         # Register models and create missing tables (SQLite; additive schema, no Alembic in-tree).
         import dsign.models as _dsign_models  # noqa: F401
@@ -213,4 +244,13 @@ def configure_static_cache(app):
             response.cache_control.public = True
         return response
 
-__all__ = ['db', 'bcrypt', 'login_manager', 'socketio', 'csrf', 'init_extensions', 'configure_static_cache']
+__all__ = [
+    'db',
+    'bcrypt',
+    'login_manager',
+    'socketio',
+    'csrf',
+    'init_extensions',
+    'configure_static_cache',
+    'configure_sqlite_engine_options',
+]

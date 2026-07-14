@@ -498,57 +498,73 @@ class PlaybackService:
         now = time.monotonic()
         if now - float(self._last_desync_recover_ts or 0.0) < self._playback_desync_coalesce_sec():
             return
+        # Plan under a short DB context; call play() only after session.remove so a
+        # slow network loadfile cannot hold a QueuePool checkout (login starvation).
+        playlist_id = None
+        resume_index = 0
+        resume_source = "manual"
+        resume_rule_id = None
         with self._app_context():
-            snap = self._playlist_manager._remote_playback_snapshot()
-            if str(snap.get("db_status") or "").lower() != "playing":
-                return
-            if snap.get("thread_alive"):
-                return
-            playlist_id = snap.get("db_playlist_id")
-            if not playlist_id:
-                return
-            if snap.get("mpv_idle") is not True and self._playlist_manager._mpv_has_active_media():
-                return
-            self._last_desync_recover_ts = now
-            resume_index = 0
             try:
-                resume_index = self._playlist_manager.get_resume_start_index(advance=False)
-            except Exception:
-                resume_index = 0
-            _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
+                snap = self._playlist_manager._remote_playback_snapshot()
+                if str(snap.get("db_status") or "").lower() != "playing":
+                    return
+                if snap.get("thread_alive"):
+                    return
+                playlist_id = snap.get("db_playlist_id")
+                if not playlist_id:
+                    return
+                if snap.get("mpv_idle") is not True and self._playlist_manager._mpv_has_active_media():
+                    return
+                self._last_desync_recover_ts = now
+                try:
+                    resume_index = self._playlist_manager.get_resume_start_index(advance=False)
+                except Exception:
+                    resume_index = 0
+                _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
+            finally:
+                try:
+                    from ..extensions import db
+
+                    db.session.remove()
+                except Exception:
+                    pass
+
+        if not playlist_id:
+            return
+        self._log_warning(
+            "Playback desync: DB playing but slideshow thread dead and mpv idle; resuming",
+            extra={
+                "playlist_id": playlist_id,
+                "start_index": resume_index,
+                "source": resume_source,
+                "rule_id": resume_rule_id,
+                "action": "playback_desync_recover",
+            },
+        )
+        ok = False
+        try:
+            ok = bool(
+                self.play(
+                    int(playlist_id),
+                    start_index=resume_index,
+                    preserve_stall_tracking=True,
+                    source=resume_source,
+                    rule_id=resume_rule_id,
+                )
+            )
+        except Exception as e:
             self._log_warning(
-                "Playback desync: DB playing but slideshow thread dead and mpv idle; resuming",
+                "Playback desync resume raised",
                 extra={
                     "playlist_id": playlist_id,
-                    "start_index": resume_index,
-                    "source": resume_source,
-                    "rule_id": resume_rule_id,
+                    "error": str(e),
+                    "type": type(e).__name__,
                     "action": "playback_desync_recover",
                 },
             )
-            ok = False
-            try:
-                ok = bool(
-                    self.play(
-                        int(playlist_id),
-                        start_index=resume_index,
-                        preserve_stall_tracking=True,
-                        source=resume_source,
-                        rule_id=resume_rule_id,
-                    )
-                )
-            except Exception as e:
-                self._log_warning(
-                    "Playback desync resume raised",
-                    extra={
-                        "playlist_id": playlist_id,
-                        "error": str(e),
-                        "type": type(e).__name__,
-                        "action": "playback_desync_recover",
-                    },
-                )
-            if not ok:
-                self._clear_stale_playing_status()
+        if not ok:
+            self._clear_stale_playing_status()
 
     def _mpv_ipc_watchdog_loop(self) -> None:
         interval = self._mpv_manager._watchdog_interval_sec()
