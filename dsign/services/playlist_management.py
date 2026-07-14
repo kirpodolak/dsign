@@ -51,6 +51,9 @@ class PlaylistManager:
         # Bumps on stop so an in-flight play() loadfile cannot resurrect status=playing.
         self._play_seq = 0
         self._play_seq_lock = Lock()
+        # Serializes Stop vs play() final commit (thread start + DB persist) so a late
+        # schedule play cannot overwrite Stop after return-to-schedule.
+        self._control_lock = Lock()
         self._override_return_ctx: Optional[Dict[str, Any]] = None
         self._playlist_single_pass: bool = False
         self._on_override_return: Optional[Callable[[], None]] = None
@@ -134,6 +137,58 @@ class PlaylistManager:
     def _is_play_seq_current(self, seq: int) -> bool:
         with self._play_seq_lock:
             return int(seq) == int(self._play_seq)
+
+    def _commit_play(
+        self,
+        play_seq: int,
+        *,
+        start_thread: Callable[[], None],
+        persist: Callable[[], None],
+        on_abort: Optional[Callable[[], None]] = None,
+    ) -> bool:
+        """Atomically finish play against Stop: thread + persist under control lock."""
+        with self._control_lock:
+            if not self._is_play_seq_current(play_seq):
+                if on_abort is not None:
+                    try:
+                        on_abort()
+                    except Exception:
+                        pass
+                return False
+            start_thread()
+            if not self._is_play_seq_current(play_seq):
+                # Stop won between start and persist — tear down without writing playing.
+                try:
+                    if self._play_thread and self._play_thread.is_alive():
+                        self._stop_event.set()
+                        self._play_thread.join(timeout=1.0)
+                except Exception:
+                    pass
+                self._play_thread = None
+                if on_abort is not None:
+                    try:
+                        on_abort()
+                    except Exception:
+                        pass
+                return False
+            persist()
+            if not self._is_play_seq_current(play_seq):
+                # Persist raced under lock should be rare; Stop holds same lock so this
+                # path means seq was bumped elsewhere — re-stop without releasing playing.
+                try:
+                    if self._play_thread and self._play_thread.is_alive():
+                        self._stop_event.set()
+                        self._play_thread.join(timeout=1.0)
+                except Exception:
+                    pass
+                self._play_thread = None
+                if on_abort is not None:
+                    try:
+                        on_abort()
+                    except Exception:
+                        pass
+                return False
+            return True
 
     def set_external_media_service(self, service) -> None:
         """Attach external media resolver service (optional)."""
@@ -1795,30 +1850,35 @@ class PlaylistManager:
             thread_target = self._run_local_mpv_playlist_loop
             thread_args = (playlist_id, items, ordered_indices, profile_muted)
 
-        if not self._is_play_seq_current(int(play_seq)):
-            self.logger.info(
-                "Local video play aborted: superseded by stop/newer play",
-                extra={"playlist_id": playlist_id, "play_seq": play_seq, "mode": mode},
-            )
+        def _abort_markers() -> None:
             self._set_playback_active_marker(False)
             try:
                 self._mpv_manager.set_playback_session_active(False)
             except Exception:
                 pass
-            return False
 
-        self._persist_playback_status(
-            playlist_id=playlist_id,
-            status="playing",
-            source=source,
-            rule_id=rule_id,
-        )
+        def _start_thread() -> None:
+            self._play_thread = Thread(target=thread_target, args=thread_args, daemon=True)
+            self._play_thread.start()
 
-        self._play_thread = Thread(target=thread_target, args=thread_args, daemon=True)
-        self._play_thread.start()
+        def _persist() -> None:
+            self._persist_playback_status(
+                playlist_id=playlist_id,
+                status="playing",
+                source=source,
+                rule_id=rule_id,
+            )
 
-        if not self._is_play_seq_current(int(play_seq)):
-            self._stop_play_thread()
+        if not self._commit_play(
+            int(play_seq),
+            start_thread=_start_thread,
+            persist=_persist,
+            on_abort=_abort_markers,
+        ):
+            self.logger.info(
+                "Local video play aborted: superseded by stop/newer play",
+                extra={"playlist_id": playlist_id, "play_seq": play_seq, "mode": mode},
+            )
             return False
 
         try:
@@ -2288,53 +2348,54 @@ class PlaylistManager:
         from ..models import PlaybackStatus
 
         try:
-            playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
-            last_playlist_id = playback.playlist_id
+            with self._control_lock:
+                playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
+                last_playlist_id = playback.playlist_id
 
-            self._stop_play_thread(
-                preserve_stall_tracking=preserve_stall_tracking,
-                preserve_loop_position=preserve_loop_position,
-                join_timeout=join_timeout,
-            )
-            self._cancel_content_cache_prefetches()
-            try:
-                self._logo_manager.ensure_mpv_video_output()
-            except Exception:
-                pass
-            self._set_playback_active_marker(False)
-
-            # Persist stopped/idle BEFORE idle-logo IPC. Logo/loadfile can wait on the
-            # mpv IPC lock held by an in-flight play(); UI must not stay "playing".
-            if update_status:
-                if source == "schedule":
-                    self._persist_playback_status(
-                        playlist_id=None,
-                        status="idle",
-                        source="idle",
-                        clear_rule=True,
-                    )
-                else:
-                    self._persist_playback_status(
-                        playlist_id=last_playlist_id,
-                        status="stopped",
-                        source="manual",
-                        clear_rule=True,
-                    )
-
+                self._stop_play_thread(
+                    preserve_stall_tracking=preserve_stall_tracking,
+                    preserve_loop_position=preserve_loop_position,
+                    join_timeout=join_timeout,
+                )
+                self._cancel_content_cache_prefetches()
                 try:
-                    if self.socketio:
-                        emit_status = "idle" if source == "schedule" else "stopped"
-                        emit_playlist = None if source == "schedule" else last_playlist_id
-                        self.socketio.emit(
-                            'playback_update',
-                            {
-                                'status': emit_status,
-                                'playlist_id': emit_playlist,
-                                'current_media': None,
-                            },
-                        )
+                    self._logo_manager.ensure_mpv_video_output()
                 except Exception:
                     pass
+                self._set_playback_active_marker(False)
+
+                # Persist stopped/idle BEFORE idle-logo IPC, under the same lock as play
+                # commit so a late schedule play cannot resurrect status=playing.
+                if update_status:
+                    if source == "schedule":
+                        self._persist_playback_status(
+                            playlist_id=None,
+                            status="idle",
+                            source="idle",
+                            clear_rule=True,
+                        )
+                    else:
+                        self._persist_playback_status(
+                            playlist_id=last_playlist_id,
+                            status="stopped",
+                            source="manual",
+                            clear_rule=True,
+                        )
+
+                    try:
+                        if self.socketio:
+                            emit_status = "idle" if source == "schedule" else "stopped"
+                            emit_playlist = None if source == "schedule" else last_playlist_id
+                            self.socketio.emit(
+                                'playback_update',
+                                {
+                                    'status': emit_status,
+                                    'playlist_id': emit_playlist,
+                                    'current_media': None,
+                                },
+                            )
+                    except Exception:
+                        pass
 
             ok = True
             if show_idle_logo:
