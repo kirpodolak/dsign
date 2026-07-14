@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+# Aggregate dsign diagnostics + extra playback/runtime metrics (one pasteable report).
+#
+# Usage:
+#   sudo bash /usr/local/bin/dsign-diagnose-bundle
+#   SINCE='2 hours ago' bash /usr/local/bin/dsign-diagnose-bundle | tee /tmp/dsign-diag.txt
+#   DSIGN_DIAG_SKIP_SUB=1 bash /usr/local/bin/dsign-diagnose-bundle   # only extra section
+#   DSIGN_DIAG_PROBE_YTDL=1 bash /usr/local/bin/dsign-diagnose-bundle # yt-dlp probe (slow)
+#
+set -u
+
+OUT_DIR="${DSIGN_DIAG_OUT_DIR:-}"
+SOCK="${DSIGN_MPV_SOCKET:-/var/lib/dsign/mpv/socket}"
+DB="${DSIGN_DB_PATH:-/var/lib/dsign/database.db}"
+CACHE_DIR="${DSIGN_CONTENT_CACHE_DIR:-/var/lib/dsign/media/cache}"
+CLONE_ROOT="${DSIGN_PROJECT_ROOT:-/home/dsign/dsign-new}"
+FLAT_ROOT="${DSIGN_RUNTIME_ROOT:-/home/dsign/dsign}"
+STAMP="$(date +%Y%m%dT%H%M%S 2>/dev/null || date +%s)"
+SINCE="${DSIGN_DIAG_SINCE:-${SINCE:-}}"
+
+_mpv_ipc() {
+  local prop="$1"
+  if [ ! -S "$SOCK" ]; then
+    echo "(no socket)"
+    return
+  fi
+  printf '{"command":["get_property","%s"]}\n' "$prop" \
+    | socat - "UNIX-CONNECT:${SOCK}" 2>/dev/null \
+    | head -1 || echo "(ipc fail)"
+}
+
+_section() {
+  echo
+  echo "########## $1 ##########"
+  echo
+}
+
+_run_sub() {
+  local bin="$1"
+  if [ "${DSIGN_DIAG_SKIP_SUB:-0}" = "1" ]; then
+    echo "(skipped: DSIGN_DIAG_SKIP_SUB=1)"
+    return 0
+  fi
+  if [ -x "$bin" ]; then
+    # shellcheck disable=SC2086
+    env SINCE="${SINCE}" DSIGN_DIAG_JOURNAL_LINES="${DSIGN_DIAG_JOURNAL_LINES:-600}" \
+      bash "$bin" 2>&1 || echo "(${bin} exited $?)"
+  else
+    echo "(missing $bin — run dsign-apply-install or install from repo usr/local/bin/)"
+  fi
+}
+
+_main() {
+  echo "=== dsign diagnose BUNDLE ==="
+  echo "host: $(hostname)  time: $(date -Is 2>/dev/null || date)"
+  echo "SINCE=${SINCE:-'(boot / default)'}"
+  echo
+
+  # --- Extra: runtime identity (what actually runs after OTA/refactor) ---
+  _section "runtime identity"
+  echo "--- flask process ---"
+  pgrep -af 'python.*run\.py' 2>/dev/null || echo "(no run.py process)"
+  local flask_pid
+  flask_pid="$(pgrep -f 'venv/bin/python.*run\.py' 2>/dev/null | head -1 || true)"
+  if [ -n "${flask_pid:-}" ] && [ -r "/proc/${flask_pid}/environ" ]; then
+    echo "environ:"
+    tr '\0' '\n' <"/proc/${flask_pid}/environ" 2>/dev/null \
+      | grep -E '^(DSIGN_PROJECT_ROOT|DSIGN_DISPLAY_BACKEND|DSIGN_MPV|UPLOAD_FOLDER|PYTHONPATH)=' \
+      | sed 's/^/  /' || true
+    echo "cwd: $(readlink -f "/proc/${flask_pid}/cwd" 2>/dev/null || true)"
+    echo "exe: $(readlink -f "/proc/${flask_pid}/exe" 2>/dev/null || true)"
+  fi
+  echo
+  echo "--- systemd digital-signage paths ---"
+  systemctl cat digital-signage.service 2>/dev/null \
+    | grep -E 'WorkingDirectory=|ExecStart=|DSIGN_PROJECT_ROOT|EnvironmentFile' \
+    | sed 's/^/  /' || true
+  echo
+  echo "--- drop-ins ---"
+  ls -la /etc/systemd/system/digital-signage.service.d/ 2>/dev/null | sed 's/^/  /' \
+    || echo "  (none)"
+  echo
+  echo "--- trees ---"
+  for root in "$FLAT_ROOT" "$CLONE_ROOT"; do
+    if [ -d "$root" ]; then
+      local ca="?"
+      if [ -f "${root}/__init__.py" ]; then
+        ca="$(grep -c create_app "${root}/__init__.py" 2>/dev/null || echo 0)"
+        echo "  ${root}/  (flat?) create_app=${ca}  run.py=$([ -f "${root}/run.py" ] && echo yes || echo no)"
+      elif [ -f "${root}/dsign/__init__.py" ]; then
+        ca="$(grep -c create_app "${root}/dsign/__init__.py" 2>/dev/null || echo 0)"
+        echo "  ${root}/  (nested) create_app=${ca}  run.py=$([ -f "${root}/run.py" ] && echo yes || echo no)"
+      else
+        echo "  ${root}/  (unknown layout)"
+      fi
+      if [ -d "${root}/.git" ]; then
+        echo "    git: $(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo '?') $(git -C "$root" log -1 --format=%s 2>/dev/null || true)"
+      fi
+    else
+      echo "  ${root}/  MISSING"
+    fi
+  done
+  echo
+  echo "--- OTA ---"
+  if command -v dsign-update >/dev/null 2>&1; then
+    dsign-update version --json 2>/dev/null | head -c 800 || echo "(version failed)"
+    echo
+    if [ -r /etc/dsign/ota.env ]; then
+      grep -E '^[A-Z_]+=' /etc/dsign/ota.env 2>/dev/null | sed 's/^/  /' || true
+    fi
+  else
+    echo "(dsign-update not installed)"
+  fi
+
+  # --- Extra: resources ---
+  _section "resources (mpv + flask)"
+  echo "--- memory / cpu ---"
+  if [ -n "${flask_pid:-}" ]; then
+    ps -o pid,etimes,pcpu,pmem,rss,cmd -p "$flask_pid" 2>/dev/null | sed 's/^/  /' || true
+  fi
+  local mpv_pid
+  mpv_pid="$(pgrep -x mpv 2>/dev/null | head -1 || true)"
+  if [ -n "${mpv_pid:-}" ]; then
+    ps -o pid,etimes,pcpu,pmem,rss,cmd -p "$mpv_pid" 2>/dev/null | sed 's/^/  /' || true
+  else
+    echo "  (no mpv)"
+  fi
+  echo
+  echo "--- load / mem ---"
+  uptime 2>/dev/null | sed 's/^/  /' || true
+  free -h 2>/dev/null | sed 's/^/  /' || true
+
+  # --- Extra: stagnation sample (is time-pos advancing?) ---
+  _section "mpv time-pos sample (stagnation check)"
+  echo "Samples path / pause / time-pos / idle-active over ~4s"
+  local i
+  for i in 1 2 3; do
+    echo "  sample $i:"
+    echo "    path=$(_mpv_ipc path)"
+    echo "    pause=$(_mpv_ipc pause)"
+    echo "    time-pos=$(_mpv_ipc time-pos)"
+    echo "    idle-active=$(_mpv_ipc idle-active)"
+    echo "    eof-reached=$(_mpv_ipc eof-reached)"
+    sleep 2
+  done
+
+  # --- Extra: playlist / DB ---
+  _section "playback DB + playlist items"
+  if [ -r "$DB" ] && command -v sqlite3 >/dev/null 2>&1; then
+    echo "--- playback_status ---"
+    sqlite3 -header -column "$DB" \
+      "SELECT id, playlist_id, status, COALESCE(source,'') AS source, COALESCE(rule_id,'') AS rule_id FROM playback_status LIMIT 5;" \
+      2>/dev/null | sed 's/^/  /' || echo "  (query failed)"
+    echo
+    local pid_pl
+    pid_pl="$(sqlite3 "$DB" "SELECT playlist_id FROM playback_status LIMIT 1;" 2>/dev/null || true)"
+    if [ -n "${pid_pl:-}" ] && [ "$pid_pl" != "" ]; then
+      echo "--- playlist ${pid_pl} files (first 15) ---"
+      sqlite3 -header -column "$DB" \
+        "SELECT id, \"order\", file_name, COALESCE(duration,0) AS dur, COALESCE(muted,0) AS muted
+         FROM playlist_files WHERE playlist_id=${pid_pl}
+         ORDER BY \"order\", id LIMIT 15;" \
+        2>/dev/null | sed 's/^/  /' || echo "  (playlist_files query failed)"
+      echo
+      echo "--- external_media sample ---"
+      sqlite3 -header -column "$DB" \
+        "SELECT id, substr(COALESCE(url,''),1,80) AS url
+         FROM external_media ORDER BY id DESC LIMIT 8;" \
+        2>/dev/null | sed 's/^/  /' || echo "  (external_media missing/empty)"
+    fi
+  else
+    echo "(sqlite3 or db missing: $DB)"
+  fi
+
+  # --- Extra: content cache ---
+  _section "content cache"
+  if [ -d "$CACHE_DIR" ]; then
+    echo "dir: $CACHE_DIR"
+    du -sh "$CACHE_DIR" 2>/dev/null | sed 's/^/  size: /' || true
+    find "$CACHE_DIR" -type f 2>/dev/null | wc -l | sed 's/^/  files: /'
+    find "$CACHE_DIR" -type f -name '*.part' 2>/dev/null | head -5 | sed 's/^/  PART: /' || true
+    ls -lt "$CACHE_DIR" 2>/dev/null | head -8 | sed 's/^/  /' || true
+  else
+    echo "(no cache dir $CACHE_DIR)"
+  fi
+
+  # --- Extra: stall / ytdl counts this boot ---
+  _section "journal counters (this boot)"
+  local jcmd=(journalctl -u digital-signage.service -b --no-pager)
+  if [ -n "$SINCE" ]; then
+    jcmd=(journalctl -u digital-signage.service --since "$SINCE" --no-pager)
+  fi
+  echo "  stall recovery:         $( "${jcmd[@]}" 2>/dev/null | grep -c 'Slideshow loop paused for mpv stall recovery' || echo 0 )"
+  echo "  hung / force restart:   $( "${jcmd[@]}" 2>/dev/null | grep -c 'forcing systemd restart' || echo 0 )"
+  echo "  socket recreate:        $( "${jcmd[@]}" 2>/dev/null | grep -c 'IPC socket recreated' || echo 0 )"
+  echo "  ytdl open fail:         $( "${jcmd[@]}" 2>/dev/null | grep -c 'ytdl stream did not open' || echo 0 )"
+  echo "  ytdl retry timeout:     $( "${jcmd[@]}" 2>/dev/null | grep -c 'retrying loadfile after open wait timed out' || echo 0 )"
+  echo "  desync recover:         $( "${jcmd[@]}" 2>/dev/null | grep -ci 'desync\|playback desync' || echo 0 )"
+  echo
+  echo "--- last stall / ytdl lines ---"
+  "${jcmd[@]}" 2>/dev/null \
+    | grep -iE 'stall recovery|ytdl stream did not|forcing systemd|IPC socket recreated|network loadfile' \
+    | tail -25 | sed 's/^/  /' || echo "  (none)"
+
+  # --- Extra: yt-dlp (optional) ---
+  _section "yt-dlp / network probe"
+  echo "yt-dlp: $(command -v yt-dlp || echo MISSING)"
+  yt-dlp --version 2>/dev/null | sed 's/^/  version: /' || true
+  echo "dns/tcp rutube.ru:443:"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY' 2>/dev/null | sed 's/^/  /'
+import socket
+try:
+    socket.create_connection(("rutube.ru", 443), timeout=3.0).close()
+    print("OK")
+except OSError as e:
+    print(f"FAIL {e}")
+PY
+  fi
+  if [ "${DSIGN_DIAG_PROBE_YTDL:-0}" = "1" ]; then
+    echo "--- yt-dlp probe (DSIGN_DIAG_PROBE_YTDL=1, may take 60s) ---"
+    local probe_url="${DSIGN_DIAG_PROBE_URL:-https://rutube.ru/video/d2465847a301b47b84ad734a0a0aaca0/}"
+    timeout 90 yt-dlp --no-download --print "%(id)s %(ext)s %(url)s" "$probe_url" 2>&1 \
+      | head -20 | sed 's/^/  /' || echo "  (probe failed / timeout)"
+  else
+    echo "(set DSIGN_DIAG_PROBE_YTDL=1 to probe one Rutube URL with yt-dlp)"
+  fi
+
+  # --- Extra: env knobs that affect stall / EOF ---
+  _section "playback env knobs (process or defaults)"
+  for name in \
+    DSIGN_MPV_PLAYBACK_STAGNATION_SEC \
+    DSIGN_MPV_EOF_IPC_STALL_POLLS \
+    DSIGN_MPV_NETWORK_NEAR_EOF_STAGNATION_SEC \
+    DSIGN_MPV_NETWORK_IDLE_GRACE_SEC \
+    DSIGN_MPV_IPC_WATCHDOG_SEC \
+    DSIGN_PLAYBACK_DESYNC_WATCH \
+    DSIGN_DISPLAY_BACKEND
+  do
+    if [ -n "${flask_pid:-}" ] && [ -r "/proc/${flask_pid}/environ" ]; then
+      local val
+      val="$(tr '\0' '\n' <"/proc/${flask_pid}/environ" 2>/dev/null | grep -E "^${name}=" | cut -d= -f2- || true)"
+      if [ -n "$val" ]; then
+        echo "  ${name}=${val} (runtime)"
+      else
+        echo "  ${name}=(unset in process — code default)"
+      fi
+    else
+      echo "  ${name}=(no flask pid)"
+    fi
+  done
+
+  # --- Sub-diagnostics (existing helpers) ---
+  _section "dsign-diagnose-playback"
+  _run_sub /usr/local/bin/dsign-diagnose-playback
+
+  _section "dsign-diagnose-audio"
+  _run_sub /usr/local/bin/dsign-diagnose-audio
+
+  _section "dsign-diagnose-compositor"
+  _run_sub /usr/local/bin/dsign-diagnose-compositor
+
+  _section "dsign-diagnose-wifi-on-display"
+  _run_sub /usr/local/bin/dsign-diagnose-wifi-on-display
+
+  echo
+  echo "=== bundle done ==="
+  echo "Tips:"
+  echo "  Save:  bash $0 | tee /tmp/dsign-diag-${STAMP}.txt"
+  echo "  Fast:  DSIGN_DIAG_SKIP_SUB=1 bash $0"
+  echo "  ytdl:  DSIGN_DIAG_PROBE_YTDL=1 bash $0"
+  echo "  Window: SINCE='2 hours ago' bash $0"
+}
+
+if [ -n "$OUT_DIR" ]; then
+  mkdir -p "$OUT_DIR"
+  REPORT="${OUT_DIR}/dsign-diag-${STAMP}.txt"
+  _main | tee "$REPORT"
+  echo
+  echo "Wrote: $REPORT"
+else
+  _main
+fi
