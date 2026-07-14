@@ -1308,6 +1308,37 @@ class PlaybackService:
         Thread(target=_run, name="schedule-evaluate", daemon=True).start()
         return True
 
+    def enqueue_stop(self, *, source: str = "manual") -> bool:
+        """Stop on a daemon thread so toggle/Stop HTTP never wait on mpv IPC."""
+        app = self._app
+        # Invalidate in-flight play immediately so late persist cannot win.
+        try:
+            self._playlist_manager._bump_play_seq()
+        except Exception:
+            pass
+        self._last_desync_recover_ts = time.monotonic()
+
+        def _run() -> None:
+            try:
+                if app is not None:
+                    with app.app_context():
+                        self.stop(source=source)
+                else:
+                    self.stop(source=source)
+            except Exception as exc:
+                self._log_error(
+                    "Async stop failed",
+                    extra={
+                        "error": str(exc),
+                        "type": type(exc).__name__,
+                        "action": "stop_async",
+                        "source": source,
+                    },
+                )
+
+        Thread(target=_run, name="playback-stop", daemon=True).start()
+        return True
+
     def enqueue_play(
         self,
         playlist_id: int,
