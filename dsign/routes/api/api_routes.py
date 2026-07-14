@@ -2618,14 +2618,16 @@ def init_api_routes(api_bp, services):
             # Backward-compatible: older clients might send `settings`, but PlaybackService.play() doesn't take it.
             # Never block the HTTP worker on ytdl/loadfile — UI Play/Stop would freeze otherwise.
             playlist_id = int(data['playlist_id'])
-            if hasattr(playback_service, "enqueue_play"):
-                details = playback_service.enqueue_play(
-                    playlist_id=playlist_id, source="manual"
-                )
+            enqueue = getattr(playback_service, "enqueue_play", None)
+            if callable(enqueue):
+                details = enqueue(playlist_id=playlist_id, source="manual")
             else:
                 details = playback_service.play(
                     playlist_id=playlist_id, source="manual"
                 )
+            # Keep response JSON-safe (tests may stub with MagicMock return values).
+            if not isinstance(details, (dict, list, str, int, float, bool, type(None))):
+                details = {"ok": bool(details)}
 
             return jsonify({
                 "success": True,

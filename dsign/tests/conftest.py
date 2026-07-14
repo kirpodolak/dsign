@@ -98,8 +98,17 @@ def api_client(schedule_db, monkeypatch):
     playback = MagicMock()
     playback.health_check.return_value = {"mpv_ready": True}
     playback._schedule_engine = None
-    playback.play.return_value = {"started": True}
-    playback.stop.return_value = {"stopped": True}
+    playback.play.return_value = True
+    playback.stop.return_value = True
+    playback.enqueue_play.return_value = {
+        "accepted": True,
+        "playlist_id": playlist.id,
+        "source": "manual",
+        "rule_id": None,
+        "start_index": 0,
+    }
+    playback.enqueue_schedule_evaluate.return_value = True
+    playback.return_to_schedule.return_value = True
 
     settings_svc = MagicMock()
     settings_svc.load_settings.return_value = {"timezone": "UTC"}
