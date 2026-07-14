@@ -737,19 +737,29 @@ const ui = {
         const pid =
             rawPid != null && rawPid !== '' ? String(rawPid) : '';
         const st = String(statusPayload?.status || '').toLowerCase();
+        // DB may say idle while mpv still loops (orphan) — keep Stop usable.
+        const orphan = Boolean(statusPayload?.orphan_mpv);
+        const stopEnabled = st === 'playing' || orphan;
 
         const currentMedia = statusPayload?.current_media;
         ids.forEach((id) => {
-            if (pid === id && st === 'playing') {
+            if (pid === id && (st === 'playing' || orphan)) {
                 this.setPlaybackCardState(id, 'playing', currentMedia);
-            } else if (pid === id && st === 'stopped') {
+            } else if (pid === id && st === 'stopped' && !orphan) {
                 this.setPlaybackCardState(id, 'stopped');
             } else {
                 this.setPlaybackCardState(id, 'idle');
             }
+            // Orphan / live: Stop must work even when badge is Idle on other cards.
+            if (stopEnabled) {
+                const stopBtn = document.querySelector(
+                    `.playlist-card[data-id="${id}"] button.stop`
+                );
+                if (stopBtn) stopBtn.disabled = false;
+            }
         });
 
-        const playbackKey = `${st}|${pid}`;
+        const playbackKey = `${st}|${pid}|${orphan ? 1 : 0}`;
         const playbackChanged = playbackKey !== state.lastAppliedPlaybackKey;
         state.lastAppliedPlaybackKey = playbackKey;
 

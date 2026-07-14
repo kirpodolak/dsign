@@ -2656,6 +2656,30 @@ class PlaylistManager:
                 dict(self._override_return_ctx) if self._override_return_ctx else None
             )
 
+        thread_alive = bool(self._play_thread and self._play_thread.is_alive())
+        try:
+            mpv_session = bool(self._mpv_manager._playback_session_active)
+        except Exception:
+            mpv_session = False
+        try:
+            loop_pl = self._mpv_get_light("loop-playlist", timeout=1.0)
+        except Exception:
+            loop_pl = None
+        loop_playlist_on = loop_pl in (True, "yes", "inf", "force")
+        try:
+            mpv_path = str(self._mpv_get_light("path", timeout=1.0) or "")
+        except Exception:
+            mpv_path = ""
+        logo_path = bool(mpv_path) and (
+            "idle_logo" in mpv_path or mpv_path.endswith("placeholder.jpg")
+        )
+        # Orphan: mpv still looping playlist/media while DB/thread say idle.
+        db_playing = str(getattr(status, "status", None) or "").lower() == "playing"
+        orphan_mpv = (not db_playing) and (not thread_alive) and (
+            (mpv_session and not logo_path)
+            or (loop_playlist_on and bool(mpv_path) and not logo_path)
+        )
+
         return {
             'status': status.status if status else None,
             'playlist_id': status.playlist_id if status else None,
@@ -2671,6 +2695,9 @@ class PlaylistManager:
             'duration': mpv_snap.get("duration"),
             'is_network': bool(mpv_snap.get("is_network")),
             'mpv_responsive': bool(mpv_snap.get("mpv_responsive")),
+            'thread_alive': thread_alive,
+            'mpv_session_active': mpv_session,
+            'orphan_mpv': bool(orphan_mpv),
             'current_media': self._get_current_media_label(),
             'settings': self._mpv_manager._current_settings,
             'network_health': self.get_network_playback_health(),

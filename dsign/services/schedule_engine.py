@@ -137,9 +137,13 @@ class ScheduleEngine:
 
         Never call ``session.remove()`` while serving an HTTP request — that detaches
         ORM objects still needed for the JSON response (schedule toggle/archive).
+
+        ``_apply_lock`` covers only planning — never the long ``play()`` loadfile, or
+        Return-to-schedule / Stop stay stuck behind a stuck ytdl open and the UI
+        shows Idle while mpv keeps looping.
         """
+        action: Optional[_ScheduleAction] = None
         with self._apply_lock:
-            action: Optional[_ScheduleAction] = None
             release = not self._in_request_context()
             if self._in_app_context():
                 try:
@@ -154,7 +158,24 @@ class ScheduleEngine:
                     finally:
                         if release:
                             self._release_db_session()
-            self._apply_action(action)
+        self._apply_action(action)
+
+    def plan_action(self, *, ignore_manual: bool = False) -> Optional[_ScheduleAction]:
+        """Public plan helper for return-to-schedule (sync, no play/stop)."""
+        with self._apply_lock:
+            release = not self._in_request_context()
+            if self._in_app_context():
+                try:
+                    return self._plan(ignore_manual=ignore_manual)
+                finally:
+                    if release:
+                        self._release_db_session()
+            with self._app_context():
+                try:
+                    return self._plan(ignore_manual=ignore_manual)
+                finally:
+                    if release:
+                        self._release_db_session()
 
     def _apply_action(self, action: Optional[_ScheduleAction]) -> None:
         if not action:
