@@ -48,6 +48,9 @@ class PlaylistManager:
         self._loop_items_count: int = 0
         self._loop_position_lock = Lock()
         self._override_lock = Lock()
+        # Bumps on stop so an in-flight play() loadfile cannot resurrect status=playing.
+        self._play_seq = 0
+        self._play_seq_lock = Lock()
         self._override_return_ctx: Optional[Dict[str, Any]] = None
         self._playlist_single_pass: bool = False
         self._on_override_return: Optional[Callable[[], None]] = None
@@ -117,6 +120,20 @@ class PlaylistManager:
             db.session.remove()
         except Exception:
             pass
+
+    def _begin_play_seq(self) -> int:
+        with self._play_seq_lock:
+            self._play_seq = int(self._play_seq) + 1
+            return int(self._play_seq)
+
+    def _bump_play_seq(self) -> None:
+        """Invalidate in-flight play() so it will not persist playing after Stop."""
+        with self._play_seq_lock:
+            self._play_seq = int(self._play_seq) + 1
+
+    def _is_play_seq_current(self, seq: int) -> bool:
+        with self._play_seq_lock:
+            return int(seq) == int(self._play_seq)
 
     def set_external_media_service(self, service) -> None:
         """Attach external media resolver service (optional)."""
@@ -1672,9 +1689,12 @@ class PlaylistManager:
         mode: str,
         source: str = "manual",
         rule_id: Optional[int] = None,
+        play_seq: Optional[int] = None,
     ) -> bool:
         """A2 single local video (loop-file=inf) or A1 mpv internal M3U playlist."""
         start_index = int(start_index or 0) % len(items)
+        if play_seq is None:
+            play_seq = self._begin_play_seq()
         self._active_playlist_id = playlist_id
         self._active_playback_mode = mode
         self._audio_route_applied_for_play = False
@@ -1775,6 +1795,18 @@ class PlaylistManager:
             thread_target = self._run_local_mpv_playlist_loop
             thread_args = (playlist_id, items, ordered_indices, profile_muted)
 
+        if not self._is_play_seq_current(int(play_seq)):
+            self.logger.info(
+                "Local video play aborted: superseded by stop/newer play",
+                extra={"playlist_id": playlist_id, "play_seq": play_seq, "mode": mode},
+            )
+            self._set_playback_active_marker(False)
+            try:
+                self._mpv_manager.set_playback_session_active(False)
+            except Exception:
+                pass
+            return False
+
         self._persist_playback_status(
             playlist_id=playlist_id,
             status="playing",
@@ -1784,6 +1816,10 @@ class PlaylistManager:
 
         self._play_thread = Thread(target=thread_target, args=thread_args, daemon=True)
         self._play_thread.start()
+
+        if not self._is_play_seq_current(int(play_seq)):
+            self._stop_play_thread()
+            return False
 
         try:
             if self.socketio:
@@ -1925,6 +1961,8 @@ class PlaylistManager:
         preserve_loop_position: bool = False,
         join_timeout: float = 2.0,
     ):
+        # Invalidate before join so a concurrent play() finishing loadfile aborts.
+        self._bump_play_seq()
         if self._play_thread and self._play_thread.is_alive():
             self._stop_event.set()
             try:
@@ -2264,10 +2302,9 @@ class PlaylistManager:
             except Exception:
                 pass
             self._set_playback_active_marker(False)
-            ok = True
-            if show_idle_logo:
-                ok = self._logo_manager.display_idle_logo()
 
+            # Persist stopped/idle BEFORE idle-logo IPC. Logo/loadfile can wait on the
+            # mpv IPC lock held by an in-flight play(); UI must not stay "playing".
             if update_status:
                 if source == "schedule":
                     self._persist_playback_status(
@@ -2298,6 +2335,20 @@ class PlaylistManager:
                         )
                 except Exception:
                     pass
+
+            ok = True
+            if show_idle_logo:
+                # mpv-internal playlist (loop-playlist) keeps running until replaced.
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": ["stop"]},
+                        timeout=3.0,
+                        lock_wait=30.0,
+                        max_attempts=1,
+                    )
+                except Exception:
+                    pass
+                ok = self._logo_manager.display_idle_logo(lock_wait=30.0)
             return ok
         except Exception as e:
             self.logger.error(

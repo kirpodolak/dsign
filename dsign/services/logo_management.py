@@ -108,7 +108,7 @@ class LogoManager:
             max_attempts=1,
         )
 
-    def _load_transition_logo(self, *, loop: bool) -> bool:
+    def _load_transition_logo(self, *, loop: bool, lock_wait: Optional[float] = None) -> bool:
         logo_path = self._validate_logo_file()
         if not logo_path:
             return self._load_transition_black()
@@ -123,6 +123,7 @@ class LogoManager:
                 {"command": cmd},
                 timeout=5.0,
                 max_attempts=1,
+                lock_wait=lock_wait,
             )
             if not response or response.get("error") != "success":
                 self.logger.warning(f"Failed command: {' '.join(map(str, cmd))}")
@@ -132,6 +133,7 @@ class LogoManager:
             {"command": ["set_property", "panscan", 0.0]},
             timeout=2.0,
             max_attempts=1,
+            lock_wait=lock_wait,
         )
         return True
 
@@ -223,7 +225,7 @@ class LogoManager:
         """Restore vo=gpu only when audio playback had switched it to null."""
         return self.restore_after_audio_playback()
 
-    def display_idle_logo(self) -> bool:
+    def display_idle_logo(self, *, lock_wait: Optional[float] = None) -> bool:
         if PlaybackConstants.is_wayland_backend():
             if self.ensure_mpv_video_output():
                 pass
@@ -232,6 +234,7 @@ class LogoManager:
                     {"command": ["stop"]},
                     timeout=3.0,
                     max_attempts=1,
+                    lock_wait=lock_wait,
                 )
             except Exception as exc:
                 self.logger.warning(
@@ -239,7 +242,7 @@ class LogoManager:
                     extra={"error": str(exc)},
                 )
             return True
-        return self._load_transition_logo(loop=True)
+        return self._load_transition_logo(loop=True, lock_wait=lock_wait)
 
     def _send_ipc_command(self, command: Dict, timeout: float = 2.0) -> bool:
         """Safe IPC command sending with retries and timeout"""

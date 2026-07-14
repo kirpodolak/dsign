@@ -2124,9 +2124,28 @@ def init_api_routes(api_bp, services):
     # Schedule (D2.1 — CRUD + week/now peek; engine in D2.2)
     # ======================
     def _trigger_schedule_evaluate() -> None:
+        """Apply schedule after rule mutations without blocking the HTTP response.
+
+        ``evaluate_and_apply`` may call ``play()`` (slow loadfile) or ``stop()``; running
+        it inline froze toggle/archive and could ``session.remove()`` mid-request.
+        """
         engine = getattr(playback_service, '_schedule_engine', None)
-        if engine is not None and hasattr(engine, 'evaluate_and_apply'):
-            engine.evaluate_and_apply()
+        if engine is None or not hasattr(engine, 'evaluate_and_apply'):
+            return
+        app = current_app._get_current_object()
+
+        def _run() -> None:
+            try:
+                with app.app_context():
+                    engine.evaluate_and_apply()
+            except Exception as exc:
+                app.logger.error(
+                    "Schedule evaluate after mutation failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+
+        Thread(target=_run, name="schedule-evaluate", daemon=True).start()
 
     @api_bp.route('/schedule/rules', methods=['GET'])
     @api_session_or_token_required
@@ -2150,8 +2169,9 @@ def init_api_routes(api_bp, services):
 
             data = request.get_json(silent=True) or {}
             rule = schedule_service.create_rule(data)
+            payload = schedule_service.rule_to_dict(rule)
             _trigger_schedule_evaluate()
-            return jsonify({"success": True, "rule": schedule_service.rule_to_dict(rule)}), 201
+            return jsonify({"success": True, "rule": payload}), 201
         except ScheduleValidationError as e:
             return jsonify({"success": False, "error": str(e)}), 400
         except Exception as e:
@@ -2188,8 +2208,9 @@ def init_api_routes(api_bp, services):
 
             data = request.get_json(silent=True) or {}
             rule = schedule_service.update_rule(rule_id, data)
+            payload = schedule_service.rule_to_dict(rule)
             _trigger_schedule_evaluate()
-            return jsonify({"success": True, "rule": schedule_service.rule_to_dict(rule)})
+            return jsonify({"success": True, "rule": payload})
         except ScheduleValidationError as e:
             msg = str(e)
             status = 404 if msg == "rule not found" else 400
@@ -2207,8 +2228,9 @@ def init_api_routes(api_bp, services):
             from dsign.services.schedule_service import ScheduleValidationError
 
             rule = schedule_service.archive_rule(rule_id)
+            payload = schedule_service.rule_to_dict(rule)
             _trigger_schedule_evaluate()
-            return jsonify({"success": True, "rule": schedule_service.rule_to_dict(rule)})
+            return jsonify({"success": True, "rule": payload})
         except ScheduleValidationError as e:
             return jsonify({"success": False, "error": str(e)}), 404
         except Exception as e:
@@ -2224,8 +2246,9 @@ def init_api_routes(api_bp, services):
             from dsign.services.schedule_service import ScheduleValidationError
 
             rule = schedule_service.toggle_rule(rule_id)
+            payload = schedule_service.rule_to_dict(rule)
             _trigger_schedule_evaluate()
-            return jsonify({"success": True, "rule": schedule_service.rule_to_dict(rule)})
+            return jsonify({"success": True, "rule": payload})
         except ScheduleValidationError as e:
             return jsonify({"success": False, "error": str(e)}), 404
         except Exception as e:

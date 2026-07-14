@@ -99,21 +99,58 @@ class ScheduleEngine:
             self._timer.daemon = True
             self._timer.start()
 
+    def _in_request_context(self) -> bool:
+        try:
+            from flask import has_request_context
+
+            return bool(has_request_context())
+        except Exception:
+            return False
+
+    def _in_app_context(self) -> bool:
+        try:
+            from flask import has_app_context
+
+            return bool(has_app_context())
+        except Exception:
+            return False
+
     def evaluate_now(self) -> Optional[ScheduleRule]:
+        release = not self._in_request_context()
+        if self._in_app_context():
+            try:
+                return self.schedule_service.find_active_rule(local_now(self.settings_service))
+            finally:
+                if release:
+                    self._release_db_session()
         with self._app_context():
             try:
                 return self.schedule_service.find_active_rule(local_now(self.settings_service))
             finally:
-                self._release_db_session()
+                if release:
+                    self._release_db_session()
 
     def evaluate_and_apply(self, *, ignore_manual: bool = False) -> None:
-        """DB under app_context, then play/stop outside so pool connections are released."""
+        """Plan under app_context, then play/stop outside so pool connections are released.
+
+        Never call ``session.remove()`` while serving an HTTP request — that detaches
+        ORM objects still needed for the JSON response (schedule toggle/archive).
+        """
         action: Optional[_ScheduleAction] = None
-        with self._app_context():
+        release = not self._in_request_context()
+        if self._in_app_context():
             try:
                 action = self._plan(ignore_manual=ignore_manual)
             finally:
-                self._release_db_session()
+                if release:
+                    self._release_db_session()
+        else:
+            with self._app_context():
+                try:
+                    action = self._plan(ignore_manual=ignore_manual)
+                finally:
+                    if release:
+                        self._release_db_session()
         self._apply_action(action)
 
     def _apply_action(self, action: Optional[_ScheduleAction]) -> None:
