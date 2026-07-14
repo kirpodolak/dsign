@@ -32,8 +32,12 @@ class PlaybackPlayRunner:
         from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
 
         try:
-            # Stop any previous manual playback loop
-            self._pm._stop_play_thread(preserve_stall_tracking=preserve_stall_tracking)
+            # Stop any previous manual playback loop and halt A1/A2 mpv autoplay so a
+            # slow next loadfile cannot leave the old playlist looping on screen.
+            self._pm._stop_play_thread(
+                preserve_stall_tracking=preserve_stall_tracking,
+                halt_mpv=True,
+            )
             self._pm._cancel_content_cache_prefetches()
             self._pm._prune_media_backoff()
             play_seq = self._pm._begin_play_seq()

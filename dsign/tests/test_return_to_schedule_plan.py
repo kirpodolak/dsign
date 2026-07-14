@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 from dsign.services.playback_service import PlaybackService
 
 
-def test_return_to_schedule_enqueues_play_from_plan():
+def _svc_for_return() -> PlaybackService:
     svc = PlaybackService.__new__(PlaybackService)
     svc.logger = MagicMock()
     svc._app = MagicMock()
@@ -32,6 +32,11 @@ def test_return_to_schedule_enqueues_play_from_plan():
     db.session = session
     svc.db_session = db
     svc._schedule_engine = MagicMock()
+    return svc
+
+
+def test_return_to_schedule_enqueues_play_from_plan():
+    svc = _svc_for_return()
     svc._schedule_engine.plan_action.return_value = ("play", 42, 7)
 
     enqueued = {}
@@ -42,6 +47,7 @@ def test_return_to_schedule_enqueues_play_from_plan():
         return {"accepted": True, "playlist_id": pid}
 
     svc.enqueue_play = _enq  # type: ignore[method-assign]
+    svc.enqueue_stop = MagicMock(return_value=True)
     svc.enqueue_schedule_evaluate = MagicMock(return_value=True)
 
     t0 = time.monotonic()
@@ -54,6 +60,30 @@ def test_return_to_schedule_enqueues_play_from_plan():
     assert enqueued["kwargs"]["source"] == "schedule"
     assert enqueued["kwargs"]["rule_id"] == 7
     svc.enqueue_schedule_evaluate.assert_not_called()
+    svc.enqueue_stop.assert_not_called()
+
+
+def test_return_to_schedule_stops_when_no_active_slot():
+    """Manual leave with empty schedule must halt mpv (not a no-op evaluate)."""
+    svc = _svc_for_return()
+    svc._schedule_engine.plan_action.return_value = None
+    svc.enqueue_play = MagicMock()
+    svc.enqueue_stop = MagicMock(return_value=True)
+    svc.enqueue_schedule_evaluate = MagicMock(return_value=True)
+
+    assert PlaybackService.return_to_schedule(svc) is True
+    svc.enqueue_stop.assert_called_once_with(source="schedule")
+    svc.enqueue_play.assert_not_called()
+    svc.enqueue_schedule_evaluate.assert_not_called()
+
+
+def test_return_to_schedule_stop_action_uses_enqueue_stop():
+    svc = _svc_for_return()
+    svc._schedule_engine.plan_action.return_value = ("stop",)
+    svc.enqueue_stop = MagicMock(return_value=True)
+
+    assert PlaybackService.return_to_schedule(svc) is True
+    svc.enqueue_stop.assert_called_once_with(source="schedule")
 
 
 def test_schedule_apply_lock_does_not_cover_play():

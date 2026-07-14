@@ -1433,29 +1433,11 @@ class PlaybackService:
             )
             return True
         if action and action[0] == "stop":
-            app = self._app
-
-            def _stop_run() -> None:
-                try:
-                    if app is not None:
-                        with app.app_context():
-                            self.stop(source="schedule")
-                    else:
-                        self.stop(source="schedule")
-                except Exception as exc:
-                    self._log_error(
-                        "Async schedule stop failed",
-                        extra={
-                            "error": str(exc),
-                            "type": type(exc).__name__,
-                            "action": "return_to_schedule_stop",
-                        },
-                    )
-
-            Thread(target=_stop_run, name="schedule-stop", daemon=True).start()
-            return True
-        # No immediate slot change (already correct) or plan unavailable — full evaluate.
-        return self.enqueue_schedule_evaluate(ignore_manual=True)
+            return self.enqueue_stop(source="schedule")
+        # No active schedule slot after leaving manual — still halt mpv. Previously
+        # evaluate no-op'd and local loop-file/playlist kept playing ("Return does nothing").
+        self.enqueue_stop(source="schedule")
+        return True
 
     def remote_pause(self, paused: Optional[bool] = None) -> Dict[str, Any]:
         """Pause or resume current playlist playback via MPV."""

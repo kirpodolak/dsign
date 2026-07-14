@@ -106,6 +106,7 @@ fail=0
 grep -q "NullPool" "$RUNTIME_ROOT/extensions.py" || { echo "MISSING NullPool in extensions.py"; fail=1; }
 grep -q "_control_lock" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING _control_lock"; fail=1; }
 grep -q "def enqueue_stop" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING enqueue_stop"; fail=1; }
+grep -q "def _halt_mpv_playback" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING _halt_mpv_playback"; fail=1; }
 grep -q "orphan_mpv" "$RUNTIME_ROOT/static/js/index.js" || { echo "MISSING orphan_mpv in index.js"; fail=1; }
 grep -q "return-to-schedule" "$RUNTIME_ROOT/routes/api/api_routes.py" || { echo "MISSING return-to-schedule route"; fail=1; }
 [[ "$fail" -eq 0 ]] || die "marker check failed — wrong tree or fetch failed"

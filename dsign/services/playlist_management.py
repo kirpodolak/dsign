@@ -2014,12 +2014,39 @@ class PlaylistManager:
                         extra={"error": str(cb_exc), "type": type(cb_exc).__name__},
                     )
 
+    def _halt_mpv_playback(self, *, lock_wait: float = 2.0, timeout: float = 2.0) -> bool:
+        """Clear mpv autoplay loops and stop so local_single/m3u cannot keep rolling after Stop.
+
+        Python thread teardown alone is not enough: A2 uses loop-file=inf and A1 uses
+        loop-playlist=yes — those keep playing without a live slideshow thread.
+        """
+        ok = True
+        cmds = (
+            ["set_property", "loop-file", "no"],
+            ["set_property", "loop-playlist", "no"],
+            ["stop"],
+        )
+        for cmd in cmds:
+            try:
+                resp = self._mpv_manager._send_command(
+                    {"command": cmd},
+                    timeout=float(timeout),
+                    lock_wait=float(lock_wait),
+                    max_attempts=1,
+                )
+                if not resp or resp.get("error") != "success":
+                    ok = False
+            except Exception:
+                ok = False
+        return ok
+
     def _stop_play_thread(
         self,
         *,
         preserve_stall_tracking: bool = False,
         preserve_loop_position: bool = False,
         join_timeout: float = 2.0,
+        halt_mpv: bool = False,
     ):
         # Invalidate before join so a concurrent play() finishing loadfile aborts.
         self._bump_play_seq()
@@ -2057,6 +2084,13 @@ class PlaylistManager:
             self._mpv_manager.set_playback_session_active(False)
         except Exception:
             pass
+        if halt_mpv:
+            # Best-effort: stop previous A1/A2 autoplay before a new loadfile, and when
+            # Stop's dedicated IPC path is skipped (thread-only teardown).
+            try:
+                self._halt_mpv_playback(lock_wait=1.0, timeout=1.5)
+            except Exception:
+                pass
 
     def _manual_slideshow_loop(
         self,
@@ -2401,17 +2435,15 @@ class PlaylistManager:
             if show_idle_logo:
                 # Keep Stop HTTP fast: brief IPC attempt, then finish logo in background
                 # if loadfile still holds the long IPC lock.
+                # Clear loop-file/loop-playlist first — otherwise local video engines keep
+                # playing after a failed/partial stop (UI looks like Stop did nothing).
+                halted = False
                 try:
-                    self._mpv_manager._send_command(
-                        {"command": ["stop"]},
-                        timeout=2.0,
-                        lock_wait=2.0,
-                        max_attempts=1,
-                    )
+                    halted = bool(self._halt_mpv_playback(lock_wait=2.0, timeout=2.0))
                 except Exception:
-                    pass
+                    halted = False
                 ok = bool(self._logo_manager.display_idle_logo(lock_wait=2.0))
-                if not ok:
+                if not ok or not halted:
                     self._enqueue_idle_logo_retry()
             return True if update_status else ok
         except Exception as e:
@@ -2434,23 +2466,13 @@ class PlaylistManager:
                 if app is not None:
                     with app.app_context():
                         try:
-                            self._mpv_manager._send_command(
-                                {"command": ["stop"]},
-                                timeout=3.0,
-                                lock_wait=30.0,
-                                max_attempts=1,
-                            )
+                            self._halt_mpv_playback(lock_wait=30.0, timeout=3.0)
                         except Exception:
                             pass
                         self._logo_manager.display_idle_logo(lock_wait=30.0)
                 else:
                     try:
-                        self._mpv_manager._send_command(
-                            {"command": ["stop"]},
-                            timeout=3.0,
-                            lock_wait=30.0,
-                            max_attempts=1,
-                        )
+                        self._halt_mpv_playback(lock_wait=30.0, timeout=3.0)
                     except Exception:
                         pass
                     self._logo_manager.display_idle_logo(lock_wait=30.0)
