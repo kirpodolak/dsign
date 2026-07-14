@@ -5,10 +5,14 @@ from __future__ import annotations
 import logging
 from contextlib import nullcontext
 from threading import Lock, Timer
-from typing import Any, Optional, Union
+from typing import Any, Optional, Tuple, Union
 
 from ..models import PlaybackStatus, ScheduleRule
 from .schedule_time import local_now
+
+# Planned actions returned after DB work; play/stop run outside app_context so a
+# slow loadfile cannot keep a SQLAlchemy connection checked out.
+_ScheduleAction = Tuple[Any, ...]
 
 
 class ScheduleEngine:
@@ -39,6 +43,24 @@ class ScheduleEngine:
     def _db_session(self):
         db_obj = getattr(self.playback, "db_session", None)
         return getattr(db_obj, "session", db_obj)
+
+    def _release_db_session(self) -> None:
+        session = self._db_session()
+        if session is None:
+            return
+        try:
+            remove = getattr(session, "remove", None)
+            if callable(remove):
+                remove()
+                return
+        except Exception:
+            pass
+        try:
+            from ..extensions import db
+
+            db.session.remove()
+        except Exception:
+            pass
 
     def start(self) -> None:
         with self._lock:
@@ -79,11 +101,34 @@ class ScheduleEngine:
 
     def evaluate_now(self) -> Optional[ScheduleRule]:
         with self._app_context():
-            return self.schedule_service.find_active_rule(local_now(self.settings_service))
+            try:
+                return self.schedule_service.find_active_rule(local_now(self.settings_service))
+            finally:
+                self._release_db_session()
 
     def evaluate_and_apply(self, *, ignore_manual: bool = False) -> None:
+        """DB under app_context, then play/stop outside so pool connections are released."""
+        action: Optional[_ScheduleAction] = None
         with self._app_context():
-            self._evaluate(ignore_manual=ignore_manual)
+            try:
+                action = self._plan(ignore_manual=ignore_manual)
+            finally:
+                self._release_db_session()
+        self._apply_action(action)
+
+    def _apply_action(self, action: Optional[_ScheduleAction]) -> None:
+        if not action:
+            return
+        kind = action[0]
+        if kind == "play":
+            self.playback.play(
+                int(action[1]),
+                source="schedule",
+                rule_id=int(action[2]),
+            )
+            return
+        if kind == "stop":
+            self.playback.stop(source="schedule")
 
     def _playback_row(self) -> Optional[PlaybackStatus]:
         session = self._db_session()
@@ -109,10 +154,10 @@ class ScheduleEngine:
             return None
         return int(row.playlist_id)
 
-    def _evaluate(self, *, ignore_manual: bool = False) -> None:
+    def _plan(self, *, ignore_manual: bool = False) -> Optional[_ScheduleAction]:
         current_source = self._get_current_source()
         if not ignore_manual and current_source in ("override", "manual"):
-            return
+            return None
 
         now = local_now(self.settings_service)
         candidates = self.schedule_service.find_active_rule_candidates(now)
@@ -136,13 +181,9 @@ class ScheduleEngine:
                 and current_rule_id == int(active_rule.id)
                 and current_playlist == int(active_rule.playlist_id)
             ):
-                return
-            self.playback.play(
-                int(active_rule.playlist_id),
-                source="schedule",
-                rule_id=int(active_rule.id),
-            )
-            return
+                return None
+            return ("play", int(active_rule.playlist_id), int(active_rule.id))
 
         if self._get_current_source() == "schedule":
-            self.playback.stop(source="schedule")
+            return ("stop",)
+        return None
