@@ -283,11 +283,7 @@ class PlaybackPlayRunner:
                     },
                 )
 
-            if not self._pm._is_play_seq_current(play_seq):
-                self._pm.logger.info(
-                    "Playback play aborted: superseded by stop/newer play",
-                    extra={"playlist_id": playlist_id, "play_seq": play_seq},
-                )
+            def _abort_markers() -> None:
                 try:
                     self._pm._mpv_manager.set_playback_stream_opening(False)
                 except Exception:
@@ -297,33 +293,39 @@ class PlaybackPlayRunner:
                     self._pm._mpv_manager.set_playback_session_active(False)
                 except Exception:
                     pass
+
+            def _start_thread() -> None:
+                self._pm._play_thread = Thread(
+                    target=self._pm._run_manual_slideshow_loop,
+                    args=(playlist_id, items, start_index),
+                    kwargs={
+                        "first_item_preloaded": True,
+                        "profile_muted": profile_muted,
+                        "single_pass": single_pass,
+                    },
+                    daemon=True,
+                )
+                self._pm._play_thread.start()
+
+            def _persist() -> None:
+                self._pm._persist_playback_status(
+                    playlist_id=playlist_id,
+                    status="playing",
+                    source=source,
+                    rule_id=rule_id,
+                )
+
+            if not self._pm._commit_play(
+                play_seq,
+                start_thread=_start_thread,
+                persist=_persist,
+                on_abort=_abort_markers,
+            ):
+                self._pm.logger.info(
+                    "Playback play aborted: superseded by stop/newer play",
+                    extra={"playlist_id": playlist_id, "play_seq": play_seq},
+                )
                 return False
-
-            # Start background loop to enforce durations and EOF waits.
-            # play() loadfile'd items[start_index]; loop walks from there, skips reload on first offset once.
-            self._pm._play_thread = Thread(
-                target=self._pm._run_manual_slideshow_loop,
-                args=(playlist_id, items, start_index),
-                kwargs={
-                    "first_item_preloaded": True,
-                    "profile_muted": profile_muted,
-                    "single_pass": single_pass,
-                },
-                daemon=True,
-            )
-            self._pm._play_thread.start()
-
-            if not self._pm._is_play_seq_current(play_seq):
-                self._pm._stop_play_thread(preserve_stall_tracking=preserve_stall_tracking)
-                return False
-
-            # Persist only after the slideshow thread is running (avoids DB=playing + dead thread).
-            self._pm._persist_playback_status(
-                playlist_id=playlist_id,
-                status="playing",
-                source=source,
-                rule_id=rule_id,
-            )
 
             # Notify clients
             try:
