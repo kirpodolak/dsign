@@ -86,6 +86,10 @@ class Config:
     # Настройки базы данных
     SQLALCHEMY_DATABASE_URI = f'sqlite:///{DB_PATH}'
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # File SQLite + background threads (schedule/desync/playback): QueuePool can exhaust
+    # (default size 5 + overflow 10) when sessions sit checked-out during long mpv/ytdl waits.
+    # NullPool opens/closes per checkout so one slow play() cannot starve login/HTTP.
+    # Applied in extensions.init_extensions for file SQLite only (:memory: keeps StaticPool).
 
     # Настройки процессов
     PROCESS_TIMEOUT = 5  # сек
