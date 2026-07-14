@@ -115,15 +115,21 @@ class PlaybackPlayRunner:
             if start_index < 0 or start_index >= len(items):
                 start_index = 0
 
+            # Detach ORM before long IPC — keep plain ids/settings for persist/emit later.
+            playlist_name = str(getattr(playlist, "name", "") or "")
+            playlist = None  # noqa: F841 — avoid accidental lazy-loads after session release
+
             playback_mode = self._pm._playlist_playback_mode(items)
             if not single_pass and playback_mode in ("local_single", "local_playlist"):
+                # Local engine still needs a short DB context for persist; release after planning.
+                self._pm._release_db_session()
                 return self._pm._play_local_video_engine(
                     playlist_id=playlist_id,
                     items=items,
                     start_index=start_index,
                     profile_muted=profile_muted,
                     profile_settings=profile_settings,
-                    playlist=playlist,
+                    playlist_name=playlist_name,
                     mode=playback_mode,
                     source=source,
                     rule_id=rule_id,
@@ -145,6 +151,8 @@ class PlaybackPlayRunner:
 
             first_path = str(first.get("path") or "")
             first_is_network = first_path.startswith(("http://", "https://", "ytdl://"))
+            # Drop the DB checkout before loadfile / ytdl (can block tens of seconds).
+            self._pm._release_db_session()
             if first_is_network:
                 try:
                     self._pm._mpv_manager.set_playback_stream_opening(True)
@@ -302,9 +310,9 @@ class PlaybackPlayRunner:
                         'playback_update',
                         {
                             'status': 'playing',
-                            'playlist_id': playlist.id,
+                            'playlist_id': playlist_id,
                             'current_media': self._pm._get_current_media_label(),
-                            'playlist': {'id': playlist.id, 'name': playlist.name},
+                            'playlist': {'id': playlist_id, 'name': playlist_name},
                             'settings': profile_settings,
                         },
                     )
