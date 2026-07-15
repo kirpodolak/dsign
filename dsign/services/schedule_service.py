@@ -343,8 +343,10 @@ class ScheduleService:
         playlist = rule.playlist or self.db_session.query(Playlist).get(rule.playlist_id)
         is_playing_now = False
         if playback is not None:
+            # Require status=playing so idle/stub with ghost source=schedule is not green.
             is_playing_now = (
-                (playback.source or "idle") == "schedule"
+                str(playback.status or "").lower() == "playing"
+                and (playback.source or "idle") == "schedule"
                 and playback.rule_id == rule.id
                 and day == now.date()
             )
