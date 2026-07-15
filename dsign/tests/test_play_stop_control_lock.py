@@ -61,3 +61,42 @@ def test_stop_persist_after_commit_leaves_stopped(null_logger, tmp_path):
     assert pm._stop_impl(source="manual", show_idle_logo=True, update_status=True) is True
     assert persisted[-1]["status"] == "stopped"
     assert persisted[-1]["source"] == "manual"
+
+
+def test_halt_mpv_playback_clears_loops_then_stops(null_logger, tmp_path):
+    pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
+    calls = []
+
+    def _send(cmd, **_kw):
+        calls.append(list(cmd["command"]))
+        return {"error": "success"}
+
+    pm._mpv_manager._send_command = _send  # type: ignore[method-assign]
+    assert pm._halt_mpv_playback() is True
+    assert calls == [
+        ["set_property", "loop-file", "no"],
+        ["set_property", "loop-playlist", "no"],
+        ["stop"],
+    ]
+
+
+def test_stop_retries_idle_logo_when_halt_fails(null_logger, tmp_path):
+    pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
+    pm._mpv_manager.set_playback_session_active = MagicMock()
+    pm._logo_manager.ensure_mpv_video_output = MagicMock()
+    pm._logo_manager.display_idle_logo = MagicMock(return_value=True)
+    pm._cancel_content_cache_prefetches = MagicMock()
+    pm._set_playback_active_marker = MagicMock()
+    pm._clear_current_media_label = MagicMock()
+    pm._clear_loop_position = MagicMock()
+    pm._reset_stall_tracking = MagicMock()
+    pm._clear_stall_restart_pending = MagicMock()
+    pm._halt_mpv_playback = MagicMock(return_value=False)  # type: ignore[method-assign]
+    pm._enqueue_idle_logo_retry = MagicMock()  # type: ignore[method-assign]
+    pm._persist_playback_status = MagicMock()  # type: ignore[method-assign]
+    row = MagicMock()
+    row.playlist_id = 1
+    pm.db_session.query.return_value.get.return_value = row
+
+    assert pm._stop_impl(source="manual", show_idle_logo=True) is True
+    pm._enqueue_idle_logo_retry.assert_called_once()
