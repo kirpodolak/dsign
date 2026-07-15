@@ -480,6 +480,20 @@ class PlaybackService:
                     self._mpv_manager.set_playback_session_active(False)
                 except Exception:
                     pass
+                try:
+                    if self.socketio:
+                        self.socketio.emit(
+                            "playback_update",
+                            {
+                                "status": "idle",
+                                "playlist_id": None,
+                                "source": "idle",
+                                "current_media": None,
+                                "stale_playing": False,
+                            },
+                        )
+                except Exception:
+                    pass
         except Exception as e:
             self._log_warning(
                 "Failed to clear stale playing status",
@@ -505,6 +519,7 @@ class PlaybackService:
         resume_source = "manual"
         resume_rule_id = None
         orphan_stop = False
+        clear_stale = False
         with self._app_context():
             try:
                 snap = self._playlist_manager._remote_playback_snapshot()
@@ -531,14 +546,37 @@ class PlaybackService:
                     playlist_id = snap.get("db_playlist_id")
                     if not playlist_id:
                         return
-                    if snap.get("mpv_idle") is not True and self._playlist_manager._mpv_has_active_media():
-                        return
-                    self._last_desync_recover_ts = now
+                    # Idle logo on screen + DB still "playing" = ghost status after Stop/halt.
+                    # Clear DB — do not resume (that resurrected schedule badge over a stub).
+                    showing_logo = bool(snap.get("idle_logo"))
+                    if not showing_logo:
+                        try:
+                            showing_logo = bool(self._playlist_manager._mpv_showing_idle_logo())
+                        except Exception:
+                            showing_logo = False
+                    play_starting = False
                     try:
-                        resume_index = self._playlist_manager.get_resume_start_index(advance=False)
+                        play_starting = (
+                            time.monotonic()
+                            - float(getattr(self._playlist_manager, "_play_start_mono", 0.0) or 0.0)
+                        ) < 45.0
                     except Exception:
-                        resume_index = 0
-                    _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
+                        play_starting = False
+                    if showing_logo and not play_starting:
+                        clear_stale = True
+                        self._last_desync_recover_ts = now
+                        playlist_id = None
+                    elif play_starting:
+                        return
+                    elif snap.get("mpv_idle") is not True and self._playlist_manager._mpv_has_active_media():
+                        return
+                    else:
+                        self._last_desync_recover_ts = now
+                        try:
+                            resume_index = self._playlist_manager.get_resume_start_index(advance=False)
+                        except Exception:
+                            resume_index = 0
+                        _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
             finally:
                 try:
                     from ..extensions import db
@@ -559,6 +597,14 @@ class PlaybackService:
                     "Playback orphan stop failed",
                     extra={"error": str(e), "type": type(e).__name__},
                 )
+            return
+
+        if clear_stale:
+            self._log_warning(
+                "Playback desync: idle logo while DB playing; clearing stale status",
+                extra={"action": "playback_stale_playing_clear"},
+            )
+            self._clear_stale_playing_status()
             return
 
         if not playlist_id:
@@ -1353,6 +1399,33 @@ class PlaybackService:
         pid = int(playlist_id)
         # Suppress orphan-desync reclaim while a fresh play is starting.
         self._last_desync_recover_ts = time.monotonic()
+        # Invalidate Stop's delayed idle-logo retry so it cannot halt this play.
+        try:
+            self._playlist_manager.mark_play_starting()
+        except Exception:
+            pass
+        # Claim source on the caller thread before the daemon loadfile starts so the
+        # next ScheduleEngine tick sees manual/schedule and does not race a second play.
+        try:
+            if app is not None:
+                with app.app_context():
+                    self._playlist_manager.claim_playback_intent(
+                        pid, source=source, rule_id=rule_id
+                    )
+            else:
+                self._playlist_manager.claim_playback_intent(
+                    pid, source=source, rule_id=rule_id
+                )
+        except Exception as exc:
+            self._log_warning(
+                "claim_playback_intent failed",
+                extra={
+                    "playlist_id": pid,
+                    "source": source,
+                    "error": str(exc),
+                    "type": type(exc).__name__,
+                },
+            )
 
         def _run() -> None:
             try:
@@ -1402,12 +1475,18 @@ class PlaybackService:
         behind another in-flight play holding the schedule apply lock.
         """
         action = None
+        plan_failed = False
         with self._app_context():
             from ..models import PlaybackStatus
             session = getattr(self.db_session, "session", self.db_session)
             row = session.query(PlaybackStatus).get(1)
-            if row is not None and (row.source or "idle") == "manual":
+            # Always drop attribution before plan — ghost source=schedule + idle made
+            # _plan return None ("already on slot") and skip re-play.
+            if row is not None:
                 row.source = "idle"
+                row.rule_id = None
+                if str(row.status or "").lower() != "playing":
+                    row.status = "idle"
                 session.add(row)
                 session.commit()
             if self._schedule_engine is None:
@@ -1419,6 +1498,7 @@ class PlaybackService:
                 else:
                     action = None
             except Exception as exc:
+                plan_failed = True
                 self._log_warning(
                     "return_to_schedule plan failed; falling back to async evaluate",
                     extra={"error": str(exc), "type": type(exc).__name__},
@@ -1433,29 +1513,18 @@ class PlaybackService:
             )
             return True
         if action and action[0] == "stop":
-            app = self._app
-
-            def _stop_run() -> None:
-                try:
-                    if app is not None:
-                        with app.app_context():
-                            self.stop(source="schedule")
-                    else:
-                        self.stop(source="schedule")
-                except Exception as exc:
-                    self._log_error(
-                        "Async schedule stop failed",
-                        extra={
-                            "error": str(exc),
-                            "type": type(exc).__name__,
-                            "action": "return_to_schedule_stop",
-                        },
-                    )
-
-            Thread(target=_stop_run, name="schedule-stop", daemon=True).start()
-            return True
-        # No immediate slot change (already correct) or plan unavailable — full evaluate.
-        return self.enqueue_schedule_evaluate(ignore_manual=True)
+            return self.enqueue_stop(source="schedule")
+        # Plan empty/failed: evaluate (enabled rules) or halt residual content with no slot.
+        if plan_failed:
+            return bool(self.enqueue_schedule_evaluate(ignore_manual=True))
+        content_on_air = False
+        try:
+            content_on_air = bool(self._playlist_manager._mpv_has_active_media())
+        except Exception:
+            content_on_air = False
+        if content_on_air:
+            return self.enqueue_stop(source="schedule")
+        return bool(self.enqueue_schedule_evaluate(ignore_manual=True))
 
     def remote_pause(self, paused: Optional[bool] = None) -> Dict[str, Any]:
         """Pause or resume current playlist playback via MPV."""
@@ -1494,6 +1563,8 @@ class PlaybackService:
         """Stop playback and return to idle state"""
         try:
             start_time = time.time()
+            # Suppress desync resume while halt/logo settle after Stop.
+            self._last_desync_recover_ts = time.monotonic()
             result = self._playlist_manager.stop(source=source)
             self._log_info(
                 "Playback stopped", 
