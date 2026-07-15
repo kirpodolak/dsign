@@ -62,6 +62,8 @@ FILES=(
   "services/playback_service.py"
   "services/playlist_management.py"
   "services/playback_play.py"
+  "services/playback_network.py"
+  "services/playback_slideshow.py"
   "services/logo_management.py"
   "routes/api/api_routes.py"
   "static/js/index.js"

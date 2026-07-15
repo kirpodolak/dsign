@@ -295,14 +295,6 @@ class PlaybackSlideshowLoop:
                         )
                         stream_ready = False
                         if is_network:
-                            if skip_load and is_preloaded_network:
-                                self._pm._record_ytdl_open_success()
-                                self._pm._set_last_good_playback(
-                                    playlist_id,
-                                    item_index,
-                                    media_key,
-                                    len(items),
-                                )
                             cycle_network_attempted += 1
                             if not self._pm._ensure_network_stream_started(
                                 item,
@@ -315,6 +307,11 @@ class PlaybackSlideshowLoop:
                                     break
                                 try:
                                     self._pm._mpv_manager.set_playback_stream_opening(False)
+                                except Exception:
+                                    pass
+                                # Stuck paused ytdl:// must not block the next Play.
+                                try:
+                                    self._pm._prepare_mpv_for_new_play(lock_wait=1.0)
                                 except Exception:
                                     pass
                                 self._pm.logger.warning(
@@ -338,20 +335,25 @@ class PlaybackSlideshowLoop:
                                     streak = int(self._pm._consecutive_ytdl_failures or 0)
                                     if streak >= net_open_abort:
                                         self._pm.logger.warning(
-                                            "Aborting playlist scan after consecutive network open failures",
+                                            "Aborting playlist after consecutive network open failures",
                                             extra={
                                                 "playlist_id": playlist_id,
                                                 "consecutive_ytdl_failures": streak,
                                                 "abort_threshold": net_open_abort,
-                                                "cooldown_sec": round(net_open_cooldown_sec, 1),
                                                 "resume_index": item_index,
                                                 "last_good_media_key": self._pm._last_good_media_key,
                                             },
                                         )
-                                        resume_at = self.get_resume_start_index_for_hung_recovery()
-                                        start_index = resume_at
-                                        self._pm._stop_event.wait(timeout=net_open_cooldown_sec)
-                                        net_open_cycle_abort = True
+                                        try:
+                                            self._pm._persist_playback_status(
+                                                playlist_id=None,
+                                                status="idle",
+                                                source="idle",
+                                                clear_rule=True,
+                                            )
+                                        except Exception:
+                                            pass
+                                        self._pm._stop_event.set()
                                         break
                                 if socket_missing:
                                     self._pm._stop_event.wait(timeout=5.0)
@@ -519,7 +521,8 @@ class PlaybackSlideshowLoop:
                     )
                     if next_start is not None:
                         start_index = int(next_start)
-                    continue
+                        continue
+                    break
 
                 if stall_abort or self._pm._stall_restart_was_requested():
                     self._pm.logger.info(
