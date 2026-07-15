@@ -35,8 +35,7 @@ class PlaybackPlayRunner:
         try:
             # Cancel late idle-logo retries from a previous Stop before we touch mpv.
             self._pm.mark_play_starting()
-            # Stop any previous manual playback loop and halt A1/A2 mpv autoplay so a
-            # slow next loadfile cannot leave the old playlist looping on screen.
+            # Stop previous thread; soft-prepare mpv (clear loops, stop only if content on).
             self._pm._stop_play_thread(
                 preserve_stall_tracking=preserve_stall_tracking,
                 halt_mpv=True,
@@ -221,6 +220,10 @@ class PlaybackPlayRunner:
                         timeout=first_load_timeout,
                         max_attempts=1,
                     )
+                    if not first_load_resp or first_load_resp.get("error") != "success":
+                        raise RuntimeError(
+                            f"Network loadfile failed at playlist start: {first_path[:160]}"
+                        )
                     self._pm._preloaded_load_cmd = first_load_cmd
                 else:
                     first_load_resp = None

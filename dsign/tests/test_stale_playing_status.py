@@ -126,6 +126,23 @@ def test_idle_logo_retry_cancelled_by_play_epoch(null_logger, tmp_path):
     pm._logo_manager.display_idle_logo.assert_not_called()
 
 
+def test_prepare_mpv_for_new_play_skips_stop_when_idle(null_logger, tmp_path):
+    pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
+    calls = []
+
+    def _send(cmd, **_kw):
+        calls.append(list(cmd["command"]))
+        return {"error": "success"}
+
+    pm._mpv_manager._send_command = _send  # type: ignore[method-assign]
+    pm._mpv_get_light = MagicMock(return_value=True)  # idle-active
+    pm._mpv_showing_idle_logo = MagicMock(return_value=False)  # type: ignore
+    pm._mpv_has_active_media = MagicMock(return_value=False)  # type: ignore
+    pm._prepare_mpv_for_new_play()
+    assert ["stop"] not in calls
+    assert ["set_property", "loop-file", "no"] in calls
+
+
 def test_claim_playback_intent_clears_rule_for_manual(null_logger, tmp_path):
     pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
     persisted = []

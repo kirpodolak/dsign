@@ -1199,6 +1199,9 @@ class PlaylistManager:
             return False
 
         if wait_vo and is_video and not is_network:
+            # Wayland: vo-configured often lags after idle/stop; loadfile success is enough.
+            if PlaybackConstants.is_wayland_backend():
+                return True
             if not self._wait_vo_configured(5.0):
                 self.logger.warning(
                     "safe_loadfile: vo-configured timeout",
@@ -2063,6 +2066,61 @@ class PlaylistManager:
                 ok = False
         return ok
 
+    def _prepare_mpv_for_new_play(self, *, lock_wait: float = 1.5) -> None:
+        """Clear A1/A2 loops; only full stop when real content is still on air.
+
+        Calling ``stop`` while already idle blanks Wayland to imv and contends IPC
+        so the following loadfile often fails — UI shows playing (claim) but screen
+        stays on the stub.
+        """
+        try:
+            idle = self._mpv_get_light("idle-active", timeout=1.0)
+        except Exception:
+            idle = None
+        already_idle = idle is True or self._mpv_showing_idle_logo()
+        if already_idle or not self._mpv_has_active_media():
+            for cmd in (
+                ["set_property", "loop-file", "no"],
+                ["set_property", "loop-playlist", "no"],
+            ):
+                try:
+                    self._mpv_manager._send_command(
+                        {"command": cmd},
+                        timeout=1.5,
+                        lock_wait=float(lock_wait),
+                        max_attempts=1,
+                    )
+                except Exception:
+                    pass
+            return
+        self._halt_mpv_playback(lock_wait=float(lock_wait), timeout=2.0)
+
+    def _revert_orphan_playback_claim(self, playlist_id: int, play_seq: int) -> None:
+        """Clear ghost DB playing after failed/aborted play when we still own the claim."""
+        if not self._is_play_seq_current(int(play_seq)):
+            return
+        try:
+            from ..models import PlaybackStatus
+
+            row = self.db_session.query(PlaybackStatus).get(1)
+            if row is None:
+                return
+            if str(getattr(row, "status", "") or "").lower() != "playing":
+                return
+            if int(getattr(row, "playlist_id", -1) or -1) != int(playlist_id):
+                return
+            self._persist_playback_status(
+                playlist_id=None,
+                status="idle",
+                source="idle",
+                clear_rule=True,
+            )
+        except Exception:
+            try:
+                self.db_session.rollback()
+            except Exception:
+                pass
+
     def _stop_play_thread(
         self,
         *,
@@ -2108,10 +2166,9 @@ class PlaylistManager:
         except Exception:
             pass
         if halt_mpv:
-            # Best-effort: stop previous A1/A2 autoplay before a new loadfile, and when
-            # Stop's dedicated IPC path is skipped (thread-only teardown).
+            # Soft prepare: avoid stop-when-already-idle (IPC contention / Wayland stub).
             try:
-                self._halt_mpv_playback(lock_wait=1.0, timeout=1.5)
+                self._prepare_mpv_for_new_play(lock_wait=1.0)
             except Exception:
                 pass
 
