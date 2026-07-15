@@ -2095,32 +2095,6 @@ class PlaylistManager:
             return
         self._halt_mpv_playback(lock_wait=float(lock_wait), timeout=2.0)
 
-    def _revert_orphan_playback_claim(self, playlist_id: int, play_seq: int) -> None:
-        """Clear ghost DB playing after failed/aborted play when we still own the claim."""
-        if not self._is_play_seq_current(int(play_seq)):
-            return
-        try:
-            from ..models import PlaybackStatus
-
-            row = self.db_session.query(PlaybackStatus).get(1)
-            if row is None:
-                return
-            if str(getattr(row, "status", "") or "").lower() != "playing":
-                return
-            if int(getattr(row, "playlist_id", -1) or -1) != int(playlist_id):
-                return
-            self._persist_playback_status(
-                playlist_id=None,
-                status="idle",
-                source="idle",
-                clear_rule=True,
-            )
-        except Exception:
-            try:
-                self.db_session.rollback()
-            except Exception:
-                pass
-
     def _stop_play_thread(
         self,
         *,
