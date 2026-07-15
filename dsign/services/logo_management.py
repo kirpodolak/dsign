@@ -229,19 +229,28 @@ class LogoManager:
         if PlaybackConstants.is_wayland_backend():
             if self.ensure_mpv_video_output():
                 pass
+            # Must report IPC failure so Stop can retry — returning True on failure left
+            # loop-file=inf content playing while the API/UI believed Stop succeeded.
             try:
-                self._mpv_manager._send_command(
+                resp = self._mpv_manager._send_command(
                     {"command": ["stop"]},
                     timeout=3.0,
                     max_attempts=1,
                     lock_wait=lock_wait,
                 )
+                if resp and resp.get("error") == "success":
+                    return True
+                self.logger.warning(
+                    "Wayland idle: MPV stop IPC unsuccessful",
+                    extra={"mpv_response": resp},
+                )
+                return False
             except Exception as exc:
                 self.logger.warning(
-                    "Wayland idle: MPV stop failed (logo still visible via imv)",
+                    "Wayland idle: MPV stop failed (logo may still cover via imv)",
                     extra={"error": str(exc)},
                 )
-            return True
+                return False
         return self._load_transition_logo(loop=True, lock_wait=lock_wait)
 
     def _send_ipc_command(self, command: Dict, timeout: float = 2.0) -> bool:
