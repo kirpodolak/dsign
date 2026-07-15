@@ -177,8 +177,10 @@ def test_maybe_recover_playback_desync_resumes_playlist(null_logger, monkeypatch
         "db_playlist_id": 6,
         "thread_alive": False,
         "mpv_idle": True,
+        "idle_logo": False,
     }
     svc._playlist_manager._mpv_has_active_media.return_value = False
+    svc._playlist_manager._mpv_showing_idle_logo.return_value = False
     svc._playlist_manager.get_resume_start_index.return_value = 2
     svc.play.return_value = True
     monkeypatch.setenv("DSIGN_PLAYBACK_DESYNC_COALESCE_SEC", "0")
@@ -200,14 +202,44 @@ def test_maybe_recover_playback_desync_clears_status_when_resume_fails(null_logg
         "db_playlist_id": 6,
         "thread_alive": False,
         "mpv_idle": True,
+        "idle_logo": False,
     }
     svc._playlist_manager._mpv_has_active_media.return_value = False
+    svc._playlist_manager._mpv_showing_idle_logo.return_value = False
     svc._playlist_manager.get_resume_start_index.return_value = 0
     svc.play.return_value = False
     monkeypatch.setenv("DSIGN_PLAYBACK_DESYNC_COALESCE_SEC", "0")
 
     svc._maybe_recover_playback_desync()
 
+    svc._playlist_manager._persist_playback_status.assert_called_once_with(
+        playlist_id=None,
+        status="idle",
+        source="idle",
+        clear_rule=True,
+    )
+
+
+def test_maybe_recover_playback_desync_clears_when_idle_logo(null_logger, monkeypatch):
+    """DB playing + logo on screen must clear status, not resume schedule play."""
+    svc = _make_recovery_service(null_logger)
+    svc._app_ready = Event()
+    svc._app_ready.set()
+    svc._last_desync_recover_ts = 0.0
+    svc.socketio = MagicMock()
+    svc._playlist_manager._remote_playback_snapshot.return_value = {
+        "db_status": "playing",
+        "db_playlist_id": 6,
+        "thread_alive": False,
+        "mpv_idle": False,
+        "idle_logo": True,
+    }
+    svc._playlist_manager._mpv_has_active_media.return_value = False
+    monkeypatch.setenv("DSIGN_PLAYBACK_DESYNC_COALESCE_SEC", "0")
+
+    svc._maybe_recover_playback_desync()
+
+    svc.play.assert_not_called()
     svc._playlist_manager._persist_playback_status.assert_called_once_with(
         playlist_id=None,
         status="idle",
