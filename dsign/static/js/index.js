@@ -1235,7 +1235,9 @@ const handlers = {
                     await api.startPlayback(playlistId);
                     state.playbackStatus = {
                         status: 'playing',
-                        playlist_id: Number(playlistId)
+                        playlist_id: Number(playlistId),
+                        source: 'manual',
+                        rule_id: null,
                     };
                     ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
                     ui.renderSettings(state.currentSettings, {
@@ -1411,8 +1413,10 @@ const handlers = {
             this.startAutoRefresh();
         });
         sockets.on('playback_update', (payload) => {
-            // payload: { status, playlist_id, timestamp }
-            state.playbackStatus = payload && typeof payload === 'object' ? payload : state.playbackStatus;
+            // Merge so a partial emit (missing source) does not wipe badge attribution.
+            if (payload && typeof payload === 'object') {
+                state.playbackStatus = { ...(state.playbackStatus || {}), ...payload };
+            }
             try {
                 ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
                 ui.renderSettings(state.currentSettings, {

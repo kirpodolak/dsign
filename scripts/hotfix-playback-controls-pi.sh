@@ -58,6 +58,7 @@ FILES=(
   "extensions.py"
   "config/config.py"
   "services/schedule_engine.py"
+  "services/schedule_service.py"
   "services/playback_service.py"
   "services/playlist_management.py"
   "services/playback_play.py"
@@ -109,6 +110,8 @@ grep -q "def enqueue_stop" "$RUNTIME_ROOT/services/playback_service.py" || { ech
 grep -q "def _halt_mpv_playback" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING _halt_mpv_playback"; fail=1; }
 grep -q "stale_playing" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING stale_playing"; fail=1; }
 grep -q "mark_play_starting" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING mark_play_starting"; fail=1; }
+grep -q "claim_playback_intent" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING claim_playback_intent"; fail=1; }
+grep -q "status == \"playing\"" "$RUNTIME_ROOT/services/schedule_engine.py" || { echo "MISSING status==playing in schedule plan"; fail=1; }
 grep -q "stale_playing" "$RUNTIME_ROOT/static/js/index.js" || { echo "MISSING stale_playing in index.js"; fail=1; }
 grep -q "orphan_mpv" "$RUNTIME_ROOT/static/js/index.js" || { echo "MISSING orphan_mpv in index.js"; fail=1; }
 grep -q "return-to-schedule" "$RUNTIME_ROOT/routes/api/api_routes.py" || { echo "MISSING return-to-schedule route"; fail=1; }

@@ -215,6 +215,12 @@ class ScheduleEngine:
             return None
         return int(row.playlist_id)
 
+    def _get_current_status(self) -> str:
+        row = self._playback_row()
+        if row is None:
+            return "idle"
+        return str(row.status or "idle").lower()
+
     def _plan(self, *, ignore_manual: bool = False) -> Optional[_ScheduleAction]:
         current_source = self._get_current_source()
         if not ignore_manual and current_source in ("override", "manual"):
@@ -237,8 +243,11 @@ class ScheduleEngine:
         if active_rule is not None:
             current_rule_id = self._get_current_rule_id()
             current_playlist = self._get_current_playlist_id()
+            current_status = self._get_current_status()
+            # Require status=playing — ghost source=schedule + idle must re-apply.
             if (
                 current_source == "schedule"
+                and current_status == "playing"
                 and current_rule_id == int(active_rule.id)
                 and current_playlist == int(active_rule.playlist_id)
             ):

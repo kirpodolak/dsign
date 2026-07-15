@@ -93,6 +93,8 @@ class PlaylistManager:
         self._idle_logo_epoch = 0
         self._idle_logo_epoch_lock = Lock()
         self._play_start_mono: float = 0.0
+        # One play()/loadfile at a time — parallel schedule+manual starts race to idle.
+        self._play_start_lock = Lock()
 
     def _bump_idle_logo_epoch(self) -> int:
         with self._idle_logo_epoch_lock:
@@ -1884,7 +1886,8 @@ class PlaylistManager:
                 playlist_id=playlist_id,
                 status="playing",
                 source=source,
-                rule_id=rule_id,
+                rule_id=int(rule_id) if source == "schedule" and rule_id is not None else None,
+                clear_rule=(str(source) != "schedule"),
             )
 
         if not self._commit_play(
@@ -1906,6 +1909,8 @@ class PlaylistManager:
                     {
                         "status": "playing",
                         "playlist_id": int(playlist_id),
+                        "source": source,
+                        "rule_id": rule_id if source == "schedule" else None,
                         "current_media": self._get_current_media_label(),
                         "playlist": {"id": int(playlist_id), "name": str(name or "")},
                         "settings": profile_settings,
@@ -2255,17 +2260,36 @@ class PlaylistManager:
         rule_id: Optional[int] = None,
     ) -> bool:
         """Play playlist with profile support"""
+        with self._play_start_lock:
+            with self._app_context():
+                with self._override_lock:
+                    self._override_return_ctx = None
+                    self._playlist_single_pass = False
+                return self._play_impl(
+                    playlist_id,
+                    start_index=start_index,
+                    preserve_stall_tracking=preserve_stall_tracking,
+                    single_pass=False,
+                    source=source,
+                    rule_id=rule_id,
+                )
+
+    def claim_playback_intent(
+        self,
+        playlist_id: int,
+        *,
+        source: str = "manual",
+        rule_id: Optional[int] = None,
+    ) -> None:
+        """Persist intended source before async loadfile so schedule ticks do not race."""
+        src = str(source or "manual")
         with self._app_context():
-            with self._override_lock:
-                self._override_return_ctx = None
-                self._playlist_single_pass = False
-            return self._play_impl(
-                playlist_id,
-                start_index=start_index,
-                preserve_stall_tracking=preserve_stall_tracking,
-                single_pass=False,
-                source=source,
-                rule_id=rule_id,
+            self._persist_playback_status(
+                playlist_id=int(playlist_id),
+                status="playing",
+                source=src,
+                rule_id=int(rule_id) if src == "schedule" and rule_id is not None else None,
+                clear_rule=(src != "schedule"),
             )
 
     def play_override(

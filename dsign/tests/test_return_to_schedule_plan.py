@@ -25,6 +25,8 @@ def _svc_for_return() -> PlaybackService:
 
     row = MagicMock()
     row.source = "manual"
+    row.status = "stopped"
+    row.rule_id = 3
     session = MagicMock()
     session.query.return_value.get.return_value = row
 

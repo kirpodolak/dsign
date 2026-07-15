@@ -124,3 +124,40 @@ def test_idle_logo_retry_cancelled_by_play_epoch(null_logger, tmp_path):
     time.sleep(0.05)
     pm._halt_mpv_playback.assert_not_called()
     pm._logo_manager.display_idle_logo.assert_not_called()
+
+
+def test_claim_playback_intent_clears_rule_for_manual(null_logger, tmp_path):
+    pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
+    persisted = []
+    pm._persist_playback_status = lambda **kw: persisted.append(dict(kw))  # type: ignore
+    pm.claim_playback_intent(5, source="manual", rule_id=99)
+    assert persisted == [
+        {
+            "playlist_id": 5,
+            "status": "playing",
+            "source": "manual",
+            "rule_id": None,
+            "clear_rule": True,
+        }
+    ]
+
+
+def test_play_error_superseded_skips_idle_wipe(null_logger, tmp_path):
+    from dsign.services.playback_play import PlaybackPlayRunner
+
+    pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
+    pm.mark_play_starting = MagicMock()
+    pm._stop_play_thread = MagicMock()
+    pm._cancel_content_cache_prefetches = MagicMock()
+    pm._prune_media_backoff = MagicMock()
+    pm._begin_play_seq = MagicMock(return_value=1)
+    pm._is_play_seq_current = MagicMock(return_value=False)
+    pm._set_playback_active_marker = MagicMock()
+    pm._persist_playback_status = MagicMock()
+    pm.db_session.query.return_value.get.side_effect = RuntimeError("boom")
+
+    runner = PlaybackPlayRunner(pm)
+    assert runner.run(1, source="manual") is False
+    # Must not wipe winner via idle persist after superseded failure.
+    for call in pm._persist_playback_status.call_args_list:
+        assert call.kwargs.get("status") != "idle"

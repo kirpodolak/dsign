@@ -1404,6 +1404,28 @@ class PlaybackService:
             self._playlist_manager.mark_play_starting()
         except Exception:
             pass
+        # Claim source on the caller thread before the daemon loadfile starts so the
+        # next ScheduleEngine tick sees manual/schedule and does not race a second play.
+        try:
+            if app is not None:
+                with app.app_context():
+                    self._playlist_manager.claim_playback_intent(
+                        pid, source=source, rule_id=rule_id
+                    )
+            else:
+                self._playlist_manager.claim_playback_intent(
+                    pid, source=source, rule_id=rule_id
+                )
+        except Exception as exc:
+            self._log_warning(
+                "claim_playback_intent failed",
+                extra={
+                    "playlist_id": pid,
+                    "source": source,
+                    "error": str(exc),
+                    "type": type(exc).__name__,
+                },
+            )
 
         def _run() -> None:
             try:
@@ -1458,8 +1480,13 @@ class PlaybackService:
             from ..models import PlaybackStatus
             session = getattr(self.db_session, "session", self.db_session)
             row = session.query(PlaybackStatus).get(1)
-            if row is not None and (row.source or "idle") == "manual":
+            # Always drop attribution before plan — ghost source=schedule + idle made
+            # _plan return None ("already on slot") and skip re-play.
+            if row is not None:
                 row.source = "idle"
+                row.rule_id = None
+                if str(row.status or "").lower() != "playing":
+                    row.status = "idle"
                 session.add(row)
                 session.commit()
             if self._schedule_engine is None:
@@ -1487,8 +1514,7 @@ class PlaybackService:
             return True
         if action and action[0] == "stop":
             return self.enqueue_stop(source="schedule")
-        # Plan empty/failed: prefer evaluate so enabled rules can start. Only force-stop
-        # when real content is still on air (A1/A2 loops) — not when already on idle logo.
+        # Plan empty/failed: evaluate (enabled rules) or halt residual content with no slot.
         if plan_failed:
             return bool(self.enqueue_schedule_evaluate(ignore_manual=True))
         content_on_air = False
