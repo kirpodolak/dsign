@@ -224,7 +224,14 @@ def test_play_seq_abort_after_stop(null_logger, tmp_path, monkeypatch):
 
     monkeypatch.setattr("dsign.services.playback_play.Thread", _ImmediateThread)
     assert PlaybackPlayRunner(pm).run(1) is False
-    pm._persist_playback_status.assert_not_called()
+    # Early claim writes source before loadfile (blocks schedule races). Stop during
+    # loadfile must abort _commit_play — no second persist after that.
+    assert pm._persist_playback_status.call_count == 1
+    claim = pm._persist_playback_status.call_args_list[0].kwargs
+    assert claim["playlist_id"] == 1
+    assert claim["status"] == "playing"
+    assert claim["source"] == "manual"
+    assert claim["clear_rule"] is True
 
 
 def test_playback_play_releases_db_before_network_loadfile(null_logger, tmp_path, monkeypatch):
