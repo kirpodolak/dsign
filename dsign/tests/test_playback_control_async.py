@@ -66,7 +66,9 @@ def test_enqueue_play_returns_immediately():
     svc.logger = MagicMock()
     svc._app = None
     svc._log_error = MagicMock()
+    svc._log_warning = MagicMock()
     svc._last_desync_recover_ts = 0.0
+    svc._playlist_manager = MagicMock()
 
     release = {"go": False}
     entered = {"n": 0}
