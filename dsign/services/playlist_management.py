@@ -2544,6 +2544,20 @@ class PlaylistManager:
             self._item_skip_event.clear()
             return self._item_skip_direction
 
+    @staticmethod
+    def _mpv_path_is_idle_logo(path: Any) -> bool:
+        p = str(path or "").strip()
+        if not p:
+            return False
+        return "idle_logo" in p or p.endswith("placeholder.jpg")
+
+    def _mpv_showing_idle_logo(self) -> bool:
+        try:
+            path = self._mpv_get_light("path", timeout=1.0)
+        except Exception:
+            path = None
+        return self._mpv_path_is_idle_logo(path)
+
     def _remote_playback_snapshot(self) -> Dict[str, Any]:
         from ..models import PlaybackStatus
 
@@ -2557,14 +2571,20 @@ class PlaylistManager:
             "db_playlist_id": getattr(row, "playlist_id", None) if row else None,
             "mpv_session": bool(self._mpv_manager._playback_session_active),
             "mpv_idle": self._mpv_get_light("idle-active", timeout=2.0),
+            "idle_logo": self._mpv_showing_idle_logo(),
         }
 
     def _mpv_has_active_media(self) -> bool:
+        """True only for real content — idle logo must not count as 'playing'."""
         idle = self._mpv_get_light("idle-active", timeout=2.0)
         if idle is True:
             return False
         path = self._mpv_get_light("path", timeout=2.0)
-        return bool(path and str(path).strip())
+        if not path or not str(path).strip():
+            return False
+        if self._mpv_path_is_idle_logo(path):
+            return False
+        return True
 
     def _remote_playback_controllable(self) -> tuple[bool, Dict[str, Any]]:
         snap = self._remote_playback_snapshot()
@@ -2573,8 +2593,9 @@ class PlaylistManager:
             and snap["active_playlist_id"] is not None
         )
         db_ok = snap["db_status"] == "playing" and snap["db_playlist_id"] is not None
-        mpv_ok = bool(snap["mpv_session"] or self._mpv_has_active_media())
-        return (thread_ok or (db_ok and mpv_ok) or mpv_ok), snap
+        # Session marker alone is not enough after halt left the logo on screen.
+        mpv_ok = bool(self._mpv_has_active_media())
+        return (thread_ok or (db_ok and mpv_ok)), snap
 
     def _remote_not_playing(self, snap: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -2753,21 +2774,37 @@ class PlaylistManager:
             mpv_path = str(self._mpv_get_light("path", timeout=1.0) or "")
         except Exception:
             mpv_path = ""
-        logo_path = bool(mpv_path) and (
-            "idle_logo" in mpv_path or mpv_path.endswith("placeholder.jpg")
-        )
+        logo_path = self._mpv_path_is_idle_logo(mpv_path)
         # Orphan: mpv still looping playlist/media while DB/thread say idle.
         db_playing = str(getattr(status, "status", None) or "").lower() == "playing"
         orphan_mpv = (not db_playing) and (not thread_alive) and (
             (mpv_session and not logo_path)
             or (loop_playlist_on and bool(mpv_path) and not logo_path)
         )
+        # Ghost: DB says playing/schedule but screen only shows idle logo (or nothing).
+        content_active = bool(mpv_path) and not logo_path and (
+            bool(thread_alive) or bool(mpv_session) or bool(loop_playlist_on)
+        )
+        stale_playing = bool(db_playing) and (not thread_alive) and (not content_active) and (
+            logo_path or not mpv_path
+        )
+
+        out_status = status.status if status else None
+        out_source = (status.source or 'idle') if status else 'idle'
+        out_playlist_id = status.playlist_id if status else None
+        out_rule_id = status.rule_id if status else None
+        if stale_playing:
+            # Heal UI immediately; desync watch will clear DB shortly.
+            out_status = "idle"
+            out_source = "idle"
+            out_playlist_id = None
+            out_rule_id = None
 
         return {
-            'status': status.status if status else None,
-            'playlist_id': status.playlist_id if status else None,
-            'source': (status.source or 'idle') if status else 'idle',
-            'rule_id': status.rule_id if status else None,
+            'status': out_status,
+            'playlist_id': out_playlist_id,
+            'source': out_source,
+            'rule_id': out_rule_id,
             'previous_source': status.previous_source if status else None,
             'previous_rule_id': status.previous_rule_id if status else None,
             'previous_playlist_id': status.previous_playlist_id if status else None,
@@ -2781,7 +2818,9 @@ class PlaylistManager:
             'thread_alive': thread_alive,
             'mpv_session_active': mpv_session,
             'orphan_mpv': bool(orphan_mpv),
-            'current_media': self._get_current_media_label(),
+            'stale_playing': bool(stale_playing),
+            'idle_logo': bool(logo_path),
+            'current_media': None if stale_playing else self._get_current_media_label(),
             'settings': self._mpv_manager._current_settings,
             'network_health': self.get_network_playback_health(),
             'cache_state': cache_state,

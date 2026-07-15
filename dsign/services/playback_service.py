@@ -480,6 +480,20 @@ class PlaybackService:
                     self._mpv_manager.set_playback_session_active(False)
                 except Exception:
                     pass
+                try:
+                    if self.socketio:
+                        self.socketio.emit(
+                            "playback_update",
+                            {
+                                "status": "idle",
+                                "playlist_id": None,
+                                "source": "idle",
+                                "current_media": None,
+                                "stale_playing": False,
+                            },
+                        )
+                except Exception:
+                    pass
         except Exception as e:
             self._log_warning(
                 "Failed to clear stale playing status",
@@ -505,6 +519,7 @@ class PlaybackService:
         resume_source = "manual"
         resume_rule_id = None
         orphan_stop = False
+        clear_stale = False
         with self._app_context():
             try:
                 snap = self._playlist_manager._remote_playback_snapshot()
@@ -531,14 +546,27 @@ class PlaybackService:
                     playlist_id = snap.get("db_playlist_id")
                     if not playlist_id:
                         return
-                    if snap.get("mpv_idle") is not True and self._playlist_manager._mpv_has_active_media():
+                    # Idle logo on screen + DB still "playing" = ghost status after Stop/halt.
+                    # Clear DB — do not resume (that resurrected schedule badge over a stub).
+                    showing_logo = bool(snap.get("idle_logo"))
+                    if not showing_logo:
+                        try:
+                            showing_logo = bool(self._playlist_manager._mpv_showing_idle_logo())
+                        except Exception:
+                            showing_logo = False
+                    if showing_logo:
+                        clear_stale = True
+                        self._last_desync_recover_ts = now
+                        playlist_id = None
+                    elif snap.get("mpv_idle") is not True and self._playlist_manager._mpv_has_active_media():
                         return
-                    self._last_desync_recover_ts = now
-                    try:
-                        resume_index = self._playlist_manager.get_resume_start_index(advance=False)
-                    except Exception:
-                        resume_index = 0
-                    _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
+                    else:
+                        self._last_desync_recover_ts = now
+                        try:
+                            resume_index = self._playlist_manager.get_resume_start_index(advance=False)
+                        except Exception:
+                            resume_index = 0
+                        _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
             finally:
                 try:
                     from ..extensions import db
@@ -559,6 +587,14 @@ class PlaybackService:
                     "Playback orphan stop failed",
                     extra={"error": str(e), "type": type(e).__name__},
                 )
+            return
+
+        if clear_stale:
+            self._log_warning(
+                "Playback desync: idle logo while DB playing; clearing stale status",
+                extra={"action": "playback_stale_playing_clear"},
+            )
+            self._clear_stale_playing_status()
             return
 
         if not playlist_id:
@@ -1476,6 +1512,8 @@ class PlaybackService:
         """Stop playback and return to idle state"""
         try:
             start_time = time.time()
+            # Suppress desync resume while halt/logo settle after Stop.
+            self._last_desync_recover_ts = time.monotonic()
             result = self._playlist_manager.stop(source=source)
             self._log_info(
                 "Playback stopped", 
