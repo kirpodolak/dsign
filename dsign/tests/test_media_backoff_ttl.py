@@ -56,23 +56,34 @@ def test_prune_stale_media_backoff_keeps_recent():
     assert backoff == {"a": {"next_try_monotonic": 1990.0, "failures": 1}}
 
 
-def test_register_media_failure_sets_last_touch_and_prunes(null_logger, tmp_path):
+def test_register_media_failure_sets_last_touch_and_prunes(null_logger, tmp_path, monkeypatch):
+    # Freeze monotonic — absolute timestamps like 10.0 only look "stale" after long uptime.
+    now = 10_000.0
+    monkeypatch.setenv("DSIGN_MEDIA_BACKOFF_TTL_SEC", "60")
+    monkeypatch.setattr("dsign.services.playlist_management.time.monotonic", lambda: now)
+    monkeypatch.setattr("dsign.services.media_backoff.time.monotonic", lambda: now)
+
     pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
     pm._media_backoff = {
-        "old": {"last_touch_monotonic": 10.0, "failures": 1},
+        "old": {"last_touch_monotonic": now - 120.0, "failures": 1},
     }
 
     pm._register_media_failure("new-key", reason="test")
 
     assert "new-key" in pm._media_backoff
-    assert pm._media_backoff["new-key"]["last_touch_monotonic"] > 0
+    assert pm._media_backoff["new-key"]["last_touch_monotonic"] == now
     assert "old" not in pm._media_backoff
 
 
 def test_play_impl_prunes_stale_backoff(null_logger, tmp_path, monkeypatch):
+    now = 10_000.0
+    monkeypatch.setenv("DSIGN_MEDIA_BACKOFF_TTL_SEC", "60")
+    monkeypatch.setattr("dsign.services.playlist_management.time.monotonic", lambda: now)
+    monkeypatch.setattr("dsign.services.media_backoff.time.monotonic", lambda: now)
+
     pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
     pm._media_backoff = {
-        "stale": {"last_touch_monotonic": 1.0, "failures": 1},
+        "stale": {"last_touch_monotonic": now - 120.0, "failures": 1},
     }
     pm._stop_play_thread = MagicMock()
     pm._set_playback_active_marker = MagicMock()
