@@ -736,9 +736,11 @@ const ui = {
         const rawPid = statusPayload && statusPayload.playlist_id;
         const pid =
             rawPid != null && rawPid !== '' ? String(rawPid) : '';
-        const st = String(statusPayload?.status || '').toLowerCase();
+        const stale = Boolean(statusPayload?.stale_playing);
+        // Prefer healed idle when API flags ghost playing-over-logo.
+        const st = stale ? 'idle' : String(statusPayload?.status || '').toLowerCase();
         // DB may say idle while mpv still loops (orphan) — keep Stop usable.
-        const orphan = Boolean(statusPayload?.orphan_mpv);
+        const orphan = Boolean(statusPayload?.orphan_mpv) && !stale;
         const stopEnabled = st === 'playing' || orphan;
 
         const currentMedia = statusPayload?.current_media;
@@ -778,9 +780,11 @@ const ui = {
         const returnBtn = elements.returnToScheduleBtn;
         if (!badge || !label) return;
 
-        const source = String(
-            statusPayload?.schedule?.source || statusPayload?.source || 'idle'
-        ).toLowerCase();
+        const source = Boolean(statusPayload?.stale_playing)
+            ? 'idle'
+            : String(
+                statusPayload?.schedule?.source || statusPayload?.source || 'idle'
+            ).toLowerCase();
 
         const sourceMap = {
             schedule: { cls: 'playback-source-badge--schedule', key: 'playback_source_schedule' },
@@ -1231,7 +1235,9 @@ const handlers = {
                     await api.startPlayback(playlistId);
                     state.playbackStatus = {
                         status: 'playing',
-                        playlist_id: Number(playlistId)
+                        playlist_id: Number(playlistId),
+                        source: 'manual',
+                        rule_id: null,
                     };
                     ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
                     ui.renderSettings(state.currentSettings, {
@@ -1407,8 +1413,10 @@ const handlers = {
             this.startAutoRefresh();
         });
         sockets.on('playback_update', (payload) => {
-            // payload: { status, playlist_id, timestamp }
-            state.playbackStatus = payload && typeof payload === 'object' ? payload : state.playbackStatus;
+            // Merge so a partial emit (missing source) does not wipe badge attribution.
+            if (payload && typeof payload === 'object') {
+                state.playbackStatus = { ...(state.playbackStatus || {}), ...payload };
+            }
             try {
                 ui.applyPlaybackStatusFromServer(state.playbackStatus, state.playlists);
                 ui.renderSettings(state.currentSettings, {
