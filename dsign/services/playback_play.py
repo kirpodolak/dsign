@@ -32,6 +32,8 @@ class PlaybackPlayRunner:
         from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
 
         try:
+            # Cancel late idle-logo retries from a previous Stop before we touch mpv.
+            self._pm.mark_play_starting()
             # Stop any previous manual playback loop and halt A1/A2 mpv autoplay so a
             # slow next loadfile cannot leave the old playlist looping on screen.
             self._pm._stop_play_thread(

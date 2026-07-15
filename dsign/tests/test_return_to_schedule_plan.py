@@ -63,10 +63,12 @@ def test_return_to_schedule_enqueues_play_from_plan():
     svc.enqueue_stop.assert_not_called()
 
 
-def test_return_to_schedule_stops_when_no_active_slot():
-    """Manual leave with empty schedule must halt mpv (not a no-op evaluate)."""
+def test_return_to_schedule_stops_when_no_slot_but_content_on_air():
+    """Empty schedule + residual A1/A2 content must halt mpv."""
     svc = _svc_for_return()
     svc._schedule_engine.plan_action.return_value = None
+    svc._playlist_manager = MagicMock()
+    svc._playlist_manager._mpv_has_active_media.return_value = True
     svc.enqueue_play = MagicMock()
     svc.enqueue_stop = MagicMock(return_value=True)
     svc.enqueue_schedule_evaluate = MagicMock(return_value=True)
@@ -75,6 +77,20 @@ def test_return_to_schedule_stops_when_no_active_slot():
     svc.enqueue_stop.assert_called_once_with(source="schedule")
     svc.enqueue_play.assert_not_called()
     svc.enqueue_schedule_evaluate.assert_not_called()
+
+
+def test_return_to_schedule_evaluates_when_already_idle_no_slot():
+    """Already on idle logo: evaluate so a newly enabled rule can start."""
+    svc = _svc_for_return()
+    svc._schedule_engine.plan_action.return_value = None
+    svc._playlist_manager = MagicMock()
+    svc._playlist_manager._mpv_has_active_media.return_value = False
+    svc.enqueue_stop = MagicMock(return_value=True)
+    svc.enqueue_schedule_evaluate = MagicMock(return_value=True)
+
+    assert PlaybackService.return_to_schedule(svc) is True
+    svc.enqueue_schedule_evaluate.assert_called_once_with(ignore_manual=True)
+    svc.enqueue_stop.assert_not_called()
 
 
 def test_return_to_schedule_stop_action_uses_enqueue_stop():

@@ -51,6 +51,7 @@ def test_get_status_reports_stale_playing_as_idle(null_logger, tmp_path):
     row.previous_playlist_id = None
     pm.db_session.query.return_value.get.return_value = row
     pm._play_thread = None
+    pm._play_start_mono = 0.0
     pm._mpv_manager._playback_session_active = False
     pm._mpv_manager._current_settings = {}
     pm._content_cache = None
@@ -73,3 +74,53 @@ def test_get_status_reports_stale_playing_as_idle(null_logger, tmp_path):
     assert st["source"] == "idle"
     assert st["playlist_id"] is None
     assert st["current_media"] is None
+
+
+def test_get_status_not_stale_during_play_start_grace(null_logger, tmp_path):
+    import time
+
+    pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
+    row = MagicMock()
+    row.status = "playing"
+    row.playlist_id = 9
+    row.source = "manual"
+    row.rule_id = None
+    row.previous_source = None
+    row.previous_rule_id = None
+    row.previous_playlist_id = None
+    pm.db_session.query.return_value.get.return_value = row
+    pm._play_thread = None
+    pm._play_start_mono = time.monotonic()
+    pm._mpv_manager._playback_session_active = False
+    pm._mpv_manager._current_settings = {}
+    pm._content_cache = None
+    pm._get_loop_position_snapshot = MagicMock(return_value=(None, 0))
+    pm._get_mpv_playback_snapshot = MagicMock(
+        return_value={"time_pos": None, "duration": None, "is_network": False, "mpv_responsive": True}
+    )
+    pm.get_network_playback_health = MagicMock(return_value={})
+    pm._get_current_media_label = MagicMock(return_value="loading")
+    pm._mpv_get_light = MagicMock(
+        side_effect=lambda prop, **_k: {
+            "loop-playlist": "no",
+            "path": "/home/dsign/dsign/static/images/placeholder.jpg",
+        }.get(prop)
+    )
+
+    st = pm.get_status()
+    assert st["stale_playing"] is False
+    assert st["status"] == "playing"
+
+
+def test_idle_logo_retry_cancelled_by_play_epoch(null_logger, tmp_path):
+    import time
+
+    pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
+    pm._app = None
+    pm._halt_mpv_playback = MagicMock(return_value=True)
+    pm._logo_manager.display_idle_logo = MagicMock(return_value=True)
+    pm.mark_play_starting()
+    pm._enqueue_idle_logo_retry()
+    time.sleep(0.05)
+    pm._halt_mpv_playback.assert_not_called()
+    pm._logo_manager.display_idle_logo.assert_not_called()

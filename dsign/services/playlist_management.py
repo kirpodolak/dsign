@@ -89,6 +89,24 @@ class PlaylistManager:
         self._playback_play = PlaybackPlayRunner(self)
         self._item_skip_direction = "next"
         self._active_playback_mode: Optional[str] = None
+        # Invalidates in-flight idle-logo retries so a late Stop retry cannot kill Play.
+        self._idle_logo_epoch = 0
+        self._idle_logo_epoch_lock = Lock()
+        self._play_start_mono: float = 0.0
+
+    def _bump_idle_logo_epoch(self) -> int:
+        with self._idle_logo_epoch_lock:
+            self._idle_logo_epoch = int(self._idle_logo_epoch) + 1
+            return int(self._idle_logo_epoch)
+
+    def _idle_logo_epoch_current(self) -> int:
+        with self._idle_logo_epoch_lock:
+            return int(self._idle_logo_epoch)
+
+    def mark_play_starting(self) -> None:
+        """Call when Play/enqueue_play begins — cancel logo retries and soft-stale window."""
+        self._play_start_mono = time.monotonic()
+        self._bump_idle_logo_epoch()
 
     def set_slideshow_crash_callback(self, callback: Optional[Callable[[], None]]) -> None:
         self._slideshow_crash_callback = callback
@@ -2385,6 +2403,8 @@ class PlaylistManager:
             with self._control_lock:
                 playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
                 last_playlist_id = playback.playlist_id
+                # Allow a fresh idle-logo retry after this Stop (Play cancels via epoch).
+                self._play_start_mono = 0.0
 
                 self._stop_play_thread(
                     preserve_stall_tracking=preserve_stall_tracking,
@@ -2460,21 +2480,37 @@ class PlaylistManager:
     def _enqueue_idle_logo_retry(self) -> None:
         """Best-effort logo after Stop when mpv IPC was busy during the request."""
         app = self._app
+        epoch = self._idle_logo_epoch_current()
 
         def _run() -> None:
             try:
+                if epoch != self._idle_logo_epoch_current():
+                    return
+                # Play/enqueue began — never clobber an in-flight or just-started play.
+                if float(self._play_start_mono or 0.0) > 0 and (
+                    time.monotonic() - float(self._play_start_mono)
+                ) < 120.0:
+                    return
                 if app is not None:
                     with app.app_context():
+                        if epoch != self._idle_logo_epoch_current():
+                            return
                         try:
                             self._halt_mpv_playback(lock_wait=30.0, timeout=3.0)
                         except Exception:
                             pass
+                        if epoch != self._idle_logo_epoch_current():
+                            return
                         self._logo_manager.display_idle_logo(lock_wait=30.0)
                 else:
+                    if epoch != self._idle_logo_epoch_current():
+                        return
                     try:
                         self._halt_mpv_playback(lock_wait=30.0, timeout=3.0)
                     except Exception:
                         pass
+                    if epoch != self._idle_logo_epoch_current():
+                        return
                     self._logo_manager.display_idle_logo(lock_wait=30.0)
             except Exception as exc:
                 self.logger.warning(
@@ -2788,6 +2824,13 @@ class PlaylistManager:
         stale_playing = bool(db_playing) and (not thread_alive) and (not content_active) and (
             logo_path or not mpv_path
         )
+        # Grace window while Play loadfile runs after halt (logo still on path briefly).
+        try:
+            starting = (time.monotonic() - float(self._play_start_mono or 0.0)) < 45.0
+        except Exception:
+            starting = False
+        if starting and db_playing:
+            stale_playing = False
 
         out_status = status.status if status else None
         out_source = (status.source or 'idle') if status else 'idle'
