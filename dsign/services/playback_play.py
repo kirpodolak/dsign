@@ -31,15 +31,37 @@ class PlaybackPlayRunner:
     ) -> bool:
         from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
 
+        play_seq: Optional[int] = None
         try:
-            # Stop any previous manual playback loop
-            self._pm._stop_play_thread(preserve_stall_tracking=preserve_stall_tracking)
+            # Cancel late idle-logo retries from a previous Stop before we touch mpv.
+            self._pm.mark_play_starting()
+            # Stop any previous manual playback loop and halt A1/A2 mpv autoplay so a
+            # slow next loadfile cannot leave the old playlist looping on screen.
+            self._pm._stop_play_thread(
+                preserve_stall_tracking=preserve_stall_tracking,
+                halt_mpv=True,
+            )
             self._pm._cancel_content_cache_prefetches()
             self._pm._prune_media_backoff()
             play_seq = self._pm._begin_play_seq()
             # Mark playback starting before DB/profile IPC so Wi-Fi-on-display skips.
             self._pm._set_playback_active_marker(True)
             self._pm._audio_route_applied_for_play = False
+            # Claim source immediately so a concurrent schedule tick cannot plan a
+            # schedule play while we are still inside a long loadfile.
+            try:
+                self._pm._persist_playback_status(
+                    playlist_id=int(playlist_id),
+                    status="playing",
+                    source=source,
+                    rule_id=int(rule_id) if source == "schedule" and rule_id is not None else None,
+                    clear_rule=(str(source) != "schedule"),
+                )
+            except Exception:
+                try:
+                    self._pm.db_session.rollback()
+                except Exception:
+                    pass
 
             # Get playlist and validate
             playlist = self._pm.db_session.query(Playlist).get(playlist_id)
@@ -312,7 +334,8 @@ class PlaybackPlayRunner:
                     playlist_id=playlist_id,
                     status="playing",
                     source=source,
-                    rule_id=rule_id,
+                    rule_id=int(rule_id) if source == "schedule" and rule_id is not None else None,
+                    clear_rule=(str(source) != "schedule"),
                 )
 
             if not self._pm._commit_play(
@@ -335,6 +358,8 @@ class PlaybackPlayRunner:
                         {
                             'status': 'playing',
                             'playlist_id': playlist_id,
+                            'source': source,
+                            'rule_id': rule_id if source == "schedule" else None,
                             'current_media': self._pm._get_current_media_label(),
                             'playlist': {'id': playlist_id, 'name': playlist_name},
                             'settings': profile_settings,
@@ -347,6 +372,19 @@ class PlaybackPlayRunner:
             return True
 
         except Exception as e:
+            # A concurrent Stop/newer play bumped seq — never wipe the winner to idle.
+            if play_seq is not None and not self._pm._is_play_seq_current(int(play_seq)):
+                self._pm.logger.info(
+                    "Playback error ignored: superseded by stop/newer play",
+                    extra={
+                        "playlist_id": playlist_id,
+                        "play_seq": play_seq,
+                        "error": str(e),
+                        "type": type(e).__name__,
+                    },
+                )
+                return False
+
             self._pm.logger.error(
                 "Playback error",
                 extra={
