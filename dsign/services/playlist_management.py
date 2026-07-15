@@ -89,6 +89,26 @@ class PlaylistManager:
         self._playback_play = PlaybackPlayRunner(self)
         self._item_skip_direction = "next"
         self._active_playback_mode: Optional[str] = None
+        # Invalidates in-flight idle-logo retries so a late Stop retry cannot kill Play.
+        self._idle_logo_epoch = 0
+        self._idle_logo_epoch_lock = Lock()
+        self._play_start_mono: float = 0.0
+        # One play()/loadfile at a time — parallel schedule+manual starts race to idle.
+        self._play_start_lock = Lock()
+
+    def _bump_idle_logo_epoch(self) -> int:
+        with self._idle_logo_epoch_lock:
+            self._idle_logo_epoch = int(self._idle_logo_epoch) + 1
+            return int(self._idle_logo_epoch)
+
+    def _idle_logo_epoch_current(self) -> int:
+        with self._idle_logo_epoch_lock:
+            return int(self._idle_logo_epoch)
+
+    def mark_play_starting(self) -> None:
+        """Call when Play/enqueue_play begins — cancel logo retries and soft-stale window."""
+        self._play_start_mono = time.monotonic()
+        self._bump_idle_logo_epoch()
 
     def set_slideshow_crash_callback(self, callback: Optional[Callable[[], None]]) -> None:
         self._slideshow_crash_callback = callback
@@ -1866,7 +1886,8 @@ class PlaylistManager:
                 playlist_id=playlist_id,
                 status="playing",
                 source=source,
-                rule_id=rule_id,
+                rule_id=int(rule_id) if source == "schedule" and rule_id is not None else None,
+                clear_rule=(str(source) != "schedule"),
             )
 
         if not self._commit_play(
@@ -1888,6 +1909,8 @@ class PlaylistManager:
                     {
                         "status": "playing",
                         "playlist_id": int(playlist_id),
+                        "source": source,
+                        "rule_id": rule_id if source == "schedule" else None,
                         "current_media": self._get_current_media_label(),
                         "playlist": {"id": int(playlist_id), "name": str(name or "")},
                         "settings": profile_settings,
@@ -2014,12 +2037,39 @@ class PlaylistManager:
                         extra={"error": str(cb_exc), "type": type(cb_exc).__name__},
                     )
 
+    def _halt_mpv_playback(self, *, lock_wait: float = 2.0, timeout: float = 2.0) -> bool:
+        """Clear mpv autoplay loops and stop so local_single/m3u cannot keep rolling after Stop.
+
+        Python thread teardown alone is not enough: A2 uses loop-file=inf and A1 uses
+        loop-playlist=yes — those keep playing without a live slideshow thread.
+        """
+        ok = True
+        cmds = (
+            ["set_property", "loop-file", "no"],
+            ["set_property", "loop-playlist", "no"],
+            ["stop"],
+        )
+        for cmd in cmds:
+            try:
+                resp = self._mpv_manager._send_command(
+                    {"command": cmd},
+                    timeout=float(timeout),
+                    lock_wait=float(lock_wait),
+                    max_attempts=1,
+                )
+                if not resp or resp.get("error") != "success":
+                    ok = False
+            except Exception:
+                ok = False
+        return ok
+
     def _stop_play_thread(
         self,
         *,
         preserve_stall_tracking: bool = False,
         preserve_loop_position: bool = False,
         join_timeout: float = 2.0,
+        halt_mpv: bool = False,
     ):
         # Invalidate before join so a concurrent play() finishing loadfile aborts.
         self._bump_play_seq()
@@ -2057,6 +2107,13 @@ class PlaylistManager:
             self._mpv_manager.set_playback_session_active(False)
         except Exception:
             pass
+        if halt_mpv:
+            # Best-effort: stop previous A1/A2 autoplay before a new loadfile, and when
+            # Stop's dedicated IPC path is skipped (thread-only teardown).
+            try:
+                self._halt_mpv_playback(lock_wait=1.0, timeout=1.5)
+            except Exception:
+                pass
 
     def _manual_slideshow_loop(
         self,
@@ -2203,17 +2260,36 @@ class PlaylistManager:
         rule_id: Optional[int] = None,
     ) -> bool:
         """Play playlist with profile support"""
+        with self._play_start_lock:
+            with self._app_context():
+                with self._override_lock:
+                    self._override_return_ctx = None
+                    self._playlist_single_pass = False
+                return self._play_impl(
+                    playlist_id,
+                    start_index=start_index,
+                    preserve_stall_tracking=preserve_stall_tracking,
+                    single_pass=False,
+                    source=source,
+                    rule_id=rule_id,
+                )
+
+    def claim_playback_intent(
+        self,
+        playlist_id: int,
+        *,
+        source: str = "manual",
+        rule_id: Optional[int] = None,
+    ) -> None:
+        """Persist intended source before async loadfile so schedule ticks do not race."""
+        src = str(source or "manual")
         with self._app_context():
-            with self._override_lock:
-                self._override_return_ctx = None
-                self._playlist_single_pass = False
-            return self._play_impl(
-                playlist_id,
-                start_index=start_index,
-                preserve_stall_tracking=preserve_stall_tracking,
-                single_pass=False,
-                source=source,
-                rule_id=rule_id,
+            self._persist_playback_status(
+                playlist_id=int(playlist_id),
+                status="playing",
+                source=src,
+                rule_id=int(rule_id) if src == "schedule" and rule_id is not None else None,
+                clear_rule=(src != "schedule"),
             )
 
     def play_override(
@@ -2351,6 +2427,8 @@ class PlaylistManager:
             with self._control_lock:
                 playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
                 last_playlist_id = playback.playlist_id
+                # Allow a fresh idle-logo retry after this Stop (Play cancels via epoch).
+                self._play_start_mono = 0.0
 
                 self._stop_play_thread(
                     preserve_stall_tracking=preserve_stall_tracking,
@@ -2401,17 +2479,15 @@ class PlaylistManager:
             if show_idle_logo:
                 # Keep Stop HTTP fast: brief IPC attempt, then finish logo in background
                 # if loadfile still holds the long IPC lock.
+                # Clear loop-file/loop-playlist first — otherwise local video engines keep
+                # playing after a failed/partial stop (UI looks like Stop did nothing).
+                halted = False
                 try:
-                    self._mpv_manager._send_command(
-                        {"command": ["stop"]},
-                        timeout=2.0,
-                        lock_wait=2.0,
-                        max_attempts=1,
-                    )
+                    halted = bool(self._halt_mpv_playback(lock_wait=2.0, timeout=2.0))
                 except Exception:
-                    pass
+                    halted = False
                 ok = bool(self._logo_manager.display_idle_logo(lock_wait=2.0))
-                if not ok:
+                if not ok or not halted:
                     self._enqueue_idle_logo_retry()
             return True if update_status else ok
         except Exception as e:
@@ -2428,31 +2504,37 @@ class PlaylistManager:
     def _enqueue_idle_logo_retry(self) -> None:
         """Best-effort logo after Stop when mpv IPC was busy during the request."""
         app = self._app
+        epoch = self._idle_logo_epoch_current()
 
         def _run() -> None:
             try:
+                if epoch != self._idle_logo_epoch_current():
+                    return
+                # Play/enqueue began — never clobber an in-flight or just-started play.
+                if float(self._play_start_mono or 0.0) > 0 and (
+                    time.monotonic() - float(self._play_start_mono)
+                ) < 120.0:
+                    return
                 if app is not None:
                     with app.app_context():
+                        if epoch != self._idle_logo_epoch_current():
+                            return
                         try:
-                            self._mpv_manager._send_command(
-                                {"command": ["stop"]},
-                                timeout=3.0,
-                                lock_wait=30.0,
-                                max_attempts=1,
-                            )
+                            self._halt_mpv_playback(lock_wait=30.0, timeout=3.0)
                         except Exception:
                             pass
+                        if epoch != self._idle_logo_epoch_current():
+                            return
                         self._logo_manager.display_idle_logo(lock_wait=30.0)
                 else:
+                    if epoch != self._idle_logo_epoch_current():
+                        return
                     try:
-                        self._mpv_manager._send_command(
-                            {"command": ["stop"]},
-                            timeout=3.0,
-                            lock_wait=30.0,
-                            max_attempts=1,
-                        )
+                        self._halt_mpv_playback(lock_wait=30.0, timeout=3.0)
                     except Exception:
                         pass
+                    if epoch != self._idle_logo_epoch_current():
+                        return
                     self._logo_manager.display_idle_logo(lock_wait=30.0)
             except Exception as exc:
                 self.logger.warning(
@@ -2522,6 +2604,20 @@ class PlaylistManager:
             self._item_skip_event.clear()
             return self._item_skip_direction
 
+    @staticmethod
+    def _mpv_path_is_idle_logo(path: Any) -> bool:
+        p = str(path or "").strip()
+        if not p:
+            return False
+        return "idle_logo" in p or p.endswith("placeholder.jpg")
+
+    def _mpv_showing_idle_logo(self) -> bool:
+        try:
+            path = self._mpv_get_light("path", timeout=1.0)
+        except Exception:
+            path = None
+        return self._mpv_path_is_idle_logo(path)
+
     def _remote_playback_snapshot(self) -> Dict[str, Any]:
         from ..models import PlaybackStatus
 
@@ -2535,14 +2631,20 @@ class PlaylistManager:
             "db_playlist_id": getattr(row, "playlist_id", None) if row else None,
             "mpv_session": bool(self._mpv_manager._playback_session_active),
             "mpv_idle": self._mpv_get_light("idle-active", timeout=2.0),
+            "idle_logo": self._mpv_showing_idle_logo(),
         }
 
     def _mpv_has_active_media(self) -> bool:
+        """True only for real content — idle logo must not count as 'playing'."""
         idle = self._mpv_get_light("idle-active", timeout=2.0)
         if idle is True:
             return False
         path = self._mpv_get_light("path", timeout=2.0)
-        return bool(path and str(path).strip())
+        if not path or not str(path).strip():
+            return False
+        if self._mpv_path_is_idle_logo(path):
+            return False
+        return True
 
     def _remote_playback_controllable(self) -> tuple[bool, Dict[str, Any]]:
         snap = self._remote_playback_snapshot()
@@ -2551,8 +2653,9 @@ class PlaylistManager:
             and snap["active_playlist_id"] is not None
         )
         db_ok = snap["db_status"] == "playing" and snap["db_playlist_id"] is not None
-        mpv_ok = bool(snap["mpv_session"] or self._mpv_has_active_media())
-        return (thread_ok or (db_ok and mpv_ok) or mpv_ok), snap
+        # Session marker alone is not enough after halt left the logo on screen.
+        mpv_ok = bool(self._mpv_has_active_media())
+        return (thread_ok or (db_ok and mpv_ok)), snap
 
     def _remote_not_playing(self, snap: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -2731,21 +2834,44 @@ class PlaylistManager:
             mpv_path = str(self._mpv_get_light("path", timeout=1.0) or "")
         except Exception:
             mpv_path = ""
-        logo_path = bool(mpv_path) and (
-            "idle_logo" in mpv_path or mpv_path.endswith("placeholder.jpg")
-        )
+        logo_path = self._mpv_path_is_idle_logo(mpv_path)
         # Orphan: mpv still looping playlist/media while DB/thread say idle.
         db_playing = str(getattr(status, "status", None) or "").lower() == "playing"
         orphan_mpv = (not db_playing) and (not thread_alive) and (
             (mpv_session and not logo_path)
             or (loop_playlist_on and bool(mpv_path) and not logo_path)
         )
+        # Ghost: DB says playing/schedule but screen only shows idle logo (or nothing).
+        content_active = bool(mpv_path) and not logo_path and (
+            bool(thread_alive) or bool(mpv_session) or bool(loop_playlist_on)
+        )
+        stale_playing = bool(db_playing) and (not thread_alive) and (not content_active) and (
+            logo_path or not mpv_path
+        )
+        # Grace window while Play loadfile runs after halt (logo still on path briefly).
+        try:
+            starting = (time.monotonic() - float(self._play_start_mono or 0.0)) < 45.0
+        except Exception:
+            starting = False
+        if starting and db_playing:
+            stale_playing = False
+
+        out_status = status.status if status else None
+        out_source = (status.source or 'idle') if status else 'idle'
+        out_playlist_id = status.playlist_id if status else None
+        out_rule_id = status.rule_id if status else None
+        if stale_playing:
+            # Heal UI immediately; desync watch will clear DB shortly.
+            out_status = "idle"
+            out_source = "idle"
+            out_playlist_id = None
+            out_rule_id = None
 
         return {
-            'status': status.status if status else None,
-            'playlist_id': status.playlist_id if status else None,
-            'source': (status.source or 'idle') if status else 'idle',
-            'rule_id': status.rule_id if status else None,
+            'status': out_status,
+            'playlist_id': out_playlist_id,
+            'source': out_source,
+            'rule_id': out_rule_id,
             'previous_source': status.previous_source if status else None,
             'previous_rule_id': status.previous_rule_id if status else None,
             'previous_playlist_id': status.previous_playlist_id if status else None,
@@ -2759,7 +2885,9 @@ class PlaylistManager:
             'thread_alive': thread_alive,
             'mpv_session_active': mpv_session,
             'orphan_mpv': bool(orphan_mpv),
-            'current_media': self._get_current_media_label(),
+            'stale_playing': bool(stale_playing),
+            'idle_logo': bool(logo_path),
+            'current_media': None if stale_playing else self._get_current_media_label(),
             'settings': self._mpv_manager._current_settings,
             'network_health': self.get_network_playback_health(),
             'cache_state': cache_state,
