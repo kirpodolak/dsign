@@ -95,6 +95,15 @@ class PlaylistManager:
         self._play_start_mono: float = 0.0
         # One play()/loadfile at a time — parallel schedule+manual starts race to idle.
         self._play_start_lock = Lock()
+        # After ScheduleEngine attach / service restart — desync watch must not
+        # clear or re-stop a boot resume that is still settling.
+        self._boot_grace_until: float = 0.0
+
+    def begin_boot_grace(self, seconds: float = 60.0) -> None:
+        self._boot_grace_until = time.monotonic() + max(0.0, float(seconds))
+
+    def in_boot_grace(self) -> bool:
+        return time.monotonic() < float(self._boot_grace_until or 0.0)
 
     def _bump_idle_logo_epoch(self) -> int:
         with self._idle_logo_epoch_lock:

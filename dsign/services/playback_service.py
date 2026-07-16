@@ -130,6 +130,13 @@ class PlaybackService:
                 settings_service=self._settings_service,
                 logger=self.logger,
             )
+            # Suppress desync auto-stop/resume while boot resume settles (flash-then-idle).
+            try:
+                begin_grace = getattr(self._playlist_manager, "begin_boot_grace", None)
+                if callable(begin_grace):
+                    begin_grace(75.0)
+            except Exception:
+                pass
             self._schedule_engine.start()
             self._register_schedule_shutdown_hook()
             self._log_info("ScheduleEngine attached", extra={"action": "schedule_engine_start"})
@@ -509,6 +516,12 @@ class PlaybackService:
             return
         if self._recover_lock.locked():
             return
+        try:
+            in_grace = getattr(self._playlist_manager, "in_boot_grace", None)
+            if callable(in_grace) and in_grace():
+                return
+        except Exception:
+            pass
         now = time.monotonic()
         if now - float(self._last_desync_recover_ts or 0.0) < self._playback_desync_coalesce_sec():
             return
@@ -1147,6 +1160,20 @@ class PlaybackService:
             if engine is not None:
                 engine.evaluate_and_apply(ignore_manual=True)
                 self._log_info("Boot schedule evaluate completed", extra={"action": "boot_resume"})
+                # Configure no longer paints idle logo when ScheduleEngine is attached.
+                # If the plan did not leave content on air, show the stub deliberately.
+                try:
+                    snap = self._playlist_manager._remote_playback_snapshot()
+                    db_playing = str(snap.get("db_status") or "").lower() == "playing"
+                    has_media = False
+                    try:
+                        has_media = bool(self._playlist_manager._mpv_has_active_media())
+                    except Exception:
+                        has_media = False
+                    if not db_playing and not has_media:
+                        self._transition_to_idle()
+                except Exception:
+                    pass
             else:
                 self._transition_to_idle()
         except Exception as e:
@@ -1407,15 +1434,13 @@ class PlaybackService:
         pid = int(playlist_id)
         # Suppress orphan-desync reclaim while a fresh play is starting.
         self._last_desync_recover_ts = time.monotonic()
-        # Abort any in-flight play *before* claiming DB — otherwise a loadfile still
-        # holding _play_start_lock can commit source=manual over this intent / return.
+        # Soft-cancel idle-logo retries only. Do NOT bump play_seq here — that raced
+        # boot/schedule loadfile and left the screen on the idle stub after a flash.
+        # Stop / return-to-schedule still call invalidate_in_flight_play().
         try:
-            self._playlist_manager.invalidate_in_flight_play()
+            self._playlist_manager.mark_play_starting()
         except Exception:
-            try:
-                self._playlist_manager.mark_play_starting()
-            except Exception:
-                pass
+            pass
         # Claim source on the caller thread before the daemon loadfile starts so the
         # next ScheduleEngine tick sees manual/schedule and does not race a second play.
         try:

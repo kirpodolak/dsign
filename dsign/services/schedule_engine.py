@@ -69,8 +69,15 @@ class ScheduleEngine:
             if self._running:
                 return
             self._running = True
-        self.logger.info("ScheduleEngine started", extra={"tick_sec": self.TICK_SEC})
-        self._schedule_tick()
+            # Defer the first evaluate — boot resume owns the immediate apply.
+            # An immediate tick raced configure idle-logo and left a flash-then-stub.
+            self._timer = Timer(self.TICK_SEC, self._schedule_tick)
+            self._timer.daemon = True
+            self._timer.start()
+        self.logger.info(
+            "ScheduleEngine started",
+            extra={"tick_sec": self.TICK_SEC, "first_tick_deferred": True},
+        )
 
     def stop(self) -> None:
         with self._lock:

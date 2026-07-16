@@ -55,6 +55,7 @@ fi
 # Flat prod layout: services/, routes/, static/, extensions.py at RUNTIME_ROOT.
 # Nested clone layout: dsign/services/ under PROJECT_ROOT.
 FILES=(
+  "__init__.py"
   "extensions.py"
   "config/config.py"
   "services/schedule_engine.py"
@@ -115,6 +116,10 @@ grep -q "mark_play_starting" "$RUNTIME_ROOT/services/playlist_management.py" || 
 grep -q "claim_playback_intent" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING claim_playback_intent"; fail=1; }
 grep -q "def _prepare_mpv_for_new_play" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING _prepare_mpv_for_new_play"; fail=1; }
 grep -q "def invalidate_in_flight_play" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING invalidate_in_flight_play"; fail=1; }
+grep -q "first_tick_deferred" "$RUNTIME_ROOT/services/schedule_engine.py" || { echo "MISSING first_tick_deferred"; fail=1; }
+grep -q "begin_boot_grace" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING begin_boot_grace"; fail=1; }
+grep -q "skipping configure idle-logo/resume" "$RUNTIME_ROOT/__init__.py" || { echo "MISSING configure skip for ScheduleEngine"; fail=1; }
+grep -q "mark_play_starting()" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING enqueue mark_play_starting"; fail=1; }
 grep -q "status == \"playing\"" "$RUNTIME_ROOT/services/schedule_engine.py" || { echo "MISSING status==playing in schedule plan"; fail=1; }
 grep -q "stale_playing" "$RUNTIME_ROOT/static/js/index.js" || { echo "MISSING stale_playing in index.js"; fail=1; }
 grep -q "orphan_mpv" "$RUNTIME_ROOT/static/js/index.js" || { echo "MISSING orphan_mpv in index.js"; fail=1; }
