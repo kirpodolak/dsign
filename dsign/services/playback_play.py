@@ -348,6 +348,7 @@ class PlaybackPlayRunner:
                     pass
 
             def _start_thread() -> None:
+                run_id = int(getattr(self._pm, "_playback_run_id", 0) or 0)
                 self._pm._play_thread = Thread(
                     target=self._pm._run_manual_slideshow_loop,
                     args=(playlist_id, items, start_index),
@@ -355,6 +356,7 @@ class PlaybackPlayRunner:
                         "first_item_preloaded": True,
                         "profile_muted": profile_muted,
                         "single_pass": single_pass,
+                        "playback_run_id": run_id,
                     },
                     daemon=True,
                 )
