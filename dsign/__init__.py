@@ -191,6 +191,16 @@ def _configure_playback_service(app: Flask) -> None:
                     playback_status = db.session.query(PlaybackStatus).first()
                     app.logger.info("Database connection verified")
 
+                    playback = getattr(app, "playback_service", None)
+                    # ScheduleEngine + boot resume own startup play/stop. A parallel
+                    # idle-logo / resume here races loadfile and leaves flash-then-stub.
+                    if playback is not None and getattr(playback, "_schedule_engine", None) is not None:
+                        app.logger.info(
+                            "ScheduleEngine attached — skipping configure idle-logo/resume "
+                            "(boot resume owns restore)"
+                        )
+                        return
+
                     if not playback_status or not playback_status.playlist_id:
                         app.logger.info("No active playlist found, starting idle logo...")
                         _run_idle_logo_attempts(app)
@@ -208,6 +218,11 @@ def _configure_playback_service(app: Flask) -> None:
 
                 except Exception as db_error:
                     app.logger.error(f"Database/playback initialization failed: {str(db_error)}")
+                    # Only legacy (no ScheduleEngine) falls back here — otherwise boot
+                    # resume / schedule tick will restore or idle deliberately.
+                    playback = getattr(app, "playback_service", None)
+                    if playback is not None and getattr(playback, "_schedule_engine", None) is not None:
+                        return
                     try:
                         _fallback_to_idle_logo(app)
                     except Exception:
