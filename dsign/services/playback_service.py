@@ -518,7 +518,8 @@ class PlaybackService:
             return
         try:
             in_grace = getattr(self._playlist_manager, "in_boot_grace", None)
-            if callable(in_grace) and in_grace():
+            # Strict True — MagicMock() is truthy and would permanently skip recover in tests.
+            if callable(in_grace) and in_grace() is True:
                 return
         except Exception:
             pass
