@@ -130,6 +130,13 @@ class PlaybackService:
                 settings_service=self._settings_service,
                 logger=self.logger,
             )
+            # Suppress desync auto-stop/resume while boot resume settles (flash-then-idle).
+            try:
+                begin_grace = getattr(self._playlist_manager, "begin_boot_grace", None)
+                if callable(begin_grace):
+                    begin_grace(75.0)
+            except Exception:
+                pass
             self._schedule_engine.start()
             self._register_schedule_shutdown_hook()
             self._log_info("ScheduleEngine attached", extra={"action": "schedule_engine_start"})
@@ -509,6 +516,12 @@ class PlaybackService:
             return
         if self._recover_lock.locked():
             return
+        try:
+            in_grace = getattr(self._playlist_manager, "in_boot_grace", None)
+            if callable(in_grace) and in_grace():
+                return
+        except Exception:
+            pass
         now = time.monotonic()
         if now - float(self._last_desync_recover_ts or 0.0) < self._playback_desync_coalesce_sec():
             return
@@ -1147,6 +1160,20 @@ class PlaybackService:
             if engine is not None:
                 engine.evaluate_and_apply(ignore_manual=True)
                 self._log_info("Boot schedule evaluate completed", extra={"action": "boot_resume"})
+                # Configure no longer paints idle logo when ScheduleEngine is attached.
+                # If the plan did not leave content on air, show the stub deliberately.
+                try:
+                    snap = self._playlist_manager._remote_playback_snapshot()
+                    db_playing = str(snap.get("db_status") or "").lower() == "playing"
+                    has_media = False
+                    try:
+                        has_media = bool(self._playlist_manager._mpv_has_active_media())
+                    except Exception:
+                        has_media = False
+                    if not db_playing and not has_media:
+                        self._transition_to_idle()
+                except Exception:
+                    pass
             else:
                 self._transition_to_idle()
         except Exception as e:
@@ -1358,10 +1385,14 @@ class PlaybackService:
         """Stop on a daemon thread so toggle/Stop HTTP never wait on mpv IPC."""
         app = self._app
         # Invalidate in-flight play immediately so late persist cannot win.
+        # (stop() will bump again under its teardown — that is intentional.)
         try:
-            self._playlist_manager._bump_play_seq()
+            self._playlist_manager.invalidate_in_flight_play()
         except Exception:
-            pass
+            try:
+                self._playlist_manager._bump_play_seq()
+            except Exception:
+                pass
         self._last_desync_recover_ts = time.monotonic()
 
         def _run() -> None:
@@ -1394,12 +1425,18 @@ class PlaybackService:
         source: str = "manual",
         rule_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Start play() off the HTTP worker — loadfile/ytdl must not freeze the UI."""
+        """Start play() off the HTTP worker — loadfile/ytdl must not freeze the UI.
+
+        PlaybackService intentionally does **not** import playback_play/network/slideshow
+        helpers — those are owned by PlaylistManager.play() → PlaybackPlayRunner.
+        """
         app = self._app
         pid = int(playlist_id)
         # Suppress orphan-desync reclaim while a fresh play is starting.
         self._last_desync_recover_ts = time.monotonic()
-        # Invalidate Stop's delayed idle-logo retry so it cannot halt this play.
+        # Soft-cancel idle-logo retries only. Do NOT bump play_seq here — that raced
+        # boot/schedule loadfile and left the screen on the idle stub after a flash.
+        # Stop / return-to-schedule still call invalidate_in_flight_play().
         try:
             self._playlist_manager.mark_play_starting()
         except Exception:
@@ -1468,14 +1505,23 @@ class PlaybackService:
         }
 
     def return_to_schedule(self) -> bool:
-        """Clear manual lock and apply current schedule slot (D2.2).
+        """Clear manual override (DB source) and apply current schedule slot (D2.2).
+
+        There is no PlaylistManager.manual_lock / return_to_schedule_plan — the
+        schedule "manual lock" is ``PlaybackStatus.source in (manual, override)``.
+        Clearing that row + ``ignore_manual=True`` is sufficient for ScheduleEngine.
 
         Plans synchronously (fast DB), then enqueues play/stop so the HTTP request
-        never waits on loadfile. Avoids Idle-stuck UI when evaluate was blocked
-        behind another in-flight play holding the schedule apply lock.
+        never waits on loadfile. Aborts in-flight play first so a late manual
+        ``_commit_play`` cannot re-persist ``source=manual``.
         """
         action = None
         plan_failed = False
+        # Kill in-flight manual play before we rewrite PlaybackStatus / plan.
+        try:
+            self._playlist_manager.invalidate_in_flight_play()
+        except Exception:
+            pass
         with self._app_context():
             from ..models import PlaybackStatus
             session = getattr(self.db_session, "session", self.db_session)
