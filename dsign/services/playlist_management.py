@@ -1055,21 +1055,50 @@ class PlaylistManager:
                 },
             )
             return int(good_idx) % self._last_good_items_count
-        cooldown = self._all_network_fail_cooldown_sec()
+        # No recoverable item: idle immediately. A 5-minute cooldown left the UI on
+        # "playing" while mpv showed nothing (VK/Rutube open failures).
         try:
-            self._logo_manager.display_idle_logo()
+            self._prepare_mpv_for_new_play(lock_wait=1.0)
+        except Exception:
+            pass
+        try:
+            self._logo_manager.display_idle_logo(lock_wait=2.0)
+        except Exception:
+            pass
+        try:
+            self._persist_playback_status(
+                playlist_id=None,
+                status="idle",
+                source="idle",
+                clear_rule=True,
+            )
+        except Exception:
+            try:
+                self.db_session.rollback()
+            except Exception:
+                pass
+        try:
+            if self.socketio:
+                self.socketio.emit(
+                    "playback_update",
+                    {
+                        "status": "idle",
+                        "playlist_id": None,
+                        "source": "idle",
+                        "current_media": None,
+                    },
+                )
         except Exception:
             pass
         self.logger.warning(
-            "playlist: no last-good media; logo + cooldown before next cycle",
+            "playlist: no last-good media after network failure cycle; idle",
             extra={
                 "playlist_id": playlist_id,
-                "cooldown_sec": round(cooldown, 1),
                 "consecutive_ytdl_failures": health.get("consecutive_ytdl_failures"),
             },
         )
-        self._stop_event.wait(timeout=cooldown)
-        return 0
+        self._stop_event.set()
+        return None
 
     def _issue_loadfile(
         self,
