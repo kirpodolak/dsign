@@ -127,7 +127,8 @@ class PlaybackNetworkHelper:
                         extra={"media_key": media_key, "path_preview": path_s[:120]},
                     )
                     self._pm._issue_ytdl_loadfile(load_cmd, media_key=media_key)
-            open_sec = self._pm._ytdl_open_timeout_sec(180.0)
+            # Keep interactive Play snappy: 180+90s left UI on "playing" while screen stayed idle.
+            open_sec = self._pm._ytdl_open_timeout_sec(55.0)
             if not self._wait_mpv_ytdl_stream_opening(timeout_sec=open_sec):
                 if load_cmd is not None:
                     self._pm.logger.info(
@@ -135,7 +136,7 @@ class PlaybackNetworkHelper:
                         extra={"media_key": media_key, "path_preview": path_s[:120]},
                     )
                     self._pm._issue_ytdl_loadfile(load_cmd, media_key=media_key)
-                    retry_sec = self._pm._ytdl_open_timeout_sec(90.0)
+                    retry_sec = self._pm._ytdl_open_timeout_sec(25.0)
                     if not self._wait_mpv_ytdl_stream_opening(timeout_sec=retry_sec):
                         self._pm.logger.warning(
                             "ytdl stream did not open after loadfile retries",
