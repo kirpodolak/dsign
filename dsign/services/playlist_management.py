@@ -159,8 +159,14 @@ class PlaylistManager:
         """
         self.mark_play_starting()
         self._bump_play_seq()
+        # Abort ytdl ensure immediately (do not wait for async stop join).
+        self._bump_playback_run_id()
         try:
             self._stop_event.set()
+        except Exception:
+            pass
+        try:
+            self._mpv_manager.set_playback_stream_opening(False)
         except Exception:
             pass
 
@@ -2149,13 +2155,45 @@ class PlaylistManager:
                 ok = False
         return ok
 
-    def _prepare_mpv_for_new_play(self, *, lock_wait: float = 1.5) -> None:
-        """Clear A1/A2 loops; only full stop when real content is still on air.
+    def _mpv_path_is_network(self, path: Any) -> bool:
+        p = str(path or "").strip()
+        return p.startswith(("http://", "https://", "ytdl://"))
 
-        Calling ``stop`` while already idle blanks Wayland to imv and contends IPC
-        so the following loadfile often fails — UI shows playing (claim) but screen
-        stays on the stub.
+    def _mpv_needs_hard_halt(self) -> bool:
+        """True when soft prepare must not skip ``stop`` (ytdl open looks idle-active)."""
+        try:
+            # Strict True — MagicMock attrs are truthy and would always hard-halt in tests.
+            if getattr(self._mpv_manager, "_playback_stream_opening", False) is True:
+                return True
+        except Exception:
+            pass
+        try:
+            path = self._mpv_get_light("path", timeout=1.0)
+        except Exception:
+            path = None
+        if self._mpv_path_is_network(path):
+            return True
+        if path is None:
+            # IPC unknown during ytdl — prefer halt over leaving a stuck open.
+            try:
+                idle = self._mpv_get_light("idle-active", timeout=0.8)
+            except Exception:
+                idle = None
+            if idle is None:
+                return True
+        return False
+
+    def _prepare_mpv_for_new_play(self, *, lock_wait: float = 1.5) -> None:
+        """Clear A1/A2 loops; full stop when content (incl. opening ytdl) is on air.
+
+        Calling ``stop`` while truly idle (logo / empty) blanks Wayland to imv and
+        contends IPC — skip that. But ytdl:// often reports idle-active=true while
+        the hook is still opening; skipping stop there left VK/Rutube alive and
+        broke the next offline Play.
         """
+        if self._mpv_needs_hard_halt():
+            self._halt_mpv_playback(lock_wait=float(lock_wait), timeout=3.0)
+            return
         try:
             idle = self._mpv_get_light("idle-active", timeout=1.0)
         except Exception:
@@ -2617,16 +2655,32 @@ class PlaylistManager:
 
             ok = True
             if show_idle_logo:
-                # Keep Stop HTTP fast: brief IPC attempt, then finish logo in background
-                # if loadfile still holds the long IPC lock.
-                # Clear loop-file/loop-playlist first — otherwise local video engines keep
-                # playing after a failed/partial stop (UI looks like Stop did nothing).
+                # Async Stop already returned to the UI — take a longer IPC lock wait so
+                # we can interrupt a stuck ytdl loadfile. Soft 2s waits left online playing.
+                try:
+                    self._mpv_manager.set_playback_stream_opening(False)
+                except Exception:
+                    pass
                 halted = False
                 try:
-                    halted = bool(self._halt_mpv_playback(lock_wait=2.0, timeout=2.0))
+                    halted = bool(self._halt_mpv_playback(lock_wait=15.0, timeout=3.0))
                 except Exception:
                     halted = False
-                ok = bool(self._logo_manager.display_idle_logo(lock_wait=2.0))
+                if not halted and (
+                    self._mpv_needs_hard_halt()
+                    or bool(getattr(self, "_orphan_play_threads", None))
+                ):
+                    self.logger.warning(
+                        "Stop halt failed with network residue; forcing mpv restart",
+                        extra={"event": "stop_force_mpv_restart"},
+                    )
+                    try:
+                        halted = bool(
+                            self._mpv_manager._force_restart_mpv_for_hung_recovery()
+                        )
+                    except Exception:
+                        halted = False
+                ok = bool(self._logo_manager.display_idle_logo(lock_wait=3.0))
                 if not ok or not halted:
                     self._enqueue_idle_logo_retry()
             return True if update_status else ok
@@ -2775,11 +2829,22 @@ class PlaylistManager:
         }
 
     def _mpv_has_active_media(self) -> bool:
-        """True only for real content — idle logo must not count as 'playing'."""
+        """True only for real content — idle logo must not count as 'playing'.
+
+        Opening ytdl:// often still reports idle-active=true; treat that as active
+        so Stop/prepare do not skip the hard halt.
+        """
+        try:
+            if getattr(self._mpv_manager, "_playback_stream_opening", False) is True:
+                return True
+        except Exception:
+            pass
+        path = self._mpv_get_light("path", timeout=2.0)
+        if self._mpv_path_is_network(path):
+            return True
         idle = self._mpv_get_light("idle-active", timeout=2.0)
         if idle is True:
             return False
-        path = self._mpv_get_light("path", timeout=2.0)
         if not path or not str(path).strip():
             return False
         if self._mpv_path_is_idle_logo(path):

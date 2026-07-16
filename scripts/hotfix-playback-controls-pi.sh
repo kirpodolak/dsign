@@ -125,6 +125,8 @@ grep -q "deferring to stream ensure" "$RUNTIME_ROOT/services/playback_play.py" |
 grep -q "_ytdl_open_timeout_sec(120.0)" "$RUNTIME_ROOT/services/playback_network.py" || { echo "MISSING cold ytdl 120s open"; fail=1; }
 grep -q "_network_open_aborted" "$RUNTIME_ROOT/services/playback_network.py" || { echo "MISSING _network_open_aborted"; fail=1; }
 grep -q "_bump_playback_run_id" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING _bump_playback_run_id"; fail=1; }
+grep -q "_mpv_needs_hard_halt" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING _mpv_needs_hard_halt"; fail=1; }
+grep -q "stop_force_mpv_restart" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING stop_force_mpv_restart"; fail=1; }
 grep -q "enqueue_stop" "$RUNTIME_ROOT/routes/api/api_routes.py" || { echo "MISSING enqueue_stop in stop route"; fail=1; }
 grep -q "status == \"playing\"" "$RUNTIME_ROOT/services/schedule_engine.py" || { echo "MISSING status==playing in schedule plan"; fail=1; }
 grep -q "stale_playing" "$RUNTIME_ROOT/static/js/index.js" || { echo "MISSING stale_playing in index.js"; fail=1; }

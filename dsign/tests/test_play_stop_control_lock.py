@@ -83,6 +83,8 @@ def test_halt_mpv_playback_clears_loops_then_stops(null_logger, tmp_path):
 def test_stop_retries_idle_logo_when_halt_fails(null_logger, tmp_path):
     pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
     pm._mpv_manager.set_playback_session_active = MagicMock()
+    pm._mpv_manager.set_playback_stream_opening = MagicMock()
+    pm._mpv_manager._playback_stream_opening = False
     pm._logo_manager.ensure_mpv_video_output = MagicMock()
     pm._logo_manager.display_idle_logo = MagicMock(return_value=True)
     pm._cancel_content_cache_prefetches = MagicMock()
@@ -92,6 +94,7 @@ def test_stop_retries_idle_logo_when_halt_fails(null_logger, tmp_path):
     pm._reset_stall_tracking = MagicMock()
     pm._clear_stall_restart_pending = MagicMock()
     pm._halt_mpv_playback = MagicMock(return_value=False)  # type: ignore[method-assign]
+    pm._mpv_needs_hard_halt = MagicMock(return_value=False)  # type: ignore[method-assign]
     pm._enqueue_idle_logo_retry = MagicMock()  # type: ignore[method-assign]
     pm._persist_playback_status = MagicMock()  # type: ignore[method-assign]
     row = MagicMock()

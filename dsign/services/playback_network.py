@@ -189,6 +189,7 @@ class PlaybackNetworkHelper:
                     provider=str(item.get("provider") or "") if item.get("provider") else None,
                     timeout_sec=12.0,
                     skip_idle_wait=True,
+                    playback_run_id=playback_run_id,
                 )
             except Exception:
                 pass
@@ -196,7 +197,9 @@ class PlaybackNetworkHelper:
                 return False
             if self._pm._mpv_get_light("time-pos", timeout=2.0) is not None:
                 pass
-            elif not self._wait_mpv_network_demuxer_ready(timeout_sec=30.0, poll_sec=0.5):
+            elif not self._wait_mpv_network_demuxer_ready(
+                timeout_sec=30.0, poll_sec=0.5, playback_run_id=playback_run_id
+            ):
                 if self._network_open_aborted(playback_run_id):
                     return False
                 if self._ytdl_stream_open_progress() is None:
@@ -209,7 +212,10 @@ class PlaybackNetworkHelper:
         else:
             leave_to = 90.0
             if not self._wait_mpv_leave_idle(
-                timeout_sec=leave_to, poll_sec=0.6, snap_timeout=8.0
+                timeout_sec=leave_to,
+                poll_sec=0.6,
+                snap_timeout=8.0,
+                playback_run_id=playback_run_id,
             ):
                 if self._network_open_aborted(playback_run_id):
                     return False
@@ -224,7 +230,9 @@ class PlaybackNetworkHelper:
             except ValueError:
                 dem_to = 45.0
             dem_to = max(5.0, min(120.0, dem_to))
-            if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to, poll_sec=0.4):
+            if not self._wait_mpv_network_demuxer_ready(
+                timeout_sec=dem_to, poll_sec=0.4, playback_run_id=playback_run_id
+            ):
                 if self._network_open_aborted(playback_run_id):
                     return False
                 self._pm.logger.warning(
@@ -324,6 +332,7 @@ class PlaybackNetworkHelper:
                 normalized_headers=normalized_headers,
                 load_cmd=load_cmd,
                 load_ipc_ok=True,
+                playback_run_id=int(getattr(self._pm, "_playback_run_id", 0) or 0),
             ):
                 return False
             try:
@@ -719,6 +728,7 @@ class PlaybackNetworkHelper:
         provider: Optional[str] = None,
         timeout_sec: float = 8.0,
         skip_idle_wait: bool = False,
+        playback_run_id: Optional[int] = None,
     ) -> None:
         """
         ytdl_hook often sets `file-local-options/stream-lavf-o` (cookies) *after* loadfile.
@@ -773,13 +783,16 @@ class PlaybackNetworkHelper:
 
         # `file-local-options/*` is only meaningful while a file is being opened/played.
         if not skip_idle_wait:
-            if not self._wait_mpv_leave_idle(timeout_sec=min(8.0, float(timeout_sec))):
+            if not self._wait_mpv_leave_idle(
+                timeout_sec=min(8.0, float(timeout_sec)),
+                playback_run_id=playback_run_id,
+            ):
                 return
 
         # Wait briefly for ytdl_hook to populate cookies, then merge+set.
         deadline = time.monotonic() + max(0.2, float(timeout_sec))
         base_val: Any = None
-        while time.monotonic() < deadline and not self._pm._stop_event.is_set():
+        while time.monotonic() < deadline and not self._network_open_aborted(playback_run_id):
             try:
                 resp = self._pm._mpv_manager._send_command(
                     {"command": ["get_property", "file-local-options/stream-lavf-o"]},
@@ -793,6 +806,8 @@ class PlaybackNetworkHelper:
             except Exception:
                 pass
             self._pm._stop_event.wait(timeout=0.15)
+        if self._network_open_aborted(playback_run_id):
+            return
 
         merged = self._merge_mpv_lavf_options(base_val, extra)
         try:
@@ -970,6 +985,7 @@ class PlaybackNetworkHelper:
         *,
         poll_sec: float = 0.5,
         snap_timeout: float = 8.0,
+        playback_run_id: Optional[int] = None,
     ) -> bool:
         """
         After loadfile, mpv often reports idle-active=true until the demuxer opens.
@@ -979,7 +995,7 @@ class PlaybackNetworkHelper:
         poll_sec = max(0.25, float(poll_sec))
         snap_timeout = max(3.0, min(20.0, float(snap_timeout)))
         while time.monotonic() < deadline:
-            if self._pm._stop_event.is_set():
+            if self._network_open_aborted(playback_run_id):
                 return False
             idle_raw = self._pm._mpv_get_light("idle-active", timeout=snap_timeout)
             if isinstance(idle_raw, bool) and idle_raw is False:
@@ -987,7 +1003,13 @@ class PlaybackNetworkHelper:
             self._pm._stop_event.wait(timeout=poll_sec)
         return False
 
-    def _wait_mpv_network_demuxer_ready(self, *, timeout_sec: float = 45.0, poll_sec: float = 0.25) -> bool:
+    def _wait_mpv_network_demuxer_ready(
+        self,
+        *,
+        timeout_sec: float = 45.0,
+        poll_sec: float = 0.25,
+        playback_run_id: Optional[int] = None,
+    ) -> bool:
         """
         After leave-idle, mpv can briefly report idle-active=false while HLS demuxer has not opened yet.
         Treat as failure if we return to idle before demuxer/path indicates an active open — avoids false
@@ -996,7 +1018,7 @@ class PlaybackNetworkHelper:
         deadline = time.monotonic() + max(2.0, float(timeout_sec))
         poll_tick = 0
         while time.monotonic() < deadline:
-            if self._pm._stop_event.is_set():
+            if self._network_open_aborted(playback_run_id):
                 return False
             poll_tick += 1
             idle_raw = self._pm._mpv_get_light("idle-active", timeout=0.35)
