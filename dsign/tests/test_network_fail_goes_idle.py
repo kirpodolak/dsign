@@ -28,6 +28,9 @@ def test_ytdl_open_timeout_defaults_are_capped(null_logger, tmp_path):
     pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
     pm._consecutive_ytdl_failures = 0
     pm._post_mpv_restart_until = 0.0
+    assert pm._ytdl_open_timeout_sec(120.0) == 120.0
     assert pm._ytdl_open_timeout_sec(55.0) == 55.0
+    pm._consecutive_ytdl_failures = 1
+    assert pm._ytdl_open_timeout_sec(120.0) == 90.0
     pm._consecutive_ytdl_failures = 2
-    assert pm._ytdl_open_timeout_sec(55.0) == 45.0
+    assert pm._ytdl_open_timeout_sec(120.0) == 45.0

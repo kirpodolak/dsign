@@ -120,6 +120,9 @@ grep -q "first_tick_deferred" "$RUNTIME_ROOT/services/schedule_engine.py" || { e
 grep -q "begin_boot_grace" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING begin_boot_grace"; fail=1; }
 grep -q "skipping configure idle-logo/resume" "$RUNTIME_ROOT/__init__.py" || { echo "MISSING configure skip for ScheduleEngine"; fail=1; }
 grep -q "mark_play_starting()" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING enqueue mark_play_starting"; fail=1; }
+grep -q "reset_network_open_health" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING reset_network_open_health"; fail=1; }
+grep -q "deferring to stream ensure" "$RUNTIME_ROOT/services/playback_play.py" || { echo "MISSING network quiet-IPC defer"; fail=1; }
+grep -q "_ytdl_open_timeout_sec(120.0)" "$RUNTIME_ROOT/services/playback_network.py" || { echo "MISSING cold ytdl 120s open"; fail=1; }
 grep -q "status == \"playing\"" "$RUNTIME_ROOT/services/schedule_engine.py" || { echo "MISSING status==playing in schedule plan"; fail=1; }
 grep -q "stale_playing" "$RUNTIME_ROOT/static/js/index.js" || { echo "MISSING stale_playing in index.js"; fail=1; }
 grep -q "orphan_mpv" "$RUNTIME_ROOT/static/js/index.js" || { echo "MISSING orphan_mpv in index.js"; fail=1; }

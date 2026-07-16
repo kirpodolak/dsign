@@ -128,6 +128,8 @@ class PlaybackSlideshowLoop:
                     )
                     if is_preloaded_network and load_cmd is None:
                         load_cmd = self._pm._preloaded_load_cmd
+                        # play() may have seen quiet ytdl IPC — do not pretend success.
+                        load_ok = bool(getattr(self._pm, "_preloaded_load_ipc_ok", True))
 
                     # Only tune mpv for the first preloaded item; before the next loadfile replace
                     # these extra set_property calls just queue behind a busy IPC socket.

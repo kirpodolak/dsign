@@ -42,6 +42,7 @@ class PlaylistManager:
         self._app = None
         self._preloaded_stream_ready = False
         self._preloaded_load_cmd: Optional[List[Any]] = None
+        self._preloaded_load_ipc_ok: bool = True
         self._current_media_label: Optional[str] = None
         self._current_media_lock = Lock()
         self._loop_item_index: Optional[int] = None
@@ -119,9 +120,22 @@ class PlaylistManager:
 
         Does **not** bump ``_play_seq`` (that is ``invalidate_in_flight_play`` /
         ``_begin_play_seq``). Confusing those two caused false "double bump" audits.
+
+        Also resets ytdl open-failure streak / media backoff so Stop→Play and
+        return-to-schedule do not inherit fail-fast budgets that skip VK/Rutube.
         """
         self._play_start_mono = time.monotonic()
         self._bump_idle_logo_epoch()
+        self.reset_network_open_health()
+
+    def reset_network_open_health(self) -> None:
+        """Clear open-failure counters so a fresh Play gets a full ytdl budget."""
+        with self._ytdl_health_lock:
+            self._consecutive_ytdl_failures = 0
+        try:
+            self._media_backoff.clear()
+        except Exception:
+            self._media_backoff = {}
 
     def invalidate_in_flight_play(self) -> None:
         """Abort any in-flight play() so it cannot commit after Stop / return-to-schedule.
@@ -2187,6 +2201,7 @@ class PlaylistManager:
         self._active_playlist_id = None
         self._preloaded_stream_ready = False
         self._preloaded_load_cmd = None
+        self._preloaded_load_ipc_ok = True
         self._clear_current_media_label(emit=False)
         if not preserve_loop_position:
             self._clear_loop_position()
