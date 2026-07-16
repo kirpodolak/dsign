@@ -1,4 +1,4 @@
-"""enqueue_play/return must invalidate in-flight play before claiming DB."""
+"""Stop/return invalidate in-flight play; enqueue_play only marks play starting."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def test_invalidate_in_flight_play_bumps_seq_and_sets_stop(null_logger, tmp_path
     assert pm._stop_event.is_set()
 
 
-def test_enqueue_play_invalidates_before_claim():
+def test_enqueue_play_marks_starting_not_invalidate():
     svc = PlaybackService.__new__(PlaybackService)
     svc.logger = MagicMock()
     svc._app = None
@@ -26,19 +26,20 @@ def test_enqueue_play_invalidates_before_claim():
     svc._playlist_manager = MagicMock()
     order = []
 
-    def _inv():
-        order.append("invalidate")
+    def _mark():
+        order.append("mark")
 
     def _claim(*_a, **_k):
         order.append("claim")
 
-    svc._playlist_manager.invalidate_in_flight_play.side_effect = _inv
+    svc._playlist_manager.mark_play_starting.side_effect = _mark
     svc._playlist_manager.claim_playback_intent.side_effect = _claim
     svc.play = MagicMock(return_value=True)
 
     details = PlaybackService.enqueue_play(svc, 9, source="manual")
     assert details["accepted"] is True
-    assert order == ["invalidate", "claim"]
+    assert order == ["mark", "claim"]
+    svc._playlist_manager.invalidate_in_flight_play.assert_not_called()
 
 
 def test_return_to_schedule_invalidates_before_plan():
