@@ -207,6 +207,14 @@ class PlaybackPlayRunner:
                 # Network/ytdl opens in two phases (ytdl_hook resolve, then lavf reapply). Unpausing
                 # here made playback start before lavf headers merged — visible "double start".
                 if first_is_network:
+                    # Idle logo left on after Stop: soft prepare skips ``stop``, and the
+                    # following ytdl loadfile often never IPC-acks (hook holds the socket).
+                    # Hard-stop the logo so replace starts from a clean idle mpv — same as boot.
+                    try:
+                        if self._pm._mpv_showing_idle_logo():
+                            self._pm._halt_mpv_playback(lock_wait=1.0, timeout=2.0)
+                    except Exception:
+                        pass
                     try:
                         self._pm._mpv_manager._send_command(
                             {"command": ["set_property", "pause", "yes"]},
@@ -220,11 +228,26 @@ class PlaybackPlayRunner:
                         timeout=first_load_timeout,
                         max_attempts=1,
                     )
-                    if not first_load_resp or first_load_resp.get("error") != "success":
-                        raise RuntimeError(
-                            f"Network loadfile failed at playlist start: {first_path[:160]}"
+                    first_load_ipc_ok = bool(
+                        first_load_resp and first_load_resp.get("error") == "success"
+                    )
+                    # ytdl:// (and busy http) often omit IPC success until the hook finishes —
+                    # same as the slideshow loop. Do not abort Play; ensure() re-issues.
+                    if not first_load_ipc_ok:
+                        self._pm.logger.info(
+                            "Network loadfile IPC quiet at playlist start; deferring to stream ensure",
+                            extra={
+                                "media_key": first_media_key,
+                                "path_preview": first_path[:120],
+                                "mpv_response": first_load_resp,
+                            },
                         )
+                        if first_path.startswith("ytdl://"):
+                            self._pm._issue_ytdl_loadfile(
+                                first_load_cmd, media_key=first_media_key
+                            )
                     self._pm._preloaded_load_cmd = first_load_cmd
+                    self._pm._preloaded_load_ipc_ok = first_load_ipc_ok
                 else:
                     first_load_resp = None
                     loaded_local = False
@@ -296,13 +319,18 @@ class PlaybackPlayRunner:
                 raise
 
             self._pm._preloaded_stream_ready = False
+            if not first_is_network:
+                self._pm._preloaded_load_cmd = None
+                self._pm._preloaded_load_ipc_ok = True
             if first_is_network and bool(first.get("is_video")):
                 self._pm.logger.info(
                     "Playback play: network loadfile issued (unpause deferred until stream ready)",
                     extra={
                         "playlist_id": playlist_id,
                         "media_key": str(first.get("key") or first_path),
-                        "load_ok": bool(first_load_resp and first_load_resp.get("error") == "success"),
+                        "load_ok": bool(
+                            getattr(self._pm, "_preloaded_load_ipc_ok", True)
+                        ),
                         "path_preview": first_path[:120],
                         "deferred_unpause": True,
                     },
