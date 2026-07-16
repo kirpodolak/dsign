@@ -2663,7 +2663,15 @@ def init_api_routes(api_bp, services):
     @api_session_or_token_required
     def playback_stop():
         try:
-            # Stop must stay synchronous but fast (persist + abort play_seq).
+            # Invalidate + daemon stop — never block the UI on ytdl/IPC join.
+            enqueue = getattr(playback_service, "enqueue_stop", None)
+            if callable(enqueue):
+                ok = bool(enqueue(source="manual"))
+                return jsonify({
+                    "success": True,
+                    "accepted": True,
+                    "details": {"ok": ok, "async": True},
+                })
             result = playback_service.stop(source='manual')
             return jsonify({
                 "success": True,

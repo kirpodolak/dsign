@@ -21,6 +21,17 @@ class PlaybackNetworkHelper:
     def __init__(self, pm: "PlaylistManager") -> None:
         self._pm = pm
 
+    def _network_open_aborted(self, playback_run_id: Optional[int] = None) -> bool:
+        """True when Stop/newer play invalidated this open wait."""
+        if self._pm._stop_event.is_set():
+            return True
+        if playback_run_id is None:
+            return False
+        try:
+            return not self._pm._is_playback_run_current(int(playback_run_id))
+        except Exception:
+            return True
+
     def _ensure_network_stream_started(
         self,
         item: Dict[str, Any],
@@ -29,6 +40,7 @@ class PlaybackNetworkHelper:
         normalized_headers: Optional[Dict[str, str]] = None,
         load_cmd: Optional[List[Any]] = None,
         load_ipc_ok: bool = True,
+        playback_run_id: Optional[int] = None,
     ) -> bool:
         """Wait until mpv opens a network stream (background thread only)."""
         path_s = str(stream_url or "")
@@ -57,6 +69,7 @@ class PlaybackNetworkHelper:
                 headers=headers,
                 load_cmd=load_cmd,
                 load_ipc_ok=load_ipc_ok,
+                playback_run_id=playback_run_id,
             )
         finally:
             try:
@@ -86,7 +99,12 @@ class PlaybackNetworkHelper:
                 return "demuxer+time-pos"
         return None
 
-    def _wait_mpv_ytdl_stream_opening(self, *, timeout_sec: float = 180.0) -> bool:
+    def _wait_mpv_ytdl_stream_opening(
+        self,
+        *,
+        timeout_sec: float = 180.0,
+        playback_run_id: Optional[int] = None,
+    ) -> bool:
         """Poll until ytdl_hook resolves to a real stream URL or playback starts."""
         try:
             timeout_sec = float(
@@ -94,9 +112,10 @@ class PlaybackNetworkHelper:
             )
         except ValueError:
             pass
-        deadline = time.monotonic() + max(30.0, min(600.0, float(timeout_sec)))
+        # Floor 5s (was 30s) so Stop/run-id abort is not padded after short waits.
+        deadline = time.monotonic() + max(5.0, min(600.0, float(timeout_sec)))
         while time.monotonic() < deadline:
-            if self._pm._stop_event.is_set():
+            if self._network_open_aborted(playback_run_id):
                 return False
             reason = self._ytdl_stream_open_progress()
             if reason:
@@ -117,11 +136,16 @@ class PlaybackNetworkHelper:
         headers: Optional[Dict[str, str]] = None,
         load_cmd: Optional[List[Any]] = None,
         load_ipc_ok: bool = True,
+        playback_run_id: Optional[int] = None,
     ) -> bool:
         is_ytdl = path_s.startswith("ytdl://")
         if is_ytdl:
             if load_cmd is not None and not load_ipc_ok:
-                if not self._wait_mpv_ytdl_stream_opening(timeout_sec=20.0):
+                if not self._wait_mpv_ytdl_stream_opening(
+                    timeout_sec=20.0, playback_run_id=playback_run_id
+                ):
+                    if self._network_open_aborted(playback_run_id):
+                        return False
                     self._pm.logger.info(
                         "ytdl: re-issuing loadfile after IPC quiet",
                         extra={"media_key": media_key, "path_preview": path_s[:120]},
@@ -130,7 +154,11 @@ class PlaybackNetworkHelper:
             # Cold open (streak==0 after Play reset): give VK/Rutube ~120s+60s.
             # After failures, _ytdl_open_timeout_sec caps tighter so we still fail fast.
             open_sec = self._pm._ytdl_open_timeout_sec(120.0)
-            if not self._wait_mpv_ytdl_stream_opening(timeout_sec=open_sec):
+            if not self._wait_mpv_ytdl_stream_opening(
+                timeout_sec=open_sec, playback_run_id=playback_run_id
+            ):
+                if self._network_open_aborted(playback_run_id):
+                    return False
                 if load_cmd is not None:
                     self._pm.logger.info(
                         "ytdl: retrying loadfile after open wait timed out",
@@ -138,7 +166,11 @@ class PlaybackNetworkHelper:
                     )
                     self._pm._issue_ytdl_loadfile(load_cmd, media_key=media_key)
                     retry_sec = self._pm._ytdl_open_timeout_sec(60.0)
-                    if not self._wait_mpv_ytdl_stream_opening(timeout_sec=retry_sec):
+                    if not self._wait_mpv_ytdl_stream_opening(
+                        timeout_sec=retry_sec, playback_run_id=playback_run_id
+                    ):
+                        if self._network_open_aborted(playback_run_id):
+                            return False
                         self._pm.logger.warning(
                             "ytdl stream did not open after loadfile retries",
                             extra={"media_key": media_key, "path_preview": path_s[:120]},
@@ -160,10 +192,12 @@ class PlaybackNetworkHelper:
                 )
             except Exception:
                 pass
+            if self._network_open_aborted(playback_run_id):
+                return False
             if self._pm._mpv_get_light("time-pos", timeout=2.0) is not None:
                 pass
             elif not self._wait_mpv_network_demuxer_ready(timeout_sec=30.0, poll_sec=0.5):
-                if self._pm._stop_event.is_set():
+                if self._network_open_aborted(playback_run_id):
                     return False
                 if self._ytdl_stream_open_progress() is None:
                     self._pm.logger.warning(
@@ -177,7 +211,7 @@ class PlaybackNetworkHelper:
             if not self._wait_mpv_leave_idle(
                 timeout_sec=leave_to, poll_sec=0.6, snap_timeout=8.0
             ):
-                if self._pm._stop_event.is_set():
+                if self._network_open_aborted(playback_run_id):
                     return False
                 self._pm.logger.warning(
                     "Network stream did not leave idle after play() loadfile",
@@ -191,7 +225,7 @@ class PlaybackNetworkHelper:
                 dem_to = 45.0
             dem_to = max(5.0, min(120.0, dem_to))
             if not self._wait_mpv_network_demuxer_ready(timeout_sec=dem_to, poll_sec=0.4):
-                if self._pm._stop_event.is_set():
+                if self._network_open_aborted(playback_run_id):
                     return False
                 self._pm.logger.warning(
                     "Network stream demuxer not ready after play() loadfile",

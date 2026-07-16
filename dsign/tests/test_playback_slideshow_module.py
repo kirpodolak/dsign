@@ -29,4 +29,5 @@ def test_playlist_manager_delegates_manual_slideshow_loop(null_logger, tmp_path)
         first_item_preloaded=False,
         profile_muted=False,
         single_pass=False,
+        playback_run_id=None,
     )

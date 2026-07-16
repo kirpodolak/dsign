@@ -99,12 +99,25 @@ class PlaylistManager:
         # After ScheduleEngine attach / service restart — desync watch must not
         # clear or re-stop a boot resume that is still settling.
         self._boot_grace_until: float = 0.0
+        # Invalidates in-flight ytdl ensure() after Stop join timeout (orphan thread).
+        self._playback_run_id: int = 0
+        self._orphan_play_threads: List[Any] = []
 
     def begin_boot_grace(self, seconds: float = 60.0) -> None:
         self._boot_grace_until = time.monotonic() + max(0.0, float(seconds))
 
     def in_boot_grace(self) -> bool:
         return time.monotonic() < float(self._boot_grace_until or 0.0)
+
+    def _bump_playback_run_id(self) -> int:
+        self._playback_run_id = int(self._playback_run_id) + 1
+        return int(self._playback_run_id)
+
+    def _is_playback_run_current(self, run_id: int) -> bool:
+        try:
+            return int(run_id) == int(self._playback_run_id)
+        except Exception:
+            return False
 
     def _bump_idle_logo_epoch(self) -> int:
         with self._idle_logo_epoch_lock:
@@ -2175,21 +2188,42 @@ class PlaylistManager:
     ):
         # Invalidate before join so a concurrent play() finishing loadfile aborts.
         self._bump_play_seq()
-        if self._play_thread and self._play_thread.is_alive():
+        # Bump run id *before* clearing stop_event so a ytdl ensure() still inside
+        # open-wait cannot re-issue loadfile / persist idle over the next Play.
+        self._bump_playback_run_id()
+
+        alive: List[Any] = []
+        if self._play_thread is not None and self._play_thread.is_alive():
+            alive.append(self._play_thread)
+        for thr in list(getattr(self, "_orphan_play_threads", None) or []):
+            if thr is not None and thr.is_alive() and thr not in alive:
+                alive.append(thr)
+        self._orphan_play_threads = []
+
+        if alive:
             self._stop_event.set()
-            try:
-                self._play_thread.join(timeout=max(0.1, float(join_timeout)))
-            except Exception:
-                pass
-            if self._play_thread.is_alive():
+            join_sec = max(0.1, float(join_timeout))
+            for thr in alive:
+                try:
+                    thr.join(timeout=join_sec)
+                except Exception:
+                    pass
+            still_alive = [thr for thr in alive if thr.is_alive()]
+            if still_alive:
+                self._orphan_play_threads = still_alive
                 self.logger.warning(
                     "Playback thread did not exit before join timeout",
                     extra={
                         "event": "playback_thread_join_timeout",
-                        "join_timeout_sec": float(join_timeout),
+                        "join_timeout_sec": join_sec,
+                        "orphan_threads": len(still_alive),
+                        "playback_run_id": int(self._playback_run_id),
                     },
                 )
+
         self._play_thread = None
+        # Always clear — orphans must abort via playback_run_id, not a sticky stop bit
+        # that would make the next Play's slideshow exit immediately.
         self._stop_event.clear()
         self._item_skip_event.clear()
         with self._item_skip_lock:
@@ -2226,6 +2260,7 @@ class PlaylistManager:
         first_item_preloaded: bool = False,
         profile_muted: bool = False,
         single_pass: bool = False,
+        playback_run_id: Optional[int] = None,
     ):
         return self._playback_slideshow.run(
             playlist_id,
@@ -2234,6 +2269,7 @@ class PlaylistManager:
             first_item_preloaded=first_item_preloaded,
             profile_muted=profile_muted,
             single_pass=single_pass,
+            playback_run_id=playback_run_id,
         )
 
     def _run_manual_slideshow_loop(
@@ -2245,6 +2281,7 @@ class PlaylistManager:
         first_item_preloaded: bool = False,
         profile_muted: bool = False,
         single_pass: bool = False,
+        playback_run_id: Optional[int] = None,
     ) -> None:
         """Thread entry: push Flask app context before DB-backed external media refresh."""
         try:
@@ -2256,6 +2293,7 @@ class PlaylistManager:
                     first_item_preloaded=first_item_preloaded,
                     profile_muted=profile_muted,
                     single_pass=single_pass,
+                    playback_run_id=playback_run_id,
                 )
         except Exception as e:
             self.logger.error(
