@@ -42,6 +42,7 @@ class PlaylistManager:
         self._app = None
         self._preloaded_stream_ready = False
         self._preloaded_load_cmd: Optional[List[Any]] = None
+        self._preloaded_load_ipc_ok: bool = True
         self._current_media_label: Optional[str] = None
         self._current_media_lock = Lock()
         self._loop_item_index: Optional[int] = None
@@ -95,6 +96,15 @@ class PlaylistManager:
         self._play_start_mono: float = 0.0
         # One play()/loadfile at a time — parallel schedule+manual starts race to idle.
         self._play_start_lock = Lock()
+        # After ScheduleEngine attach / service restart — desync watch must not
+        # clear or re-stop a boot resume that is still settling.
+        self._boot_grace_until: float = 0.0
+
+    def begin_boot_grace(self, seconds: float = 60.0) -> None:
+        self._boot_grace_until = time.monotonic() + max(0.0, float(seconds))
+
+    def in_boot_grace(self) -> bool:
+        return time.monotonic() < float(self._boot_grace_until or 0.0)
 
     def _bump_idle_logo_epoch(self) -> int:
         with self._idle_logo_epoch_lock:
@@ -106,9 +116,40 @@ class PlaylistManager:
             return int(self._idle_logo_epoch)
 
     def mark_play_starting(self) -> None:
-        """Call when Play/enqueue_play begins — cancel logo retries and soft-stale window."""
+        """Call when Play/enqueue_play begins — cancel logo retries and soft-stale window.
+
+        Does **not** bump ``_play_seq`` (that is ``invalidate_in_flight_play`` /
+        ``_begin_play_seq``). Confusing those two caused false "double bump" audits.
+
+        Also resets ytdl open-failure streak / media backoff so Stop→Play and
+        return-to-schedule do not inherit fail-fast budgets that skip VK/Rutube.
+        """
         self._play_start_mono = time.monotonic()
         self._bump_idle_logo_epoch()
+        self.reset_network_open_health()
+
+    def reset_network_open_health(self) -> None:
+        """Clear open-failure counters so a fresh Play gets a full ytdl budget."""
+        with self._ytdl_health_lock:
+            self._consecutive_ytdl_failures = 0
+        try:
+            self._media_backoff.clear()
+        except Exception:
+            self._media_backoff = {}
+
+    def invalidate_in_flight_play(self) -> None:
+        """Abort any in-flight play() so it cannot commit after Stop / return-to-schedule.
+
+        Must run on the HTTP/caller thread *before* claim_playback_intent or schedule
+        plan enqueue — otherwise a loadfile still holding ``_play_start_lock`` can
+        finish and re-persist ``source=manual`` over the new intent.
+        """
+        self.mark_play_starting()
+        self._bump_play_seq()
+        try:
+            self._stop_event.set()
+        except Exception:
+            pass
 
     def set_slideshow_crash_callback(self, callback: Optional[Callable[[], None]]) -> None:
         self._slideshow_crash_callback = callback
@@ -2160,6 +2201,7 @@ class PlaylistManager:
         self._active_playlist_id = None
         self._preloaded_stream_ready = False
         self._preloaded_load_cmd = None
+        self._preloaded_load_ipc_ok = True
         self._clear_current_media_label(emit=False)
         if not preserve_loop_position:
             self._clear_loop_position()
