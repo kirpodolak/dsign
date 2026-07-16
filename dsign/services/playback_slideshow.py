@@ -25,6 +25,7 @@ class PlaybackSlideshowLoop:
         first_item_preloaded: bool = False,
         profile_muted: bool = False,
         single_pass: bool = False,
+        playback_run_id: Optional[int] = None,
     ):
         """
         Manual playback loop that enforces per-item durations for images and plays videos to EOF.
@@ -32,11 +33,14 @@ class PlaybackSlideshowLoop:
         polling mpv properties until EOF.
 
         ``profile_muted``: playlist overrides mute flag (combined with per-file ``muted``).
+        ``playback_run_id``: generation token; Stop bumps it so orphan ytdl waits exit cleanly.
         """
         self._pm.logger.info("Starting manual playback loop", extra={"playlist_id": playlist_id, "items_count": len(items)})
 
         if not items:
             return
+        if playback_run_id is None:
+            playback_run_id = int(getattr(self._pm, "_playback_run_id", 0) or 0)
         self._pm._mpv_manager.set_playback_session_active(True)
         try:
 
@@ -63,7 +67,11 @@ class PlaybackSlideshowLoop:
             except ValueError:
                 net_open_cooldown_sec = 90.0
             net_open_cooldown_sec = max(15.0, min(600.0, net_open_cooldown_sec))
-            while not self._pm._stop_event.is_set() and self._pm._active_playlist_id == playlist_id:
+            while (
+                not self._pm._stop_event.is_set()
+                and self._pm._active_playlist_id == playlist_id
+                and self._pm._is_playback_run_current(int(playback_run_id))
+            ):
                 loop_cycle += 1
                 cycle_network_attempted = 0
                 cycle_network_failed = 0
@@ -78,7 +86,11 @@ class PlaybackSlideshowLoop:
                     item_index = (start_index + offset) % len(items)
                     item = items[item_index]
                     self._pm._set_loop_position(item_index, len(items))
-                    if self._pm._stop_event.is_set() or self._pm._active_playlist_id != playlist_id:
+                    if (
+                        self._pm._stop_event.is_set()
+                        or self._pm._active_playlist_id != playlist_id
+                        or not self._pm._is_playback_run_current(int(playback_run_id))
+                    ):
                         break
 
                     path = item["path"]
@@ -304,8 +316,16 @@ class PlaybackSlideshowLoop:
                                 normalized_headers=normalized_headers or None,
                                 load_cmd=load_cmd,
                                 load_ipc_ok=bool(load_ok),
+                                playback_run_id=int(playback_run_id),
                             ):
-                                if self._pm._stop_event.is_set():
+                                # Stop / superseded run: exit without failure bookkeeping
+                                # (that used to persist idle over a fresh Play).
+                                if (
+                                    self._pm._stop_event.is_set()
+                                    or not self._pm._is_playback_run_current(
+                                        int(playback_run_id)
+                                    )
+                                ):
                                     break
                                 try:
                                     self._pm._mpv_manager.set_playback_stream_opening(False)
