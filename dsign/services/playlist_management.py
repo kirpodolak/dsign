@@ -106,9 +106,27 @@ class PlaylistManager:
             return int(self._idle_logo_epoch)
 
     def mark_play_starting(self) -> None:
-        """Call when Play/enqueue_play begins — cancel logo retries and soft-stale window."""
+        """Call when Play/enqueue_play begins — cancel logo retries and soft-stale window.
+
+        Does **not** bump ``_play_seq`` (that is ``invalidate_in_flight_play`` /
+        ``_begin_play_seq``). Confusing those two caused false "double bump" audits.
+        """
         self._play_start_mono = time.monotonic()
         self._bump_idle_logo_epoch()
+
+    def invalidate_in_flight_play(self) -> None:
+        """Abort any in-flight play() so it cannot commit after Stop / return-to-schedule.
+
+        Must run on the HTTP/caller thread *before* claim_playback_intent or schedule
+        plan enqueue — otherwise a loadfile still holding ``_play_start_lock`` can
+        finish and re-persist ``source=manual`` over the new intent.
+        """
+        self.mark_play_starting()
+        self._bump_play_seq()
+        try:
+            self._stop_event.set()
+        except Exception:
+            pass
 
     def set_slideshow_crash_callback(self, callback: Optional[Callable[[], None]]) -> None:
         self._slideshow_crash_callback = callback

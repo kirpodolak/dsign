@@ -1358,10 +1358,14 @@ class PlaybackService:
         """Stop on a daemon thread so toggle/Stop HTTP never wait on mpv IPC."""
         app = self._app
         # Invalidate in-flight play immediately so late persist cannot win.
+        # (stop() will bump again under its teardown — that is intentional.)
         try:
-            self._playlist_manager._bump_play_seq()
+            self._playlist_manager.invalidate_in_flight_play()
         except Exception:
-            pass
+            try:
+                self._playlist_manager._bump_play_seq()
+            except Exception:
+                pass
         self._last_desync_recover_ts = time.monotonic()
 
         def _run() -> None:
@@ -1394,16 +1398,24 @@ class PlaybackService:
         source: str = "manual",
         rule_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Start play() off the HTTP worker — loadfile/ytdl must not freeze the UI."""
+        """Start play() off the HTTP worker — loadfile/ytdl must not freeze the UI.
+
+        PlaybackService intentionally does **not** import playback_play/network/slideshow
+        helpers — those are owned by PlaylistManager.play() → PlaybackPlayRunner.
+        """
         app = self._app
         pid = int(playlist_id)
         # Suppress orphan-desync reclaim while a fresh play is starting.
         self._last_desync_recover_ts = time.monotonic()
-        # Invalidate Stop's delayed idle-logo retry so it cannot halt this play.
+        # Abort any in-flight play *before* claiming DB — otherwise a loadfile still
+        # holding _play_start_lock can commit source=manual over this intent / return.
         try:
-            self._playlist_manager.mark_play_starting()
+            self._playlist_manager.invalidate_in_flight_play()
         except Exception:
-            pass
+            try:
+                self._playlist_manager.mark_play_starting()
+            except Exception:
+                pass
         # Claim source on the caller thread before the daemon loadfile starts so the
         # next ScheduleEngine tick sees manual/schedule and does not race a second play.
         try:
@@ -1468,14 +1480,23 @@ class PlaybackService:
         }
 
     def return_to_schedule(self) -> bool:
-        """Clear manual lock and apply current schedule slot (D2.2).
+        """Clear manual override (DB source) and apply current schedule slot (D2.2).
+
+        There is no PlaylistManager.manual_lock / return_to_schedule_plan — the
+        schedule "manual lock" is ``PlaybackStatus.source in (manual, override)``.
+        Clearing that row + ``ignore_manual=True`` is sufficient for ScheduleEngine.
 
         Plans synchronously (fast DB), then enqueues play/stop so the HTTP request
-        never waits on loadfile. Avoids Idle-stuck UI when evaluate was blocked
-        behind another in-flight play holding the schedule apply lock.
+        never waits on loadfile. Aborts in-flight play first so a late manual
+        ``_commit_play`` cannot re-persist ``source=manual``.
         """
         action = None
         plan_failed = False
+        # Kill in-flight manual play before we rewrite PlaybackStatus / plan.
+        try:
+            self._playlist_manager.invalidate_in_flight_play()
+        except Exception:
+            pass
         with self._app_context():
             from ..models import PlaybackStatus
             session = getattr(self.db_session, "session", self.db_session)
