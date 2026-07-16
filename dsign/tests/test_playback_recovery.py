@@ -31,6 +31,8 @@ def _make_recovery_service(null_logger) -> PlaybackService:
     svc._recover_lock = Lock()
     svc._recovery_queue = RecoveryQueue()
     svc._playlist_manager = MagicMock()
+    # Boot grace must be off for desync-heal unit tests (real method returns bool).
+    svc._playlist_manager.in_boot_grace.return_value = False
     svc._mpv_manager = MagicMock()
     svc._app_context = lambda: nullcontext()
     svc._last_socket_identity = None
@@ -164,6 +166,20 @@ def test_resume_slideshow_after_crash_restarts_playlist(null_logger, monkeypatch
     svc._playlist_manager.play.assert_called_once_with(
         7, start_index=1, source="schedule", rule_id=5
     )
+
+
+def test_maybe_recover_playback_desync_skips_during_boot_grace(null_logger, monkeypatch):
+    svc = _make_recovery_service(null_logger)
+    svc._app_ready = Event()
+    svc._app_ready.set()
+    svc._last_desync_recover_ts = 0.0
+    svc._playlist_manager.in_boot_grace.return_value = True
+    monkeypatch.setenv("DSIGN_PLAYBACK_DESYNC_COALESCE_SEC", "0")
+
+    svc._maybe_recover_playback_desync()
+
+    svc.play.assert_not_called()
+    svc._playlist_manager._remote_playback_snapshot.assert_not_called()
 
 
 def test_maybe_recover_playback_desync_resumes_playlist(null_logger, monkeypatch):
