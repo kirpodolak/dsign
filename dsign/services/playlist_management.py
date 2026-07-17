@@ -2468,37 +2468,84 @@ class PlaylistManager:
         source: str = "manual",
         rule_id: Optional[int] = None,
     ) -> bool:
-        """Play playlist with profile support"""
-        lock_timeout = max(5.0, min(300.0, float(self._play_lock_timeout_sec())))
-        acquired = self._play_start_lock.acquire(timeout=lock_timeout)
-        if not acquired:
+        """Play playlist with profile support.
+
+        Does **not** hold ``_play_start_lock`` across loadfile/ytdl — that blocked
+        Stop→Play for minutes (play_lock_timeout). Handoff lock is only around
+        ``_stop_play_thread`` + ``_begin_play_seq`` inside PlaybackPlayRunner.
+        """
+        with self._app_context():
+            with self._override_lock:
+                self._override_return_ctx = None
+                self._playlist_single_pass = False
+            return self._play_impl(
+                playlist_id,
+                start_index=start_index,
+                preserve_stall_tracking=preserve_stall_tracking,
+                single_pass=False,
+                source=source,
+                rule_id=rule_id,
+            )
+
+    def _play_lock_timeout_sec(self) -> float:
+        """Handoff lock only (not full loadfile). Keep short so Stop→Play stays responsive."""
+        try:
+            return float((os.getenv("DSIGN_PLAY_LOCK_TIMEOUT_SEC") or "8").strip())
+        except ValueError:
+            return 8.0
+
+    def _acquire_play_handoff(self, *, playlist_id: int) -> bool:
+        """Serialize stop-previous + begin-seq. Never held across loadfile."""
+        lock_timeout = max(0.05, min(60.0, float(self._play_lock_timeout_sec())))
+        for attempt in range(2):
+            acquired = self._play_start_lock.acquire(timeout=lock_timeout)
+            if acquired:
+                return True
             self.logger.warning(
-                "play lock timeout — previous loadfile still holding lock",
+                "play handoff lock busy — aborting in-flight play and retrying",
                 extra={
                     "event": "play_lock_timeout",
                     "playlist_id": int(playlist_id),
                     "timeout_sec": lock_timeout,
+                    "attempt": attempt + 1,
                 },
             )
-            return False
-        try:
-            with self._app_context():
-                with self._override_lock:
-                    self._override_return_ctx = None
-                    self._playlist_single_pass = False
-                return self._play_impl(
-                    playlist_id,
-                    start_index=start_index,
-                    preserve_stall_tracking=preserve_stall_tracking,
-                    single_pass=False,
-                    source=source,
-                    rule_id=rule_id,
-                )
-        finally:
             try:
-                self._play_start_lock.release()
+                self._bump_playback_run_id()
             except Exception:
                 pass
+            try:
+                self._bump_play_seq()
+            except Exception:
+                pass
+            try:
+                self._stop_event.set()
+            except Exception:
+                pass
+            try:
+                self._mpv_manager.set_playback_stream_opening(False)
+            except Exception:
+                pass
+            try:
+                self._halt_mpv_playback(lock_wait=1.0, timeout=1.5)
+            except Exception:
+                pass
+            lock_timeout = min(lock_timeout, 5.0)
+        self.logger.warning(
+            "play handoff lock timeout — giving up",
+            extra={
+                "event": "play_lock_timeout",
+                "playlist_id": int(playlist_id),
+                "timeout_sec": lock_timeout,
+            },
+        )
+        return False
+
+    def _release_play_handoff(self) -> None:
+        try:
+            self._play_start_lock.release()
+        except Exception:
+            pass
 
     def claim_playback_intent(
         self,
@@ -2951,12 +2998,6 @@ class PlaylistManager:
             if thr is not None and thr.is_alive():
                 return True
         return False
-
-    def _play_lock_timeout_sec(self) -> float:
-        try:
-            return float((os.getenv("DSIGN_PLAY_LOCK_TIMEOUT_SEC") or "45").strip())
-        except ValueError:
-            return 45.0
 
     def rollback_claimed_play(self, playlist_id: int, *, reason: str) -> None:
         """Drop ghost playing when enqueue_play claimed DB but play() never started."""

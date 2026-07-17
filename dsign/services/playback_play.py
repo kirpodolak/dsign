@@ -36,15 +36,20 @@ class PlaybackPlayRunner:
         try:
             # Cancel late idle-logo retries from a previous Stop before we touch mpv.
             self._pm.mark_play_starting()
-            # Stop previous thread; soft-prepare mpv (clear loops, stop only if content on).
-            self._pm._stop_play_thread(
-                preserve_stall_tracking=preserve_stall_tracking,
-                halt_mpv=True,
-            )
-            play_run_id = int(getattr(self._pm, "_playback_run_id", 0) or 0)
-            self._pm._cancel_content_cache_prefetches()
-            self._pm._prune_media_backoff()
-            play_seq = self._pm._begin_play_seq()
+            # Short exclusive handoff only — never hold across loadfile/ytdl IPC.
+            if not self._pm._acquire_play_handoff(playlist_id=int(playlist_id)):
+                return False
+            try:
+                self._pm._stop_play_thread(
+                    preserve_stall_tracking=preserve_stall_tracking,
+                    halt_mpv=True,
+                )
+                play_run_id = int(getattr(self._pm, "_playback_run_id", 0) or 0)
+                self._pm._cancel_content_cache_prefetches()
+                self._pm._prune_media_backoff()
+                play_seq = self._pm._begin_play_seq()
+            finally:
+                self._pm._release_play_handoff()
             # Mark playback starting before DB/profile IPC so Wi-Fi-on-display skips.
             self._pm._set_playback_active_marker(True)
             self._pm._audio_route_applied_for_play = False

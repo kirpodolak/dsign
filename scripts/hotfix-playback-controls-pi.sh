@@ -140,6 +140,8 @@ grep -q "stale_playing" "$RUNTIME_ROOT/static/js/index.js" || { echo "MISSING st
 grep -q "orphan_mpv" "$RUNTIME_ROOT/static/js/index.js" || { echo "MISSING orphan_mpv in index.js"; fail=1; }
 grep -q "claimed_play_rollback" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING claimed_play rollback"; fail=1; }
 grep -q "play_lock_timeout" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING play lock timeout"; fail=1; }
+grep -q "_acquire_play_handoff" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING play handoff lock"; fail=1; }
+grep -q "_release_play_handoff" "$RUNTIME_ROOT/services/playback_play.py" || { echo "MISSING handoff release in play runner"; fail=1; }
 grep -q "enqueue_play" "$RUNTIME_ROOT/services/schedule_engine.py" || { echo "MISSING schedule enqueue_play"; fail=1; }
 grep -q "play_async_returned_false" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING play_async rollback"; fail=1; }
 [[ "$fail" -eq 0 ]] || die "marker check failed — wrong tree or fetch failed"
