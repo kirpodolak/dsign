@@ -101,6 +101,8 @@ def test_stop_retries_idle_logo_when_halt_fails(null_logger, tmp_path):
     pm._enqueue_idle_logo_retry = MagicMock()  # type: ignore[method-assign]
     pm._persist_playback_status = MagicMock()  # type: ignore[method-assign]
     pm._stop_play_thread = MagicMock()  # type: ignore[method-assign]
+    pm._acquire_play_handoff = MagicMock(return_value=True)  # type: ignore[method-assign]
+    pm._release_play_handoff = MagicMock()  # type: ignore[method-assign]
     row = MagicMock()
     row.playlist_id = 1
     pm.db_session.query.return_value.get.return_value = row
