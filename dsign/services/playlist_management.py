@@ -102,6 +102,8 @@ class PlaylistManager:
         # Invalidates in-flight ytdl ensure() after Stop join timeout (orphan thread).
         self._playback_run_id: int = 0
         self._orphan_play_threads: List[Any] = []
+        # After orphan IPC interrupt, use short loadfile lock waits (not prefer_long 45s).
+        self._post_orphan_ipc_until: float = 0.0
 
     def begin_boot_grace(self, seconds: float = 60.0) -> None:
         self._boot_grace_until = time.monotonic() + max(0.0, float(seconds))
@@ -1196,10 +1198,12 @@ class PlaylistManager:
             self._last_loaded_media_key = key
 
         try:
+            lock_wait = self._loadfile_ipc_lock_wait_sec()
             return self._mpv_manager._send_command(
                 {"command": load_cmd},
                 timeout=timeout,
                 max_attempts=max_attempts,
+                lock_wait=lock_wait,
             )
         finally:
             with self._load_lock:
@@ -2263,7 +2267,40 @@ class PlaylistManager:
         except Exception:
             pass
 
-    def _join_play_threads(self, *, join_timeout: float = 2.0) -> None:
+    def _interrupt_orphan_playback_ipc(self) -> None:
+        """Unblock Play after join timeout: fail orphan ``sess.command`` / free ``_ipc_lock``."""
+        try:
+            self._post_orphan_ipc_until = time.monotonic() + 45.0
+        except Exception:
+            self._post_orphan_ipc_until = 0.0
+        try:
+            mgr = self._mpv_manager
+            interrupt = getattr(mgr, "interrupt_blocked_ipc", None)
+            if callable(interrupt):
+                interrupt()
+            else:
+                reset = getattr(mgr, "_reset_ipc_session", None)
+                if callable(reset):
+                    reset()
+        except Exception:
+            pass
+
+    def _loadfile_ipc_lock_wait_sec(self) -> Optional[float]:
+        """After orphan interrupt, avoid prefer_long (45s) waits that stall Stop→Play."""
+        try:
+            until = float(getattr(self, "_post_orphan_ipc_until", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            until = 0.0
+        if until and time.monotonic() < until:
+            return 5.0
+        return None
+
+    def _join_play_threads(
+        self,
+        *,
+        join_timeout: float = 2.0,
+        interrupt_ipc_on_timeout: bool = False,
+    ) -> None:
         """Join slideshow threads. Must NOT run under ``_play_start_lock`` (handoff)."""
         alive: List[Any] = []
         if self._play_thread is not None and self._play_thread.is_alive():
@@ -2295,6 +2332,15 @@ class PlaylistManager:
                     "playback_run_id": int(self._playback_run_id),
                 },
             )
+            # Orphan ytdl loadfile holds _ipc_lock for the full IPC timeout — without
+            # interrupt, the next Play prepare/loadfile blocks for tens of seconds
+            # (or forever behind prefer_long), and concurrent play workers pile on futex.
+            if interrupt_ipc_on_timeout:
+                self._interrupt_orphan_playback_ipc()
+                try:
+                    self._halt_mpv_playback(lock_wait=2.0, timeout=2.0)
+                except Exception:
+                    pass
         self._play_thread = None
 
     def _clear_play_thread_state(
@@ -2304,9 +2350,14 @@ class PlaylistManager:
         preserve_loop_position: bool = False,
     ) -> None:
         """Reset Python-side playback markers. No mpv IPC (keeps handoff short)."""
-        # Always clear — orphans must abort via playback_run_id, not a sticky stop bit
-        # that would make the next Play's slideshow exit immediately.
-        self._stop_event.clear()
+        # If an orphan slideshow is still alive, keep stop set so its wait loops exit.
+        # The new slideshow clears stop when it starts (playback_run_id owns the run).
+        orphans_alive = any(
+            thr is not None and thr.is_alive()
+            for thr in (getattr(self, "_orphan_play_threads", None) or [])
+        )
+        if not orphans_alive:
+            self._stop_event.clear()
         self._item_skip_event.clear()
         with self._item_skip_lock:
             self._item_skip_direction = "next"
@@ -2345,7 +2396,10 @@ class PlaylistManager:
         for ~13s while IPC ``stop`` commands ran under the lock).
         """
         self._signal_play_threads_stop()
-        self._join_play_threads(join_timeout=join_timeout)
+        self._join_play_threads(
+            join_timeout=join_timeout,
+            interrupt_ipc_on_timeout=True,
+        )
         self._clear_play_thread_state(
             preserve_stall_tracking=preserve_stall_tracking,
             preserve_loop_position=preserve_loop_position,
@@ -2510,6 +2564,11 @@ class PlaylistManager:
         Does **not** hold ``_play_start_lock`` across loadfile/ytdl — that blocked
         Stop→Play (play_lock_timeout). Handoff is only around ``_begin_play_seq``;
         Stop never takes handoff (control_lock only).
+
+        Concurrent ``enqueue_play`` workers are allowed: the newer Play bumps
+        ``playback_run_id`` / interrupts orphan IPC, and the older Play aborts via
+        play_seq checks. A full-body exec lock caused ``play_async_false`` while the
+        first Play was still inside ytdl open after Stop.
         """
         with self._app_context():
             with self._override_lock:
@@ -2854,6 +2913,9 @@ class PlaylistManager:
                     self._mpv_manager.set_playback_stream_opening(False)
                 except Exception:
                     pass
+                # Free _ipc_lock if an orphan still sits in ytdl loadfile before halt.
+                if getattr(self, "_orphan_play_threads", None):
+                    self._interrupt_orphan_playback_ipc()
                 halted = False
                 try:
                     halted = bool(self._halt_mpv_playback(lock_wait=15.0, timeout=3.0))
