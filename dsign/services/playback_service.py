@@ -477,33 +477,41 @@ class PlaybackService:
 
     def _clear_stale_playing_status(self) -> None:
         """Clear ghost DB playing. Preserve manual lock so schedule cannot auto-steal."""
+        status, source, keep_pid = "idle", "idle", None
         try:
             with self._app_context():
                 from ..models import PlaybackStatus
 
                 session = getattr(self.db_session, "session", self.db_session)
-                row = session.query(PlaybackStatus).get(1) if session is not None else None
+                row = None
+                try:
+                    row = session.query(PlaybackStatus).get(1) if session is not None else None
+                except Exception:
+                    row = None
                 src = str(getattr(row, "source", None) or "idle").lower() if row else "idle"
                 pid = getattr(row, "playlist_id", None) if row else None
                 if src in ("manual", "override"):
-                    status, source, clear_rule = "stopped", "manual", True
-                    keep_pid = pid
+                    status, source, keep_pid = "stopped", "manual", pid
                 else:
-                    status, source, clear_rule = "idle", "idle", True
-                    keep_pid = None
+                    status, source, keep_pid = "idle", "idle", None
                 self._playlist_manager._persist_playback_status(
                     playlist_id=keep_pid,
                     status=status,
                     source=source,
-                    clear_rule=clear_rule,
+                    clear_rule=True,
                 )
+                try:
+                    # Allow a later Play to be treated as a fresh start by desync watch.
+                    self._playlist_manager._play_start_mono = 0.0
+                except Exception:
+                    pass
                 self._playlist_manager._set_playback_active_marker(False)
                 try:
                     self._mpv_manager.set_playback_session_active(False)
                 except Exception:
                     pass
                 try:
-                    if self.socketio:
+                    if getattr(self, "socketio", None):
                         self.socketio.emit(
                             "playback_update",
                             {
@@ -517,6 +525,16 @@ class PlaybackService:
                 except Exception:
                     pass
         except Exception as e:
+            # Last resort: still drop ghost playing so UI/schedule cannot stay stuck.
+            try:
+                self._playlist_manager._persist_playback_status(
+                    playlist_id=None,
+                    status="idle",
+                    source="idle",
+                    clear_rule=True,
+                )
+            except Exception:
+                pass
             self._log_warning(
                 "Failed to clear stale playing status",
                 extra={
