@@ -832,6 +832,20 @@ class MPVManager:
             except Exception:
                 pass
 
+    def interrupt_blocked_ipc(self) -> None:
+        """Fail in-flight ``sess.command`` waiters so orphan threads release ``_ipc_lock``.
+
+        Safe from another thread while a caller holds the lock inside ``command()`` —
+        the waiter gets ``MPVIPCClosedError`` and releases in ``finally``. Next IPC
+        reconnects. Used after slideshow join timeout so Stop→Play is not stuck behind
+        a long ytdl ``loadfile``.
+        """
+        self.logger.info(
+            "Interrupting blocked MPV IPC waiters",
+            extra={"event": "mpv_ipc_interrupt"},
+        )
+        self._reset_ipc_session()
+
     @staticmethod
     def _normalize_get_property_batch_reply(
         result: Dict[str, Any], ipc_request_id: int
