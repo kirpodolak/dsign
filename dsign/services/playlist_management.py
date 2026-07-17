@@ -156,11 +156,19 @@ class PlaylistManager:
         Must run on the HTTP/caller thread *before* claim_playback_intent or schedule
         plan enqueue — otherwise a loadfile still holding ``_play_start_lock`` can
         finish and re-persist ``source=manual`` over the new intent.
+
+        Does **not** bump ``_playback_run_id`` — that races async Stop cleanup against
+        a concurrent Play (force-restart mpv after ytdl loadfile). Run id is bumped in
+        ``_stop_play_thread`` / ``enqueue_play`` instead.
         """
         self.mark_play_starting()
         self._bump_play_seq()
         try:
             self._stop_event.set()
+        except Exception:
+            pass
+        try:
+            self._mpv_manager.set_playback_stream_opening(False)
         except Exception:
             pass
 
@@ -2149,13 +2157,74 @@ class PlaylistManager:
                 ok = False
         return ok
 
-    def _prepare_mpv_for_new_play(self, *, lock_wait: float = 1.5) -> None:
-        """Clear A1/A2 loops; only full stop when real content is still on air.
+    def _mpv_path_is_network(self, path: Any) -> bool:
+        p = str(path or "").strip()
+        return p.startswith(("http://", "https://", "ytdl://"))
 
-        Calling ``stop`` while already idle blanks Wayland to imv and contends IPC
-        so the following loadfile often fails — UI shows playing (claim) but screen
-        stays on the stub.
+    def _mpv_loop_props_on(self) -> bool:
+        """A1/A2 leave loop-* on after the Python thread dies — Stop must clear them."""
+        on_vals = (True, "yes", "inf", "force")
+        try:
+            lf = self._mpv_get_light("loop-file", timeout=1.0)
+        except Exception:
+            lf = None
+        try:
+            lp = self._mpv_get_light("loop-playlist", timeout=1.0)
+        except Exception:
+            lp = None
+        return lf in on_vals or lp in on_vals
+
+    def _mpv_content_still_on_air(self) -> bool:
+        """True if mpv still shows real content after a Stop/halt attempt."""
+        if self._mpv_has_active_media():
+            return True
+        if not self._mpv_loop_props_on():
+            return False
+        try:
+            path = self._mpv_get_light("path", timeout=1.0)
+        except Exception:
+            path = None
+        if not path or not str(path).strip():
+            return False
+        return not self._mpv_path_is_idle_logo(path)
+
+    def _mpv_needs_hard_halt(self) -> bool:
+        """True when soft prepare must not skip ``stop`` (ytdl open / A1/A2 loops)."""
+        try:
+            # Strict True — MagicMock attrs are truthy and would always hard-halt in tests.
+            if getattr(self._mpv_manager, "_playback_stream_opening", False) is True:
+                return True
+        except Exception:
+            pass
+        if self._mpv_loop_props_on():
+            return True
+        try:
+            path = self._mpv_get_light("path", timeout=1.0)
+        except Exception:
+            path = None
+        if self._mpv_path_is_network(path):
+            return True
+        if path is None:
+            # IPC unknown during ytdl — prefer halt over leaving a stuck open.
+            try:
+                idle = self._mpv_get_light("idle-active", timeout=0.8)
+            except Exception:
+                idle = None
+            if idle is None:
+                return True
+        return False
+
+    def _prepare_mpv_for_new_play(self, *, lock_wait: float = 1.5) -> None:
+        """Clear A1/A2 loops; full stop when content (incl. opening ytdl) is on air.
+
+        Calling ``stop`` while truly idle (logo / empty) blanks Wayland to imv and
+        contends IPC — skip that. But ytdl:// often reports idle-active=true while
+        the hook is still opening; skipping stop there left VK/Rutube alive and
+        broke the next offline Play.
         """
+        if self._mpv_needs_hard_halt():
+            self._halt_mpv_playback(lock_wait=float(lock_wait), timeout=3.0)
+            return
         try:
             idle = self._mpv_get_light("idle-active", timeout=1.0)
         except Exception:
@@ -2570,11 +2639,14 @@ class PlaylistManager:
                 # Allow a fresh idle-logo retry after this Stop (Play cancels via epoch).
                 self._play_start_mono = 0.0
 
+                # Soft-prepare inside stop_play_thread clears A1/A2 loops when halt_mpv.
                 self._stop_play_thread(
                     preserve_stall_tracking=preserve_stall_tracking,
                     preserve_loop_position=preserve_loop_position,
                     join_timeout=join_timeout,
+                    halt_mpv=True,
                 )
+                stop_run_id = int(self._playback_run_id)
                 self._cancel_content_cache_prefetches()
                 try:
                     self._logo_manager.ensure_mpv_video_output()
@@ -2584,6 +2656,7 @@ class PlaylistManager:
 
                 # Persist stopped/idle BEFORE idle-logo IPC, under the same lock as play
                 # commit so a late schedule play cannot resurrect status=playing.
+                # source=manual holds ScheduleEngine off until return-to-schedule.
                 if update_status:
                     if source == "schedule":
                         self._persist_playback_status(
@@ -2617,17 +2690,59 @@ class PlaylistManager:
 
             ok = True
             if show_idle_logo:
-                # Keep Stop HTTP fast: brief IPC attempt, then finish logo in background
-                # if loadfile still holds the long IPC lock.
-                # Clear loop-file/loop-playlist first — otherwise local video engines keep
-                # playing after a failed/partial stop (UI looks like Stop did nothing).
+                # Async Stop can finish after a newer Play already opened ytdl — never
+                # force-restart mpv or show idle logo over that play.
+                if not self._is_playback_run_current(stop_run_id):
+                    self.logger.info(
+                        "Stop mpv/logo skipped: superseded by newer play",
+                        extra={
+                            "event": "stop_cleanup_superseded",
+                            "stop_run_id": int(stop_run_id),
+                            "playback_run_id": int(self._playback_run_id),
+                        },
+                    )
+                    return True if update_status else ok
+                # Prove mpv is actually idle. Schedule A2 (loop-file=inf) kept playing
+                # after a "successful" Stop when we only force-restarted for ytdl.
+                try:
+                    self._mpv_manager.set_playback_stream_opening(False)
+                except Exception:
+                    pass
                 halted = False
                 try:
-                    halted = bool(self._halt_mpv_playback(lock_wait=2.0, timeout=2.0))
+                    halted = bool(self._halt_mpv_playback(lock_wait=15.0, timeout=3.0))
                 except Exception:
                     halted = False
-                ok = bool(self._logo_manager.display_idle_logo(lock_wait=2.0))
-                if not ok or not halted:
+                if not self._is_playback_run_current(stop_run_id):
+                    return True if update_status else ok
+                still_on = False
+                try:
+                    still_on = (not halted) or self._mpv_content_still_on_air()
+                except Exception:
+                    still_on = not halted
+                if still_on:
+                    self.logger.warning(
+                        "Stop left content on air; forcing mpv restart",
+                        extra={
+                            "event": "stop_force_mpv_restart",
+                            "halted": bool(halted),
+                            "loop_props_on": bool(self._mpv_loop_props_on()),
+                        },
+                    )
+                    try:
+                        halted = bool(
+                            self._mpv_manager._force_restart_mpv_for_hung_recovery()
+                        )
+                    except Exception:
+                        halted = False
+                    if not self._is_playback_run_current(stop_run_id):
+                        return True if update_status else ok
+                    try:
+                        still_on = self._mpv_content_still_on_air()
+                    except Exception:
+                        still_on = not halted
+                ok = bool(self._logo_manager.display_idle_logo(lock_wait=3.0))
+                if not ok or not halted or still_on:
                     self._enqueue_idle_logo_retry()
             return True if update_status else ok
         except Exception as e:
@@ -2751,6 +2866,67 @@ class PlaylistManager:
             return False
         return "idle_logo" in p or p.endswith("placeholder.jpg")
 
+    def _clear_ghost_playing_after_slideshow_exit(
+        self,
+        playlist_id: int,
+        playback_run_id: int,
+    ) -> None:
+        """Drop ghost DB playing when our slideshow thread exits without supersession."""
+        if not self._is_playback_run_current(int(playback_run_id)):
+            return
+        try:
+            if self._mpv_has_active_media():
+                return
+        except Exception:
+            pass
+        from ..models import PlaybackStatus
+
+        try:
+            with self._control_lock:
+                row = self.db_session.query(PlaybackStatus).get(1)
+                if row is None:
+                    return
+                if str(row.status or "").lower() != "playing":
+                    return
+                if int(row.playlist_id or 0) != int(playlist_id):
+                    return
+                self._persist_playback_status(
+                    playlist_id=None,
+                    status="idle",
+                    source="idle",
+                    clear_rule=True,
+                )
+            try:
+                if self.socketio:
+                    self.socketio.emit(
+                        "playback_update",
+                        {
+                            "status": "idle",
+                            "playlist_id": None,
+                            "source": "idle",
+                            "current_media": None,
+                        },
+                    )
+            except Exception:
+                pass
+            self.logger.info(
+                "Cleared ghost playing after slideshow exit",
+                extra={
+                    "event": "slideshow_ghost_playing_clear",
+                    "playlist_id": int(playlist_id),
+                    "playback_run_id": int(playback_run_id),
+                },
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to clear ghost playing after slideshow exit",
+                extra={
+                    "playlist_id": int(playlist_id),
+                    "error": str(exc),
+                    "type": type(exc).__name__,
+                },
+            )
+
     def _mpv_showing_idle_logo(self) -> bool:
         try:
             path = self._mpv_get_light("path", timeout=1.0)
@@ -2775,11 +2951,22 @@ class PlaylistManager:
         }
 
     def _mpv_has_active_media(self) -> bool:
-        """True only for real content — idle logo must not count as 'playing'."""
+        """True only for real content — idle logo must not count as 'playing'.
+
+        Opening ytdl:// often still reports idle-active=true; treat that as active
+        so Stop/prepare do not skip the hard halt.
+        """
+        try:
+            if getattr(self._mpv_manager, "_playback_stream_opening", False) is True:
+                return True
+        except Exception:
+            pass
+        path = self._mpv_get_light("path", timeout=2.0)
+        if self._mpv_path_is_network(path):
+            return True
         idle = self._mpv_get_light("idle-active", timeout=2.0)
         if idle is True:
             return False
-        path = self._mpv_get_light("path", timeout=2.0)
         if not path or not str(path).strip():
             return False
         if self._mpv_path_is_idle_logo(path):
@@ -2971,26 +3158,48 @@ class PlaylistManager:
             loop_pl = None
         loop_playlist_on = loop_pl in (True, "yes", "inf", "force")
         try:
+            loop_fl = self._mpv_get_light("loop-file", timeout=1.0)
+        except Exception:
+            loop_fl = None
+        loop_file_on = loop_fl in (True, "yes", "inf", "force")
+        try:
             mpv_path = str(self._mpv_get_light("path", timeout=1.0) or "")
         except Exception:
             mpv_path = ""
         logo_path = self._mpv_path_is_idle_logo(mpv_path)
         # Orphan: mpv still looping playlist/media while DB/thread say idle.
+        # A2 schedule uses loop-file=inf — must count even when session marker is cleared.
         db_playing = str(getattr(status, "status", None) or "").lower() == "playing"
+        try:
+            media_on = bool(self._mpv_has_active_media()) and not logo_path
+        except Exception:
+            media_on = False
         orphan_mpv = (not db_playing) and (not thread_alive) and (
             (mpv_session and not logo_path)
             or (loop_playlist_on and bool(mpv_path) and not logo_path)
+            or (loop_file_on and bool(mpv_path) and not logo_path)
+            or media_on
         )
         # Ghost: DB says playing/schedule but screen only shows idle logo (or nothing).
         content_active = bool(mpv_path) and not logo_path and (
-            bool(thread_alive) or bool(mpv_session) or bool(loop_playlist_on)
+            bool(thread_alive)
+            or bool(mpv_session)
+            or bool(loop_playlist_on)
+            or bool(loop_file_on)
+            or media_on
         )
         stale_playing = bool(db_playing) and (not thread_alive) and (not content_active) and (
             logo_path or not mpv_path
         )
-        # Grace window while Play loadfile runs after halt (logo still on path briefly).
+        # Grace window while Play loadfile / ytdl open runs (logo may stay on path briefly).
         try:
-            starting = (time.monotonic() - float(self._play_start_mono or 0.0)) < 45.0
+            start_age = time.monotonic() - float(self._play_start_mono or 0.0)
+            starting = start_age < 45.0
+            try:
+                if getattr(self._mpv_manager, "_playback_stream_opening", False) is True:
+                    starting = starting or start_age < 180.0
+            except Exception:
+                pass
         except Exception:
             starting = False
         if starting and db_playing:
