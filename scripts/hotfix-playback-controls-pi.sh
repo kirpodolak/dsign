@@ -149,6 +149,7 @@ grep -q "schedule_play_cooldown" "$RUNTIME_ROOT/services/playback_service.py" ||
 grep -q "_schedule_play_on_cooldown" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING _schedule_play_on_cooldown"; fail=1; }
 grep -q "claim_source" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING claim_source rollback"; fail=1; }
 grep -q "playback_desync_no_resume" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING desync no-resume"; fail=1; }
+grep -q "rollback_status" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING slideshow/claim rollback_status"; fail=1; }
 [[ "$fail" -eq 0 ]] || die "marker check failed — wrong tree or fetch failed"
 
 find "$RUNTIME_ROOT" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true

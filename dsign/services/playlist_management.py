@@ -2995,10 +2995,17 @@ class PlaylistManager:
                     return
                 if int(row.playlist_id or 0) != int(playlist_id):
                     return
+                # Keep manual lock — idle here lets ScheduleEngine steal the screen.
+                src = str(getattr(row, "source", None) or "idle").lower()
+                if src in ("manual", "override"):
+                    status, source, keep_pid = "stopped", "manual", int(playlist_id)
+                else:
+                    status, source, keep_pid = "idle", "idle", None
+                self._play_start_mono = 0.0
                 self._persist_playback_status(
-                    playlist_id=None,
-                    status="idle",
-                    source="idle",
+                    playlist_id=keep_pid,
+                    status=status,
+                    source=source,
                     clear_rule=True,
                 )
             try:
@@ -3006,9 +3013,9 @@ class PlaylistManager:
                     self.socketio.emit(
                         "playback_update",
                         {
-                            "status": "idle",
-                            "playlist_id": None,
-                            "source": "idle",
+                            "status": status,
+                            "playlist_id": keep_pid,
+                            "source": source,
                             "current_media": None,
                         },
                     )
@@ -3020,6 +3027,8 @@ class PlaylistManager:
                     "event": "slideshow_ghost_playing_clear",
                     "playlist_id": int(playlist_id),
                     "playback_run_id": int(playback_run_id),
+                    "rollback_status": status,
+                    "rollback_source": source,
                 },
             )
         except Exception as exc:
@@ -3073,6 +3082,9 @@ class PlaylistManager:
                     return
                 if int(row.playlist_id or 0) != int(playlist_id):
                     return
+                # Drop start grace so desync can clear immediately (schedule reclaim
+                # used to refresh mark_play_starting and block clear forever).
+                self._play_start_mono = 0.0
                 self._persist_playback_status(
                     playlist_id=keep_pid,
                     status=status,
