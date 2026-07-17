@@ -555,7 +555,25 @@ class PlaybackService:
                 elif db_status != "playing":
                     return
                 elif thread_alive:
-                    return
+                    stuck_idle = False
+                    try:
+                        stuck_idle = bool(snap.get("idle_logo")) and not bool(
+                            self._playlist_manager._mpv_has_active_media()
+                        )
+                    except Exception:
+                        stuck_idle = bool(snap.get("idle_logo"))
+                    start_age = 0.0
+                    try:
+                        start_age = time.monotonic() - float(
+                            getattr(self._playlist_manager, "_play_start_mono", 0.0) or 0.0
+                        )
+                    except Exception:
+                        start_age = 0.0
+                    if stuck_idle and start_age > 90.0:
+                        clear_stale = True
+                        self._last_desync_recover_ts = now
+                    else:
+                        return
                 else:
                     playlist_id = snap.get("db_playlist_id")
                     if not playlist_id:
@@ -1495,9 +1513,21 @@ class PlaybackService:
             )
 
         def _run() -> None:
+            ok = False
             try:
                 if app is not None:
                     with app.app_context():
+                        ok = bool(
+                            self.play(
+                                pid,
+                                start_index=start_index,
+                                preserve_stall_tracking=preserve_stall_tracking,
+                                source=source,
+                                rule_id=rule_id,
+                            )
+                        )
+                else:
+                    ok = bool(
                         self.play(
                             pid,
                             start_index=start_index,
@@ -1505,15 +1535,14 @@ class PlaybackService:
                             source=source,
                             rule_id=rule_id,
                         )
-                else:
-                    self.play(
-                        pid,
-                        start_index=start_index,
-                        preserve_stall_tracking=preserve_stall_tracking,
-                        source=source,
-                        rule_id=rule_id,
                     )
             except Exception as exc:
+                try:
+                    self._playlist_manager.rollback_claimed_play(
+                        pid, reason=f"play_async:{type(exc).__name__}"
+                    )
+                except Exception:
+                    pass
                 self._log_error(
                     "Async play failed",
                     extra={
@@ -1522,6 +1551,22 @@ class PlaybackService:
                         "error": str(exc),
                         "type": type(exc).__name__,
                         "action": "play_async",
+                    },
+                )
+                return
+            if not ok:
+                try:
+                    self._playlist_manager.rollback_claimed_play(
+                        pid, reason="play_async_returned_false"
+                    )
+                except Exception:
+                    pass
+                self._log_warning(
+                    "Async play returned false after claim",
+                    extra={
+                        "playlist_id": pid,
+                        "source": source,
+                        "action": "play_async_false",
                     },
                 )
 

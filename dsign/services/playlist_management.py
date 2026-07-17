@@ -2469,7 +2469,19 @@ class PlaylistManager:
         rule_id: Optional[int] = None,
     ) -> bool:
         """Play playlist with profile support"""
-        with self._play_start_lock:
+        lock_timeout = max(5.0, min(300.0, float(self._play_lock_timeout_sec())))
+        acquired = self._play_start_lock.acquire(timeout=lock_timeout)
+        if not acquired:
+            self.logger.warning(
+                "play lock timeout — previous loadfile still holding lock",
+                extra={
+                    "event": "play_lock_timeout",
+                    "playlist_id": int(playlist_id),
+                    "timeout_sec": lock_timeout,
+                },
+            )
+            return False
+        try:
             with self._app_context():
                 with self._override_lock:
                     self._override_return_ctx = None
@@ -2482,6 +2494,11 @@ class PlaylistManager:
                     source=source,
                     rule_id=rule_id,
                 )
+        finally:
+            try:
+                self._play_start_lock.release()
+            except Exception:
+                pass
 
     def claim_playback_intent(
         self,
@@ -2927,18 +2944,91 @@ class PlaylistManager:
                 },
             )
 
+    def _any_play_threads_alive(self) -> bool:
+        if self._play_thread is not None and self._play_thread.is_alive():
+            return True
+        for thr in list(getattr(self, "_orphan_play_threads", None) or []):
+            if thr is not None and thr.is_alive():
+                return True
+        return False
+
+    def _play_lock_timeout_sec(self) -> float:
+        try:
+            return float((os.getenv("DSIGN_PLAY_LOCK_TIMEOUT_SEC") or "45").strip())
+        except ValueError:
+            return 45.0
+
+    def rollback_claimed_play(self, playlist_id: int, *, reason: str) -> None:
+        """Drop ghost playing when enqueue_play claimed DB but play() never started."""
+        if self._any_play_threads_alive():
+            return
+        from ..models import PlaybackStatus
+
+        try:
+            with self._control_lock:
+                row = self.db_session.query(PlaybackStatus).get(1)
+                if row is None:
+                    return
+                if str(row.status or "").lower() != "playing":
+                    return
+                if int(row.playlist_id or 0) != int(playlist_id):
+                    return
+                self._persist_playback_status(
+                    playlist_id=None,
+                    status="idle",
+                    source="idle",
+                    clear_rule=True,
+                )
+            try:
+                if self.socketio:
+                    self.socketio.emit(
+                        "playback_update",
+                        {
+                            "status": "idle",
+                            "playlist_id": None,
+                            "source": "idle",
+                            "current_media": None,
+                        },
+                    )
+            except Exception:
+                pass
+            self.logger.warning(
+                "Rolled back claimed play — loadfile never started",
+                extra={
+                    "event": "claimed_play_rollback",
+                    "playlist_id": int(playlist_id),
+                    "reason": str(reason),
+                },
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to roll back claimed play",
+                extra={
+                    "playlist_id": int(playlist_id),
+                    "reason": str(reason),
+                    "error": str(exc),
+                    "type": type(exc).__name__,
+                },
+            )
+
     def _mpv_showing_idle_logo(self) -> bool:
+        try:
+            idle = self._mpv_get_light("idle-active", timeout=1.0)
+        except Exception:
+            idle = None
         try:
             path = self._mpv_get_light("path", timeout=1.0)
         except Exception:
             path = None
+        if idle is True and (not path or not str(path).strip()):
+            return True
         return self._mpv_path_is_idle_logo(path)
 
     def _remote_playback_snapshot(self) -> Dict[str, Any]:
         from ..models import PlaybackStatus
 
         row = self.db_session.query(PlaybackStatus).first()
-        thread_alive = bool(self._play_thread and self._play_thread.is_alive())
+        thread_alive = self._any_play_threads_alive()
         return {
             "thread_alive": thread_alive,
             "active_playlist_id": self._active_playlist_id,
@@ -3147,7 +3237,7 @@ class PlaylistManager:
                 dict(self._override_return_ctx) if self._override_return_ctx else None
             )
 
-        thread_alive = bool(self._play_thread and self._play_thread.is_alive())
+        thread_alive = self._any_play_threads_alive()
         try:
             mpv_session = bool(self._mpv_manager._playback_session_active)
         except Exception:

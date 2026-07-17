@@ -138,7 +138,10 @@ grep -q "enqueue_stop" "$RUNTIME_ROOT/routes/api/api_routes.py" || { echo "MISSI
 grep -q "status == \"playing\"" "$RUNTIME_ROOT/services/schedule_engine.py" || { echo "MISSING status==playing in schedule plan"; fail=1; }
 grep -q "stale_playing" "$RUNTIME_ROOT/static/js/index.js" || { echo "MISSING stale_playing in index.js"; fail=1; }
 grep -q "orphan_mpv" "$RUNTIME_ROOT/static/js/index.js" || { echo "MISSING orphan_mpv in index.js"; fail=1; }
-grep -q "return-to-schedule" "$RUNTIME_ROOT/routes/api/api_routes.py" || { echo "MISSING return-to-schedule route"; fail=1; }
+grep -q "claimed_play_rollback" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING claimed_play rollback"; fail=1; }
+grep -q "play_lock_timeout" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING play lock timeout"; fail=1; }
+grep -q "enqueue_play" "$RUNTIME_ROOT/services/schedule_engine.py" || { echo "MISSING schedule enqueue_play"; fail=1; }
+grep -q "play_async_returned_false" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING play_async rollback"; fail=1; }
 [[ "$fail" -eq 0 ]] || die "marker check failed — wrong tree or fetch failed"
 
 find "$RUNTIME_ROOT" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
