@@ -39,9 +39,9 @@
 
 Login + mutating API endpoints: play/stop/screenshot/reboot/service restart — `api_rate_limit.py`, `test_api_rate_limit.py`.
 
-### 3. Subprocess timeouts → `H-SUB`
+### 3. Subprocess timeouts → `H-SUB` ✅
 
-Приоритет: `_audio_set()` / `amixer` без timeout.
+`subprocess_limits.py` + integration tests (`test_subprocess_timeouts.py`) + static AST audit (`test_subprocess_audit.py`). Все `subprocess.run` / `check_output` в prod-коде с `timeout=`; `Popen` — только allowlist с manual deadline.
 
 ### 4. Upload → `H-UPL` ✅
 
@@ -139,6 +139,7 @@ Unit (mock IPC) → Integration (fake MPV) → API smoke → coverage report →
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-10 | H-SUB ✅: AST audit test; все run/check_output с timeout |
 | 2026-07-10 | Docs sync: H-REF ✅, Tier 2 ✅, 170 pytest; H-SUB/D2-OPS — отдельные PR |
 | 2026-07-10 | H-COAL ✅: adaptive restart coalesce documented (код уже в main) |
 | 2026-07-09 | T-API + T-SCH: API smoke + schedule_service pytest |
