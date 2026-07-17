@@ -46,6 +46,8 @@ def test_stop_force_restarts_when_content_still_on_air(null_logger, tmp_path):
     pm._enqueue_idle_logo_retry = MagicMock()  # type: ignore[method-assign]
     pm._persist_playback_status = MagicMock()  # type: ignore[method-assign]
     pm._stop_play_thread = MagicMock()  # type: ignore[method-assign]
+    pm._acquire_play_handoff = MagicMock(return_value=True)  # type: ignore[method-assign]
+    pm._release_play_handoff = MagicMock()  # type: ignore[method-assign]
     row = MagicMock()
     row.playlist_id = 1
     pm.db_session.query.return_value.get.return_value = row
@@ -65,6 +67,7 @@ def test_enqueue_stop_halts_before_async_thread():
 
     def _bump():
         order.append("bump")
+        return 11
 
     def _inv():
         order.append("invalidate")
@@ -80,3 +83,7 @@ def test_enqueue_stop_halts_before_async_thread():
 
     assert PlaybackService.enqueue_stop(svc, source="manual") is True
     assert order == ["bump", "invalidate", "halt"]
+    import time
+
+    time.sleep(0.05)
+    svc.stop.assert_called_once_with(source="manual", stop_generation=11)
