@@ -36,7 +36,7 @@
 | **D2 расписание D2.1–D2.5** | ✅ PR #103–#107 |
 | `GET /api/health`, upload limit 1 GiB, login rate limit | ✅ в коде |
 | `MPVManager.shutdown()`, SIGTERM → `ScheduleEngine.stop()` | ✅ частично |
-| **T-CI** GitHub Actions pytest (170 кейсов, Tier 1 + Tier 2) | ✅ |
+| **T-CI** GitHub Actions pytest (**179** кейсов, Tier 1–3 partial) | ✅ |
 | **H-REF** extract-only refactor `playlist_management.py` | ✅ PR #128–#131 |
 | **Tier 2 pytest** (T-CACHE, T-MIX, prefetch/retry) | ✅ частично |
 | **T-IPC** unit tests (`MpvJsonIpcSession`, 10 кейсов) | ✅ PR pytest-tier1 |
@@ -186,7 +186,7 @@ flowchart TD
 - [x] Каталог `tests/` + `pytest` / `pytest-cov` (зависимости в `setup.py`, `packages=dsign` only)
 - [x] GitHub Actions workflow на PR/push → `main` (`.github/workflows/pytest.yml`, `working-directory: dsign`)
 - [x] Integration (fake MPV, recovery, EOF, audio) + API smoke + schedule в том же workflow
-- [x] Merge gate: полный pytest suite must pass (**170** тестов на `main`)
+- [x] Merge gate: полный pytest suite must pass (**179** тестов на `main`)
 
 *Источник:* improvement §1, стратегия тестов
 
@@ -425,6 +425,7 @@ Extract-only refactor `playlist_management.py` → отдельные модул
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-10 | Tier 3 pytest: Settings + System API smoke (179 total) |
 | 2026-07-10 | Docs sync: H-REF ✅, 170 pytest, Tier 2 partial, порядок → D1 OTA |
 | 2026-07-10 | H-COAL ✅ (adaptive MPV restart coalesce; docs sync) |
 | 2026-07-10 | H-RQ ✅ (recovery queue; 3+1 pytest) |

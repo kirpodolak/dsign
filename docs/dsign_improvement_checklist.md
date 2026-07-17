@@ -121,8 +121,8 @@ ContentCache: `ThreadPoolExecutor` (`DSIGN_CONTENT_CACHE_PREFETCH_WORKERS`), `ca
 
 ### Tier 3 — nice (частично)
 
-11. System API (Wi-Fi, screenshot, restart) — `test_wifi_validation.py`, `test_api_rate_limit.py` (partial)  
-12. Settings API — 🟡 нет dedicated smoke  
+11. System API (Wi-Fi, screenshot, restart) — `test_wifi_validation.py`, `test_api_rate_limit.py`, `test_tier3_api_smoke.py` (status/network/services)  
+12. Settings API — `test_tier3_api_smoke.py` (schema, current, timezones, update+CSRF)  
 13. Media upload / thumbnails — `test_upload_disk.py`, `test_upload_stream.py` (partial)
 
 ### CI pipeline (целевой)
@@ -139,6 +139,7 @@ Unit (mock IPC) → Integration (fake MPV) → API smoke → coverage report →
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-10 | Tier 3 pytest: test_tier3_api_smoke.py (Settings + System API) |
 | 2026-07-10 | Docs sync: H-REF ✅, Tier 2 ✅, 170 pytest; H-SUB/D2-OPS — отдельные PR |
 | 2026-07-10 | H-COAL ✅: adaptive restart coalesce documented (код уже в main) |
 | 2026-07-09 | T-API + T-SCH: API smoke + schedule_service pytest |
