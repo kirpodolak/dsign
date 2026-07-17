@@ -2468,20 +2468,84 @@ class PlaylistManager:
         source: str = "manual",
         rule_id: Optional[int] = None,
     ) -> bool:
-        """Play playlist with profile support"""
-        with self._play_start_lock:
-            with self._app_context():
-                with self._override_lock:
-                    self._override_return_ctx = None
-                    self._playlist_single_pass = False
-                return self._play_impl(
-                    playlist_id,
-                    start_index=start_index,
-                    preserve_stall_tracking=preserve_stall_tracking,
-                    single_pass=False,
-                    source=source,
-                    rule_id=rule_id,
-                )
+        """Play playlist with profile support.
+
+        Does **not** hold ``_play_start_lock`` across loadfile/ytdl — that blocked
+        Stop→Play for minutes (play_lock_timeout). Handoff lock is only around
+        ``_stop_play_thread`` + ``_begin_play_seq`` inside PlaybackPlayRunner.
+        """
+        with self._app_context():
+            with self._override_lock:
+                self._override_return_ctx = None
+                self._playlist_single_pass = False
+            return self._play_impl(
+                playlist_id,
+                start_index=start_index,
+                preserve_stall_tracking=preserve_stall_tracking,
+                single_pass=False,
+                source=source,
+                rule_id=rule_id,
+            )
+
+    def _play_lock_timeout_sec(self) -> float:
+        """Handoff lock only (not full loadfile). Keep short so Stop→Play stays responsive."""
+        try:
+            return float((os.getenv("DSIGN_PLAY_LOCK_TIMEOUT_SEC") or "8").strip())
+        except ValueError:
+            return 8.0
+
+    def _acquire_play_handoff(self, *, playlist_id: int) -> bool:
+        """Serialize stop-previous + begin-seq. Never held across loadfile."""
+        lock_timeout = max(0.05, min(60.0, float(self._play_lock_timeout_sec())))
+        for attempt in range(2):
+            acquired = self._play_start_lock.acquire(timeout=lock_timeout)
+            if acquired:
+                return True
+            self.logger.warning(
+                "play handoff lock busy — aborting in-flight play and retrying",
+                extra={
+                    "event": "play_lock_timeout",
+                    "playlist_id": int(playlist_id),
+                    "timeout_sec": lock_timeout,
+                    "attempt": attempt + 1,
+                },
+            )
+            try:
+                self._bump_playback_run_id()
+            except Exception:
+                pass
+            try:
+                self._bump_play_seq()
+            except Exception:
+                pass
+            try:
+                self._stop_event.set()
+            except Exception:
+                pass
+            try:
+                self._mpv_manager.set_playback_stream_opening(False)
+            except Exception:
+                pass
+            try:
+                self._halt_mpv_playback(lock_wait=1.0, timeout=1.5)
+            except Exception:
+                pass
+            lock_timeout = min(lock_timeout, 5.0)
+        self.logger.warning(
+            "play handoff lock timeout — giving up",
+            extra={
+                "event": "play_lock_timeout",
+                "playlist_id": int(playlist_id),
+                "timeout_sec": lock_timeout,
+            },
+        )
+        return False
+
+    def _release_play_handoff(self) -> None:
+        try:
+            self._play_start_lock.release()
+        except Exception:
+            pass
 
     def claim_playback_intent(
         self,
@@ -2608,6 +2672,7 @@ class PlaylistManager:
         preserve_loop_position: bool = False,
         source: str = "manual",
         join_timeout: float = 2.0,
+        stop_generation: Optional[int] = None,
     ) -> bool:
         """Stop playback and persist stopped state so UI/API match MPV (idle logo)."""
         with self._app_context():
@@ -2618,6 +2683,7 @@ class PlaylistManager:
                 preserve_loop_position=preserve_loop_position,
                 source=source,
                 join_timeout=join_timeout,
+                stop_generation=stop_generation,
             )
 
     def _stop_impl(
@@ -2629,64 +2695,103 @@ class PlaylistManager:
         preserve_loop_position: bool = False,
         source: str = "manual",
         join_timeout: float = 2.0,
+        stop_generation: Optional[int] = None,
     ) -> bool:
         from ..models import PlaybackStatus
 
         try:
-            with self._control_lock:
-                playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
-                last_playlist_id = playback.playlist_id
-                # Allow a fresh idle-logo retry after this Stop (Play cancels via epoch).
-                self._play_start_mono = 0.0
-
-                # Soft-prepare inside stop_play_thread clears A1/A2 loops when halt_mpv.
-                self._stop_play_thread(
-                    preserve_stall_tracking=preserve_stall_tracking,
-                    preserve_loop_position=preserve_loop_position,
-                    join_timeout=join_timeout,
-                    halt_mpv=True,
+            # Fast path: Play already bumped run_id after enqueue_stop — do not tear
+            # down the new play (that left Stop OK / Play dead).
+            if stop_generation is not None and not self._is_playback_run_current(
+                int(stop_generation)
+            ):
+                self.logger.info(
+                    "Stop skipped: superseded by newer play",
+                    extra={
+                        "event": "stop_superseded",
+                        "stop_generation": int(stop_generation),
+                        "playback_run_id": int(self._playback_run_id),
+                    },
                 )
-                stop_run_id = int(self._playback_run_id)
-                self._cancel_content_cache_prefetches()
-                try:
-                    self._logo_manager.ensure_mpv_video_output()
-                except Exception:
-                    pass
-                self._set_playback_active_marker(False)
+                return True
 
-                # Persist stopped/idle BEFORE idle-logo IPC, under the same lock as play
-                # commit so a late schedule play cannot resurrect status=playing.
-                # source=manual holds ScheduleEngine off until return-to-schedule.
-                if update_status:
-                    if source == "schedule":
-                        self._persist_playback_status(
-                            playlist_id=None,
-                            status="idle",
-                            source="idle",
-                            clear_rule=True,
+            # Same lock order as Play handoff: handoff → control (avoid deadlock).
+            if not self._acquire_play_handoff(playlist_id=0):
+                self.logger.info(
+                    "Stop skipped: play handoff busy (newer play starting)",
+                    extra={"event": "stop_superseded", "reason": "handoff_busy"},
+                )
+                return True
+            try:
+                with self._control_lock:
+                    if stop_generation is not None and not self._is_playback_run_current(
+                        int(stop_generation)
+                    ):
+                        self.logger.info(
+                            "Stop skipped: superseded under lock",
+                            extra={
+                                "event": "stop_superseded",
+                                "stop_generation": int(stop_generation),
+                                "playback_run_id": int(self._playback_run_id),
+                            },
                         )
-                    else:
-                        self._persist_playback_status(
-                            playlist_id=last_playlist_id,
-                            status="stopped",
-                            source="manual",
-                            clear_rule=True,
-                        )
+                        return True
 
+                    playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
+                    last_playlist_id = playback.playlist_id
+                    # Allow a fresh idle-logo retry after this Stop (Play cancels via epoch).
+                    self._play_start_mono = 0.0
+
+                    # Soft-prepare inside stop_play_thread clears A1/A2 loops when halt_mpv.
+                    self._stop_play_thread(
+                        preserve_stall_tracking=preserve_stall_tracking,
+                        preserve_loop_position=preserve_loop_position,
+                        join_timeout=join_timeout,
+                        halt_mpv=True,
+                    )
+                    stop_run_id = int(self._playback_run_id)
+                    self._cancel_content_cache_prefetches()
                     try:
-                        if self.socketio:
-                            emit_status = "idle" if source == "schedule" else "stopped"
-                            emit_playlist = None if source == "schedule" else last_playlist_id
-                            self.socketio.emit(
-                                'playback_update',
-                                {
-                                    'status': emit_status,
-                                    'playlist_id': emit_playlist,
-                                    'current_media': None,
-                                },
-                            )
+                        self._logo_manager.ensure_mpv_video_output()
                     except Exception:
                         pass
+                    self._set_playback_active_marker(False)
+
+                    # Persist stopped/idle BEFORE idle-logo IPC, under the same lock as play
+                    # commit so a late schedule play cannot resurrect status=playing.
+                    # source=manual holds ScheduleEngine off until return-to-schedule.
+                    if update_status:
+                        if source == "schedule":
+                            self._persist_playback_status(
+                                playlist_id=None,
+                                status="idle",
+                                source="idle",
+                                clear_rule=True,
+                            )
+                        else:
+                            self._persist_playback_status(
+                                playlist_id=last_playlist_id,
+                                status="stopped",
+                                source="manual",
+                                clear_rule=True,
+                            )
+
+                        try:
+                            if self.socketio:
+                                emit_status = "idle" if source == "schedule" else "stopped"
+                                emit_playlist = None if source == "schedule" else last_playlist_id
+                                self.socketio.emit(
+                                    'playback_update',
+                                    {
+                                        'status': emit_status,
+                                        'playlist_id': emit_playlist,
+                                        'current_media': None,
+                                    },
+                                )
+                        except Exception:
+                            pass
+            finally:
+                self._release_play_handoff()
 
             ok = True
             if show_idle_logo:
@@ -2927,18 +3032,106 @@ class PlaylistManager:
                 },
             )
 
+    def _any_play_threads_alive(self) -> bool:
+        if self._play_thread is not None and self._play_thread.is_alive():
+            return True
+        for thr in list(getattr(self, "_orphan_play_threads", None) or []):
+            if thr is not None and thr.is_alive():
+                return True
+        return False
+
+    def rollback_claimed_play(
+        self,
+        playlist_id: int,
+        *,
+        reason: str,
+        claim_source: str = "manual",
+    ) -> None:
+        """Drop ghost playing when enqueue_play claimed DB but play() never started.
+
+        Manual claims roll back to ``stopped``/``manual`` so ScheduleEngine cannot
+        immediately steal the screen (idle→schedule→claim→fail loops).
+        """
+        if self._any_play_threads_alive():
+            return
+        from ..models import PlaybackStatus
+
+        src = str(claim_source or "manual").lower()
+        if src in ("manual", "override"):
+            status, source, keep_pid = "stopped", "manual", int(playlist_id)
+            clear_rule = True
+        else:
+            status, source, keep_pid = "idle", "idle", None
+            clear_rule = True
+
+        try:
+            with self._control_lock:
+                row = self.db_session.query(PlaybackStatus).get(1)
+                if row is None:
+                    return
+                if str(row.status or "").lower() != "playing":
+                    return
+                if int(row.playlist_id or 0) != int(playlist_id):
+                    return
+                self._persist_playback_status(
+                    playlist_id=keep_pid,
+                    status=status,
+                    source=source,
+                    clear_rule=clear_rule,
+                )
+            try:
+                if self.socketio:
+                    self.socketio.emit(
+                        "playback_update",
+                        {
+                            "status": status,
+                            "playlist_id": keep_pid,
+                            "source": source,
+                            "current_media": None,
+                        },
+                    )
+            except Exception:
+                pass
+            self.logger.warning(
+                "Rolled back claimed play — loadfile never started",
+                extra={
+                    "event": "claimed_play_rollback",
+                    "playlist_id": int(playlist_id),
+                    "reason": str(reason),
+                    "claim_source": src,
+                    "rollback_status": status,
+                    "rollback_source": source,
+                },
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to roll back claimed play",
+                extra={
+                    "playlist_id": int(playlist_id),
+                    "reason": str(reason),
+                    "error": str(exc),
+                    "type": type(exc).__name__,
+                },
+            )
+
     def _mpv_showing_idle_logo(self) -> bool:
+        try:
+            idle = self._mpv_get_light("idle-active", timeout=1.0)
+        except Exception:
+            idle = None
         try:
             path = self._mpv_get_light("path", timeout=1.0)
         except Exception:
             path = None
+        if idle is True and (not path or not str(path).strip()):
+            return True
         return self._mpv_path_is_idle_logo(path)
 
     def _remote_playback_snapshot(self) -> Dict[str, Any]:
         from ..models import PlaybackStatus
 
         row = self.db_session.query(PlaybackStatus).first()
-        thread_alive = bool(self._play_thread and self._play_thread.is_alive())
+        thread_alive = self._any_play_threads_alive()
         return {
             "thread_alive": thread_alive,
             "active_playlist_id": self._active_playlist_id,
@@ -3147,7 +3340,7 @@ class PlaylistManager:
                 dict(self._override_return_ctx) if self._override_return_ctx else None
             )
 
-        thread_alive = bool(self._play_thread and self._play_thread.is_alive())
+        thread_alive = self._any_play_threads_alive()
         try:
             mpv_session = bool(self._mpv_manager._playback_session_active)
         except Exception:
