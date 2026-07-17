@@ -1422,12 +1422,12 @@ class PlaybackService:
         schedule A2 (loop-file=inf) does not keep rolling while status flips to stopped.
         """
         app = self._app
-        # Bump run id on the caller thread so ytdl ensure() aborts immediately; play()
-        # will bump again in _stop_play_thread when it starts.
+        # Token for async stop: if Play bumps run_id before teardown, skip killing it.
+        stop_generation = 0
         try:
-            self._playlist_manager._bump_playback_run_id()
+            stop_generation = int(self._playlist_manager._bump_playback_run_id())
         except Exception:
-            pass
+            stop_generation = 0
         # Invalidate in-flight play immediately so late persist cannot win.
         try:
             self._playlist_manager.invalidate_in_flight_play()
@@ -1447,9 +1447,9 @@ class PlaybackService:
             try:
                 if app is not None:
                     with app.app_context():
-                        self.stop(source=source)
+                        self.stop(source=source, stop_generation=stop_generation)
                 else:
-                    self.stop(source=source)
+                    self.stop(source=source, stop_generation=stop_generation)
             except Exception as exc:
                 self._log_error(
                     "Async stop failed",
@@ -1685,13 +1685,16 @@ class PlaybackService:
             )
             return {"success": False, "error": str(e)}
 
-    def stop(self, *, source: str = "manual") -> bool:
+    def stop(self, *, source: str = "manual", stop_generation: Optional[int] = None) -> bool:
         """Stop playback and return to idle state"""
         try:
             start_time = time.time()
             # Suppress desync resume while halt/logo settle after Stop.
             self._last_desync_recover_ts = time.monotonic()
-            result = self._playlist_manager.stop(source=source)
+            result = self._playlist_manager.stop(
+                source=source,
+                stop_generation=stop_generation,
+            )
             self._log_info(
                 "Playback stopped", 
                 extra={

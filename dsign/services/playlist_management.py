@@ -2672,6 +2672,7 @@ class PlaylistManager:
         preserve_loop_position: bool = False,
         source: str = "manual",
         join_timeout: float = 2.0,
+        stop_generation: Optional[int] = None,
     ) -> bool:
         """Stop playback and persist stopped state so UI/API match MPV (idle logo)."""
         with self._app_context():
@@ -2682,6 +2683,7 @@ class PlaylistManager:
                 preserve_loop_position=preserve_loop_position,
                 source=source,
                 join_timeout=join_timeout,
+                stop_generation=stop_generation,
             )
 
     def _stop_impl(
@@ -2693,64 +2695,103 @@ class PlaylistManager:
         preserve_loop_position: bool = False,
         source: str = "manual",
         join_timeout: float = 2.0,
+        stop_generation: Optional[int] = None,
     ) -> bool:
         from ..models import PlaybackStatus
 
         try:
-            with self._control_lock:
-                playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
-                last_playlist_id = playback.playlist_id
-                # Allow a fresh idle-logo retry after this Stop (Play cancels via epoch).
-                self._play_start_mono = 0.0
-
-                # Soft-prepare inside stop_play_thread clears A1/A2 loops when halt_mpv.
-                self._stop_play_thread(
-                    preserve_stall_tracking=preserve_stall_tracking,
-                    preserve_loop_position=preserve_loop_position,
-                    join_timeout=join_timeout,
-                    halt_mpv=True,
+            # Fast path: Play already bumped run_id after enqueue_stop — do not tear
+            # down the new play (that left Stop OK / Play dead).
+            if stop_generation is not None and not self._is_playback_run_current(
+                int(stop_generation)
+            ):
+                self.logger.info(
+                    "Stop skipped: superseded by newer play",
+                    extra={
+                        "event": "stop_superseded",
+                        "stop_generation": int(stop_generation),
+                        "playback_run_id": int(self._playback_run_id),
+                    },
                 )
-                stop_run_id = int(self._playback_run_id)
-                self._cancel_content_cache_prefetches()
-                try:
-                    self._logo_manager.ensure_mpv_video_output()
-                except Exception:
-                    pass
-                self._set_playback_active_marker(False)
+                return True
 
-                # Persist stopped/idle BEFORE idle-logo IPC, under the same lock as play
-                # commit so a late schedule play cannot resurrect status=playing.
-                # source=manual holds ScheduleEngine off until return-to-schedule.
-                if update_status:
-                    if source == "schedule":
-                        self._persist_playback_status(
-                            playlist_id=None,
-                            status="idle",
-                            source="idle",
-                            clear_rule=True,
+            # Same lock order as Play handoff: handoff → control (avoid deadlock).
+            if not self._acquire_play_handoff(playlist_id=0):
+                self.logger.info(
+                    "Stop skipped: play handoff busy (newer play starting)",
+                    extra={"event": "stop_superseded", "reason": "handoff_busy"},
+                )
+                return True
+            try:
+                with self._control_lock:
+                    if stop_generation is not None and not self._is_playback_run_current(
+                        int(stop_generation)
+                    ):
+                        self.logger.info(
+                            "Stop skipped: superseded under lock",
+                            extra={
+                                "event": "stop_superseded",
+                                "stop_generation": int(stop_generation),
+                                "playback_run_id": int(self._playback_run_id),
+                            },
                         )
-                    else:
-                        self._persist_playback_status(
-                            playlist_id=last_playlist_id,
-                            status="stopped",
-                            source="manual",
-                            clear_rule=True,
-                        )
+                        return True
 
+                    playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
+                    last_playlist_id = playback.playlist_id
+                    # Allow a fresh idle-logo retry after this Stop (Play cancels via epoch).
+                    self._play_start_mono = 0.0
+
+                    # Soft-prepare inside stop_play_thread clears A1/A2 loops when halt_mpv.
+                    self._stop_play_thread(
+                        preserve_stall_tracking=preserve_stall_tracking,
+                        preserve_loop_position=preserve_loop_position,
+                        join_timeout=join_timeout,
+                        halt_mpv=True,
+                    )
+                    stop_run_id = int(self._playback_run_id)
+                    self._cancel_content_cache_prefetches()
                     try:
-                        if self.socketio:
-                            emit_status = "idle" if source == "schedule" else "stopped"
-                            emit_playlist = None if source == "schedule" else last_playlist_id
-                            self.socketio.emit(
-                                'playback_update',
-                                {
-                                    'status': emit_status,
-                                    'playlist_id': emit_playlist,
-                                    'current_media': None,
-                                },
-                            )
+                        self._logo_manager.ensure_mpv_video_output()
                     except Exception:
                         pass
+                    self._set_playback_active_marker(False)
+
+                    # Persist stopped/idle BEFORE idle-logo IPC, under the same lock as play
+                    # commit so a late schedule play cannot resurrect status=playing.
+                    # source=manual holds ScheduleEngine off until return-to-schedule.
+                    if update_status:
+                        if source == "schedule":
+                            self._persist_playback_status(
+                                playlist_id=None,
+                                status="idle",
+                                source="idle",
+                                clear_rule=True,
+                            )
+                        else:
+                            self._persist_playback_status(
+                                playlist_id=last_playlist_id,
+                                status="stopped",
+                                source="manual",
+                                clear_rule=True,
+                            )
+
+                        try:
+                            if self.socketio:
+                                emit_status = "idle" if source == "schedule" else "stopped"
+                                emit_playlist = None if source == "schedule" else last_playlist_id
+                                self.socketio.emit(
+                                    'playback_update',
+                                    {
+                                        'status': emit_status,
+                                        'playlist_id': emit_playlist,
+                                        'current_media': None,
+                                    },
+                                )
+                        except Exception:
+                            pass
+            finally:
+                self._release_play_handoff()
 
             ok = True
             if show_idle_logo:
