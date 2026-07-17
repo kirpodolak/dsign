@@ -145,6 +145,10 @@ grep -q "_release_play_handoff" "$RUNTIME_ROOT/services/playback_play.py" || { e
 grep -q "enqueue_play" "$RUNTIME_ROOT/services/schedule_engine.py" || { echo "MISSING schedule enqueue_play"; fail=1; }
 grep -q "stop_superseded" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING stop_superseded"; fail=1; }
 grep -q "stop_generation" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING stop_generation in enqueue_stop"; fail=1; }
+grep -q "schedule_play_cooldown" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING schedule_play_cooldown"; fail=1; }
+grep -q "_schedule_play_on_cooldown" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING _schedule_play_on_cooldown"; fail=1; }
+grep -q "claim_source" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING claim_source rollback"; fail=1; }
+grep -q "playback_desync_no_resume" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING desync no-resume"; fail=1; }
 [[ "$fail" -eq 0 ]] || die "marker check failed — wrong tree or fetch failed"
 
 find "$RUNTIME_ROOT" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true

@@ -82,6 +82,8 @@ class PlaybackService:
         self._wayland_manager = WaylandManager(logger=self.logger)
         self._last_socket_identity: Optional[tuple] = None
         self._last_desync_recover_ts: float = 0.0
+        # After a failed schedule play, do not let ScheduleEngine/desync hammer ytdl.
+        self._schedule_play_cooldown_until: float = 0.0
         self._app = None
         self._app_ready = Event()
         self._mpv_init_ready = Event()
@@ -474,13 +476,26 @@ class PlaybackService:
                 )
 
     def _clear_stale_playing_status(self) -> None:
+        """Clear ghost DB playing. Preserve manual lock so schedule cannot auto-steal."""
         try:
             with self._app_context():
+                from ..models import PlaybackStatus
+
+                session = getattr(self.db_session, "session", self.db_session)
+                row = session.query(PlaybackStatus).get(1) if session is not None else None
+                src = str(getattr(row, "source", None) or "idle").lower() if row else "idle"
+                pid = getattr(row, "playlist_id", None) if row else None
+                if src in ("manual", "override"):
+                    status, source, clear_rule = "stopped", "manual", True
+                    keep_pid = pid
+                else:
+                    status, source, clear_rule = "idle", "idle", True
+                    keep_pid = None
                 self._playlist_manager._persist_playback_status(
-                    playlist_id=None,
-                    status="idle",
-                    source="idle",
-                    clear_rule=True,
+                    playlist_id=keep_pid,
+                    status=status,
+                    source=source,
+                    clear_rule=clear_rule,
                 )
                 self._playlist_manager._set_playback_active_marker(False)
                 try:
@@ -492,9 +507,9 @@ class PlaybackService:
                         self.socketio.emit(
                             "playback_update",
                             {
-                                "status": "idle",
-                                "playlist_id": None,
-                                "source": "idle",
+                                "status": status,
+                                "playlist_id": keep_pid,
+                                "source": source,
                                 "current_media": None,
                                 "stale_playing": False,
                             },
@@ -618,12 +633,15 @@ class PlaybackService:
                     elif snap.get("mpv_idle") is not True and self._playlist_manager._mpv_has_active_media():
                         return
                     else:
+                        # Empty/idle mpv with ghost playing — clear, never auto-resume
+                        # (resume caused schedule↔claim↔fail loops, desync_recover×45).
+                        clear_stale = True
                         self._last_desync_recover_ts = now
+                        playlist_id = None
                         try:
-                            resume_index = self._playlist_manager.get_resume_start_index(advance=False)
+                            self._note_schedule_play_failure("desync_ghost_idle")
                         except Exception:
-                            resume_index = 0
-                        _pid, resume_source, resume_rule_id = self._resolve_playback_resume_context()
+                            pass
             finally:
                 try:
                     from ..extensions import db
@@ -651,44 +669,32 @@ class PlaybackService:
                 "Playback desync: idle logo while DB playing; clearing stale status",
                 extra={"action": "playback_stale_playing_clear"},
             )
+            try:
+                snap_src = None
+                with self._app_context():
+                    from ..models import PlaybackStatus
+
+                    session = getattr(self.db_session, "session", self.db_session)
+                    row = session.query(PlaybackStatus).get(1) if session is not None else None
+                    snap_src = str(getattr(row, "source", None) or "").lower() if row else ""
+                if snap_src == "schedule":
+                    self._note_schedule_play_failure("stale_playing_clear")
+            except Exception:
+                pass
             self._clear_stale_playing_status()
             return
 
         if not playlist_id:
             return
+        # Auto-resume disabled: ghost idle must clear, not re-issue play() into a loop.
         self._log_warning(
-            "Playback desync: DB playing but slideshow thread dead and mpv idle; resuming",
+            "Playback desync: skipping auto-resume (clear stale instead)",
             extra={
                 "playlist_id": playlist_id,
-                "start_index": resume_index,
-                "source": resume_source,
-                "rule_id": resume_rule_id,
-                "action": "playback_desync_recover",
+                "action": "playback_desync_no_resume",
             },
         )
-        ok = False
-        try:
-            ok = bool(
-                self.play(
-                    int(playlist_id),
-                    start_index=resume_index,
-                    preserve_stall_tracking=True,
-                    source=resume_source,
-                    rule_id=resume_rule_id,
-                )
-            )
-        except Exception as e:
-            self._log_warning(
-                "Playback desync resume raised",
-                extra={
-                    "playlist_id": playlist_id,
-                    "error": str(e),
-                    "type": type(e).__name__,
-                    "action": "playback_desync_recover",
-                },
-            )
-        if not ok:
-            self._clear_stale_playing_status()
+        self._clear_stale_playing_status()
 
     def _mpv_ipc_watchdog_loop(self) -> None:
         interval = self._mpv_manager._watchdog_interval_sec()
@@ -1464,6 +1470,25 @@ class PlaybackService:
         Thread(target=_run, name="playback-stop", daemon=True).start()
         return True
 
+    def _note_schedule_play_failure(self, reason: str) -> None:
+        try:
+            cooldown = float((os.getenv("DSIGN_SCHEDULE_PLAY_FAIL_COOLDOWN_SEC") or "120").strip())
+        except ValueError:
+            cooldown = 120.0
+        cooldown = max(30.0, min(600.0, cooldown))
+        self._schedule_play_cooldown_until = time.monotonic() + cooldown
+        self._log_warning(
+            "Schedule play cooldown armed",
+            extra={
+                "event": "schedule_play_cooldown",
+                "reason": str(reason),
+                "cooldown_sec": cooldown,
+            },
+        )
+
+    def _schedule_play_on_cooldown(self) -> bool:
+        return time.monotonic() < float(getattr(self, "_schedule_play_cooldown_until", 0.0) or 0.0)
+
     def enqueue_play(
         self,
         playlist_id: int,
@@ -1480,6 +1505,26 @@ class PlaybackService:
         """
         app = self._app
         pid = int(playlist_id)
+        if str(source) == "schedule" and self._schedule_play_on_cooldown():
+            self._log_warning(
+                "Schedule enqueue_play skipped — cooldown after failed open",
+                extra={
+                    "playlist_id": pid,
+                    "rule_id": rule_id,
+                    "action": "schedule_play_cooldown_skip",
+                },
+            )
+            return {
+                "accepted": False,
+                "playlist_id": pid,
+                "source": source,
+                "rule_id": rule_id,
+                "start_index": int(start_index or 0),
+                "reason": "schedule_play_cooldown",
+            }
+        if str(source) in ("manual", "override"):
+            # User intent — allow schedule again after this manual attempt settles.
+            self._schedule_play_cooldown_until = 0.0
         # Suppress orphan-desync reclaim while a fresh play is starting.
         self._last_desync_recover_ts = time.monotonic()
         # Soft-cancel idle-logo retries only. Do NOT bump play_seq here — that raced
@@ -1539,10 +1584,17 @@ class PlaybackService:
             except Exception as exc:
                 try:
                     self._playlist_manager.rollback_claimed_play(
-                        pid, reason=f"play_async:{type(exc).__name__}"
+                        pid,
+                        reason=f"play_async:{type(exc).__name__}",
+                        claim_source=str(source),
                     )
                 except Exception:
                     pass
+                if str(source) == "schedule":
+                    try:
+                        self._note_schedule_play_failure(f"play_async:{type(exc).__name__}")
+                    except Exception:
+                        pass
                 self._log_error(
                     "Async play failed",
                     extra={
@@ -1557,10 +1609,17 @@ class PlaybackService:
             if not ok:
                 try:
                     self._playlist_manager.rollback_claimed_play(
-                        pid, reason="play_async_returned_false"
+                        pid,
+                        reason="play_async_returned_false",
+                        claim_source=str(source),
                     )
                 except Exception:
                     pass
+                if str(source) == "schedule":
+                    try:
+                        self._note_schedule_play_failure("play_async_returned_false")
+                    except Exception:
+                        pass
                 self._log_warning(
                     "Async play returned false after claim",
                     extra={
@@ -1592,6 +1651,8 @@ class PlaybackService:
         """
         action = None
         plan_failed = False
+        # User asked to return — clear schedule fail cooldown so the slot can start.
+        self._schedule_play_cooldown_until = 0.0
         # Abort in-flight ytdl immediately; play() bumps again when it starts.
         try:
             self._playlist_manager._bump_playback_run_id()

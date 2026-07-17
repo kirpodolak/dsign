@@ -77,14 +77,17 @@ def test_schedule_engine_releases_session_before_play():
 
     def _play(*_a, **_k):
         release_order.append("play")
-        return True
+        return {"accepted": True}
 
-    playback.play.side_effect = _play
+    playback.enqueue_play.side_effect = _play
+    # Fallback if enqueue_play missing would call play — keep stub.
+    playback.play.side_effect = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("sync play"))
 
     engine.evaluate_and_apply()
 
     assert release_order == ["remove", "play"]
-    playback.play.assert_called_once_with(3, source="schedule", rule_id=7)
+    playback.enqueue_play.assert_called_once_with(3, source="schedule", rule_id=7)
+    playback.play.assert_not_called()
     playback.stop.assert_not_called()
 
 
@@ -147,6 +150,8 @@ def test_schedule_engine_skips_remove_in_request_context(tmp_path):
         playback = MagicMock()
         playback._app = app
         playback.db_session = db
+        playback.enqueue_play = MagicMock(return_value={"accepted": True})
+        playback.enqueue_stop = MagicMock(return_value=True)
         playback.play = MagicMock(return_value=True)
         playback.stop = MagicMock(return_value=True)
 
@@ -160,7 +165,8 @@ def test_schedule_engine_skips_remove_in_request_context(tmp_path):
         payload = svc.rule_to_dict(rule)
         assert payload["enabled"] is False
         assert payload["playlist_name"] == "P"
-        playback.stop.assert_called_once_with(source="schedule")
+        playback.enqueue_stop.assert_called_once_with(source="schedule")
+        playback.stop.assert_not_called()
 
 
 def test_play_seq_abort_after_stop(null_logger, tmp_path, monkeypatch):

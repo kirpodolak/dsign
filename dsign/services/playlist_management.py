@@ -3040,11 +3040,29 @@ class PlaylistManager:
                 return True
         return False
 
-    def rollback_claimed_play(self, playlist_id: int, *, reason: str) -> None:
-        """Drop ghost playing when enqueue_play claimed DB but play() never started."""
+    def rollback_claimed_play(
+        self,
+        playlist_id: int,
+        *,
+        reason: str,
+        claim_source: str = "manual",
+    ) -> None:
+        """Drop ghost playing when enqueue_play claimed DB but play() never started.
+
+        Manual claims roll back to ``stopped``/``manual`` so ScheduleEngine cannot
+        immediately steal the screen (idle→schedule→claim→fail loops).
+        """
         if self._any_play_threads_alive():
             return
         from ..models import PlaybackStatus
+
+        src = str(claim_source or "manual").lower()
+        if src in ("manual", "override"):
+            status, source, keep_pid = "stopped", "manual", int(playlist_id)
+            clear_rule = True
+        else:
+            status, source, keep_pid = "idle", "idle", None
+            clear_rule = True
 
         try:
             with self._control_lock:
@@ -3056,19 +3074,19 @@ class PlaylistManager:
                 if int(row.playlist_id or 0) != int(playlist_id):
                     return
                 self._persist_playback_status(
-                    playlist_id=None,
-                    status="idle",
-                    source="idle",
-                    clear_rule=True,
+                    playlist_id=keep_pid,
+                    status=status,
+                    source=source,
+                    clear_rule=clear_rule,
                 )
             try:
                 if self.socketio:
                     self.socketio.emit(
                         "playback_update",
                         {
-                            "status": "idle",
-                            "playlist_id": None,
-                            "source": "idle",
+                            "status": status,
+                            "playlist_id": keep_pid,
+                            "source": source,
                             "current_media": None,
                         },
                     )
@@ -3080,6 +3098,9 @@ class PlaylistManager:
                     "event": "claimed_play_rollback",
                     "playlist_id": int(playlist_id),
                     "reason": str(reason),
+                    "claim_source": src,
+                    "rollback_status": status,
+                    "rollback_source": source,
                 },
             )
         except Exception as exc:
