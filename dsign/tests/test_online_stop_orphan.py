@@ -28,8 +28,8 @@ def test_stop_play_thread_bumps_run_id_and_tracks_orphan(null_logger, tmp_path):
     assert pm._play_thread is None
     assert len(pm._orphan_play_threads) == 1
     assert thr.is_alive()
-    # New Play must not see a sticky stop bit.
-    assert not pm._stop_event.is_set()
+    # Sticky stop kept while orphan is alive; new Play clears after handoff.
+    assert pm._stop_event.is_set()
 
     release.set()
     thr.join(timeout=2.0)
