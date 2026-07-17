@@ -189,14 +189,26 @@ class ScheduleEngine:
             return
         kind = action[0]
         if kind == "play":
-            self.playback.play(
-                int(action[1]),
-                source="schedule",
-                rule_id=int(action[2]),
-            )
+            enqueue = getattr(self.playback, "enqueue_play", None)
+            if callable(enqueue):
+                enqueue(
+                    int(action[1]),
+                    source="schedule",
+                    rule_id=int(action[2]),
+                )
+            else:
+                self.playback.play(
+                    int(action[1]),
+                    source="schedule",
+                    rule_id=int(action[2]),
+                )
             return
         if kind == "stop":
-            self.playback.stop(source="schedule")
+            enqueue_stop = getattr(self.playback, "enqueue_stop", None)
+            if callable(enqueue_stop):
+                enqueue_stop(source="schedule")
+            else:
+                self.playback.stop(source="schedule")
 
     def _playback_row(self) -> Optional[PlaybackStatus]:
         session = self._db_session()
