@@ -75,6 +75,7 @@ def test_network_loadfile_quiet_ipc_does_not_abort_play(null_logger, tmp_path):
     pm._release_db_session = MagicMock()
     pm._mpv_showing_idle_logo = MagicMock(return_value=True)
     pm._halt_mpv_playback = MagicMock(return_value=True)
+    pm._prepare_mpv_for_new_play = MagicMock()
     pm._apply_mpv_http_headers = MagicMock(return_value=({}, {}))
     pm._apply_mpv_ytdl_options = MagicMock()
     pm._mpv_loadfile_command = MagicMock(
@@ -100,5 +101,5 @@ def test_network_loadfile_quiet_ipc_does_not_abort_play(null_logger, tmp_path):
     assert pm._preloaded_load_cmd is not None
     assert pm._preloaded_load_ipc_ok is False
     pm._issue_ytdl_loadfile.assert_called()
-    pm._halt_mpv_playback.assert_called()
+    pm._prepare_mpv_for_new_play.assert_called()
     pm._commit_play.assert_called()

@@ -207,10 +207,10 @@ class PlaybackPlayRunner:
                 # Network/ytdl opens in two phases (ytdl_hook resolve, then lavf reapply). Unpausing
                 # here made playback start before lavf headers merged — visible "double start".
                 if first_is_network:
-                    # Always hard-stop before a new network loadfile (idle logo, leftover
-                    # ytdl:// from VK↔Rutube switch, or soft-prepare skip during open).
+                    # Conditional prepare: hard-stop only when ytdl/loops/content are on air.
+                    # Unconditional stop on idle Wayland blanks imv and breaks VK/Rutube open.
                     try:
-                        self._pm._halt_mpv_playback(lock_wait=2.0, timeout=3.0)
+                        self._pm._prepare_mpv_for_new_play(lock_wait=2.0)
                     except Exception:
                         pass
                     try:
@@ -344,11 +344,11 @@ class PlaybackPlayRunner:
                     self._pm._mpv_manager.set_playback_session_active(False)
                 except Exception:
                     pass
-                # First network loadfile may already be in mpv before commit — halt it
+                # First network loadfile may already be in mpv before commit — soft-prepare
                 # so a superseded Play cannot leave VK/Rutube owning the screen.
                 if first_is_network:
                     try:
-                        self._pm._halt_mpv_playback(lock_wait=2.0, timeout=2.0)
+                        self._pm._prepare_mpv_for_new_play(lock_wait=1.0)
                     except Exception:
                         pass
 

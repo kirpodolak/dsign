@@ -156,11 +156,13 @@ class PlaylistManager:
         Must run on the HTTP/caller thread *before* claim_playback_intent or schedule
         plan enqueue — otherwise a loadfile still holding ``_play_start_lock`` can
         finish and re-persist ``source=manual`` over the new intent.
+
+        Does **not** bump ``_playback_run_id`` — that races async Stop cleanup against
+        a concurrent Play (force-restart mpv after ytdl loadfile). Run id is bumped in
+        ``_stop_play_thread`` / ``enqueue_play`` instead.
         """
         self.mark_play_starting()
         self._bump_play_seq()
-        # Abort ytdl ensure immediately (do not wait for async stop join).
-        self._bump_playback_run_id()
         try:
             self._stop_event.set()
         except Exception:
@@ -2644,6 +2646,7 @@ class PlaylistManager:
                     join_timeout=join_timeout,
                     halt_mpv=True,
                 )
+                stop_run_id = int(self._playback_run_id)
                 self._cancel_content_cache_prefetches()
                 try:
                     self._logo_manager.ensure_mpv_video_output()
@@ -2687,6 +2690,18 @@ class PlaylistManager:
 
             ok = True
             if show_idle_logo:
+                # Async Stop can finish after a newer Play already opened ytdl — never
+                # force-restart mpv or show idle logo over that play.
+                if not self._is_playback_run_current(stop_run_id):
+                    self.logger.info(
+                        "Stop mpv/logo skipped: superseded by newer play",
+                        extra={
+                            "event": "stop_cleanup_superseded",
+                            "stop_run_id": int(stop_run_id),
+                            "playback_run_id": int(self._playback_run_id),
+                        },
+                    )
+                    return True if update_status else ok
                 # Prove mpv is actually idle. Schedule A2 (loop-file=inf) kept playing
                 # after a "successful" Stop when we only force-restarted for ytdl.
                 try:
@@ -2698,6 +2713,8 @@ class PlaylistManager:
                     halted = bool(self._halt_mpv_playback(lock_wait=15.0, timeout=3.0))
                 except Exception:
                     halted = False
+                if not self._is_playback_run_current(stop_run_id):
+                    return True if update_status else ok
                 still_on = False
                 try:
                     still_on = (not halted) or self._mpv_content_still_on_air()
@@ -2718,6 +2735,8 @@ class PlaylistManager:
                         )
                     except Exception:
                         halted = False
+                    if not self._is_playback_run_current(stop_run_id):
+                        return True if update_status else ok
                     try:
                         still_on = self._mpv_content_still_on_air()
                     except Exception:

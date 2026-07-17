@@ -1389,6 +1389,7 @@ class PlaybackService:
         schedule A2 (loop-file=inf) does not keep rolling while status flips to stopped.
         """
         app = self._app
+        halt_run_id = int(getattr(self._playlist_manager, "_playback_run_id", 0) or 0)
         # Invalidate in-flight play immediately so late persist cannot win.
         # (stop() will bump again under its teardown — that is intentional.)
         try:
@@ -1399,8 +1400,10 @@ class PlaybackService:
             except Exception:
                 pass
         # Best-effort sync halt before the HTTP response — kills local loops fast.
+        # Skip when a concurrent Play already bumped playback_run_id (Stop→Play race).
         try:
-            self._playlist_manager._halt_mpv_playback(lock_wait=3.0, timeout=2.0)
+            if int(getattr(self._playlist_manager, "_playback_run_id", 0) or 0) == halt_run_id:
+                self._playlist_manager._halt_mpv_playback(lock_wait=3.0, timeout=2.0)
         except Exception:
             pass
         self._last_desync_recover_ts = time.monotonic()
@@ -1449,6 +1452,8 @@ class PlaybackService:
         # Stop / return-to-schedule still call invalidate_in_flight_play().
         try:
             self._playlist_manager.mark_play_starting()
+            # Supersede async Stop cleanup before loadfile/ytdl on the daemon thread.
+            self._playlist_manager._bump_playback_run_id()
         except Exception:
             pass
         # Claim source on the caller thread before the daemon loadfile starts so the

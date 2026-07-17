@@ -52,10 +52,10 @@ def test_mpv_has_active_media_true_for_opening_ytdl(null_logger, tmp_path):
     assert pm._mpv_has_active_media() is True
 
 
-def test_invalidate_bumps_playback_run_id(null_logger, tmp_path):
+def test_invalidate_does_not_bump_playback_run_id(null_logger, tmp_path):
     pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
     run0 = int(pm._playback_run_id)
     pm.invalidate_in_flight_play()
-    assert int(pm._playback_run_id) == run0 + 1
+    assert int(pm._playback_run_id) == run0
     assert pm._stop_event.is_set()
     pm._mpv_manager.set_playback_stream_opening.assert_called_with(False)
