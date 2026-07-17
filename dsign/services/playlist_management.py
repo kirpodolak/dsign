@@ -228,49 +228,54 @@ class PlaylistManager:
         persist: Callable[[], None],
         on_abort: Optional[Callable[[], None]] = None,
     ) -> bool:
-        """Atomically finish play against Stop: thread + persist under control lock."""
+        """Atomically finish play against Stop: thread + persist under control lock.
+
+        Never join threads or run mpv IPC under ``_control_lock`` — that deadlocked
+        Stop (waiting on control while holding handoff) and piled up play workers.
+        """
+        abort_after = False
         with self._control_lock:
             if not self._is_play_seq_current(play_seq):
-                if on_abort is not None:
+                abort_after = True
+            else:
+                start_thread()
+                if not self._is_play_seq_current(play_seq):
+                    # Stop won between start and persist — orphan the thread; abort outside.
                     try:
-                        on_abort()
-                    except Exception:
-                        pass
-                return False
-            start_thread()
-            if not self._is_play_seq_current(play_seq):
-                # Stop won between start and persist — tear down without writing playing.
-                try:
-                    if self._play_thread and self._play_thread.is_alive():
                         self._stop_event.set()
-                        self._play_thread.join(timeout=1.0)
-                except Exception:
-                    pass
-                self._play_thread = None
-                if on_abort is not None:
-                    try:
-                        on_abort()
                     except Exception:
                         pass
-                return False
-            persist()
-            if not self._is_play_seq_current(play_seq):
-                # Persist raced under lock should be rare; Stop holds same lock so this
-                # path means seq was bumped elsewhere — re-stop without releasing playing.
-                try:
-                    if self._play_thread and self._play_thread.is_alive():
-                        self._stop_event.set()
-                        self._play_thread.join(timeout=1.0)
-                except Exception:
-                    pass
-                self._play_thread = None
-                if on_abort is not None:
-                    try:
-                        on_abort()
-                    except Exception:
-                        pass
-                return False
-            return True
+                    thr = self._play_thread
+                    self._play_thread = None
+                    if thr is not None and thr.is_alive():
+                        try:
+                            self._orphan_play_threads.append(thr)
+                        except Exception:
+                            pass
+                    abort_after = True
+                else:
+                    persist()
+                    if not self._is_play_seq_current(play_seq):
+                        try:
+                            self._stop_event.set()
+                        except Exception:
+                            pass
+                        thr = self._play_thread
+                        self._play_thread = None
+                        if thr is not None and thr.is_alive():
+                            try:
+                                self._orphan_play_threads.append(thr)
+                            except Exception:
+                                pass
+                        abort_after = True
+                    else:
+                        return True
+        if abort_after and on_abort is not None:
+            try:
+                on_abort()
+            except Exception:
+                pass
+        return False
 
     def set_external_media_service(self, service) -> None:
         """Attach external media resolver service (optional)."""
@@ -2503,8 +2508,8 @@ class PlaylistManager:
         """Play playlist with profile support.
 
         Does **not** hold ``_play_start_lock`` across loadfile/ytdl — that blocked
-        Stop→Play for minutes (play_lock_timeout). Handoff lock is only around
-        ``_stop_play_thread`` + ``_begin_play_seq`` inside PlaybackPlayRunner.
+        Stop→Play (play_lock_timeout). Handoff is only around ``_begin_play_seq``;
+        Stop never takes handoff (control_lock only).
         """
         with self._app_context():
             with self._override_lock:
@@ -2520,15 +2525,19 @@ class PlaylistManager:
             )
 
     def _play_lock_timeout_sec(self) -> float:
-        """Handoff lock only (not full loadfile). Keep short so Stop→Play stays responsive."""
+        """Handoff lock only (begin-seq). Keep short — Stop does not use this lock."""
         try:
-            return float((os.getenv("DSIGN_PLAY_LOCK_TIMEOUT_SEC") or "8").strip())
+            return float((os.getenv("DSIGN_PLAY_LOCK_TIMEOUT_SEC") or "2").strip())
         except ValueError:
-            return 8.0
+            return 2.0
 
     def _acquire_play_handoff(self, *, playlist_id: int) -> bool:
-        """Serialize begin-seq / status write. Never held across join/loadfile/IPC halt."""
-        lock_timeout = max(0.05, min(60.0, float(self._play_lock_timeout_sec())))
+        """Serialize Play begin-seq only. Never held across join/loadfile/IPC/DB/control_lock.
+
+        Stop must not take this lock. Timeouts stay short — a healthy holder releases
+        in milliseconds; waiting 8–13s only piled up futex waiters.
+        """
+        lock_timeout = max(0.05, min(2.0, float(self._play_lock_timeout_sec())))
         for attempt in range(2):
             acquired = self._play_start_lock.acquire(timeout=lock_timeout)
             if acquired:
@@ -2538,31 +2547,26 @@ class PlaylistManager:
                 extra={
                     "event": "play_lock_timeout",
                     "playlist_id": int(playlist_id),
-                    "timeout_sec": lock_timeout,
+                    "timeout_sec": float(lock_timeout),
                     "attempt": attempt + 1,
                 },
             )
-            # Nudge the holder without doing long IPC under contention.
+            # Invalidate the holder’s begin-seq path; do not join/halt here.
             try:
-                self._signal_play_threads_stop()
+                self._bump_play_seq()
             except Exception:
                 pass
             try:
                 self._mpv_manager.set_playback_stream_opening(False)
             except Exception:
                 pass
-            # Short join only — never a multi-second mpv halt while waiting for handoff.
-            try:
-                self._join_play_threads(join_timeout=0.5)
-            except Exception:
-                pass
-            lock_timeout = min(lock_timeout, 2.0)
+            lock_timeout = min(lock_timeout, 0.5)
         self.logger.warning(
             "play handoff lock timeout — giving up",
             extra={
                 "event": "play_lock_timeout",
                 "playlist_id": int(playlist_id),
-                "timeout_sec": lock_timeout,
+                "timeout_sec": float(lock_timeout),
             },
         )
         return False
@@ -2760,85 +2764,73 @@ class PlaylistManager:
             stop_run_id = int(self._playback_run_id)
             last_playlist_id = None
 
-            # Brief handoff: status + python state only (no join, no mpv IPC).
-            # If Play holds handoff for begin-seq, skip — do not overwrite its claim.
-            if not self._acquire_play_handoff(playlist_id=0):
-                self.logger.info(
-                    "Stop skipped: play handoff busy (newer play starting)",
-                    extra={
-                        "event": "stop_superseded",
-                        "reason": "handoff_busy",
-                        "source": source,
-                    },
+            # Status under control_lock only — NEVER take play handoff. Holding handoff
+            # while waiting on control_lock (Play commit/IPC) caused play_lock_timeout
+            # for every later Play/Stop and left playback-* threads on futex_do_wait.
+            with self._control_lock:
+                if stop_generation is not None and not self._is_playback_run_current(
+                    int(stop_generation)
+                ):
+                    self.logger.info(
+                        "Stop skipped: superseded under lock",
+                        extra={
+                            "event": "stop_superseded",
+                            "stop_generation": int(stop_generation),
+                            "playback_run_id": int(self._playback_run_id),
+                        },
+                    )
+                    return True
+
+                playback = (
+                    self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
                 )
-                return True
-            try:
-                with self._control_lock:
-                    if stop_generation is not None and not self._is_playback_run_current(
-                        int(stop_generation)
-                    ):
-                        self.logger.info(
-                            "Stop skipped: superseded under lock",
-                            extra={
-                                "event": "stop_superseded",
-                                "stop_generation": int(stop_generation),
-                                "playback_run_id": int(self._playback_run_id),
-                            },
+                last_playlist_id = playback.playlist_id
+                # Allow a fresh idle-logo retry after this Stop (Play cancels via epoch).
+                self._play_start_mono = 0.0
+                self._clear_play_thread_state(
+                    preserve_stall_tracking=preserve_stall_tracking,
+                    preserve_loop_position=preserve_loop_position,
+                )
+                stop_run_id = int(self._playback_run_id)
+                self._cancel_content_cache_prefetches()
+
+                # Persist stopped/idle BEFORE idle-logo IPC, under the same lock as play
+                # commit so a late schedule play cannot resurrect status=playing.
+                if update_status:
+                    if source == "schedule":
+                        self._persist_playback_status(
+                            playlist_id=None,
+                            status="idle",
+                            source="idle",
+                            clear_rule=True,
                         )
-                        return True
+                    else:
+                        self._persist_playback_status(
+                            playlist_id=last_playlist_id,
+                            status="stopped",
+                            source="manual",
+                            clear_rule=True,
+                        )
 
-                    playback = (
-                        self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
-                    )
-                    last_playlist_id = playback.playlist_id
-                    # Allow a fresh idle-logo retry after this Stop (Play cancels via epoch).
-                    self._play_start_mono = 0.0
-                    self._clear_play_thread_state(
-                        preserve_stall_tracking=preserve_stall_tracking,
-                        preserve_loop_position=preserve_loop_position,
-                    )
-                    stop_run_id = int(self._playback_run_id)
-                    self._cancel_content_cache_prefetches()
-
-                    # Persist stopped/idle BEFORE idle-logo IPC, under the same lock as play
-                    # commit so a late schedule play cannot resurrect status=playing.
-                    if update_status:
-                        if source == "schedule":
-                            self._persist_playback_status(
-                                playlist_id=None,
-                                status="idle",
-                                source="idle",
-                                clear_rule=True,
+                    try:
+                        if self.socketio:
+                            emit_status = "idle" if source == "schedule" else "stopped"
+                            emit_playlist = (
+                                None if source == "schedule" else last_playlist_id
                             )
-                        else:
-                            self._persist_playback_status(
-                                playlist_id=last_playlist_id,
-                                status="stopped",
-                                source="manual",
-                                clear_rule=True,
+                            self.socketio.emit(
+                                "playback_update",
+                                {
+                                    "status": emit_status,
+                                    "playlist_id": emit_playlist,
+                                    "current_media": None,
+                                },
                             )
-
-                        try:
-                            if self.socketio:
-                                emit_status = "idle" if source == "schedule" else "stopped"
-                                emit_playlist = (
-                                    None if source == "schedule" else last_playlist_id
-                                )
-                                self.socketio.emit(
-                                    "playback_update",
-                                    {
-                                        "status": emit_status,
-                                        "playlist_id": emit_playlist,
-                                        "current_media": None,
-                                    },
-                                )
-                        except Exception:
-                            pass
-            finally:
-                self._release_play_handoff()
+                    except Exception:
+                        pass
 
             ok = True
-            # mpv halt / idle logo — always outside handoff.
+            # mpv halt / idle logo — outside all play/control locks.
             try:
                 self._logo_manager.ensure_mpv_video_output()
             except Exception:

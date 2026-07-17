@@ -46,13 +46,19 @@ class PlaybackPlayRunner:
                 self._pm._prepare_mpv_for_new_play(lock_wait=1.0)
             except Exception:
                 pass
-            # Short exclusive handoff — begin-seq only (never join/loadfile/IPC).
+            try:
+                self._pm._cancel_content_cache_prefetches()
+            except Exception:
+                pass
+            try:
+                self._pm._prune_media_backoff()
+            except Exception:
+                pass
+            # Micro handoff — begin-seq only (never join/loadfile/IPC/DB/control_lock).
             if not self._pm._acquire_play_handoff(playlist_id=int(playlist_id)):
                 return False
             try:
                 play_run_id = int(getattr(self._pm, "_playback_run_id", 0) or 0)
-                self._pm._cancel_content_cache_prefetches()
-                self._pm._prune_media_backoff()
                 play_seq = self._pm._begin_play_seq()
             finally:
                 self._pm._release_play_handoff()
