@@ -93,7 +93,7 @@ flowchart TD
 | **H-SUB** | Subprocess timeout audit (`amixer` и др.) | 🔴 | improvement §3 | — |
 | **H-WIFI** | SSID/password validation (1–32, WPA 8–63) | ✅ | improvement §5 | — |
 | **H-UPL** | Upload: disk check до save, streaming >100MB | ✅ | improvement §4 | `upload_disk.py`, `upload_stream.py` |
-| **D2-OPS** | `DSIGN_API_TOKEN` на fleet + проверка schedule Bearer | 🟡 | 4phase D2, schedule §D2.5 | — |
+| **D2-OPS** | `DSIGN_API_TOKEN` на fleet + schedule Bearer | 🟡 | 4phase D2, [D2_OPS_FLEET.md](./D2_OPS_FLEET.md) | runbook ✅; fleet checklist в §4 |
 | **D2-24H** | Offline 24 ч — расписание по timezone | 🟡 | schedule §D2.4, 4phase D2 | — |
 | **C3** | Nested playlists (DB + flat play) | 🟡 | 4phase §C3 | — |
 | **H-SD** | Graceful shutdown playback (join thread, logo, DB) | ✅ | improvement §6 | `graceful_shutdown`, `DSIGN_SHUTDOWN_JOIN_SEC` |
@@ -305,8 +305,9 @@ flowchart TD
 ### D2 — расписание (ops + тест)
 
 - [ ] **D2-24H:** отключить NTP 24 ч, слоты срабатывают по `settings.timezone`
-- [ ] **D2-OPS:** на fleet задать `DSIGN_API_TOKEN`; curl Bearer на `/api/schedule/rules`
+- [ ] **D2-OPS fleet rollout:** пройти checklist в [D2_OPS_FLEET.md](./D2_OPS_FLEET.md) §4 на каждом плеере
 
+*Runbook (код + curl):* [D2_OPS_FLEET.md](./D2_OPS_FLEET.md)  
 *Источник:* [schedule §D2.4–D2.5](./dsign_schedule_spec.md), [4phase §D2](./dsign_4phase_checklist.md)
 
 ### C3 — Nested playlists
@@ -416,7 +417,7 @@ Extract-only refactor `playlist_management.py` → отдельные модул
 ```
 
 **Следующий логичный PR по продукту:** **D1 OTA**  
-**Следующий ops на fleet:** **D2-OPS** (`DSIGN_API_TOKEN` + schedule Bearer)  
+**Следующий ops на fleet:** **D2-OPS** — [D2_OPS_FLEET.md](./D2_OPS_FLEET.md)  
 **Для commercial v1.0 после P0:** **COM-POP** + **COM-HTTPS** + **COM-SEC**
 
 ---
@@ -425,6 +426,7 @@ Extract-only refactor `playlist_management.py` → отдельные модул
 
 | Дата | Изменение |
 |------|-----------|
+| 2026-07-10 | D2-OPS runbook: docs/D2_OPS_FLEET.md (fleet Bearer checklist) |
 | 2026-07-10 | Docs sync: H-REF ✅, 170 pytest, Tier 2 partial, порядок → D1 OTA |
 | 2026-07-10 | H-COAL ✅ (adaptive MPV restart coalesce; docs sync) |
 | 2026-07-10 | H-RQ ✅ (recovery queue; 3+1 pytest) |

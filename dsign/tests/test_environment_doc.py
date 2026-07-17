@@ -28,3 +28,11 @@ def test_environment_doc_covers_deployment_paths():
     text = _ENV_DOC.read_text(encoding="utf-8")
     assert "/etc/dsign/api.env" in text
     assert "wayland.env" in text
+
+
+def test_d2_ops_fleet_runbook_exists():
+    path = _REPO_ROOT / "docs" / "D2_OPS_FLEET.md"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    assert "dsign-api-token" in text
+    assert "/api/schedule/rules" in text
