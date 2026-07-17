@@ -33,7 +33,7 @@ def test_play_does_not_acquire_lock_around_impl():
 def test_handoff_retries_after_busy_lock(null_logger, tmp_path):
     pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
     pm._play_lock_timeout_sec = MagicMock(return_value=0.05)  # type: ignore[method-assign]
-    pm._halt_mpv_playback = MagicMock(return_value=True)  # type: ignore[method-assign]
+    pm._bump_play_seq = MagicMock(wraps=pm._bump_play_seq)  # type: ignore[method-assign]
 
     assert pm._play_start_lock.acquire(blocking=False)
     result: list[bool] = []
@@ -49,4 +49,5 @@ def test_handoff_retries_after_busy_lock(null_logger, tmp_path):
     thr.join(timeout=2.0)
     assert result == [True]
     pm._release_play_handoff()
-    pm._halt_mpv_playback.assert_called()
+    # Busy retry bumps play_seq — never join/halt while waiting for handoff.
+    pm._bump_play_seq.assert_called()
