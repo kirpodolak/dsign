@@ -62,6 +62,12 @@ class PlaybackPlayRunner:
                 play_seq = self._pm._begin_play_seq()
             finally:
                 self._pm._release_play_handoff()
+            # This Play owns the run — clear sticky stop left for orphan slideshows
+            # so loadfile / network ensure are not aborted immediately.
+            try:
+                self._pm._stop_event.clear()
+            except Exception:
+                pass
             # Mark playback starting before DB/profile IPC so Wi-Fi-on-display skips.
             self._pm._set_playback_active_marker(True)
             self._pm._audio_route_applied_for_play = False

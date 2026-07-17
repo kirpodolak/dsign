@@ -157,8 +157,8 @@ grep -q "Micro handoff" "$RUNTIME_ROOT/services/playback_play.py" || { echo "MIS
 grep -q "Never join threads or run mpv IPC under" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING commit_play no-IPC"; fail=1; }
 grep -q "interrupt_blocked_ipc" "$RUNTIME_ROOT/services/mpv_management.py" || { echo "MISSING interrupt_blocked_ipc"; fail=1; }
 grep -q "interrupt_ipc_on_timeout" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING interrupt_ipc_on_timeout"; fail=1; }
-grep -q "_play_exec_lock" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING _play_exec_lock"; fail=1; }
-grep -q "play_exec_lock_timeout" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING play_exec_lock_timeout"; fail=1; }
+grep -q "_post_orphan_ipc_until" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING _post_orphan_ipc_until"; fail=1; }
+grep -q "_loadfile_ipc_lock_wait_sec" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING _loadfile_ipc_lock_wait_sec"; fail=1; }
 [[ "$fail" -eq 0 ]] || die "marker check failed — wrong tree or fetch failed"
 
 find "$RUNTIME_ROOT" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true

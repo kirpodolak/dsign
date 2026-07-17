@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from threading import Event, Thread
 from unittest.mock import MagicMock
 
@@ -31,6 +32,8 @@ def test_join_timeout_interrupts_ipc_and_halts(null_logger, tmp_path):
     pm._halt_mpv_playback.assert_called_once()
     assert len(pm._orphan_play_threads) == 1
     assert thr.is_alive()
+    assert pm._post_orphan_ipc_until > time.monotonic()
+    assert pm._loadfile_ipc_lock_wait_sec() == 5.0
 
     release.set()
     thr.join(timeout=2.0)
@@ -54,45 +57,10 @@ def test_stop_play_thread_interrupts_on_orphan(null_logger, tmp_path):
     pm._stop_play_thread(join_timeout=0.15, halt_mpv=False)
 
     pm._mpv_manager.interrupt_blocked_ipc.assert_called()
+    # Sticky stop kept while orphan alive — new Play clears after handoff.
+    assert pm._stop_event.is_set()
     release.set()
     thr.join(timeout=2.0)
-
-
-def test_play_exec_lock_serializes_bodies(null_logger, tmp_path):
-    pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
-    order: list[str] = []
-    hold = Event()
-    started = Event()
-
-    def _slow_impl(*_a, **_k):
-        order.append("enter")
-        started.set()
-        hold.wait(timeout=3.0)
-        order.append("leave")
-        return True
-
-    pm._play_impl = _slow_impl  # type: ignore[method-assign]
-    pm._app = None
-
-    def _run():
-        # Bypass app_context by calling acquire + impl path used by play().
-        assert pm._acquire_play_exec(playlist_id=1)
-        try:
-            pm._play_impl(1)
-        finally:
-            pm._release_play_exec()
-
-    t1 = Thread(target=_run, daemon=True)
-    t1.start()
-    assert started.wait(timeout=2.0)
-
-    # Second acquire must wait until first releases.
-    assert pm._play_exec_lock.acquire(blocking=False) is False
-    hold.set()
-    t1.join(timeout=2.0)
-    assert order == ["enter", "leave"]
-    assert pm._acquire_play_exec(playlist_id=2)
-    pm._release_play_exec()
 
 
 def test_interrupt_blocked_ipc_resets_session(null_logger, tmp_path):
@@ -103,3 +71,13 @@ def test_interrupt_blocked_ipc_resets_session(null_logger, tmp_path):
     mgr._ipc_session = sess
     mgr.interrupt_blocked_ipc()
     sess.reset.assert_called_once()
+
+
+def test_play_does_not_hold_exec_lock_across_body():
+    """Regression: full-body exec lock caused play_async_false after Stop→Play."""
+    from dsign.services import playlist_management as pm_mod
+    import inspect
+
+    src = inspect.getsource(pm_mod.PlaylistManager.play)
+    assert "_acquire_play_exec" not in src
+    assert "_play_exec_lock" not in src

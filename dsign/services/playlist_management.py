@@ -96,15 +96,14 @@ class PlaylistManager:
         self._play_start_mono: float = 0.0
         # One play()/loadfile at a time — parallel schedule+manual starts race to idle.
         self._play_start_lock = Lock()
-        # Serialize full play() bodies so concurrent enqueue_play workers cannot all
-        # bump run_id / clear stop_event / fight ytdl IPC (futex pile-up on Pi).
-        self._play_exec_lock = Lock()
         # After ScheduleEngine attach / service restart — desync watch must not
         # clear or re-stop a boot resume that is still settling.
         self._boot_grace_until: float = 0.0
         # Invalidates in-flight ytdl ensure() after Stop join timeout (orphan thread).
         self._playback_run_id: int = 0
         self._orphan_play_threads: List[Any] = []
+        # After orphan IPC interrupt, use short loadfile lock waits (not prefer_long 45s).
+        self._post_orphan_ipc_until: float = 0.0
 
     def begin_boot_grace(self, seconds: float = 60.0) -> None:
         self._boot_grace_until = time.monotonic() + max(0.0, float(seconds))
@@ -1199,10 +1198,12 @@ class PlaylistManager:
             self._last_loaded_media_key = key
 
         try:
+            lock_wait = self._loadfile_ipc_lock_wait_sec()
             return self._mpv_manager._send_command(
                 {"command": load_cmd},
                 timeout=timeout,
                 max_attempts=max_attempts,
+                lock_wait=lock_wait,
             )
         finally:
             with self._load_lock:
@@ -2269,6 +2270,10 @@ class PlaylistManager:
     def _interrupt_orphan_playback_ipc(self) -> None:
         """Unblock Play after join timeout: fail orphan ``sess.command`` / free ``_ipc_lock``."""
         try:
+            self._post_orphan_ipc_until = time.monotonic() + 45.0
+        except Exception:
+            self._post_orphan_ipc_until = 0.0
+        try:
             mgr = self._mpv_manager
             interrupt = getattr(mgr, "interrupt_blocked_ipc", None)
             if callable(interrupt):
@@ -2279,6 +2284,16 @@ class PlaylistManager:
                     reset()
         except Exception:
             pass
+
+    def _loadfile_ipc_lock_wait_sec(self) -> Optional[float]:
+        """After orphan interrupt, avoid prefer_long (45s) waits that stall Stop→Play."""
+        try:
+            until = float(getattr(self, "_post_orphan_ipc_until", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            until = 0.0
+        if until and time.monotonic() < until:
+            return 5.0
+        return None
 
     def _join_play_threads(
         self,
@@ -2335,9 +2350,14 @@ class PlaylistManager:
         preserve_loop_position: bool = False,
     ) -> None:
         """Reset Python-side playback markers. No mpv IPC (keeps handoff short)."""
-        # Always clear — orphans must abort via playback_run_id, not a sticky stop bit
-        # that would make the next Play's slideshow exit immediately.
-        self._stop_event.clear()
+        # If an orphan slideshow is still alive, keep stop set so its wait loops exit.
+        # The new slideshow clears stop when it starts (playback_run_id owns the run).
+        orphans_alive = any(
+            thr is not None and thr.is_alive()
+            for thr in (getattr(self, "_orphan_play_threads", None) or [])
+        )
+        if not orphans_alive:
+            self._stop_event.clear()
         self._item_skip_event.clear()
         with self._item_skip_lock:
             self._item_skip_direction = "next"
@@ -2545,26 +2565,23 @@ class PlaylistManager:
         Stop→Play (play_lock_timeout). Handoff is only around ``_begin_play_seq``;
         Stop never takes handoff (control_lock only).
 
-        Full ``play()`` bodies are single-flight via ``_play_exec_lock`` so concurrent
-        ``enqueue_play`` workers cannot stack on futex behind one stuck ytdl open.
+        Concurrent ``enqueue_play`` workers are allowed: the newer Play bumps
+        ``playback_run_id`` / interrupts orphan IPC, and the older Play aborts via
+        play_seq checks. A full-body exec lock caused ``play_async_false`` while the
+        first Play was still inside ytdl open after Stop.
         """
         with self._app_context():
             with self._override_lock:
                 self._override_return_ctx = None
                 self._playlist_single_pass = False
-            if not self._acquire_play_exec(playlist_id=int(playlist_id)):
-                return False
-            try:
-                return self._play_impl(
-                    playlist_id,
-                    start_index=start_index,
-                    preserve_stall_tracking=preserve_stall_tracking,
-                    single_pass=False,
-                    source=source,
-                    rule_id=rule_id,
-                )
-            finally:
-                self._release_play_exec()
+            return self._play_impl(
+                playlist_id,
+                start_index=start_index,
+                preserve_stall_tracking=preserve_stall_tracking,
+                single_pass=False,
+                source=source,
+                rule_id=rule_id,
+            )
 
     def _play_lock_timeout_sec(self) -> float:
         """Handoff lock only (begin-seq). Keep short — Stop does not use this lock."""
@@ -2572,50 +2589,6 @@ class PlaylistManager:
             return float((os.getenv("DSIGN_PLAY_LOCK_TIMEOUT_SEC") or "2").strip())
         except ValueError:
             return 2.0
-
-    def _play_exec_timeout_sec(self) -> float:
-        try:
-            return float((os.getenv("DSIGN_PLAY_EXEC_LOCK_TIMEOUT_SEC") or "5").strip())
-        except ValueError:
-            return 5.0
-
-    def _acquire_play_exec(self, *, playlist_id: int = 0) -> bool:
-        """One play() body at a time. On timeout, interrupt orphan IPC and retry once."""
-        lock_timeout = max(0.5, min(15.0, float(self._play_exec_timeout_sec())))
-        if self._play_exec_lock.acquire(timeout=lock_timeout):
-            return True
-        self.logger.warning(
-            "play exec lock busy — interrupting orphan IPC and retrying",
-            extra={
-                "event": "play_exec_lock_timeout",
-                "playlist_id": int(playlist_id),
-                "timeout_sec": float(lock_timeout),
-                "attempt": 1,
-            },
-        )
-        try:
-            self._signal_play_threads_stop()
-        except Exception:
-            pass
-        self._interrupt_orphan_playback_ipc()
-        retry_timeout = min(lock_timeout, 2.0)
-        if self._play_exec_lock.acquire(timeout=retry_timeout):
-            return True
-        self.logger.warning(
-            "play exec lock timeout — giving up",
-            extra={
-                "event": "play_exec_lock_timeout",
-                "playlist_id": int(playlist_id),
-                "timeout_sec": float(retry_timeout),
-            },
-        )
-        return False
-
-    def _release_play_exec(self) -> None:
-        try:
-            self._play_exec_lock.release()
-        except RuntimeError:
-            pass
 
     def _acquire_play_handoff(self, *, playlist_id: int) -> bool:
         """Serialize Play begin-seq only. Never held across join/loadfile/IPC/DB/control_lock.
@@ -2715,24 +2688,14 @@ class PlaylistManager:
         )
 
         with self._app_context():
-            if not self._acquire_play_exec(playlist_id=int(playlist_id)):
-                return {
-                    "success": False,
-                    "playlist_id": int(playlist_id),
-                    "return_to_previous": bool(return_to_previous),
-                    "previous": previous,
-                }
-            try:
-                ok = self._play_impl(
-                    int(playlist_id),
-                    start_index=int(start_index or 0),
-                    preserve_stall_tracking=True,
-                    single_pass=True,
-                    source="override",
-                    rule_id=None,
-                )
-            finally:
-                self._release_play_exec()
+            ok = self._play_impl(
+                int(playlist_id),
+                start_index=int(start_index or 0),
+                preserve_stall_tracking=True,
+                single_pass=True,
+                source="override",
+                rule_id=None,
+            )
 
         return {
             "success": bool(ok),
