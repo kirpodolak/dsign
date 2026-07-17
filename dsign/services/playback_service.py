@@ -570,10 +570,25 @@ class PlaybackService:
                             showing_logo = False
                     play_starting = False
                     try:
-                        play_starting = (
+                        start_age = (
                             time.monotonic()
-                            - float(getattr(self._playlist_manager, "_play_start_mono", 0.0) or 0.0)
-                        ) < 45.0
+                            - float(
+                                getattr(self._playlist_manager, "_play_start_mono", 0.0) or 0.0
+                            )
+                        )
+                        play_starting = start_age < 45.0
+                        try:
+                            if (
+                                getattr(
+                                    self._mpv_manager,
+                                    "_playback_stream_opening",
+                                    False,
+                                )
+                                is True
+                            ):
+                                play_starting = play_starting or start_age < 180.0
+                        except Exception:
+                            pass
                     except Exception:
                         play_starting = False
                     if showing_logo and not play_starting:
@@ -1383,10 +1398,19 @@ class PlaybackService:
         return True
 
     def enqueue_stop(self, *, source: str = "manual") -> bool:
-        """Stop on a daemon thread so toggle/Stop HTTP never wait on mpv IPC."""
+        """Stop on a daemon thread so toggle/Stop HTTP never wait on full teardown.
+
+        Still issues an immediate best-effort mpv halt on the caller thread so
+        schedule A2 (loop-file=inf) does not keep rolling while status flips to stopped.
+        """
         app = self._app
+        # Bump run id on the caller thread so ytdl ensure() aborts immediately; play()
+        # will bump again in _stop_play_thread when it starts.
+        try:
+            self._playlist_manager._bump_playback_run_id()
+        except Exception:
+            pass
         # Invalidate in-flight play immediately so late persist cannot win.
-        # (stop() will bump again under its teardown — that is intentional.)
         try:
             self._playlist_manager.invalidate_in_flight_play()
         except Exception:
@@ -1394,6 +1418,11 @@ class PlaybackService:
                 self._playlist_manager._bump_play_seq()
             except Exception:
                 pass
+        # Best-effort sync halt before the HTTP response — kills local loops fast.
+        try:
+            self._playlist_manager._halt_mpv_playback(lock_wait=3.0, timeout=2.0)
+        except Exception:
+            pass
         self._last_desync_recover_ts = time.monotonic()
 
         def _run() -> None:
@@ -1518,6 +1547,11 @@ class PlaybackService:
         """
         action = None
         plan_failed = False
+        # Abort in-flight ytdl immediately; play() bumps again when it starts.
+        try:
+            self._playlist_manager._bump_playback_run_id()
+        except Exception:
+            pass
         # Kill in-flight manual play before we rewrite PlaybackStatus / plan.
         try:
             self._playlist_manager.invalidate_in_flight_play()
