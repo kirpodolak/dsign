@@ -2247,20 +2247,19 @@ class PlaylistManager:
             return
         self._halt_mpv_playback(lock_wait=float(lock_wait), timeout=2.0)
 
-    def _stop_play_thread(
-        self,
-        *,
-        preserve_stall_tracking: bool = False,
-        preserve_loop_position: bool = False,
-        join_timeout: float = 2.0,
-        halt_mpv: bool = False,
-    ):
-        # Invalidate before join so a concurrent play() finishing loadfile aborts.
+    def _signal_play_threads_stop(self) -> None:
+        """Invalidate in-flight play/slideshow. Safe without handoff/control locks."""
         self._bump_play_seq()
         # Bump run id *before* clearing stop_event so a ytdl ensure() still inside
         # open-wait cannot re-issue loadfile / persist idle over the next Play.
         self._bump_playback_run_id()
+        try:
+            self._stop_event.set()
+        except Exception:
+            pass
 
+    def _join_play_threads(self, *, join_timeout: float = 2.0) -> None:
+        """Join slideshow threads. Must NOT run under ``_play_start_lock`` (handoff)."""
         alive: List[Any] = []
         if self._play_thread is not None and self._play_thread.is_alive():
             alive.append(self._play_thread)
@@ -2269,28 +2268,37 @@ class PlaylistManager:
                 alive.append(thr)
         self._orphan_play_threads = []
 
-        if alive:
-            self._stop_event.set()
-            join_sec = max(0.1, float(join_timeout))
-            for thr in alive:
-                try:
-                    thr.join(timeout=join_sec)
-                except Exception:
-                    pass
-            still_alive = [thr for thr in alive if thr.is_alive()]
-            if still_alive:
-                self._orphan_play_threads = still_alive
-                self.logger.warning(
-                    "Playback thread did not exit before join timeout",
-                    extra={
-                        "event": "playback_thread_join_timeout",
-                        "join_timeout_sec": join_sec,
-                        "orphan_threads": len(still_alive),
-                        "playback_run_id": int(self._playback_run_id),
-                    },
-                )
+        if not alive:
+            self._play_thread = None
+            return
 
+        join_sec = max(0.1, float(join_timeout))
+        for thr in alive:
+            try:
+                thr.join(timeout=join_sec)
+            except Exception:
+                pass
+        still_alive = [thr for thr in alive if thr.is_alive()]
+        if still_alive:
+            self._orphan_play_threads = still_alive
+            self.logger.warning(
+                "Playback thread did not exit before join timeout",
+                extra={
+                    "event": "playback_thread_join_timeout",
+                    "join_timeout_sec": join_sec,
+                    "orphan_threads": len(still_alive),
+                    "playback_run_id": int(self._playback_run_id),
+                },
+            )
         self._play_thread = None
+
+    def _clear_play_thread_state(
+        self,
+        *,
+        preserve_stall_tracking: bool = False,
+        preserve_loop_position: bool = False,
+    ) -> None:
+        """Reset Python-side playback markers. No mpv IPC (keeps handoff short)."""
         # Always clear — orphans must abort via playback_run_id, not a sticky stop bit
         # that would make the next Play's slideshow exit immediately.
         self._stop_event.clear()
@@ -2313,6 +2321,30 @@ class PlaylistManager:
             self._mpv_manager.set_playback_session_active(False)
         except Exception:
             pass
+        try:
+            self._mpv_manager.set_playback_stream_opening(False)
+        except Exception:
+            pass
+
+    def _stop_play_thread(
+        self,
+        *,
+        preserve_stall_tracking: bool = False,
+        preserve_loop_position: bool = False,
+        join_timeout: float = 2.0,
+        halt_mpv: bool = False,
+    ):
+        """Stop slideshow threads. Callers must not hold ``_play_start_lock`` during this.
+
+        Holding handoff across join + mpv halt blocked Stop→Play (play_lock_timeout
+        for ~13s while IPC ``stop`` commands ran under the lock).
+        """
+        self._signal_play_threads_stop()
+        self._join_play_threads(join_timeout=join_timeout)
+        self._clear_play_thread_state(
+            preserve_stall_tracking=preserve_stall_tracking,
+            preserve_loop_position=preserve_loop_position,
+        )
         if halt_mpv:
             # Soft prepare: avoid stop-when-already-idle (IPC contention / Wayland stub).
             try:
@@ -2495,7 +2527,7 @@ class PlaylistManager:
             return 8.0
 
     def _acquire_play_handoff(self, *, playlist_id: int) -> bool:
-        """Serialize stop-previous + begin-seq. Never held across loadfile."""
+        """Serialize begin-seq / status write. Never held across join/loadfile/IPC halt."""
         lock_timeout = max(0.05, min(60.0, float(self._play_lock_timeout_sec())))
         for attempt in range(2):
             acquired = self._play_start_lock.acquire(timeout=lock_timeout)
@@ -2510,27 +2542,21 @@ class PlaylistManager:
                     "attempt": attempt + 1,
                 },
             )
+            # Nudge the holder without doing long IPC under contention.
             try:
-                self._bump_playback_run_id()
-            except Exception:
-                pass
-            try:
-                self._bump_play_seq()
-            except Exception:
-                pass
-            try:
-                self._stop_event.set()
+                self._signal_play_threads_stop()
             except Exception:
                 pass
             try:
                 self._mpv_manager.set_playback_stream_opening(False)
             except Exception:
                 pass
+            # Short join only — never a multi-second mpv halt while waiting for handoff.
             try:
-                self._halt_mpv_playback(lock_wait=1.0, timeout=1.5)
+                self._join_play_threads(join_timeout=0.5)
             except Exception:
                 pass
-            lock_timeout = min(lock_timeout, 5.0)
+            lock_timeout = min(lock_timeout, 2.0)
         self.logger.warning(
             "play handoff lock timeout — giving up",
             extra={
@@ -2715,11 +2741,35 @@ class PlaylistManager:
                 )
                 return True
 
-            # Same lock order as Play handoff: handoff → control (avoid deadlock).
+            # Join / signal OUTSIDE handoff — holding handoff across join + mpv halt
+            # made Stop→Play fail with play_lock_timeout (~13s IPC under the lock).
+            if stop_generation is None:
+                self._signal_play_threads_stop()
+            else:
+                # enqueue_stop already bumped run_id; still abort slideshow waiters.
+                try:
+                    self._bump_play_seq()
+                except Exception:
+                    pass
+                try:
+                    self._stop_event.set()
+                except Exception:
+                    pass
+            self._join_play_threads(join_timeout=join_timeout)
+
+            stop_run_id = int(self._playback_run_id)
+            last_playlist_id = None
+
+            # Brief handoff: status + python state only (no join, no mpv IPC).
+            # If Play holds handoff for begin-seq, skip — do not overwrite its claim.
             if not self._acquire_play_handoff(playlist_id=0):
                 self.logger.info(
                     "Stop skipped: play handoff busy (newer play starting)",
-                    extra={"event": "stop_superseded", "reason": "handoff_busy"},
+                    extra={
+                        "event": "stop_superseded",
+                        "reason": "handoff_busy",
+                        "source": source,
+                    },
                 )
                 return True
             try:
@@ -2737,29 +2787,21 @@ class PlaylistManager:
                         )
                         return True
 
-                    playback = self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
+                    playback = (
+                        self.db_session.query(PlaybackStatus).get(1) or PlaybackStatus(id=1)
+                    )
                     last_playlist_id = playback.playlist_id
                     # Allow a fresh idle-logo retry after this Stop (Play cancels via epoch).
                     self._play_start_mono = 0.0
-
-                    # Soft-prepare inside stop_play_thread clears A1/A2 loops when halt_mpv.
-                    self._stop_play_thread(
+                    self._clear_play_thread_state(
                         preserve_stall_tracking=preserve_stall_tracking,
                         preserve_loop_position=preserve_loop_position,
-                        join_timeout=join_timeout,
-                        halt_mpv=True,
                     )
                     stop_run_id = int(self._playback_run_id)
                     self._cancel_content_cache_prefetches()
-                    try:
-                        self._logo_manager.ensure_mpv_video_output()
-                    except Exception:
-                        pass
-                    self._set_playback_active_marker(False)
 
                     # Persist stopped/idle BEFORE idle-logo IPC, under the same lock as play
                     # commit so a late schedule play cannot resurrect status=playing.
-                    # source=manual holds ScheduleEngine off until return-to-schedule.
                     if update_status:
                         if source == "schedule":
                             self._persist_playback_status(
@@ -2779,13 +2821,15 @@ class PlaylistManager:
                         try:
                             if self.socketio:
                                 emit_status = "idle" if source == "schedule" else "stopped"
-                                emit_playlist = None if source == "schedule" else last_playlist_id
+                                emit_playlist = (
+                                    None if source == "schedule" else last_playlist_id
+                                )
                                 self.socketio.emit(
-                                    'playback_update',
+                                    "playback_update",
                                     {
-                                        'status': emit_status,
-                                        'playlist_id': emit_playlist,
-                                        'current_media': None,
+                                        "status": emit_status,
+                                        "playlist_id": emit_playlist,
+                                        "current_media": None,
                                     },
                                 )
                         except Exception:
@@ -2794,6 +2838,11 @@ class PlaylistManager:
                 self._release_play_handoff()
 
             ok = True
+            # mpv halt / idle logo — always outside handoff.
+            try:
+                self._logo_manager.ensure_mpv_video_output()
+            except Exception:
+                pass
             if show_idle_logo:
                 # Async Stop can finish after a newer Play already opened ytdl — never
                 # force-restart mpv or show idle logo over that play.
