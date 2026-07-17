@@ -27,6 +27,8 @@ def test_stop_impl_skips_mpv_cleanup_when_run_superseded(null_logger, tmp_path):
     pm._mpv_content_still_on_air = MagicMock(return_value=True)
     pm._mpv_loop_props_on = MagicMock(return_value=True)
     pm._enqueue_idle_logo_retry = MagicMock()  # type: ignore[method-assign]
+    pm._acquire_play_handoff = MagicMock(return_value=True)  # type: ignore[method-assign]
+    pm._release_play_handoff = MagicMock()  # type: ignore[method-assign]
 
     row = MagicMock()
     row.playlist_id = 3
@@ -37,6 +39,22 @@ def test_stop_impl_skips_mpv_cleanup_when_run_superseded(null_logger, tmp_path):
     pm._halt_mpv_playback.assert_not_called()
     pm._mpv_manager._force_restart_mpv_for_hung_recovery.assert_not_called()
     pm._logo_manager.display_idle_logo.assert_not_called()
+
+
+def test_stop_impl_skips_teardown_when_stop_generation_stale(null_logger, tmp_path):
+    """Async Stop must not call _stop_play_thread after Play bumped run_id."""
+    pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
+    pm._playback_run_id = 9
+    pm._acquire_play_handoff = MagicMock(return_value=True)  # type: ignore[method-assign]
+    pm._release_play_handoff = MagicMock()  # type: ignore[method-assign]
+    pm._stop_play_thread = MagicMock()  # type: ignore[method-assign]
+    pm._persist_playback_status = MagicMock()  # type: ignore[method-assign]
+    pm._halt_mpv_playback = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+    assert pm._stop_impl(source="manual", stop_generation=4, show_idle_logo=True) is True
+    pm._stop_play_thread.assert_not_called()
+    pm._acquire_play_handoff.assert_not_called()
+    pm._persist_playback_status.assert_not_called()
 
 
 def test_enqueue_stop_bumps_run_id_before_invalidate():
@@ -50,6 +68,7 @@ def test_enqueue_stop_bumps_run_id_before_invalidate():
 
     def _bump():
         order.append("bump")
+        return 3
 
     def _inv():
         order.append("invalidate")
@@ -60,7 +79,10 @@ def test_enqueue_stop_bumps_run_id_before_invalidate():
 
     assert PlaybackService.enqueue_stop(svc, source="manual") is True
     assert order == ["bump", "invalidate"]
-    svc._playlist_manager._halt_mpv_playback.assert_called_once()
+    import time
+
+    time.sleep(0.05)
+    svc.stop.assert_called_once_with(source="manual", stop_generation=3)
 
 
 def test_enqueue_play_does_not_bump_playback_run_id():
