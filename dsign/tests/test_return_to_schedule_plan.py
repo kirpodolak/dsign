@@ -126,7 +126,7 @@ def test_return_to_schedule_stop_action_uses_enqueue_stop():
 
 
 def test_schedule_apply_lock_does_not_cover_play():
-    """Planning under lock must finish even if another play is 'in flight'."""
+    """Planning under lock must finish even if enqueue_play is in flight."""
     from dsign.services.schedule_engine import ScheduleEngine
 
     playback = MagicMock()
@@ -149,15 +149,14 @@ def test_schedule_apply_lock_does_not_cover_play():
     release = {"go": False}
     play_entered = {"n": 0}
 
-    def _slow_play(*_a, **_k):
+    def _slow_enqueue(*_a, **_k):
         play_entered["n"] += 1
         while not release["go"]:
             time.sleep(0.01)
-        return True
+        return {"accepted": True}
 
-    playback.play.side_effect = _slow_play
+    playback.enqueue_play.side_effect = _slow_enqueue
 
-    # Start evaluate in background (play will block).
     import threading
 
     t = threading.Thread(target=lambda: engine.evaluate_and_apply(), daemon=True)
@@ -168,7 +167,6 @@ def test_schedule_apply_lock_does_not_cover_play():
         time.sleep(0.02)
     assert play_entered["n"] == 1
 
-    # Plan must still succeed while play holds — lock does not wrap play.
     t0 = time.monotonic()
     action = engine.plan_action(ignore_manual=True)
     elapsed = time.monotonic() - t0
