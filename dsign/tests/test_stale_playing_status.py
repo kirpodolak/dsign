@@ -135,7 +135,11 @@ def test_prepare_mpv_for_new_play_skips_stop_when_idle(null_logger, tmp_path):
         return {"error": "success"}
 
     pm._mpv_manager._send_command = _send  # type: ignore[method-assign]
-    pm._mpv_get_light = MagicMock(return_value=True)  # idle-active
+    pm._mpv_manager._playback_stream_opening = False
+    # Truly idle: no path, idle-active true — soft clear loops only.
+    pm._mpv_get_light = MagicMock(
+        side_effect=lambda prop, **_k: (True if prop == "idle-active" else None)
+    )
     pm._mpv_showing_idle_logo = MagicMock(return_value=False)  # type: ignore
     pm._mpv_has_active_media = MagicMock(return_value=False)  # type: ignore
     pm._prepare_mpv_for_new_play()
