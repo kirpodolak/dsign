@@ -2159,14 +2159,43 @@ class PlaylistManager:
         p = str(path or "").strip()
         return p.startswith(("http://", "https://", "ytdl://"))
 
+    def _mpv_loop_props_on(self) -> bool:
+        """A1/A2 leave loop-* on after the Python thread dies — Stop must clear them."""
+        on_vals = (True, "yes", "inf", "force")
+        try:
+            lf = self._mpv_get_light("loop-file", timeout=1.0)
+        except Exception:
+            lf = None
+        try:
+            lp = self._mpv_get_light("loop-playlist", timeout=1.0)
+        except Exception:
+            lp = None
+        return lf in on_vals or lp in on_vals
+
+    def _mpv_content_still_on_air(self) -> bool:
+        """True if mpv still shows real content after a Stop/halt attempt."""
+        if self._mpv_has_active_media():
+            return True
+        if not self._mpv_loop_props_on():
+            return False
+        try:
+            path = self._mpv_get_light("path", timeout=1.0)
+        except Exception:
+            path = None
+        if not path or not str(path).strip():
+            return False
+        return not self._mpv_path_is_idle_logo(path)
+
     def _mpv_needs_hard_halt(self) -> bool:
-        """True when soft prepare must not skip ``stop`` (ytdl open looks idle-active)."""
+        """True when soft prepare must not skip ``stop`` (ytdl open / A1/A2 loops)."""
         try:
             # Strict True — MagicMock attrs are truthy and would always hard-halt in tests.
             if getattr(self._mpv_manager, "_playback_stream_opening", False) is True:
                 return True
         except Exception:
             pass
+        if self._mpv_loop_props_on():
+            return True
         try:
             path = self._mpv_get_light("path", timeout=1.0)
         except Exception:
@@ -2608,10 +2637,12 @@ class PlaylistManager:
                 # Allow a fresh idle-logo retry after this Stop (Play cancels via epoch).
                 self._play_start_mono = 0.0
 
+                # Soft-prepare inside stop_play_thread clears A1/A2 loops when halt_mpv.
                 self._stop_play_thread(
                     preserve_stall_tracking=preserve_stall_tracking,
                     preserve_loop_position=preserve_loop_position,
                     join_timeout=join_timeout,
+                    halt_mpv=True,
                 )
                 self._cancel_content_cache_prefetches()
                 try:
@@ -2622,6 +2653,7 @@ class PlaylistManager:
 
                 # Persist stopped/idle BEFORE idle-logo IPC, under the same lock as play
                 # commit so a late schedule play cannot resurrect status=playing.
+                # source=manual holds ScheduleEngine off until return-to-schedule.
                 if update_status:
                     if source == "schedule":
                         self._persist_playback_status(
@@ -2655,8 +2687,8 @@ class PlaylistManager:
 
             ok = True
             if show_idle_logo:
-                # Async Stop already returned to the UI — take a longer IPC lock wait so
-                # we can interrupt a stuck ytdl loadfile. Soft 2s waits left online playing.
+                # Prove mpv is actually idle. Schedule A2 (loop-file=inf) kept playing
+                # after a "successful" Stop when we only force-restarted for ytdl.
                 try:
                     self._mpv_manager.set_playback_stream_opening(False)
                 except Exception:
@@ -2666,13 +2698,19 @@ class PlaylistManager:
                     halted = bool(self._halt_mpv_playback(lock_wait=15.0, timeout=3.0))
                 except Exception:
                     halted = False
-                if not halted and (
-                    self._mpv_needs_hard_halt()
-                    or bool(getattr(self, "_orphan_play_threads", None))
-                ):
+                still_on = False
+                try:
+                    still_on = (not halted) or self._mpv_content_still_on_air()
+                except Exception:
+                    still_on = not halted
+                if still_on:
                     self.logger.warning(
-                        "Stop halt failed with network residue; forcing mpv restart",
-                        extra={"event": "stop_force_mpv_restart"},
+                        "Stop left content on air; forcing mpv restart",
+                        extra={
+                            "event": "stop_force_mpv_restart",
+                            "halted": bool(halted),
+                            "loop_props_on": bool(self._mpv_loop_props_on()),
+                        },
                     )
                     try:
                         halted = bool(
@@ -2680,8 +2718,12 @@ class PlaylistManager:
                         )
                     except Exception:
                         halted = False
+                    try:
+                        still_on = self._mpv_content_still_on_air()
+                    except Exception:
+                        still_on = not halted
                 ok = bool(self._logo_manager.display_idle_logo(lock_wait=3.0))
-                if not ok or not halted:
+                if not ok or not halted or still_on:
                     self._enqueue_idle_logo_retry()
             return True if update_status else ok
         except Exception as e:
@@ -3036,19 +3078,35 @@ class PlaylistManager:
             loop_pl = None
         loop_playlist_on = loop_pl in (True, "yes", "inf", "force")
         try:
+            loop_fl = self._mpv_get_light("loop-file", timeout=1.0)
+        except Exception:
+            loop_fl = None
+        loop_file_on = loop_fl in (True, "yes", "inf", "force")
+        try:
             mpv_path = str(self._mpv_get_light("path", timeout=1.0) or "")
         except Exception:
             mpv_path = ""
         logo_path = self._mpv_path_is_idle_logo(mpv_path)
         # Orphan: mpv still looping playlist/media while DB/thread say idle.
+        # A2 schedule uses loop-file=inf — must count even when session marker is cleared.
         db_playing = str(getattr(status, "status", None) or "").lower() == "playing"
+        try:
+            media_on = bool(self._mpv_has_active_media()) and not logo_path
+        except Exception:
+            media_on = False
         orphan_mpv = (not db_playing) and (not thread_alive) and (
             (mpv_session and not logo_path)
             or (loop_playlist_on and bool(mpv_path) and not logo_path)
+            or (loop_file_on and bool(mpv_path) and not logo_path)
+            or media_on
         )
         # Ghost: DB says playing/schedule but screen only shows idle logo (or nothing).
         content_active = bool(mpv_path) and not logo_path and (
-            bool(thread_alive) or bool(mpv_session) or bool(loop_playlist_on)
+            bool(thread_alive)
+            or bool(mpv_session)
+            or bool(loop_playlist_on)
+            or bool(loop_file_on)
+            or media_on
         )
         stale_playing = bool(db_playing) and (not thread_alive) and (not content_active) and (
             logo_path or not mpv_path

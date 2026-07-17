@@ -1383,7 +1383,11 @@ class PlaybackService:
         return True
 
     def enqueue_stop(self, *, source: str = "manual") -> bool:
-        """Stop on a daemon thread so toggle/Stop HTTP never wait on mpv IPC."""
+        """Stop on a daemon thread so toggle/Stop HTTP never wait on full teardown.
+
+        Still issues an immediate best-effort mpv halt on the caller thread so
+        schedule A2 (loop-file=inf) does not keep rolling while status flips to stopped.
+        """
         app = self._app
         # Invalidate in-flight play immediately so late persist cannot win.
         # (stop() will bump again under its teardown — that is intentional.)
@@ -1394,6 +1398,11 @@ class PlaybackService:
                 self._playlist_manager._bump_play_seq()
             except Exception:
                 pass
+        # Best-effort sync halt before the HTTP response — kills local loops fast.
+        try:
+            self._playlist_manager._halt_mpv_playback(lock_wait=3.0, timeout=2.0)
+        except Exception:
+            pass
         self._last_desync_recover_ts = time.monotonic()
 
         def _run() -> None:
