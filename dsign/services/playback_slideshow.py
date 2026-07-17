@@ -41,6 +41,12 @@ class PlaybackSlideshowLoop:
             return
         if playback_run_id is None:
             playback_run_id = int(getattr(self._pm, "_playback_run_id", 0) or 0)
+        # New owner of this run_id: clear sticky stop left for orphan threads.
+        if self._pm._is_playback_run_current(int(playback_run_id)):
+            try:
+                self._pm._stop_event.clear()
+            except Exception:
+                pass
         self._pm._mpv_manager.set_playback_session_active(True)
         try:
 
