@@ -32,6 +32,7 @@ class PlaybackPlayRunner:
         from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
 
         play_seq: Optional[int] = None
+        play_run_id: Optional[int] = None
         try:
             # Cancel late idle-logo retries from a previous Stop before we touch mpv.
             self._pm.mark_play_starting()
@@ -40,6 +41,7 @@ class PlaybackPlayRunner:
                 preserve_stall_tracking=preserve_stall_tracking,
                 halt_mpv=True,
             )
+            play_run_id = int(getattr(self._pm, "_playback_run_id", 0) or 0)
             self._pm._cancel_content_cache_prefetches()
             self._pm._prune_media_backoff()
             play_seq = self._pm._begin_play_seq()
@@ -207,12 +209,10 @@ class PlaybackPlayRunner:
                 # Network/ytdl opens in two phases (ytdl_hook resolve, then lavf reapply). Unpausing
                 # here made playback start before lavf headers merged — visible "double start".
                 if first_is_network:
-                    # Idle logo left on after Stop: soft prepare skips ``stop``, and the
-                    # following ytdl loadfile often never IPC-acks (hook holds the socket).
-                    # Hard-stop the logo so replace starts from a clean idle mpv — same as boot.
+                    # Conditional prepare: hard-stop only when ytdl/loops/content are on air.
+                    # Unconditional stop on idle Wayland blanks imv and breaks VK/Rutube open.
                     try:
-                        if self._pm._mpv_showing_idle_logo():
-                            self._pm._halt_mpv_playback(lock_wait=1.0, timeout=2.0)
+                        self._pm._prepare_mpv_for_new_play(lock_wait=2.0)
                     except Exception:
                         pass
                     try:
@@ -346,9 +346,16 @@ class PlaybackPlayRunner:
                     self._pm._mpv_manager.set_playback_session_active(False)
                 except Exception:
                     pass
+                # First network loadfile may already be in mpv before commit — soft-prepare
+                # so a superseded Play cannot leave VK/Rutube owning the screen.
+                if first_is_network:
+                    try:
+                        self._pm._prepare_mpv_for_new_play(lock_wait=1.0)
+                    except Exception:
+                        pass
 
             def _start_thread() -> None:
-                run_id = int(getattr(self._pm, "_playback_run_id", 0) or 0)
+                run_id = int(play_run_id or getattr(self._pm, "_playback_run_id", 0) or 0)
                 self._pm._play_thread = Thread(
                     target=self._pm._run_manual_slideshow_loop,
                     args=(playlist_id, items, start_index),
@@ -370,6 +377,20 @@ class PlaybackPlayRunner:
                     rule_id=int(rule_id) if source == "schedule" and rule_id is not None else None,
                     clear_rule=(str(source) != "schedule"),
                 )
+
+            if play_run_id is not None and not self._pm._is_playback_run_current(
+                int(play_run_id)
+            ):
+                self._pm.logger.info(
+                    "Playback play aborted: superseded during loadfile",
+                    extra={
+                        "playlist_id": playlist_id,
+                        "play_seq": play_seq,
+                        "play_run_id": int(play_run_id),
+                    },
+                )
+                _abort_markers()
+                return False
 
             if not self._pm._commit_play(
                 play_seq,
