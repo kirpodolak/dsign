@@ -31,8 +31,6 @@ def test_stop_impl_skips_mpv_cleanup_when_run_superseded(null_logger, tmp_path):
     row = MagicMock()
     row.playlist_id = 3
     pm.db_session.query.return_value.get.return_value = row
-
-    # Newer Play bumps run id after Stop captured stop_run_id=1 (during async cleanup).
     pm._playback_run_id = 0
 
     assert pm._stop_impl(source="manual", show_idle_logo=True) is True
@@ -41,29 +39,31 @@ def test_stop_impl_skips_mpv_cleanup_when_run_superseded(null_logger, tmp_path):
     pm._logo_manager.display_idle_logo.assert_not_called()
 
 
-def test_enqueue_stop_skips_sync_halt_when_play_bumped_run_id():
+def test_enqueue_stop_bumps_run_id_before_invalidate():
     svc = PlaybackService.__new__(PlaybackService)
     svc.logger = MagicMock()
     svc._app = None
     svc._log_error = MagicMock()
     svc._last_desync_recover_ts = 0.0
     svc._playlist_manager = MagicMock()
-    svc._playlist_manager._playback_run_id = 0
     order = []
+
+    def _bump():
+        order.append("bump")
 
     def _inv():
         order.append("invalidate")
-        svc._playlist_manager._playback_run_id = 1
 
+    svc._playlist_manager._bump_playback_run_id.side_effect = _bump
     svc._playlist_manager.invalidate_in_flight_play.side_effect = _inv
     svc.stop = MagicMock(return_value=True)
 
     assert PlaybackService.enqueue_stop(svc, source="manual") is True
-    assert order == ["invalidate"]
-    svc._playlist_manager._halt_mpv_playback.assert_not_called()
+    assert order == ["bump", "invalidate"]
+    svc._playlist_manager._halt_mpv_playback.assert_called_once()
 
 
-def test_enqueue_play_bumps_playback_run_id():
+def test_enqueue_play_does_not_bump_playback_run_id():
     svc = PlaybackService.__new__(PlaybackService)
     svc.logger = MagicMock()
     svc._app = None
@@ -71,9 +71,34 @@ def test_enqueue_play_bumps_playback_run_id():
     svc._log_warning = MagicMock()
     svc._last_desync_recover_ts = 0.0
     svc._playlist_manager = MagicMock()
-    svc._playlist_manager._playback_run_id = 4
     svc._playlist_manager.claim_playback_intent = MagicMock()
     svc.play = MagicMock(return_value=True)
 
     PlaybackService.enqueue_play(svc, 2, source="manual")
-    svc._playlist_manager._bump_playback_run_id.assert_called_once()
+    svc._playlist_manager._bump_playback_run_id.assert_not_called()
+
+
+def test_clear_ghost_playing_after_slideshow_exit(null_logger, tmp_path):
+    pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
+    pm._is_playback_run_current = MagicMock(return_value=True)  # type: ignore[method-assign]
+    pm._mpv_has_active_media = MagicMock(return_value=False)  # type: ignore[method-assign]
+    pm._persist_playback_status = MagicMock()
+    pm.socketio = None
+    row = MagicMock()
+    row.status = "playing"
+    row.playlist_id = 9
+    pm.db_session.query.return_value.get.return_value = row
+
+    pm._clear_ghost_playing_after_slideshow_exit(9, 3)
+    pm._persist_playback_status.assert_called_once()
+    args, kwargs = pm._persist_playback_status.call_args
+    assert kwargs.get("status") == "idle"
+
+
+def test_clear_ghost_skipped_when_run_superseded(null_logger, tmp_path):
+    pm = PlaylistManager(null_logger, None, str(tmp_path), MagicMock(), MagicMock(), MagicMock())
+    pm._is_playback_run_current = MagicMock(return_value=False)  # type: ignore[method-assign]
+    pm._persist_playback_status = MagicMock()
+
+    pm._clear_ghost_playing_after_slideshow_exit(9, 3)
+    pm._persist_playback_status.assert_not_called()

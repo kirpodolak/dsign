@@ -32,6 +32,7 @@ class PlaybackPlayRunner:
         from ..models import PlaybackStatus, Playlist, PlaylistProfileAssignment, PlaybackProfile
 
         play_seq: Optional[int] = None
+        play_run_id: Optional[int] = None
         try:
             # Cancel late idle-logo retries from a previous Stop before we touch mpv.
             self._pm.mark_play_starting()
@@ -40,6 +41,7 @@ class PlaybackPlayRunner:
                 preserve_stall_tracking=preserve_stall_tracking,
                 halt_mpv=True,
             )
+            play_run_id = int(getattr(self._pm, "_playback_run_id", 0) or 0)
             self._pm._cancel_content_cache_prefetches()
             self._pm._prune_media_backoff()
             play_seq = self._pm._begin_play_seq()
@@ -353,7 +355,7 @@ class PlaybackPlayRunner:
                         pass
 
             def _start_thread() -> None:
-                run_id = int(getattr(self._pm, "_playback_run_id", 0) or 0)
+                run_id = int(play_run_id or getattr(self._pm, "_playback_run_id", 0) or 0)
                 self._pm._play_thread = Thread(
                     target=self._pm._run_manual_slideshow_loop,
                     args=(playlist_id, items, start_index),
@@ -375,6 +377,20 @@ class PlaybackPlayRunner:
                     rule_id=int(rule_id) if source == "schedule" and rule_id is not None else None,
                     clear_rule=(str(source) != "schedule"),
                 )
+
+            if play_run_id is not None and not self._pm._is_playback_run_current(
+                int(play_run_id)
+            ):
+                self._pm.logger.info(
+                    "Playback play aborted: superseded during loadfile",
+                    extra={
+                        "playlist_id": playlist_id,
+                        "play_seq": play_seq,
+                        "play_run_id": int(play_run_id),
+                    },
+                )
+                _abort_markers()
+                return False
 
             if not self._pm._commit_play(
                 play_seq,

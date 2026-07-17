@@ -2866,6 +2866,67 @@ class PlaylistManager:
             return False
         return "idle_logo" in p or p.endswith("placeholder.jpg")
 
+    def _clear_ghost_playing_after_slideshow_exit(
+        self,
+        playlist_id: int,
+        playback_run_id: int,
+    ) -> None:
+        """Drop ghost DB playing when our slideshow thread exits without supersession."""
+        if not self._is_playback_run_current(int(playback_run_id)):
+            return
+        try:
+            if self._mpv_has_active_media():
+                return
+        except Exception:
+            pass
+        from ..models import PlaybackStatus
+
+        try:
+            with self._control_lock:
+                row = self.db_session.query(PlaybackStatus).get(1)
+                if row is None:
+                    return
+                if str(row.status or "").lower() != "playing":
+                    return
+                if int(row.playlist_id or 0) != int(playlist_id):
+                    return
+                self._persist_playback_status(
+                    playlist_id=None,
+                    status="idle",
+                    source="idle",
+                    clear_rule=True,
+                )
+            try:
+                if self.socketio:
+                    self.socketio.emit(
+                        "playback_update",
+                        {
+                            "status": "idle",
+                            "playlist_id": None,
+                            "source": "idle",
+                            "current_media": None,
+                        },
+                    )
+            except Exception:
+                pass
+            self.logger.info(
+                "Cleared ghost playing after slideshow exit",
+                extra={
+                    "event": "slideshow_ghost_playing_clear",
+                    "playlist_id": int(playlist_id),
+                    "playback_run_id": int(playback_run_id),
+                },
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to clear ghost playing after slideshow exit",
+                extra={
+                    "playlist_id": int(playlist_id),
+                    "error": str(exc),
+                    "type": type(exc).__name__,
+                },
+            )
+
     def _mpv_showing_idle_logo(self) -> bool:
         try:
             path = self._mpv_get_light("path", timeout=1.0)
@@ -3130,9 +3191,15 @@ class PlaylistManager:
         stale_playing = bool(db_playing) and (not thread_alive) and (not content_active) and (
             logo_path or not mpv_path
         )
-        # Grace window while Play loadfile runs after halt (logo still on path briefly).
+        # Grace window while Play loadfile / ytdl open runs (logo may stay on path briefly).
         try:
-            starting = (time.monotonic() - float(self._play_start_mono or 0.0)) < 45.0
+            start_age = time.monotonic() - float(self._play_start_mono or 0.0)
+            starting = start_age < 45.0
+            try:
+                if getattr(self._mpv_manager, "_playback_stream_opening", False) is True:
+                    starting = starting or start_age < 180.0
+            except Exception:
+                pass
         except Exception:
             starting = False
         if starting and db_playing:

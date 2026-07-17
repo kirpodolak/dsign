@@ -131,7 +131,8 @@ grep -q "Stop left content on air" "$RUNTIME_ROOT/services/playlist_management.p
 grep -q "stop_force_mpv_restart" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING stop_force_mpv_restart"; fail=1; }
 grep -q "stop_cleanup_superseded" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING stop_cleanup_superseded guard"; fail=1; }
 grep -q "_prepare_mpv_for_new_play(lock_wait=2.0)" "$RUNTIME_ROOT/services/playback_play.py" || { echo "MISSING network prepare in playback_play"; fail=1; }
-grep -q "_bump_playback_run_id()" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING enqueue_play run_id bump"; fail=1; }
+grep -q "slideshow_ghost_playing_clear" "$RUNTIME_ROOT/services/playlist_management.py" || { echo "MISSING slideshow ghost clear"; fail=1; }
+grep -q "_bump_playback_run_id()" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING enqueue_stop run_id bump"; fail=1; }
 grep -q "_halt_mpv_playback(lock_wait=3.0" "$RUNTIME_ROOT/services/playback_service.py" || { echo "MISSING sync halt in enqueue_stop"; fail=1; }
 grep -q "enqueue_stop" "$RUNTIME_ROOT/routes/api/api_routes.py" || { echo "MISSING enqueue_stop in stop route"; fail=1; }
 grep -q "status == \"playing\"" "$RUNTIME_ROOT/services/schedule_engine.py" || { echo "MISSING status==playing in schedule plan"; fail=1; }

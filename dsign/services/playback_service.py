@@ -570,10 +570,25 @@ class PlaybackService:
                             showing_logo = False
                     play_starting = False
                     try:
-                        play_starting = (
+                        start_age = (
                             time.monotonic()
-                            - float(getattr(self._playlist_manager, "_play_start_mono", 0.0) or 0.0)
-                        ) < 45.0
+                            - float(
+                                getattr(self._playlist_manager, "_play_start_mono", 0.0) or 0.0
+                            )
+                        )
+                        play_starting = start_age < 45.0
+                        try:
+                            if (
+                                getattr(
+                                    self._mpv_manager,
+                                    "_playback_stream_opening",
+                                    False,
+                                )
+                                is True
+                            ):
+                                play_starting = play_starting or start_age < 180.0
+                        except Exception:
+                            pass
                     except Exception:
                         play_starting = False
                     if showing_logo and not play_starting:
@@ -1389,9 +1404,13 @@ class PlaybackService:
         schedule A2 (loop-file=inf) does not keep rolling while status flips to stopped.
         """
         app = self._app
-        halt_run_id = int(getattr(self._playlist_manager, "_playback_run_id", 0) or 0)
+        # Bump run id on the caller thread so ytdl ensure() aborts immediately; play()
+        # will bump again in _stop_play_thread when it starts.
+        try:
+            self._playlist_manager._bump_playback_run_id()
+        except Exception:
+            pass
         # Invalidate in-flight play immediately so late persist cannot win.
-        # (stop() will bump again under its teardown — that is intentional.)
         try:
             self._playlist_manager.invalidate_in_flight_play()
         except Exception:
@@ -1400,10 +1419,8 @@ class PlaybackService:
             except Exception:
                 pass
         # Best-effort sync halt before the HTTP response — kills local loops fast.
-        # Skip when a concurrent Play already bumped playback_run_id (Stop→Play race).
         try:
-            if int(getattr(self._playlist_manager, "_playback_run_id", 0) or 0) == halt_run_id:
-                self._playlist_manager._halt_mpv_playback(lock_wait=3.0, timeout=2.0)
+            self._playlist_manager._halt_mpv_playback(lock_wait=3.0, timeout=2.0)
         except Exception:
             pass
         self._last_desync_recover_ts = time.monotonic()
@@ -1452,8 +1469,6 @@ class PlaybackService:
         # Stop / return-to-schedule still call invalidate_in_flight_play().
         try:
             self._playlist_manager.mark_play_starting()
-            # Supersede async Stop cleanup before loadfile/ytdl on the daemon thread.
-            self._playlist_manager._bump_playback_run_id()
         except Exception:
             pass
         # Claim source on the caller thread before the daemon loadfile starts so the
@@ -1532,6 +1547,11 @@ class PlaybackService:
         """
         action = None
         plan_failed = False
+        # Abort in-flight ytdl immediately; play() bumps again when it starts.
+        try:
+            self._playlist_manager._bump_playback_run_id()
+        except Exception:
+            pass
         # Kill in-flight manual play before we rewrite PlaybackStatus / plan.
         try:
             self._playlist_manager.invalidate_in_flight_play()

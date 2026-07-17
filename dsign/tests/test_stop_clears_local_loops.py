@@ -63,6 +63,9 @@ def test_enqueue_stop_halts_before_async_thread():
     svc._playlist_manager = MagicMock()
     order = []
 
+    def _bump():
+        order.append("bump")
+
     def _inv():
         order.append("invalidate")
 
@@ -70,9 +73,10 @@ def test_enqueue_stop_halts_before_async_thread():
         order.append("halt")
         return True
 
+    svc._playlist_manager._bump_playback_run_id.side_effect = _bump
     svc._playlist_manager.invalidate_in_flight_play.side_effect = _inv
     svc._playlist_manager._halt_mpv_playback.side_effect = _halt
     svc.stop = MagicMock(return_value=True)
 
     assert PlaybackService.enqueue_stop(svc, source="manual") is True
-    assert order == ["invalidate", "halt"]
+    assert order == ["bump", "invalidate", "halt"]

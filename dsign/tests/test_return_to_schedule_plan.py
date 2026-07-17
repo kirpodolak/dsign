@@ -34,7 +34,28 @@ def _svc_for_return() -> PlaybackService:
     db.session = session
     svc.db_session = db
     svc._schedule_engine = MagicMock()
+    svc._playlist_manager = MagicMock()
     return svc
+
+
+def test_return_to_schedule_bumps_run_id_before_invalidate():
+    svc = _svc_for_return()
+    svc._schedule_engine.plan_action.return_value = None
+    svc._playlist_manager._mpv_has_active_media.return_value = False
+    svc.enqueue_schedule_evaluate = MagicMock(return_value=True)
+    order = []
+
+    def _bump():
+        order.append("bump")
+
+    def _inv():
+        order.append("invalidate")
+
+    svc._playlist_manager._bump_playback_run_id.side_effect = _bump
+    svc._playlist_manager.invalidate_in_flight_play.side_effect = _inv
+
+    assert PlaybackService.return_to_schedule(svc) is True
+    assert order == ["bump", "invalidate"]
 
 
 def test_return_to_schedule_enqueues_play_from_plan():

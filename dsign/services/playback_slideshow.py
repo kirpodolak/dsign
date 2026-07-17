@@ -577,3 +577,10 @@ class PlaybackSlideshowLoop:
             except Exception:
                 pass
             self._pm._mpv_manager.set_playback_session_active(False)
+            try:
+                self._pm._clear_ghost_playing_after_slideshow_exit(
+                    playlist_id,
+                    int(playback_run_id),
+                )
+            except Exception:
+                pass
