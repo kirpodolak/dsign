@@ -65,6 +65,8 @@ def test_network_loadfile_quiet_ipc_does_not_abort_play(null_logger, tmp_path):
     )
     pm._playlist_playback_mode = MagicMock(return_value="manual_slideshow")  # type: ignore[method-assign]
     pm.mark_play_starting = MagicMock()
+    pm._acquire_play_handoff = MagicMock(return_value=True)
+    pm._release_play_handoff = MagicMock()
     pm._stop_play_thread = MagicMock()
     pm._cancel_content_cache_prefetches = MagicMock()
     pm._prune_media_backoff = MagicMock()
